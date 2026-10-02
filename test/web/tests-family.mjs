@@ -33,7 +33,7 @@ async function familyServer(ctx) {
     stop: async () => { child.kill(); await new Promise(r => { child.once('exit', r); setTimeout(r, 3000); }); },
     // The API as someone (Tailscale login or a cookie).
     call: async (who, method, p, body) => {
-      const headers = { ...(who.login ? { 'Tailscale-User-Login': who.login, 'Tailscale-User-Name': who.name || '' } : { Cookie: who.cookie }), ...(body ? { 'Content-Type': 'application/json' } : {}) };
+      const headers = { ...(who.login ? { 'Tailscale-User-Login': who.login, 'Tailscale-User-Name': who.name || '', 'X-Forwarded-For': '100.64.7.7' } : { Cookie: who.cookie }), ...(body ? { 'Content-Type': 'application/json' } : {}) };
       const res = await fetch(base + p, { method, headers, body: body ? JSON.stringify(body) : undefined });
       const text = await res.text();
       let json = null;
@@ -47,10 +47,10 @@ async function familyServer(ctx) {
 
 const owner = { login: OWNER, name: 'Robin' };
 
-// A page signed in by Tailscale (the header tailscale serve adds).
+// A page signed in by Tailscale (the headers tailscale serve adds: the identity, and the caller's Tailscale address).
 async function tailscalePage(ctx, login, name, opts = {}) {
   const page = await ctx.browser.newPage(opts);
-  await page.send('Network.setExtraHTTPHeaders', { headers: { 'Tailscale-User-Login': login, 'Tailscale-User-Name': name } });
+  await page.send('Network.setExtraHTTPHeaders', { headers: { 'Tailscale-User-Login': login, 'Tailscale-User-Name': name, 'X-Forwarded-For': '100.64.7.8' } });
   return page;
 }
 

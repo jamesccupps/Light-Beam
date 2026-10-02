@@ -119,7 +119,8 @@ async function waitFor(check, ms = 5000, step = 40) {
 }
 
 // Ways in: Tailscale (as serve sends it) or a session cookie.
-const ts = (login, name = '') => ({ 'Tailscale-User-Login': login, ...(name ? { 'Tailscale-User-Name': name } : {}) });
+// (as tailscale serve sends them: the identity, and the caller's Tailscale address in X-Forwarded-For)
+const ts = (login, name = '') => ({ 'Tailscale-User-Login': login, 'X-Forwarded-For': '100.64.7.7', ...(name ? { 'Tailscale-User-Name': name } : {}) });
 const as = who => (typeof who === 'string' ? { Cookie: who } : who);
 const call = (srv, method, route, who = {}, body) => srv.req(method, route, {
   headers: { ...as(who), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
@@ -157,6 +158,28 @@ const post = async (srv, who, channel, body, extra = {}) => {
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
+
+test('F-K (1.7.2): Tailscale identity only for a caller at a Tailscale address and never through Funnel; signing out ends that sign-in’s live stream; 30 unsent uploads each at most', async () => {
+  const s = await start('audit172', 8848);
+  try {
+    const f = await family(s);
+    let r = await call(s, 'GET', '/api/session', { ...ts(OWNER, 'Robin'), 'X-Forwarded-For': '203.0.113.5' });
+    assert.equal(r.json.signedIn, false, 'identity headers for a caller that isn’t at a Tailscale address don’t count');
+    r = await call(s, 'GET', '/api/session', { ...ts(OWNER, 'Robin'), 'Tailscale-Funnel-Request': '?1' });
+    assert.equal(r.json.signedIn, false, '...nor on a Funnel request');
+    assert.equal((await call(s, 'GET', '/api/session', f.owner)).json.signedIn, true, '...as tailscale serve sends them, they do');
+    // A password sign-in's live stream ends when it signs out (it went on receiving everything).
+    const mary = await join(s, f.owner, 'Mary');
+    const ev = await openEvents(s.port, { Cookie: mary.who });
+    await ev.wait('hello');
+    assert.equal((await call(s, 'POST', '/api/signout', mary.who)).status, 204);
+    await waitFor(() => ev.closed, 3000);
+    // Unsent uploads count against the storage by their declared size: 30 at a time each.
+    for (let i = 0; i < 30; i++) assert.equal((await call(s, 'POST', '/api/uploads', f.owner, { name: `f${i}.txt`, size: 10 })).status, 201);
+    r = await call(s, 'POST', '/api/uploads', f.owner, { name: 'one-more.txt', size: 10 });
+    assert.equal(r.status, 429, r.body);
+  } finally { await s.stop(); }
+});
 
 // ---------------------------------------------------------------- push: a fake push service, and a browser's keys
 

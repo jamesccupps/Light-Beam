@@ -92,7 +92,10 @@ function serve() {
   refreshOwner();
   setInterval(refreshOwner, 10 * 60e3).unref();
 
-  const hub = createHub({ onPresence: (user, online) => hub.emit(null, 'presence', { person: user, online }) });
+  const hub = createHub({
+    onPresence: (user, online) => hub.emit(null, 'presence', { person: user, online }),
+    onDrop: user => log.warn(`Dropped a stalled live connection (${ctx.people?.getUser(user)?.name || 'someone'}): over 1 MB unread`),
+  });
   const ctx = {
     db, hub, log, config, version: VERSION, dirs: DIR,
     ownerLogin: () => config.owner || machineOwner,
@@ -119,6 +122,14 @@ function serve() {
   async function handle(req, res) {
     const url = new URL(req.url, 'http://family');
     const p = url.pathname;
+    // A body has 60 s to arrive in full, except a piece of a file (15 min, the server's limit): a visitor trickling a
+    // sign-in for minutes mustn't hold a connection that long (1.7.2).
+    if (!(req.method === 'PUT' && /^\/api\/uploads\//.test(p)) && !req.complete) {
+      const slow = setTimeout(() => { if (!req.complete) req.destroy(); }, 60_000);
+      slow.unref();
+      req.on('end', () => clearTimeout(slow));
+      res.on('close', () => clearTimeout(slow));
+    }
     try {
       if (p.startsWith('/api/')) {
         if (p === '/api/hello') return send(res, 200, { family: true, version: VERSION });
@@ -154,7 +165,19 @@ function serve() {
 
   // (a request has 15 minutes to arrive in full: enough for a 16 MB piece of a file over a slow link, not for ever)
   server = http.createServer({ requestTimeout: 15 * 60e3, headersTimeout: 30_000, keepAliveTimeout: 65_000 }, handle);
+  server.maxConnections = 1000; // (1.7.2) live streams included
   server.on('clientError', (err, socket) => { try { socket.destroy(); } catch {} });
+  // Expired sign-ins and invites go once a day (1.7.2: they stayed for good); the audit trail is kept for a year.
+  const purge = () => {
+    try {
+      const t = now();
+      const gone = db.run('DELETE FROM sessions WHERE expires_at < ?', t).changes + db.run('DELETE FROM invites WHERE expires_at < ?', t - 30 * 86400e3).changes
+        + db.run('DELETE FROM audit WHERE at < ?', t - 365 * 86400e3).changes;
+      if (gone) log.info(`Cleaned up ${gone} expired sign-in${gone === 1 ? '' : 's'}, invites and old audit lines`);
+    } catch (err) { log.warn(`Clean-up: ${err.message}`); }
+  };
+  setTimeout(purge, 5 * 60e3).unref();
+  setInterval(purge, 24 * 3600e3).unref();
   server.listen(PORT, HOST, () => {
     log.info(`Beam Family ${VERSION} is running on ${HOST}:${PORT}; data in ${DATA_DIR}${config.publicUrl ? `; address ${config.publicUrl}` : ''}`);
     process.send?.({ ready: true });
@@ -278,7 +301,7 @@ async function main() {
   if (flags.has('--supervise')) return supervise(argv.filter(a => a !== '--supervise'));
   if (!command) return serve();
   const commands = { stop: commandStop, invite: () => commandInvite(flags, options), status: commandStatus };
-  if (!commands[command]) {
+  if (!Object.hasOwn(commands, command)) {
     console.error(`Unknown command "${command}".\n\n${HELP}`);
     process.exitCode = 2;
     return;

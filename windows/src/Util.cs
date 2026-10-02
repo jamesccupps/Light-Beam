@@ -290,7 +290,10 @@ namespace Beam
             ".library-ms", ".search-ms", ".sys", ".dll", ".ocx", ".chm", ".vb", ".xll", ".xlam", ".ppam", ".iqy", ".slk", ".website",
             // (disk images mount and hide what they hold; installers, themes, scriptlets and web archives run or fetch)
             ".iso", ".img", ".vhd", ".vhdx", ".appinstaller", ".searchconnector-ms", ".theme", ".themepack",
-            ".desktopthemepackfile", ".wsc", ".sct", ".xbap", ".mht", ".mhtml"
+            ".desktopthemepackfile", ".wsc", ".sct", ".xbap", ".mht", ".mhtml",
+            // (1.7.2) cabinets, old help, Internet settings, Monad/console scripts, compiled Access databases
+            ".cab", ".hlp", ".ins", ".isp", ".msh", ".msh1", ".msh2", ".mshxml", ".msh1xml", ".msh2xml", ".psc1", ".psc2",
+            ".ade", ".adp", ".mde", ".accde"
         };
 
         public static bool IsExecutable(string path)
@@ -374,6 +377,8 @@ namespace Beam
         {
             try
             {
+                // (no line breaks or other control characters from the referrer: it must stay one line; 1.7.2)
+                if (referrer != null) referrer = System.Text.RegularExpressions.Regex.Replace(referrer, @"[\x00-\x1f\x7f]", "");
                 string text = "[ZoneTransfer]\r\nZoneId=3\r\n" + (string.IsNullOrEmpty(referrer) ? "" : "ReferrerUrl=" + referrer + "\r\n");
                 var bytes = Encoding.ASCII.GetBytes(text);
                 using (var h = Native.CreateFile(path + ":Zone.Identifier", 0x40000000 /*GENERIC_WRITE*/, 0, IntPtr.Zero, 2 /*CREATE_ALWAYS*/, 0x80, IntPtr.Zero))

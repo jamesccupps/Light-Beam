@@ -179,11 +179,15 @@ const bodyUnread = req => Boolean(req) && !req.complete && (Number(req.headers['
 const closeIfUnread = (res, headers) => (bodyUnread(res.req) ? { ...headers, Connection: 'close' } : headers);
 
 // Sends a response; objects go as JSON (see sendJson). Only the first call for a response counts.
+// On every API answer too (1.7.2), as files and the app's pages already had them: never sniffed as something else,
+// never readable by another site's page.
+const ANSWER_HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Cross-Origin-Resource-Policy': 'same-origin' };
+
 function send(res, status, body = '', headers = {}) {
   if (body !== null && typeof body === 'object' && !Buffer.isBuffer(body)) return sendJson(res, status, JSON.stringify(body), headers);
   if (res.beamSent || res.writableEnded) return;
   res.beamSent = true;
-  headers = closeIfUnread(res, { 'Cache-Control': 'no-store', ...headers });
+  headers = closeIfUnread(res, { 'Cache-Control': 'no-store', ...ANSWER_HEADERS, ...headers });
   if (status !== 204 && status !== 304 && body !== '' && headers['Content-Length'] === undefined) headers['Content-Length'] = Buffer.byteLength(body);
   res.writeHead(status, headers);
   res.end(body);
@@ -194,7 +198,7 @@ function send(res, status, body = '', headers = {}) {
 function sendJson(res, status, text, headers = {}, memo = null) {
   if (res.beamSent || res.writableEnded) return;
   res.beamSent = true;
-  headers = closeIfUnread(res, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json; charset=utf-8', ...headers });
+  headers = closeIfUnread(res, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json; charset=utf-8', ...ANSWER_HEADERS, ...headers });
   if (text.length > GZIP_MIN && status !== 204 && status !== 304 && res.req?.method !== 'HEAD' && accepts(res.req, 'gzip')) {
     return sendGzipped(res, status, text, headers, memo);
   }
@@ -333,7 +337,8 @@ async function readJson(req, { limit = 64 * 1024, optional = false } = {}) {
 // ---------------------------------------------------------------- state
 
 const ITEM_ID = /^[a-f0-9]{16}$/;
-const DEVICE_ID = /^[A-Za-z0-9_-]{8,64}$/;
+// (never an Object.prototype name: devices, aliases and read marks are plain objects keyed by device id; 1.7.2)
+const DEVICE_ID = /^(?!(?:__proto__|constructor|prototype)$)[A-Za-z0-9_-]{8,64}$/;
 
 let KEY = null; // the master key: the legacy credential old clients hold, and the admin credential
 let SERVER_ID = null;
@@ -680,6 +685,7 @@ let tsIndex = new Map(); // tailnet address -> { key, name, user, self }
 let tsIndexAt = 0;
 let tsRefreshing = null;
 let tsSelfName = '';
+let tsSelfDns = ''; // this machine's MagicDNS name (e.g. pc.tailnet.ts.net), for ownHost()
 
 function refreshTailnet(force = false) {
   if (tsRefreshing || (!force && now() - tsIndexAt < 15_000)) return tsRefreshing || Promise.resolve();
@@ -687,6 +693,7 @@ function refreshTailnet(force = false) {
     if (status) {
       tsIndex = tailscale.machineIndex(status);
       tsSelfName = status.Self?.HostName || '';
+      tsSelfDns = String(status.Self?.DNSName || '').replace(/\.$/, '').toLowerCase();
     }
     tsIndexAt = now();
   }).catch(() => {}).finally(() => { tsRefreshing = null; });
@@ -736,16 +743,39 @@ function identityFromHeaders(req) {
   return { login, name: cleanName(tailscale.decodeHeaderWords(req.headers['tailscale-user-name'] || '')), ip };
 }
 
-// The header identity cross-checked with `tailscale whois` when that is available. A mismatch rejects it.
+// The header identity, believed only when `tailscale whois` confirms that address belongs to that login (1.7.2: no
+// answer used to count as yes, so a request that only looked like tailscale serve's was believed while tailscaled
+// was unreachable). Unconfirmed or contradicted: rejected (automatic sign-in waits; passwords and approvals work).
 async function verifiedIdentity(req) {
   const header = identityFromHeaders(req);
   if (!header) return null;
   const who = await ts.whois(header.ip);
-  if (who?.login && who.login !== header.login) {
+  if (!who?.login) {
+    log.warn(`Ignored a Tailscale identity: tailscale whois couldn't confirm who ${header.ip} is`);
+    return { ...header, mismatch: true, unconfirmed: true };
+  }
+  if (who.login !== header.login) {
     log.warn(`Ignored a Tailscale identity: the headers say ${header.login} but tailscale whois says ${header.ip} belongs to ${who.login}`);
     return { ...header, mismatch: true };
   }
-  return { ...header, node: who?.node || tsIndex.get(header.ip)?.name || null, tsNode: nodeOf(who, header.ip) };
+  return { ...header, node: who.node || tsIndex.get(header.ip)?.name || null, tsNode: nodeOf(who, header.ip) };
+}
+
+// Automatic sign-in (Tailscale identity, or a Beam app on the same machine) only at this Beam's own addresses (1.7.2):
+// a page on another name pointed at this server (DNS rebinding) must not get a sign-in just because its browser runs
+// on the right machine. IP addresses can't be rebound; names must be this machine's, its tailnet name, or an address
+// Beam knows (its public address, ones seen through tailscale serve).
+async function ownHost(req) {
+  const raw = requestHost(req).trim().toLowerCase();
+  const host = raw.startsWith('[') ? raw.slice(1, raw.indexOf(']')) : raw.replace(/:\d+$/, '');
+  if (!host) return false;
+  if (net.isIP(host) || host === 'localhost') return true;
+  if (!tsSelfDns && ts.source !== 'off') await refreshTailnet(true);
+  const own = new Set([os.hostname().toLowerCase(), `${os.hostname().toLowerCase()}.local`, tsSelfName.toLowerCase(), tsSelfDns]);
+  for (const u of [setting('publicUrl'), serveUrlCache]) { try { if (u) own.add(new URL(u).hostname.toLowerCase()); } catch {} }
+  for (const h of settings.knownHosts || []) own.add(String(h).toLowerCase().replace(/:\d+$/, ''));
+  own.delete('');
+  return own.has(host);
 }
 
 // The Tailscale machine behind an address: its StableID when whois knows it, else its name and addresses.
@@ -3588,7 +3618,12 @@ async function linkOrCopy(from, to, size) {
   } catch (err) {
     if (err.code === 'ENOENT') throw httpError(404, 'The original is missing on the server');
     if (size) await ensureSpace(size);
-    await fsp.copyFile(from, to);
+    try {
+      await fsp.copyFile(from, to);
+    } catch (copyErr) {
+      await fsp.rm(to, { force: true }).catch(() => {}); // (no half copy left behind; 1.7.2)
+      throw copyErr;
+    }
   }
 }
 
@@ -4189,6 +4224,21 @@ async function getUpdates(req, res) {
   send(res, 200, await appUpdates());
 }
 
+// A Windows app that connects while running an older version than the one in dist is told at once (1.7.2). It checks
+// only when it starts, every 6 hours and when told: three PCs that reconnected 2 s after a restart's "app-update"
+// broadcast missed it (1.7.1's deploy). Android checks by itself; not repeated there.
+async function offerUpdateOnConnect(client, req, url) {
+  if (platformOf(req, url) !== 'windows') return;
+  const version = appVersionOf(req, url);
+  if (!version) return;
+  try {
+    const updates = await appUpdates();
+    const offered = updates.windows?.version;
+    if (!offered || offered === version || !versionAtLeast(offered, version) || client.res.writableEnded) return;
+    writeTo(client, `event: app-update\ndata: ${JSON.stringify(updates)}\n\n`);
+  } catch {}
+}
+
 // Tell connected apps as soon as a new build lands in dist/: fs.watch for speed (re-armed when dist/ is
 // recreated), plus a check every minute for file systems where watching doesn't work (network shares).
 let distWatcher = null;
@@ -4297,6 +4347,7 @@ function events(req, res, _m, url) {
     presence.set(deviceId, { ...p, [kind]: p[kind] + 1 });
     broadcastDevices();
     if (kind === 'app') rcOnConnect(client);
+    if (kind === 'app') offerUpdateOnConnect(client, req, url);
   }
   res.on('close', () => {
     clearTimeout(client.beat);
@@ -4589,8 +4640,23 @@ function linkSecret(secret) {
 
 // Set, change or (with an empty password) remove the sign-in password.
 async function setPassword(req, res) {
-  const { password: next } = await readJson(req);
+  const body = await readJson(req);
+  const next = body.password;
   if (typeof next !== 'string') throw httpError(400, 'Expected {"password": "..."}');
+  // Changing or removing a set password needs the current one (1.7.2), except from a sign-in made deliberately (as
+  // remote control counts them: the password, a pairing link, an approval, the master key, a Beam app's own): a
+  // browser that is only signed in because of Tailscale or an app on its machine can't take the password over.
+  if (hasPassword() && !rcSignInOk(authOf(req))) {
+    const ip = clientIp(req);
+    if (passwordIp.blocked(ip)) throw httpError(429, 'Too many wrong attempts. Try again in a few minutes.');
+    if (typeof body.current !== 'string' || !body.current) throw httpError(403, 'Type your current password to change it', { reason: 'current-password' });
+    passwordIp.hit(ip);
+    if (!(await passwordMatches(body.current))) {
+      log.warn(`A password change with a wrong current password from ${describeWhereSync(req)}`);
+      throw httpError(403, 'Your current password isn’t right', { reason: 'current-password' });
+    }
+    passwordIp.reset(ip);
+  }
   if (next === '') {
     password = {};
     persistPassword();
@@ -4775,12 +4841,16 @@ async function answerLoginRequest(req, res, [action], url) {
 async function autoPair(req, res) {
   if (crossSiteBrowser(req)) return send(res, 403, { error: 'Blocked a cross-site sign-in', reason: 'csrf' });
   const body = await readJson(req, { limit: 4096, optional: true });
+  if (!(await ownHost(req))) {
+    log.warn(`Refused an automatic sign-in at an address that isn't this Beam's (${statusText(requestHost(req)).slice(0, 80)}) from ${describeWhereSync(req)}`);
+    return send(res, 403, { error: 'Automatic sign-in only works at this Beam’s own address', reason: 'host' });
+  }
   const url = new URL(req.url, 'http://beam');
   const client = body.client === 'app' ? 'app' : 'web';
   let via = null;
   let reason = 'no-identity';
   const identity = await verifiedIdentity(req);
-  if (identity?.mismatch) reason = 'whois-mismatch';
+  if (identity?.mismatch) reason = identity.unconfirmed ? 'whois-unavailable' : 'whois-mismatch';
   else if (identity && !setting('tailscaleSignIn')) reason = 'disabled';
   else if (identity && nodeBlocked(identity.tsNode, identity.ip)) reason = 'blocked';
   else if (identity) {
@@ -4802,6 +4872,7 @@ async function autoPair(req, res) {
     const messages = {
       'no-identity': 'Tailscale didn’t say who this is', 'not-owner': 'This Tailscale account isn’t one of this Beam’s owners',
       disabled: 'Signing in with Tailscale is turned off', 'whois-mismatch': 'Tailscale gave conflicting answers about this device',
+      'whois-unavailable': 'Tailscale couldn’t confirm who this is right now',
       'no-app': 'No Beam app is running on this device',
       blocked: 'This device was removed from Beam, so it can’t sign in automatically. Use the password or approve it from another device.',
     };
@@ -4932,7 +5003,9 @@ async function verifyMoveTarget(to) {
   if (hello.instance === INSTANCE_ID) return { ok: false, retry: false, error: `${to} is this server` };
   if (hello.serverId !== SERVER_ID) return { ok: false, retry: false, error: `${to} is a different Beam (its server id differs)` };
   const expected = crypto.createHmac('sha256', sha256raw(KEY)).update(`${SERVER_ID}:${nonce}`).digest('hex');
-  if (typeof hello.proof !== 'string' || !crypto.timingSafeEqual(Buffer.from(hello.proof.padEnd(64).slice(0, 64)), Buffer.from(expected))) {
+  // (a proof is 64 hex digits; anything else isn't compared: a 64-character string with é in it is 65 bytes, and
+  // timingSafeEqual threw on it, every 5 s while a move waited; 1.7.2)
+  if (typeof hello.proof !== 'string' || !/^[0-9a-f]{64}$/.test(hello.proof) || !crypto.timingSafeEqual(Buffer.from(hello.proof), Buffer.from(expected))) {
     return { ok: false, retry: false, error: `${to} doesn't hold this Beam's key (did you copy the data folder?)` };
   }
   return { ok: true };
@@ -6185,7 +6258,7 @@ async function main() {
     'moved-to': () => commandMovedTo(arg, flags),
     stop: () => commandStop(),
   };
-  if (!commands[command]) {
+  if (!Object.hasOwn(commands, command)) {
     console.error(`Unknown command "${command}".\n\n${HELP}`);
     process.exitCode = 2;
     return;

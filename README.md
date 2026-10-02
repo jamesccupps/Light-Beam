@@ -546,7 +546,8 @@ The short version (the threat model and how to report a problem are in [SECURITY
 - Pairing links work once, for 15 minutes. The master key (`data/key`) is only needed by older apps and for
   administration; the `beam` command and newer apps swap it for their own sign-in by themselves.
 - Signing in with Tailscale only trusts identities that `tailscale serve` on the Beam machine vouches for (never
-  through Funnel), checked with `tailscale whois`.
+  through Funnel), confirmed by `tailscale whois` (no answer means no automatic sign-in), and only at this Beam's own
+  address, so a page on another name pointed at your server gets nothing.
 - Password guesses are limited: 5 per address and 30 overall per 10 minutes, even in parallel. Keys that don't work
   are limited too.
 - Browsers only accept changes from Beam's own pages, so another website on your tailnet can't act in your name.

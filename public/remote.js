@@ -1210,6 +1210,12 @@ function rcOnKeyDown(e) {
     rcTimer('paste', rcFlushHeld, 400);
     return; // (not prevented: that's what makes the paste happen)
   }
+  // Ctrl+V with the clipboard off pastes what the PC itself copied: say once how to bring this device's across (1.7.2,
+  // the user's paste from the laptop "didn't paste": sync is off in each session until it's turned on).
+  if (!rc.clip && !rc.clipHinted && !e.repeat && ((code === 'KeyV' && (e.ctrlKey || e.metaKey) && !e.altKey) || (code === 'Insert' && e.shiftKey))) {
+    rc.clipHinted = true;
+    if (typeof toast === 'function') toast('To paste what this device copied, turn on Clipboard in the bar (it’s off in each session until you turn it on).', { ms: 8000 });
+  }
   e.preventDefault();
   if (rc.sticky.size && !rcModifier(code)) return rcWithSticky([code]);
   rcKey(code, true);

@@ -122,7 +122,8 @@ namespace Beam
                 int slash = cidr.IndexOf('/');
                 if (SameIp(slash >= 0 ? cidr.Substring(0, slash) : cidr, ip)) has = true;
             }
-            if (listed && !has) return "Tailscale names another node for that address";
+            if (!listed) return "Tailscale lists no addresses for that node"; // (1.7.2: this passed, the one open door here)
+            if (!has) return "Tailscale names another node for that address";
             return null;
         }
 

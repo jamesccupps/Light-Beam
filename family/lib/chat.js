@@ -216,7 +216,7 @@ function createChat(ctx) {
   // GET /api/events
   function events(req, res) {
     const user = people().requireUser(req);
-    hub.connect(req, res, user);
+    hub.connect(req, res, user, people().whoIs(req).sessionHash || null); // (its sign-in ending ends it too)
   }
 
   // PUT /api/focus { client, channel, visible }: what an open app shows (no push for what's being looked at).
