@@ -90,9 +90,16 @@ async function wakeDevice(d) {
 
 // In the Windows app: Remote Desktop opens directly (the app checks `host` and runs mstsc /v:host).
 // In a browser: a .rdp file for the Remote Desktop app.
+// Either way Windows asks who to sign in as. A PIN or Windows Hello doesn't work there, and picking it ends in "A
+// certification authority could not be contacted" (1.7.1: say so up front).
+const RDP_SIGN_IN = 'Sign in with that PC’s Windows account: its email address (or user name) and password. A PIN or Windows Hello doesn’t work over Remote Desktop.';
+
 async function remoteDesktop(d) {
   if (HOST) {
-    try { await hostCall('remoteDesktop', { host: rdpHost(d) }); } catch (err) {
+    try {
+      await hostCall('remoteDesktop', { host: rdpHost(d) });
+      toast(`Opening Remote Desktop. ${RDP_SIGN_IN}`, { ms: 10000 });
+    } catch (err) {
       toast(err.code === 'bad-request' ? `Beam doesn’t have a usable address for ${d.name}.` : 'Remote Desktop couldn’t start on this PC.', { error: true });
     }
     return;
@@ -101,7 +108,7 @@ async function remoteDesktop(d) {
   document.body.append(a);
   a.click();
   a.remove();
-  toast(`Open ${d.name}.rdp to connect with Remote Desktop.`);
+  toast(`Open ${d.name}.rdp to connect with Remote Desktop. ${RDP_SIGN_IN}`, { ms: 10000 });
 }
 
 // `ring { device, by, stop, at }`: only the target rings; everyone else just shows it.

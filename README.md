@@ -138,6 +138,9 @@ address, so the browser becomes part of that device instead of a separate entry.
   - From the Windows app it opens directly.
   - From a browser it downloads a small `.rdp` file that opens Remote Desktop.
   - On the phone it needs Microsoft's Remote Desktop app ("Windows App").
+  - Sign in with that PC's Windows account: its email address (or user name) and password. A PIN or Windows Hello
+    doesn't work over Remote Desktop (choosing it ends in "A certification authority could not be contacted"):
+    pick **More choices → Use a different account**.
 - **Alerts** (Settings → Alerts): a device's battery is low, its storage is nearly full, or the Beam server's disk is
   nearly full. For the devices you pick in Settings → Devices, also when one goes offline and comes back.
 
@@ -211,6 +214,8 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Limits:** a locked or signed-out PC, administrator windows and Ctrl+Alt+Del need Remote Desktop (the existing
   button). Only Beam apps, or a browser where you signed in with a pairing link, approval or password, can start a
   session.
+- **Dragging a file out of Beam's chat** on a PC that is being controlled copies it instead (paste it with
+  Ctrl+V): a drag there would freeze the session.
 
 **Windows app** (`Beam.exe`, one self-updating file)
 
@@ -227,7 +232,8 @@ address, so the browser becomes part of that device instead of a separate entry.
   - Text goes onto the clipboard; you can keep it out of clipboard history.
   - Files are saved to `Downloads\Beam` and marked as downloaded from the internet. Big ones start saving while
     they're still arriving.
-  - Clicking a notification opens a link, copies text or shows the file.
+  - Clicking a notification opens a link or copies text. A picture or a video opens in its conversation; another file
+    shows in its folder. A notification for several things at once opens their conversation at the newest.
   - Programs are only ever shown in Explorer, never run.
 - **Links open themselves** (optional, Settings → This PC → "Open links sent to this PC automatically"): a link you
   send to this PC by itself opens in the browser right away.

@@ -175,6 +175,55 @@ export default function register(test) {
     await page.waitFor(`${hostLog('dragOut')}.some(m => m.itemId === '${item.id}')`, 3000, 'drag → dragOut');
   });
 
+  test('host: the app’s own drag of a file out of the chat is never taken for a file dropped on it; while this PC is controlled the app copies instead (1.7.1)', async ctx => {
+    const features = ['transfers', 'localFiles', 'settings', 'clipboard', 'pickFiles', 'pickFolder', 'dragOut', 'dragOutDone', 'openPanel'];
+    const { page, appId } = await hostPage(ctx, { features });
+    await page.waitFor(`paired && hostState.ready`);
+    const admin = dev(ctx, 'Admin', 'windows');
+    const item = await admin.file('report.pdf', Buffer.from('%PDF-1.4 dragged'), [appId]);
+    await page.waitFor(`items.some(i => i.id === '${item.id}')`);
+    await page.evaluate(`openConv('${admin.id}')`);
+    await page.evaluate(`__host.emit({ type: 'localFile', itemId: '${item.id}', saved: true })`);
+    const node = `document.querySelector('[data-id="${item.id}"]')`;
+    await page.waitFor(`${node}?.querySelector('.meta button[aria-label="Open"]') != null`, 3000, 'saved');
+    const dragOut = `${node}.querySelector('.file-row').dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }))`;
+    // The app's native drag arrives at the page as a file drag (as Windows delivers it), the file being the saved one.
+    const file = path.join(ctx.TMP, 'report.pdf');
+    fs.writeFileSync(file, '%PDF-1.4 dragged');
+    const drag = async types => { for (const type of types) await page.send('Input.dispatchDragEvent', { type, x: 800, y: 400, data: { items: [], files: [file], dragOperationsMask: 1 } }); };
+    await page.evaluate(dragOut);
+    await page.waitFor(`${hostLog('dragOut')}.length === 1 && ownDrag()`, 3000, 'drag → dragOut');
+    await drag(['dragEnter', 'dragOver']);
+    assert(!(await page.evaluate(`$('#drop').classList.contains('show')`)), 'no "Drop to send to …" for its own drag');
+    await drag(['drop']);
+    await new Promise(r => setTimeout(r, 500));
+    eq(await page.evaluate(`${hostLog('sendFiles')}.length`), 0, 'dropped back on the chat, nothing is sent (1.7.0 sent it straight back)');
+    // The app says the drag ended: a file dragged in from elsewhere is sent as always.
+    await page.evaluate(`__host.emit({ type: 'dragOutDone', itemId: '${item.id}' })`);
+    await page.waitFor(`!ownDrag()`, 3000, 'its drag is over');
+    await drag(['dragEnter', 'dragOver']);
+    await page.waitFor(`$('#drop').classList.contains('show')`, 3000, '"Drop to send" for a file from elsewhere');
+    await drag(['drop']);
+    await page.waitFor(`__host.files.some(f => f.type === 'sendFiles' && f.names.includes('report.pdf'))`, 5000, 'a file from elsewhere is sent');
+    // While another device controls this PC the app copies the file instead of starting a drag (which froze the
+    // session), and the page says what to do.
+    await page.evaluate(`__host.reply('dragOut', () => ({ ok: true, result: { copied: true } }))`);
+    await page.evaluate(dragOut);
+    await page.waitFor(`/Copied\\. Paste it where you want it \\(Ctrl\\+V\\)/.test(document.body.textContent)`, 3000, '"Copied" message');
+    assert(await page.evaluate(`!ownDrag()`), 'no drag to wait for');
+    // An older app (no dragOutDone) never says when its drag ends: the page doesn't wait for it.
+    const { page: old, appId: oldId } = await hostPage(ctx);
+    await old.waitFor(`paired && hostState.ready`);
+    const oldItem = await admin.file('old.pdf', Buffer.from('%PDF-1.4 old'), [oldId]);
+    await old.waitFor(`items.some(i => i.id === '${oldItem.id}')`);
+    await old.evaluate(`openConv('${admin.id}'); __host.emit({ type: 'localFile', itemId: '${oldItem.id}', saved: true })`);
+    const oldNode = `document.querySelector('[data-id="${oldItem.id}"]')`;
+    await old.waitFor(`${oldNode}?.querySelector('.meta button[aria-label="Open"]') != null`, 3000, 'saved (older app)');
+    await old.evaluate(`${oldNode}.querySelector('.file-row').dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }))`);
+    await old.waitFor(`${hostLog('dragOut')}.length === 1`, 3000, 'drag → dragOut (older app)');
+    assert(await old.evaluate(`!ownDrag()`), 'nothing to wait for with an older app');
+  });
+
   test('host: navigate highlights an item; openPanel opens This PC; settings changes go to the app', async ctx => {
     const { page, appId } = await hostPage(ctx);
     await page.waitFor(`paired && hostState.ready`);

@@ -637,6 +637,26 @@ try {
   rc('closeviews');
   check(live && (await call(VIEWER(), 'GET', '/api/rc/sessions')).data.sessions.some(x => x.id === live.id), '...and the session goes on');
 
+  // 1.7.1: a file dragged out of the chat while this PC is being controlled is copied instead. A drag's modal loop on the
+  // app's thread held up the session's own input there: the mouse button never came back up, the session froze and the
+  // viewer couldn't reconnect.
+  {
+    const sent = await fetch(`${base}/api/file?to=${pcId}`, { method: 'PUT', headers: { ...VIEWER(), 'X-Filename': 'drag-me.txt', 'Content-Type': 'application/octet-stream' }, body: 'dragged while controlled' });
+    const itemId = (await sent.json()).id;
+    await sleep(1500); // (the app hears of it: this instance doesn't save files by itself)
+    forward(['--test-bridge', JSON.stringify({ type: 'saveFile', id: 'test-save', itemId })]);
+    check(!!(await waitLog(new RegExp(`Saved down:${itemId} to .*drag-me\\.txt`), from, 15000)), 'a file for this PC arrived and was saved');
+    const before = logLines().length;
+    fs.rmSync(dir('cfg/clipboard-files.txt'), { force: true });
+    forward(['--test-bridge', JSON.stringify({ type: 'dragOut', id: 'test-drag', itemId })]);
+    const reply = await waitLog(/Bridge test reply: .*"id":"test-drag"/, before, 15000);
+    check(!!reply && /"ok":true/.test(reply) && /"copied":true/.test(reply), `dragging it out of the chat copies it instead (${reply ? reply.slice(reply.indexOf('{')) : 'no reply'})`);
+    let files = '';
+    try { files = fs.readFileSync(dir('cfg/clipboard-files.txt'), 'utf8').trim(); } catch {}
+    check(/drag-me\.txt$/.test(files), `...onto the clipboard as a file, as Explorer's Copy does (${files || 'nothing'})`);
+    check(!!(await waitLog(/Drag out of \w+ while this PC is being controlled: copied instead/, before, 3000)), '...and beam.log says why');
+  }
+
   // Stop on the banner.
   t1 = Date.now();
   const sid = live.id;

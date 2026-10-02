@@ -831,6 +831,33 @@ namespace Beam
             }
         }
 
+        // Files on the clipboard as Explorer's Copy puts them (Beam 1.7.1): what a file dragged out of the chat becomes while
+        // another device controls this PC, where a drag would hold up that session's own input (see WebWindow.DragOut).
+        public static bool SetFiles(IList<string> paths)
+        {
+            if (paths == null || paths.Count == 0) return false;
+            if (IsolatedDir != null)
+            {
+                try { File.WriteAllLines(Path.Combine(IsolatedDir, "clipboard-files.txt"), paths); return true; }
+                catch (Exception ex) { Log.Error("Test clipboard", ex); return false; }
+            }
+            try
+            {
+                var data = new DataObject();
+                var list = new StringCollection();
+                list.AddRange(paths.ToArray());
+                data.SetFileDropList(list);
+                data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes((int)DragDropEffects.Copy))); // copy, not cut
+                Clipboard.SetDataObject(data, true, 10, 100);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Clipboard", ex);
+                return false;
+            }
+        }
+
         // Text from a remote control viewer (Beam 1.6): never uploaded to the cloud clipboard, and kept out of Win+V
         // history too when "Keep it in clipboard history" is off.
         public static bool SetRemoteText(string text, bool history)

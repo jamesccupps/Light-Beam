@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl" };
 
         readonly App app;
         readonly WebWindow win;
@@ -170,8 +170,10 @@ namespace Beam
                 }
                 case "dragOut":
                 {
-                    string err = win.DragOut(itemId);
-                    if (err != null) Fail(id, err, "Save the file first"); else Reply(id, null);
+                    string r = win.DragOut(itemId);
+                    if (r == null) Reply(id, null);
+                    else if (r == "copied") Reply(id, Obj("copied", true)); // (this PC is being controlled: no drag, 1.7.1)
+                    else Fail(id, r, r == "clipboard" ? "Couldn't copy it" : "Save the file first");
                     break;
                 }
                 case "read":

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Beam for Windows: regression checks for the 1.4.0 review findings (save while arriving, revoke, receipts, stream
 // checks, foreign 401s, leftover partial files, a paused sender) and the re-review's R1/R2 (a sender pausing right
-// after full reads; Retry on a failed early download), and 1.6.2's Copy image. Exits 1 if any check fails.
+// after full reads; Retry on a failed early download), 1.6.2's Copy image and 1.7.1's notification clicks. Exits 1 if
+// any check fails.
 //
 //   node test/perf/windows-regress.mjs [all|reconnect|restart|revoke|ack|doublepoke|nonbeam401|cancel-after-restart|cancel-live|lane
-//        |pause-full|retry-early|lost-finish|copy-image] [--exe <Beam.exe>]
+//        |pause-full|retry-early|lost-finish|copy-image|notify-open] [--exe <Beam.exe>]
 //
 // Isolated like the other windows-* checks: a scratch server (this checkout's server.js) on 127.0.0.1:8805, the app
 // reaching it through a small TCP proxy on 8855 (so its connections can be dropped), a fake peer, and a copy of Beam.exe
@@ -516,8 +517,42 @@ async function copyImage(r) {
   r.check(rep && rep.ok === false && rep.code === 'not-found', `a text item: "not-found" (${rep && rep.code})`);
 }
 
+// 1.7.1: a click on the notification for files that came opens their conversation at the newest of them (with several at
+// once it just brought Beam up, wherever it was), and a picture's own notification opens it in Beam rather than in
+// Explorer. (Other files still show in their folder: not clicked here, it would open Explorer.)
+async function notifyOpen(r) {
+  await r.setup();
+  const send = async (name, data, mime) => {
+    const c = await r.api('POST', '/api/uploads', { name, size: data.length, mime, to: [r.appId] });
+    await r.upload(c.data.id, data, 0, data.length);
+    return c.data.id;
+  };
+  const one = Buffer.from('\x89PNG first picture'), two = Buffer.from('\x89PNG second picture');
+  let from = r.logLines().length;
+  const a = await send('one.png', one, 'image/png');
+  const b = await send('two.png', two, 'image/png');
+  r.check(await r.waitFor(() => r.saved(one, 'one.png') && r.saved(two, 'two.png'), 20000), 'two pictures came and were saved');
+  const merged = await r.waitLog(/Notification: file item \w+ saved, file item \w+ saved/, from, 10000);
+  r.check(!!merged && merged.includes(a) && merged.includes(b), `one balloon for both (${merged ? merged.replace(/.*Notification: /, '') : 'none'})`);
+  from = r.logLines().length;
+  r.forward(['--test-click-balloon']);
+  let nav = await r.waitLog(/Web window: navigate to /, from, 60000);
+  r.check(!!nav && nav.endsWith(`navigate to ${r.peerId} at ${b}`), `its click opens their conversation at the newer one (${nav ? nav.replace(/.*navigate to /, '') : 'nothing'})`);
+  // (the window now shows that conversation, so nothing new there would be notified: hide it)
+  r.forward(['--hide']);
+  await sleep(1500);
+  from = r.logLines().length;
+  const three = Buffer.from('\x89PNG third picture');
+  const c = await send('three.png', three, 'image/png');
+  r.check(!!(await r.waitLog(new RegExp(`Notification: file item ${c} saved$`), from, 20000)), 'a third picture, on its own balloon');
+  from = r.logLines().length;
+  r.forward(['--test-click-balloon']);
+  nav = await r.waitLog(/Web window: navigate to /, from, 30000);
+  r.check(!!nav && nav.endsWith(`navigate to ${r.peerId} at ${c}`), `a picture's own balloon opens it in Beam (${nav ? nav.replace(/.*navigate to /, '') : 'nothing'})`);
+}
+
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
-  'pause-full': pauseFull, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage };
+  'pause-full': pauseFull, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'notify-open': notifyOpen };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

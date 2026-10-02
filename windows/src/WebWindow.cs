@@ -831,6 +831,7 @@ namespace Beam
             d["conversation"] = App.ToPageConv(navConv);
             d["itemId"] = navItem;
             d["focusComposer"] = navItem == null;
+            Log.Write("Web window: navigate to " + App.ToPageConv(navConv) + (navItem != null ? " at " + navItem : ""));
             navConv = navItem = null;
             Post(Json.Stringify(d));
         }
@@ -910,15 +911,32 @@ namespace Beam
         void OnUpdateChanged() { if (helloSeen) PostEvent("update", "update", bridge.UpdateObject()); }
         void OnConnChanged() { if (helloSeen) PostEvent("conn", "conn", bridge.ConnObject()); }
 
-        // Starts a native drag of a saved file (the page calls this from dragstart).
+        // Starts a native drag of a saved file (the page calls this from dragstart); the page hears "dragOutDone" when it
+        // ends, so it doesn't take its own drag for a file dropped on it. Null: dragging; "copied"; or why not.
+        //
+        // While another device controls this PC (Beam 1.7.1) the file is copied instead. A drag runs a modal loop on this
+        // thread until the mouse button comes up, but that "up" comes from the viewer through this same thread
+        // (RemoteControl injects its input here): the session froze, the button stayed down and the viewer couldn't
+        // reconnect until something else let go of it.
         public string DragOut(string itemId)
         {
             string path = app.LocalFile(itemId);
             if (path == null) return "not-saved";
+            if (app.Rc != null && app.Rc.Active)
+            {
+                bool copied = ClipPayload.SetFiles(new[] { path });
+                Log.Write("Drag out of " + itemId + " while this PC is being controlled: " + (copied ? "copied instead" : "couldn't copy it"));
+                return copied ? "copied" : "clipboard";
+            }
             if (web == null) return "busy";
             var data = new DataObject();
             data.SetFileDropList(new StringCollection { path });
-            BeginInvoke(new Action(() => { try { web.DoDragDrop(data, DragDropEffects.Copy); } catch (Exception ex) { Log.Error("Drag out", ex); } }));
+            BeginInvoke(new Action(() =>
+            {
+                try { web.DoDragDrop(data, DragDropEffects.Copy); }
+                catch (Exception ex) { Log.Error("Drag out", ex); }
+                PostEvent("dragOutDone", "itemId", itemId);
+            }));
             return null;
         }
 

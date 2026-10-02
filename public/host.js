@@ -132,6 +132,9 @@ function onHostEvent(m) {
     case 'conn':
       hostState.conn = m.conn || null;
       break;
+    case 'dragOutDone':
+      ownDragEnded(); // the app's drag of a file out of the chat ended (send.js)
+      break;
     case 'openPanel':
       // The tray's "Settings" and "Add a device…".
       for (const d of $$('dialog[open]')) if (d.id !== 'approveDlg') d.close();
