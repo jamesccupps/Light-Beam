@@ -210,6 +210,10 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **While someone is connected** the PC shows a red bar, "*device* (*machine* · *address*) is controlling this PC ·
   **Stop**". After 5 seconds it shrinks to a small "Beam · Stop" pill that grows back when the mouse rests on it. Drag it
   anywhere on the screen (it starts there next time); double-click it to put it back at the top.
+- **Signed in through Remote Desktop?** Beam can't control a Remote Desktop session (it isn't on the PC's own
+  screen, so the PC shows as locked). Right-click Beam's tray icon there → **Back to this PC's screen**: Windows asks
+  for administrator rights, Remote Desktop closes, and Beam's Control works. The PC's own monitor then shows your
+  desktop, unlocked.
   **Ctrl+Alt+Shift+F12** on the PC ends every session at once. You can also end a session, or turn remote control off
   for a PC, from any of your devices (Settings → Devices). Nothing but the PC itself can turn it on.
 - **In the viewer:** Sharp text or Smooth motion, choose a screen, full screen, a Keys menu (Win, Alt+Tab, Lock this

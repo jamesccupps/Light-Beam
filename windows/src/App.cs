@@ -2913,6 +2913,13 @@ namespace Beam
                 menu.Items.Add(allow);
                 if (Cfg.AllowRemoteControl) menu.Items.Add("Remote control devices…", null, (s, e) => ShowRcAllow(null));
                 if (Rc.Active) menu.Items.Add("Stop remote control (" + Rc.ViewerName + ")", null, (s, e) => Rc.Stop("the tray menu"));
+                if (Cfg.AllowRemoteControl && RemoteControl.InRemoteDesktop)
+                {
+                    // Beam 1.7.5: hand a Remote Desktop session back to this PC's own screen, for Beam's control.
+                    var back = new ToolStripMenuItem("Back to this PC's screen", null, (s, e) => Rc.BackToScreen());
+                    back.ToolTipText = "Moves this session onto the PC's own screen so Beam's remote control can take over. Windows asks for administrator rights; Remote Desktop closes.";
+                    menu.Items.Add(back);
+                }
             }
             var phoneOn = PhoneNotificationsOn;
             if (phoneOn.HasValue)
