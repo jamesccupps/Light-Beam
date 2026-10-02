@@ -1,9 +1,13 @@
 // The banner shown while another device controls this PC (Beam 1.6): "Robin Phone (pixel-9 · 100.70.1.2) is
 // controlling this PC · Stop". This PC renders it from its device list and its own Tailscale check, never from text the
-// viewer sends. It sits top-most at the top centre of the screen (Windows' own sharing bar sits at the bottom), never
-// takes the focus, re-asserts top-most every second, and ignores clicks for 500 ms after it appears, so a click meant
-// for what was there before can't land on Stop. Closing it in any way is Stop: no banner, no session.
+// viewer sends. It appears at the top centre of the screen (Windows' own sharing bar sits at the bottom), never takes
+// the focus, re-asserts top-most every second, and ignores clicks for 500 ms after it appears, so a click meant for
+// what was there before can't land on Stop. Closing it in any way is Stop: no banner, no session.
+// Beam 1.7.4 (the user: it covered the browser's tabs): it can be dragged anywhere (never off a screen) and starts where
+// it was put last time; a double-click puts it back at the top. After 5 s it shrinks to a small "Beam · Stop" pill
+// that grows back under the mouse. Stop stays where it is through all of that. RcBannerPlace has the geometry.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
@@ -14,16 +18,21 @@ namespace Beam
 {
     class RcBanner : Form
     {
-        public const int ClickGuardMs = 500;
+        public const int ClickGuardMs = 500, ShrinkAfterMs = 5000, ShrinkAgainMs = 1500, GrowAfterMs = 400;
+        const string Short = "Beam";
         static readonly Color Back = Color.FromArgb(0xA4, 0x26, 0x2C), Fore = Color.White, StopHover = Color.FromArgb(0xF3, 0xD6, 0xD7);
         readonly App app;
         readonly string label;
         readonly Action onStop;
         readonly Stopwatch shown = new Stopwatch();
         readonly ToolTip tip;
+        readonly Timer shrink = new Timer(), grow = new Timer();
         Rectangle stopRect;
-        Point home;                                    // where it was shown
-        bool hover, up, stopped;
+        Size full, pill;
+        int stopW;
+        Point home;                                    // where it belongs (KeepOnTop puts it back there)
+        Point grab, downAt;                            // a drag: where the pointer holds it, where the press was
+        bool hover, up, stopped, compact, dragging, moved, downOnStop;
 
         public RcBanner(App app, string label, Action onStop)
         {
@@ -39,7 +48,12 @@ namespace Beam
             DoubleBuffered = true;
             Font = Ui.Bold;
             tip = new ToolTip();
-            tip.SetToolTip(this, "Stop ends the remote control at once. " + RemoteControl.KillKeys + " does too, from anywhere.");
+            tip.ShowAlways = true; // (it's never the active window)
+            tip.SetToolTip(this, this.label + ". Drag it anywhere; a double-click puts it back at the top. Stop ends the remote control at once. " + RemoteControl.KillKeys + " does too, from anywhere.");
+            shrink.Tick += (s, e) => ShrinkNow();
+            // The pill grows only when the mouse stays on it: one passing over on its way to a tab leaves it small.
+            grow.Interval = GrowAfterMs;
+            grow.Tick += (s, e) => { grow.Stop(); if (!dragging && !stopped && !IsDisposed && Bounds.Contains(Cursor.Position)) Grow(); };
         }
 
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -57,40 +71,65 @@ namespace Beam
         // Up: shown, not closed (the session checks this every second).
         public bool Up { get { return up && !IsDisposed && Visible; } }
 
+        // Every screen's working area. Tests: one made-up screen far off the real ones, so the banner is shown and can be
+        // moved but never appears on the user's screen.
+        static List<BannerArea> Areas()
+        {
+            if (Ui.TestOffscreen) return new List<BannerArea> { new BannerArea("test", new Rectangle(-20000, -20000, 1600, 900), true) };
+            return Screen.AllScreens.Select(s => new BannerArea(s.DeviceName, s.WorkingArea, s.Primary)).ToList();
+        }
+
+        Rectangle StopIn(Size size)
+        {
+            return new Rectangle(size.Width - stopW - Ui.S(6), Ui.S(6), stopW, size.Height - Ui.S(12));
+        }
+
         public void ShowBanner(ScreenInfo screen)
         {
-            int h = Ui.S(40), pad = Ui.S(16), stopW = Math.Max(Ui.S(72), Ui.Width("Stop", Ui.Bold) + Ui.S(28));
+            int h = Ui.S(40), pad = Ui.S(16);
+            stopW = Math.Max(Ui.S(72), Ui.Width("Stop", Ui.Bold) + Ui.S(28));
+            var areas = Areas();
+            int narrowest = areas.Count > 0 ? areas.Min(a => a.Work.Width) - Ui.S(16) : int.MaxValue; // (it must fit on any screen)
             int textW = Math.Min(Ui.Width(label, Ui.Bold), Ui.S(720));
-            int w = pad + textW + Ui.S(14) + stopW + Ui.S(6);
-            Size = new Size(w, h);
-            stopRect = new Rectangle(w - stopW - Ui.S(6), Ui.S(6), stopW, h - Ui.S(12));
-            if (Ui.TestOffscreen) Location = new Point(-20000, -20000); // tests: shown, but never on the user's screen
+            full = new Size(Math.Max(Ui.S(200), Math.Min(narrowest, pad + textW + Ui.S(14) + stopW + Ui.S(6))), h);
+            pill = new Size(pad + Ui.S(16) + Ui.Width(Short, Ui.Bold) + Ui.S(14) + stopW + Ui.S(6), h);
+            Size = full;
+            stopRect = StopIn(full);
+            var stopCentre = new Point(stopRect.X + stopRect.Width / 2, stopRect.Y + stopRect.Height / 2);
+            Point? saved = RcBannerPlace.FromSpot(app.Cfg.RcBannerSpot, full, stopCentre, areas);
+            if (saved != null) Location = saved.Value;
             else
             {
-                var area = screen != null ? new Rectangle(screen.X, screen.Y, screen.W, screen.H) : Screen.PrimaryScreen.Bounds;
-                var work = Screen.FromRectangle(area).WorkingArea;
-                Location = new Point(area.X + (area.Width - w) / 2, Math.Max(area.Y, work.Y) + Ui.S(8));
+                // The top centre of the screen asked for (the primary one), as before 1.7.4.
+                BannerArea target = null;
+                if (screen != null) target = RcBannerPlace.AreaOf(new Rectangle(screen.X, screen.Y, screen.W, screen.H), areas);
+                Location = RcBannerPlace.TopCentre(full, target ?? RcBannerPlace.PrimaryOf(areas), Ui.S(8));
             }
             home = Location;
-            using (var path = Ui.Round(new Rectangle(0, 0, w, h), h / 2)) Region = new Region(path);
+            SetShape();
             Show();
             up = true;
             shown.Restart();
+            ShrinkLater(ShrinkAfterMs);
             KeepOnTop();
+            Log.Write("Remote control: the banner is " + (saved != null ? "where it was put last time" : "at the top centre"));
         }
 
-        // Top-most again, and back where it belongs if something moved it (partly) off every screen.
+        void SetShape()
+        {
+            using (var path = Ui.Round(new Rectangle(Point.Empty, Size), Height / 2)) Region = new Region(path);
+        }
+
+        // Top-most again, and back at the top if something moved it (partly) off every screen.
         public void KeepOnTop()
         {
             if (!IsHandleCreated || IsDisposed) return;
             uint flags = 0x0001 | 0x0010 | 0x0040; // NOSIZE | NOACTIVATE | SHOWWINDOW
-            var bounds = new Rectangle(Location, Size);
-            bool seen = Ui.TestOffscreen || Screen.AllScreens.Any(s => s.WorkingArea.Contains(bounds));
-            if (seen) flags |= 0x0002; // NOMOVE
+            var areas = Areas();
+            if (dragging || RcBannerPlace.OnScreen(Bounds, areas)) flags |= 0x0002; // NOMOVE
             else
             {
-                var wa = Screen.PrimaryScreen.WorkingArea; // the top centre of the primary screen as it is now
-                home = new Point(wa.X + (wa.Width - Width) / 2, wa.Y + Ui.S(8));
+                home = RcBannerPlace.TopCentre(Size, RcBannerPlace.PrimaryOf(areas), Ui.S(8)); // the primary screen as it is now
                 Log.Write("Remote control: the banner was moved off the screen; it's back at the top");
             }
             SetWindowPos(Handle, new IntPtr(-1) /* HWND_TOPMOST */, home.X, home.Y, 0, 0, flags);
@@ -100,8 +139,12 @@ namespace Beam
         {
             stopped = true;
             up = false;
+            shrink.Stop();
+            grow.Stop();
             if (!IsDisposed) { Close(); Dispose(); }
         }
+
+        // ------------------------------------------------------------------ Stop
 
         // Tests: a click on Stop, with the same 500 ms guard.
         public void ClickStopForTest()
@@ -118,33 +161,202 @@ namespace Beam
             app.Post(onStop); // not from inside this window's own click
         }
 
-        protected override void OnPaint(PaintEventArgs e)
+        // ------------------------------------------------------------------ the pill
+
+        // The whole banner or the pill; the right end (Stop) stays where it is.
+        void SetCompact(bool on)
         {
-            var g = e.Graphics;
-            g.Clear(Back);
-            int pad = Ui.S(16);
-            Ui.Text(g, label, Ui.Bold, new Rectangle(pad, 0, stopRect.Left - pad - Ui.S(10), Height), Fore, Ui.Line);
-            Ui.FillRound(g, hover ? StopHover : Fore, stopRect, stopRect.Height / 2);
-            Ui.Text(g, "Stop", Ui.Bold, stopRect, Back, Ui.Center);
+            if (on == compact || IsDisposed) return;
+            compact = on;
+            var size = on ? pill : full;
+            var at = RcBannerPlace.Resize(Bounds, size.Width, Areas());
+            Bounds = new Rectangle(at, size);
+            stopRect = StopIn(size);
+            SetShape();
+            home = Location;
+            Invalidate();
+        }
+
+        void ShrinkLater(int ms)
+        {
+            shrink.Stop();
+            shrink.Interval = ms;
+            shrink.Start();
+        }
+
+        void ShrinkNow()
+        {
+            shrink.Stop();
+            if (IsDisposed || stopped || dragging) return;
+            if (!Ui.TestOffscreen && Bounds.Contains(Cursor.Position)) { ShrinkLater(ShrinkAgainMs); return; } // still under the mouse
+            SetCompact(true);
+        }
+
+        void Grow()
+        {
+            shrink.Stop();
+            grow.Stop();
+            SetCompact(false);
+        }
+
+        // ------------------------------------------------------------------ moving it
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            moved = false; // (a click on Stop after a drag is a click)
+            grow.Stop();
+            downOnStop = stopRect.Contains(e.Location);
+            if (downOnStop) return;
+            dragging = true;
+            downAt = Cursor.Position;
+            grab = new Point(downAt.X - Left, downAt.Y - Top);
+            shrink.Stop();
+            Capture = true;
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            bool h = stopRect.Contains(e.Location);
-            if (h != hover) { hover = h; Cursor = h ? Cursors.Hand : Cursors.Default; Invalidate(); }
+            if (dragging)
+            {
+                var p = Cursor.Position;
+                var slop = SystemInformation.DragSize;
+                if (!moved && (Math.Abs(p.X - downAt.X) > slop.Width / 2 || Math.Abs(p.Y - downAt.Y) > slop.Height / 2)) moved = true;
+                if (moved) DragTo(p);
+            }
+            else
+            {
+                shrink.Stop();
+                if (compact && !grow.Enabled) grow.Start();
+                bool h = stopRect.Contains(PointToClient(Cursor.Position)); // (where Stop is now, if it just grew)
+                if (h != hover) { hover = h; Cursor = h ? Cursors.Hand : Cursors.Default; Invalidate(); }
+            }
             base.OnMouseMove(e);
         }
 
-        protected override void OnMouseLeave(EventArgs e)
+        void DragTo(Point pointer)
         {
-            if (hover) { hover = false; Invalidate(); }
-            base.OnMouseLeave(e);
+            var at = RcBannerPlace.DragTo(new Rectangle(pointer.X - grab.X, pointer.Y - grab.Y, Width, Height), pointer, Areas());
+            if (at != Location) Location = at;
+            home = Location;
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (e.Button != MouseButtons.Left) return;
+            EndDrag();
+            Capture = false;
+        }
+
+        // The mouse taken away mid-drag (another window took the capture): it stays where it got to.
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (!Capture) EndDrag();
+        }
+
+        void EndDrag()
+        {
+            if (!dragging) return;
+            dragging = false;
+            if (moved) Remember("a drag");
+            if (!Bounds.Contains(Cursor.Position)) ShrinkLater(ShrinkAgainMs); // (let go off it: at a screen edge)
         }
 
         protected override void OnMouseClick(MouseEventArgs e)
         {
             base.OnMouseClick(e);
-            if (e.Button == MouseButtons.Left && stopRect.Contains(e.Location)) ClickStop("a click");
+            // Pressed and let go on Stop: a drag that ends over Stop (at a screen edge) isn't a click on it.
+            if (e.Button == MouseButtons.Left && downOnStop && !moved && stopRect.Contains(e.Location)) ClickStop("a click");
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            base.OnMouseDoubleClick(e);
+            if (e.Button == MouseButtons.Left && !stopRect.Contains(e.Location)) BackToTop("a double-click");
+        }
+
+        // Where Stop is now, kept for the next session.
+        void Remember(string how)
+        {
+            var stop = new Point(Left + stopRect.X + stopRect.Width / 2, Top + stopRect.Y + stopRect.Height / 2);
+            app.Cfg.RcBannerSpot = RcBannerPlace.Spot(stop, Areas());
+            app.Cfg.Save();
+            Log.Write("Remote control: the banner was moved (" + how + "); it starts there next time");
+        }
+
+        void BackToTop(string how)
+        {
+            dragging = false;
+            Location = RcBannerPlace.TopCentre(Size, RcBannerPlace.PrimaryOf(Areas()), Ui.S(8));
+            home = Location;
+            app.Cfg.RcBannerSpot = null;
+            app.Cfg.Save();
+            Log.Write("Remote control: the banner is back at the top (" + how + ")");
+            ShrinkLater(ShrinkAgainMs); // (it moved away from under the mouse)
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            grow.Stop();
+            if (hover) { hover = false; Invalidate(); }
+            if (!dragging) ShrinkLater(ShrinkAgainMs);
+            base.OnMouseLeave(e);
+        }
+
+        // ------------------------------------------------------------------ tests (--test-rc banner:…; nothing real is clicked)
+
+        public void TestCommand(string arg)
+        {
+            string cmd = arg ?? "info", rest = null;
+            int colon = cmd.IndexOf(':');
+            if (colon > 0) { rest = cmd.Substring(colon + 1); cmd = cmd.Substring(0, colon); }
+            var area = RcBannerPlace.PrimaryOf(Areas()).Work;
+            Point? p = null;
+            if (rest != null)
+            {
+                // x,y of the (made-up) screen, never far from it: a test can't put the banner on the user's screen.
+                var xy = rest.Split(',');
+                int x, y;
+                if (xy.Length == 2 && int.TryParse(xy[0], out x) && int.TryParse(xy[1], out y) && Math.Abs(x) <= 5000 && Math.Abs(y) <= 5000)
+                    p = new Point(area.X + x, area.Y + y);
+            }
+            if ((cmd == "drag" || cmd == "jump") && (p == null || !Ui.TestOffscreen)) { Log.Write("Remote control: (test) banner " + cmd + " needs x,y in a test instance"); return; }
+            switch (cmd)
+            {
+                case "drag": // the pointer takes it by its label and lets go at x,y of the screen
+                    grab = new Point(Ui.S(16), Height / 2);
+                    dragging = moved = true;
+                    DragTo(p.Value);
+                    dragging = false;
+                    Remember("a test drag");
+                    break;
+                case "jump": Location = p.Value; break; // something else moved it (KeepOnTop's next round puts it back)
+                case "hover": if (rest == "off") ShrinkLater(ShrinkAgainMs); else Grow(); break;
+                case "top": BackToTop("a test double-click"); break;
+            }
+            Log.Write("Remote control: (test) banner " + (compact ? "pill" : "full") + " at " + (Left - area.X) + "," + (Top - area.Y) + " size " + Width + "x" + Height
+                + " of " + area.Width + "x" + area.Height + ", spot " + (app.Cfg.RcBannerSpot ?? "none"));
+        }
+
+        // ------------------------------------------------------------------ drawing
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Back);
+            int pad = Ui.S(16);
+            if (compact)
+            {
+                int dot = Ui.S(8);
+                Ui.FillCircle(g, Fore, new Rectangle(pad, (Height - dot) / 2, dot, dot));
+                Ui.Text(g, Short, Ui.Bold, new Rectangle(pad + Ui.S(16), 0, stopRect.Left - pad - Ui.S(16) - Ui.S(6), Height), Fore, Ui.Line);
+            }
+            else Ui.Text(g, label, Ui.Bold, new Rectangle(pad, 0, stopRect.Left - pad - Ui.S(10), Height), Fore, Ui.Line);
+            Ui.FillRound(g, hover ? StopHover : Fore, stopRect, stopRect.Height / 2);
+            Ui.Text(g, "Stop", Ui.Bold, stopRect, Back, Ui.Center);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -159,7 +371,7 @@ namespace Beam
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) tip.Dispose();
+            if (disposing) { shrink.Dispose(); grow.Dispose(); tip.Dispose(); }
             base.Dispose(disposing);
         }
 

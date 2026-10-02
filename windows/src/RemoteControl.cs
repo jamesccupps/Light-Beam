@@ -1035,6 +1035,10 @@ namespace Beam
                     break;
                 case "probe": Probe(); break;
                 case "guard": testClickOnShow = true; break;
+                case "banner": // banner[:info|drag:x,y|jump:x,y|hover:on|off|top] (RcBanner.TestCommand)
+                    if (current != null && current.Banner != null) current.Banner.TestCommand(arg);
+                    else Log.Write("Remote control: (test) no banner");
+                    break;
                 case "closeviews": app.CloseRemoteViewsForTest(); break;
                 case "viewmsg": app.RemoteViewsForTest(arg ?? "{}"); break;
                 case "viewreload": app.RemoteViewsForTest(null); break;

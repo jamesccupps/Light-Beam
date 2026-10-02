@@ -4,6 +4,7 @@
 // INPUT records; the screen layouts are made up (several monitors, mixed DPI, negative coordinates).
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -556,6 +557,49 @@ namespace Beam
                 Check(UpdateSignature.Check("", uv, usha, usize, null) == null, "a build without a key checks only the SHA-256 (as before 1.7.3)");
             }
             Section("signed updates: version, SHA-256 and size, from this Beam's key only (1.7.3)", u0);
+
+            // The remote-control banner's place (1.7.4): three made-up screens, one left of the primary (negative x),
+            // one right of it and higher up. The banner is 600×40 (pill 180×40), Stop's centre 558,20 inside it.
+            int b0 = failures;
+            {
+                var one = new BannerArea(@"\\.\DISPLAY1", new Rectangle(0, 0, 1920, 1040), true);
+                var two = new BannerArea(@"\\.\DISPLAY2", new Rectangle(1920, -200, 1280, 1024), false);
+                var three = new BannerArea(@"\\.\DISPLAY3", new Rectangle(-1600, 100, 1600, 900), false);
+                var areas = new List<BannerArea> { one, two, three };
+                var full = new Size(600, 40);
+                var stop = new Point(558, 20);
+                Func<int, int, Rectangle> at = (x, y) => new Rectangle(x, y, 600, 40);
+                Check(RcBannerPlace.Clamp(at(100, 100), areas) == new Point(100, 100), "a banner on a screen stays where it is");
+                Check(RcBannerPlace.Clamp(at(1500, 100), areas) == new Point(1320, 100), "half off the right edge: back inside the screen it's mostly on");
+                Check(RcBannerPlace.Clamp(at(100, -30), areas) == new Point(100, 0) && RcBannerPlace.Clamp(at(100, 1030), areas) == new Point(100, 1000), "above the top or over the taskbar: inside the working area");
+                Check(RcBannerPlace.Clamp(at(5000, 5000), areas) == new Point(2600, 784), "off every screen: onto the nearest one");
+                Check(RcBannerPlace.Clamp(new Rectangle(0, 0, 2000, 40), areas) == new Point(0, 0), "wider than the screen: its left edge");
+                Check(RcBannerPlace.DragTo(at(1900, 480), new Point(2000, 500), areas) == new Point(1920, 480), "dragged onto the next screen: the pointer's screen, fully");
+                Check(RcBannerPlace.DragTo(at(-80, 940), new Point(-50, 950), areas) == new Point(-600, 940), "...also one at negative coordinates");
+                bool always = true;
+                for (int x = -1700; x <= 3300 && always; x += 50)
+                    for (int y = -300; y <= 1100 && always; y += 50)
+                        always = RcBannerPlace.OnScreen(new Rectangle(RcBannerPlace.DragTo(at(x - 100, y - 20), new Point(x, y), areas), full), areas);
+                Check(always, "dragged anywhere over the desktop (gaps between screens too), it's always fully on a screen");
+                Check(RcBannerPlace.OnScreen(at(100, 100), areas) && !RcBannerPlace.OnScreen(at(1500, 100), areas) && !RcBannerPlace.OnScreen(at(-20000, -20000), areas), "on a screen: fully on one");
+                Check(RcBannerPlace.TopCentre(full, RcBannerPlace.PrimaryOf(areas), 8) == new Point(660, 8), "the usual place: the top centre of the primary screen");
+                Check(RcBannerPlace.Resize(at(1000, 8), 180, areas) == new Point(1420, 8) && RcBannerPlace.Resize(new Rectangle(1420, 8, 180, 40), 600, areas) == new Point(1000, 8), "shrinking and growing keep Stop (the right end) in place");
+                Check(RcBannerPlace.Resize(new Rectangle(0, 8, 180, 40), 600, areas) == new Point(0, 8), "...unless it would leave the screen");
+                string spot = RcBannerPlace.Spot(new Point(1000 + 558, 500 + 20), areas);
+                Check(spot == @"\\.\DISPLAY1|0.8115|0.5", "a spot: the screen and Stop's place as fractions (" + spot + ")");
+                Check(RcBannerPlace.FromSpot(spot, full, stop, areas) == new Point(1000, 500), "...back from it: the same place");
+                string spot2 = RcBannerPlace.Spot(new Point(2100 + 558, 300 + 20), areas);
+                Check(spot2 != null && spot2.StartsWith(@"\\.\DISPLAY2|") && RcBannerPlace.FromSpot(spot2, full, stop, areas) == new Point(2100, 300), "...also on another screen (" + spot2 + ")");
+                Check(RcBannerPlace.FromSpot(@"\\.\DISPLAY9|0.5|0.1", full, stop, areas) == new Point(402, 84), "a screen that's gone: the primary, same fractions");
+                var bigger = new List<BannerArea> { new BannerArea(@"\\.\DISPLAY1", new Rectangle(0, 0, 2560, 1400), true) };
+                Check(RcBannerPlace.FromSpot(spot, full, stop, bigger) == new Point(1519, 680), "another resolution: the same place relative to the screen");
+                var wild = RcBannerPlace.FromSpot(@"\\.\DISPLAY1|7|0.5", full, stop, areas);
+                Check(wild != null && RcBannerPlace.OnScreen(new Rectangle(wild.Value, full), areas), "a fraction out of range: still fully on the screen");
+                Check(new[] { null, "", "abc", "x|0.5", "x|abc|0.5", "x|-0.5|0.5", "x|NaN|0.5", "x|1e3|0.5", "x|0.5|" }.All(s => RcBannerPlace.FromSpot(s, full, stop, areas) == null), "a spot that can't be read: none (the usual place)");
+                Check(RcBannerPlace.Spot(new Point(-20000, -20000), new List<BannerArea> { one }) == @"\\.\DISPLAY1|0|0", "a spot off the screen: the nearest corner");
+                Check(RcBannerPlace.FromSpot(spot, full, stop, new List<BannerArea>()) == null, "no screens: no place");
+            }
+            Section("remote-control banner: dragged anywhere, never off a screen, remembered (1.7.4)", b0);
 
             Console.WriteLine();
             Console.WriteLine(failures == 0 ? "All " + passed + " checks passed." : failures + " of " + (passed + failures) + " checks FAILED.");
