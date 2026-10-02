@@ -944,8 +944,9 @@ test('A17/A18/A19: banner hides the key, pair command, logs, hello and info', as
     assert.equal(r.status, 200, 'a pairing link works once');
     const hello = (await s.req('GET', '/api/hello')).json;
     assert.equal(hello.api, 3);
-    assert.ok(Array.isArray(hello.urls));
+    assert.equal(hello.urls, undefined, '(1.7.7, S-33) the addresses only for signed-in callers');
     const info = (await s.req('GET', '/api/info', { headers: app(K, 'opsdev00001') })).json;
+    assert.ok(Array.isArray(info.urls));
     for (const f of ['tokens', 'move', 'export', 'read-markers', 'thumbnails']) assert.ok(info.features.includes(f));
     assert.ok(info.storage && info.uptime >= 0 && info.settings);
     const logs = (await s.req('GET', '/api/logs?lines=50', { headers: app(K, 'opsdev00001') })).json.lines;
@@ -1020,7 +1021,7 @@ test('B1: settings: read, validated changes, env locks, learned public address',
     r = await s.req('GET', '/api/settings', { headers: h });
     assert.equal(r.json.publicUrl, 'https://beam.tail1234.ts.net');
     assert.equal(r.json.publicUrlLearned, true);
-    assert.ok((await s.req('GET', '/api/hello')).json.urls.includes('https://beam.tail1234.ts.net'));
+    assert.ok((await s.req('GET', '/api/info', { headers: h })).json.urls.includes('https://beam.tail1234.ts.net'));
     ev.close();
   } finally { await s.stop(); }
 });
@@ -1482,19 +1483,32 @@ test('B5: import-from copies a running Beam after approval and moves everyone ov
   } finally { await old.stop(); await neu?.stop(); }
 });
 
-test('1.7.6: __Host-beam_key signs in before the legacy beam_key, a stale one falls back to it, and signing out over https clears both', async () => {
+test('1.7.6/1.7.7: __Host-beam_key signs in before the legacy beam_key; over https sign-ins set it, a page still on the old name is moved over, and signing out clears both', async () => {
   const s = await startServer('hostcookie', 8792);
   try {
     const key = (await post(s, '/api/login', { secret: s.key, client: 'app', platform: 'windows' }, { 'X-Beam-Device-Id': 'hostcook001', ...from('100.64.76.1') })).json.key;
-    const me = c => s.req('GET', '/api/me', { headers: { Cookie: c, ...from('100.64.76.1') } });
+    const https = viaServe('100.64.76.1');
+    const me = (c, via = from('100.64.76.1')) => s.req('GET', '/api/me', { headers: { Cookie: c, ...via } });
+    const setCookies = r => [].concat(r.headers['set-cookie'] || []);
     assert.equal((await me(`__Host-beam_key=${key}`)).status, 200, 'the new name');
-    assert.equal((await me(`beam_key=${key}`)).status, 200, 'the old name, while the apps move over');
+    let r = await me(`beam_key=${key}`);
+    assert.equal(r.status, 200, 'the old name, until the next release');
+    assert.deepEqual(setCookies(r), [], 'plain http keeps the old name');
     assert.equal((await me(`__Host-beam_key=notatoken; beam_key=${key}`)).status, 200, 'a stale new one falls back to the old');
     assert.equal((await me('__Host-beam_key=notatoken')).status, 401);
-    await waitFor(() => /pages use the __Host-beam_key sign-in cookie/.test(fs.readFileSync(path.join(s.data, 'logs', 'server.log'), 'utf8')));
-    const out = await post(s, '/api/logout', {}, { ...viaServe('100.64.76.1'), ...sameOrigin, Cookie: `__Host-beam_key=${key}` });
+    r = await me(`beam_key=${key}`, https);
+    assert.equal(r.status, 200);
+    assert.deepEqual(setCookies(r), [`__Host-beam_key=${key}; Path=/; Max-Age=315360000; HttpOnly; SameSite=Lax; Secure`, 'beam_key=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure'], 'moved over');
+    assert.deepEqual(setCookies(await me(`__Host-beam_key=${key}`, https)), [], 'nothing to move');
+    await waitFor(() => /page sign-in to the __Host-beam_key cookie/.test(fs.readFileSync(path.join(s.data, 'logs', 'server.log'), 'utf8')));
+    await post(s, '/api/password', { password: 'host cookie pass' }, app(s.key, 'hostcook002'));
+    r = await post(s, '/api/login', { secret: 'host cookie pass', remember: false }, { ...https, ...sameOrigin, Cookie: 'beam_device_id=hostcook003' });
+    assert.equal(r.status, 204);
+    assert.match(setCookies(r)[0], /^__Host-beam_key=bt_[^;]+; Path=\/; HttpOnly; SameSite=Lax; Secure$/, 'a session sign-in, under the new name');
+    assert.match(setCookies(r)[1], /^beam_key=; Path=\/; Max-Age=0;/);
+    const out = await post(s, '/api/logout', {}, { ...https, ...sameOrigin, Cookie: `__Host-beam_key=${key}` });
     assert.equal(out.status, 204);
-    const cleared = [].concat(out.headers['set-cookie'] || []);
+    const cleared = setCookies(out);
     assert.ok(cleared.some(c => /^beam_key=;.*Max-Age=0/.test(c)) && cleared.some(c => /^__Host-beam_key=; Path=\/; Max-Age=0;.*Secure/.test(c)), cleared.join(' | '));
     assert.equal((await me(`__Host-beam_key=${key}`)).status, 401, 'signed out');
   } finally { await s.stop(); }

@@ -1061,8 +1061,9 @@ function redeemPairing(hash, req) {
 function authOf(req) {
   if (req._auth !== undefined) return req._auth;
   const header = String(req.headers.authorization || '');
-  // Cookies (1.7.6, audit S-10): `__Host-beam_key` first (host-only, so another machine of the tailnet can't plant it),
-  // then the legacy `beam_key`, during the move to the new name: the apps set both, browsers still get the old one.
+  // Cookies (audit S-10): `__Host-beam_key` first (host-only, so another machine of the tailnet can't plant it), then
+  // the legacy `beam_key`, during the move to the new name: since 1.7.7 a page still signed in with the old one over
+  // https is moved to the new one (moveCookie); the old name is read until the next release.
   const candidates = [];
   if (/^bearer\s/i.test(header)) candidates.push([header.slice(7).trim(), 'bearer']);
   else {
@@ -1074,11 +1075,7 @@ function authOf(req) {
   let auth = null;
   for (const [secret, source, name] of candidates) {
     if (secret && (auth = authBySecret(secret, source, req))) {
-      // (once per device while the server runs; not logOnce, whose summary a minute later needs a `more` text)
-      if (name === HOST_COOKIE && auth.deviceId && !hostCookieSeen.has(auth.deviceId)) {
-        hostCookieSeen.add(auth.deviceId);
-        log.info(`${whoName(auth.deviceId)}'s pages use the ${HOST_COOKIE} sign-in cookie`);
-      }
+      auth.cookie = name;
       break;
     }
   }
@@ -1086,7 +1083,17 @@ function authOf(req) {
 }
 
 const HOST_COOKIE = '__Host-beam_key';
-const hostCookieSeen = new Set(); // devices whose pages used HOST_COOKIE, logged once each
+const cookieMoved = new Set(); // devices whose pages were moved to HOST_COOKIE, logged once each
+
+// (1.7.7, audit S-10 step 2) The same sign-in again as HOST_COOKIE; authCookie clears the old name.
+function moveCookie(req, res, auth) {
+  res.setHeader('Set-Cookie', authCookie(req, parseCookies(req).beam_key, { session: auth.session }));
+  // (once per device while the server runs; not logOnce, whose summary a minute later needs a `more` text)
+  if (auth.deviceId && !cookieMoved.has(auth.deviceId)) {
+    cookieMoved.add(auth.deviceId);
+    log.info(`Moved ${whoName(auth.deviceId)}'s page sign-in to the ${HOST_COOKIE} cookie`);
+  }
+}
 
 function authBySecret(secret, source, req) {
   if (keyMatches(secret)) return { via: 'master', tokenId: null, hash: null, token: null, deviceId: null, user: 'owner', role: 'owner', scope: null, source };
@@ -1115,9 +1122,12 @@ function touchToken(auth) {
   }
 }
 
+// Over https the sign-in is HOST_COOKIE (1.7.7) and the old `beam_key` is cleared; plain http (this PC itself) keeps
+// `beam_key`, as `__Host-` cookies need https.
 function authCookie(req, value, { session = false, clear = false } = {}) {
   const age = clear ? '; Max-Age=0' : session ? '' : `; Max-Age=${10 * 365 * 86400}`;
-  return `beam_key=${encodeURIComponent(value)}; Path=/${age}; HttpOnly; SameSite=Lax${isHttps(req) ? '; Secure' : ''}`;
+  if (!isHttps(req)) return `beam_key=${encodeURIComponent(value)}; Path=/${age}; HttpOnly; SameSite=Lax`;
+  return [`${HOST_COOKIE}=${encodeURIComponent(value)}; Path=/${age}; HttpOnly; SameSite=Lax; Secure`, 'beam_key=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure'];
 }
 
 // Browsers attach cookies to requests from any page of the same *site*, and every *.ts.net machine of a tailnet
@@ -5064,9 +5074,8 @@ async function logout(req, res) {
   if (crossSiteBrowser(req)) return send(res, 403, { error: 'Blocked a cross-site request', reason: 'csrf' });
   const auth = authOf(req);
   if (auth?.via === 'token') revokeTokens(h => h === auth.hash, 'signed out');
-  // (1.7.6) both cookie names go: the apps set __Host-beam_key themselves over https
-  const clear = [authCookie(req, '', { clear: true }), ...(isHttps(req) ? [`${HOST_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure`] : [])];
-  send(res, 204, '', { 'Set-Cookie': clear, 'Clear-Site-Data': '"cache", "storage"' });
+  // (over https both cookie names go: see authCookie)
+  send(res, 204, '', { 'Set-Cookie': authCookie(req, '', { clear: true }), 'Clear-Site-Data': '"cache", "storage"' });
 }
 
 // Signs out every other device: the master key changes (old clients holding it must sign in again), every
@@ -5389,8 +5398,9 @@ function learnAddress(req) {
   }
 }
 
+// (1.7.7, audit S-33) Without `urls`: the apps read this Beam's addresses from the signed-in /api/info.
 function hello(req, res, url) {
-  const body = { beam: true, version: VERSION, serverId: SERVER_ID, api: API_VERSION, instance: INSTANCE_ID, urls: knownUrls() };
+  const body = { beam: true, version: VERSION, serverId: SERVER_ID, api: API_VERSION, instance: INSTANCE_ID };
   if (setting('movedTo')) body.movedTo = setting('movedTo');
   const proof = helloProof(url);
   if (proof) body.proof = proof;
@@ -5956,7 +5966,8 @@ async function handle(req, res) {
 
   const ip = clientIp(req);
   const host = machineOf(req) === 'host' && !viaTrustedProxy(req);
-  if (!host && badSecrets.blocked(ip) && (req.headers.authorization || parseCookies(req).beam_key)) {
+  const cookies = parseCookies(req);
+  if (!host && badSecrets.blocked(ip) && (req.headers.authorization || cookies.beam_key || cookies[HOST_COOKIE])) {
     return send(res, 429, { error: 'Too many failed sign-ins from this address. Try again in a few minutes.' }, { 'Retry-After': String(badSecrets.retryAfter(ip)) });
   }
   const auth = authOf(req);
@@ -5979,6 +5990,7 @@ async function handle(req, res) {
   if (isFrozen() && req.method !== 'GET' && req.method !== 'HEAD' && !FROZEN_OK.test(pathname)) {
     return send(res, 503, { error: 'Beam is moving to a new server. Try again in a minute.', retryAfter: 30 }, { 'Retry-After': '30' });
   }
+  if (auth.cookie === 'beam_key' && isHttps(req)) moveCookie(req, res, auth);
 
   touchToken(auth);
   if (auth.via === 'token' && !auth.token.platform && auth.source === 'bearer') {
