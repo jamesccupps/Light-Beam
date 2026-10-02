@@ -56,6 +56,7 @@
     <string name="signin_expires">Expires in about %1$d min</string>
     <string name="signin_not_found">No sign-in request with that code. It may have expired, so ask for a new one.</string>
     <string name="signin_other_server">No sign-in request with that code on your server. The code may belong to another Beam server (%1$s).</string>
+    <string name="signin_link_other_server">That approval link is for another Beam server (%1$s), not yours. Nothing was approved.</string>
     <string name="signin_the_device">The device</string>
     <string name="signin_approved">%1$s is signed in.</string>
     <string name="signin_approved_elsewhere">%1$s was approved on another device.</string>
@@ -316,6 +317,7 @@
     <string name="device_stop_ringing">Stop ringing</string>
     <string name="device_wake">Wake</string>
     <string name="device_remote_desktop">Remote Desktop</string>
+    <string name="remote_desktop_needs_app">Remote Desktop needs Microsoft\'s Windows App on this phone (free in the Play Store).</string>
     <string name="device_control">Control</string>
     <string name="remote_needs_server">Controlling a PC needs Beam server 1.6.</string>
     <string name="remote_sign_in_failed">Couldn\'t open the PC\'s screen: %1$s</string>

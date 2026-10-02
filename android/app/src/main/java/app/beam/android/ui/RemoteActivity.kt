@@ -16,6 +16,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import android.widget.Toast
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
@@ -155,9 +156,21 @@ class RemoteActivity : BaseActivity() {
         w.setBackgroundColor(Color.BLACK)
         w.webViewClient = Client()
         w.webChromeClient = Chrome()
+        w.setDownloadListener { url, _, _, _, _ -> onDownload(url) }
         b.viewer.addView(w, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         w.requestFocus() // a hardware keyboard's keys go to the page
         web = w
+    }
+
+    // The viewer's "Remote Desktop" for a locked PC (1.7.6): the page downloads a .rdp file, which a WebView can't
+    // save. Microsoft's Windows App opens rdp:// links instead, as the conversation's menu does; without it, say so.
+    private fun onDownload(url: String) {
+        val u = url.toUri()
+        val id = DeviceActions.rdpDevice(u.path) ?: return
+        if (!sameServer(u)) return
+        val open = app.repo.state.value.devicesById[id]?.let { DeviceActions.remoteDesktopIntent(this, it) }
+        if (open != null && runCatching { startActivity(open) }.isSuccess) return
+        Toast.makeText(this, R.string.remote_desktop_needs_app, Toast.LENGTH_LONG).show()
     }
 
     private fun dropWebView() {

@@ -90,9 +90,10 @@ async function wakeDevice(d) {
 
 // In the Windows app: Remote Desktop opens directly (the app checks `host` and runs mstsc /v:host).
 // In a browser: a .rdp file for the Remote Desktop app.
-// Either way Windows asks who to sign in as. A PIN or Windows Hello doesn't work there, and picking it ends in "A
+// Either way Windows asks who to sign in as. With a personal or local account a PIN or Windows Hello doesn't work there, and picking it ends in "A
 // certification authority could not be contacted" (1.7.1: say so up front).
-const RDP_SIGN_IN = 'Sign in with that PC’s Windows account: its email address (or user name) and password. A PIN or Windows Hello doesn’t work over Remote Desktop.';
+// (1.7.6: between PCs on the same work or school account Windows Hello does work, the user found.)
+const RDP_SIGN_IN = 'Sign in with that PC’s Windows account: its email address (or user name) and password. Windows Hello or a PIN works only between PCs on the same work or school account.';
 
 async function remoteDesktop(d) {
   if (HOST) {

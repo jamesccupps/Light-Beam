@@ -26,7 +26,9 @@ handed as their `key`.
 | **Master key** | anything else | The original shared key, in `data/key`. It still works everywhere (legacy clients, admin), but no sign-in path hands it out any more. |
 
 Send the secret as `Authorization: Bearer <secret>` (apps, CLI) or in the `beam_key` cookie (browsers; the
-server sets it, `HttpOnly`).
+server sets it, `HttpOnly`). Since 1.7.6 the server also reads `__Host-beam_key`, first (host-only, `Secure`, `Path=/`:
+no other machine of the tailnet can plant it); the apps set it over https. A later version sets that name itself
+over https and stops reading the old one there (audit S-10).
 
 - **A device token speaks for its device (v3).** Once a token is bound to a device, the server uses that device's id
   whatever `X-Beam-Device-Id` says. A token issued without a device id is bound to the first id it is used with.
@@ -161,7 +163,9 @@ Apps should try this first when they reach Beam over its `https://…ts.net` add
 
 **Finding the server.** `GET /api/hello` answers without a key:
 `{ "beam": true, "version", "serverId", "api": 3, "urls": [...], "movedTo"?, "proof"? }`.
-- `urls` (v3) lists every address this Beam is known by. Remember them for finding it again after a move.
+- `urls` (v3) lists every address this Beam is known by. Remember them for finding it again after a move. Since 1.7.6
+  the apps read them from the signed-in `GET /api/info` (`urls`) instead; a later server leaves them out of hello,
+  which answers anyone (audit S-33).
 - An app on a new computer can find Beam by running `tailscale status --json` and probing
   `https://<peer DNSName>/api/hello` on each online peer (strip the trailing dot from `DNSName`).
 

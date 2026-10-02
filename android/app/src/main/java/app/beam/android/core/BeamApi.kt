@@ -376,8 +376,8 @@ class BeamApi(
     /**
      * A sign-in of its own for a page that acts as this device (remote control's viewer): `POST /api/login` with this
      * token in the body (never in a URL, where a proxy in front of the server might log it) answers like a browser's
-     * sign-in: a new token for this device, as a cookie. None of the hooks run. The `beam_key` `Set-Cookie` value, or
-     * null when the server gave none.
+     * sign-in: a new token for this device, as a cookie. None of the hooks run. The `__Host-beam_key` (1.7.6, audit S-10)
+     * or `beam_key` `Set-Cookie` value, or null when the server gave none.
      */
     fun pageSignIn(): String? {
         val req = Request.Builder().url(url("/api/login"))
@@ -386,7 +386,8 @@ class BeamApi(
             .post(JSONObject().put("secret", key).toString().toRequestBody(JSON)).build()
         return http.newCall(req).execute().use { res ->
             if (!res.isSuccessful) throw errorOf(res)
-            res.headers("Set-Cookie").firstOrNull { it.startsWith("beam_key=") }
+            val cookies = res.headers("Set-Cookie")
+            cookies.firstOrNull { it.startsWith("__Host-beam_key=") } ?: cookies.firstOrNull { it.startsWith("beam_key=") }
         }
     }
 
@@ -514,7 +515,8 @@ class BeamApi(
     companion object {
         /** `POST /api/logout` at [base] as the page signed in with [token]: that token is revoked (never an app's). */
         fun pageSignOut(client: OkHttpClient, base: HttpUrl, token: String) {
-            val req = Request.Builder().url(base.beamPath("/api/logout")).header("Cookie", "beam_key=$token").post("{}".toRequestBody(JSON)).build()
+            // (1.7.6) as a bearer token: it doesn't depend on the cookie's name, which moves to __Host-beam_key
+            val req = Request.Builder().url(base.beamPath("/api/logout")).header("Authorization", "Bearer $token").post("{}".toRequestBody(JSON)).build()
             client.newCall(req).execute().use { res -> if (!res.isSuccessful) throw errorOf(res) }
         }
 

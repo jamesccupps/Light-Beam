@@ -40,7 +40,8 @@ The page and the app are **one device**. The host sets things up so the page is 
 
 - **Cookie.** Before loading the page, the host puts the app's secret (a device token, or the master key on older
   servers) in the `beam_key` cookie for the server's host: `HttpOnly`, `Path=/`, `SameSite=Lax`, `Secure` on https,
-  10-year expiry. The page never sees the secret.
+  10-year expiry. The page never sees the secret. Over https (1.7.6, audit S-10) also as `__Host-beam_key`, set through
+  DevTools `Network.setCookie` with the page's URL (CreateCookie names a Domain, which the `__Host-` prefix forbids).
 - **Id and name.** The page must take `beamHost.deviceId` and `beamHost.deviceName` instead of its own
   `beam.deviceId` / `beam.device`. (For older pages the host also writes those two localStorage keys before the page runs.)
 - **Headers.** Every API call and the SSE stream use the app's id, name and **platform `windows`**:

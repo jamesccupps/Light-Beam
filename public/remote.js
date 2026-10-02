@@ -2346,9 +2346,10 @@ function rcRender() {
   rcRenderBar();
   rcDrawPointer();
   rcUi.root.dataset.state = rc.state;
-  // The PC's foreground window runs as administrator: a note over the picture (input to it doesn't work).
+  // The PC's foreground window runs as administrator: a note over the picture. Windows drops all injected input then
+  // (UIPI), not just input to that window (1.7.6: the user found every click and key blocked).
   notice.hidden = !(rc.state === 'live' && rc.sub.elevated && !rc.sub.locked && !rc.sub.secure);
-  notice.textContent = 'This window runs as administrator, so Beam can’t control it.';
+  notice.textContent = 'An administrator window is in front on the PC, so Windows blocks all of Beam’s clicks and keys. Close it there, or with Remote Desktop.';
   const button = (label, onclick, cls = '') => el('button', { class: `btn ${cls}`, type: 'button', onclick }, label);
   const rdp = () => rc.device?.can?.remoteDesktop && (!HOST || hostHas('remoteDesktop')) && button('Remote Desktop', () => remoteDesktop(rc.device), 'primary');
   const spin = () => el('div', { class: 'rc-spin', 'aria-hidden': 'true' });

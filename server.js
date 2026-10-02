@@ -1060,39 +1060,43 @@ function redeemPairing(hash, req) {
 // roles and scopes can be added later without touching the routes. user/role are reserved: always "owner".
 function authOf(req) {
   if (req._auth !== undefined) return req._auth;
-  let secret = null;
-  let source = null;
   const header = String(req.headers.authorization || '');
-  if (/^bearer\s/i.test(header)) {
-    secret = header.slice(7).trim();
-    source = 'bearer';
-  } else {
-    const cookie = parseCookies(req).beam_key;
-    if (cookie) {
-      secret = cookie;
-      source = 'cookie';
-    }
+  // Cookies (1.7.6, audit S-10): `__Host-beam_key` first (host-only, so another machine of the tailnet can't plant it),
+  // then the legacy `beam_key`, during the move to the new name: the apps set both, browsers still get the old one.
+  const candidates = [];
+  if (/^bearer\s/i.test(header)) candidates.push([header.slice(7).trim(), 'bearer']);
+  else {
+    const cookies = parseCookies(req);
+    if (cookies[HOST_COOKIE]) candidates.push([cookies[HOST_COOKIE], 'cookie', HOST_COOKIE]);
+    if (cookies.beam_key) candidates.push([cookies.beam_key, 'cookie', 'beam_key']);
   }
-  req._authPresented = Boolean(secret);
+  req._authPresented = candidates.length > 0;
   let auth = null;
-  if (secret && keyMatches(secret)) {
-    auth = { via: 'master', tokenId: null, hash: null, token: null, deviceId: null, user: 'owner', role: 'owner', scope: null, source };
-  } else if (secret) {
-    const hash = sha256hex(secret);
-    let record = tokenStore.tokens[hash] || (secret.startsWith('bp_') ? redeemPairing(hash, req) : null);
-    if (record && tokenExpired(record)) {
-      revokeTokens(h => h === hash, expiryOf(record));
-      record = null;
-    }
-    if (record) {
-      auth = {
-        via: 'token', tokenId: hash.slice(0, 12), hash, token: record,
-        deviceId: record.device ? resolveAlias(record.device) : null,
-        user: record.user || 'owner', role: record.role || 'owner', scope: record.scope || null, session: Boolean(record.session), source,
-      };
+  for (const [secret, source, name] of candidates) {
+    if (secret && (auth = authBySecret(secret, source, req))) {
+      if (name === HOST_COOKIE && auth.deviceId) logOnce(`host-cookie:${auth.deviceId}`, `${whoName(auth.deviceId)}'s pages use the ${HOST_COOKIE} sign-in cookie`);
+      break;
     }
   }
   return (req._auth = auth);
+}
+
+const HOST_COOKIE = '__Host-beam_key';
+
+function authBySecret(secret, source, req) {
+  if (keyMatches(secret)) return { via: 'master', tokenId: null, hash: null, token: null, deviceId: null, user: 'owner', role: 'owner', scope: null, source };
+  const hash = sha256hex(secret);
+  let record = tokenStore.tokens[hash] || (secret.startsWith('bp_') ? redeemPairing(hash, req) : null);
+  if (record && tokenExpired(record)) {
+    revokeTokens(h => h === hash, expiryOf(record));
+    record = null;
+  }
+  if (!record) return null;
+  return {
+    via: 'token', tokenId: hash.slice(0, 12), hash, token: record,
+    deviceId: record.device ? resolveAlias(record.device) : null,
+    user: record.user || 'owner', role: record.role || 'owner', scope: record.scope || null, session: Boolean(record.session), source,
+  };
 }
 
 const tokenSavedAt = new Map();
@@ -5055,7 +5059,9 @@ async function logout(req, res) {
   if (crossSiteBrowser(req)) return send(res, 403, { error: 'Blocked a cross-site request', reason: 'csrf' });
   const auth = authOf(req);
   if (auth?.via === 'token') revokeTokens(h => h === auth.hash, 'signed out');
-  send(res, 204, '', { 'Set-Cookie': authCookie(req, '', { clear: true }), 'Clear-Site-Data': '"cache", "storage"' });
+  // (1.7.6) both cookie names go: the apps set __Host-beam_key themselves over https
+  const clear = [authCookie(req, '', { clear: true }), ...(isHttps(req) ? [`${HOST_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure`] : [])];
+  send(res, 204, '', { 'Set-Cookie': clear, 'Clear-Site-Data': '"cache", "storage"' });
 }
 
 // Signs out every other device: the master key changes (old clients holding it must sign in again), every

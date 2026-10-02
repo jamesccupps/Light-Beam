@@ -124,6 +124,10 @@ object DeviceActions {
         return intent.takeIf { ctx.packageManager.resolveActivity(it, 0) != null }
     }
 
+    /** The PC in the viewer's Remote Desktop download, `…/api/devices/<id>/remote-desktop.rdp` (1.7.6), or null. */
+    fun rdpDevice(path: String?): String? = path?.let { RDP_PATH.find(it)?.groupValues?.get(1) }
+
+    private val RDP_PATH = Regex("/api/devices/([A-Za-z0-9_-]{1,64})/remote-desktop\\.rdp$")
     private val HOST = Regex("^[A-Za-z0-9.-]{1,253}$")
     private const val RING_SNACK_MS = 60_000
 }

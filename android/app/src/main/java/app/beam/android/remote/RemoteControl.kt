@@ -128,7 +128,7 @@ class RemoteControl(private val app: BeamApp) {
         // This viewer has no session yet, and no other is open: what's kept can go without ending a live session.
         revokeKept()
         val setCookie = api.pageSignIn() ?: throw IOException("The server didn't sign the viewer in")
-        val token = setCookie.substringAfter("beam_key=").substringBefore(';').trim().takeIf { it.isNotEmpty() }
+        val token = cookieValue(setCookie)
             ?: throw IOException("The server didn't sign the viewer in")
         val live = synchronized(tokens) {
             // Kept until revoked, with its server, so a crash can't leave it valid for good.
@@ -248,13 +248,18 @@ class RemoteControl(private val app: BeamApp) {
          * The WebView may still keep a session cookie across a process death; its token is revoked at the next connect.
          */
         fun pageCookie(setCookie: String, base: HttpUrl): String {
-            val path = base.encodedPath.trimEnd('/') + "/"
+            // A __Host- cookie must say Path=/ (the browser refuses it otherwise; 1.7.6)
+            val path = if (setCookie.startsWith("__Host-")) "/" else base.encodedPath.trimEnd('/') + "/"
             val parts = setCookie.split(';').map { it.trim() }.filter { it.isNotEmpty() }
             val attributes = parts.drop(1).filterNot { a ->
                 a.startsWith("Max-Age", ignoreCase = true) || a.startsWith("Expires", ignoreCase = true) || a.startsWith("Path", ignoreCase = true)
             }
             return (listOf(parts.first(), "Path=$path") + attributes).joinToString("; ")
         }
+
+        /** The token in a sign-in `Set-Cookie` (`__Host-beam_key=` or `beam_key=`), or null. */
+        fun cookieValue(setCookie: String): String? =
+            setCookie.substringBefore(';').substringAfter('=', "").trim().takeIf { it.isNotEmpty() }
 
         /** A kept page sign-in: "<server> <token>". */
         private fun entry(e: String): Pair<HttpUrl, String>? {

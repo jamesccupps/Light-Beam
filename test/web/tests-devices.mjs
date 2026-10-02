@@ -150,7 +150,7 @@ export default function register(test) {
     await clickMenu(host, 'Remote Desktop');
     await host.waitFor(`__host.log.some(m => m.type === 'remoteDesktop' && m.host === '${ip}' && Object.keys(m).sort().join() === 'host,id,type')`, 3000, 'bridge remoteDesktop { host }');
     // (1.7.1) How to sign in there: picking a PIN or Windows Hello ends in "A certification authority could not be contacted".
-    await host.waitFor(`__toasts.some(t => /Opening Remote Desktop\\. Sign in with that PC’s Windows account: its email address \\(or user name\\) and password\\. A PIN or Windows Hello doesn’t work/.test(t))`, 3000, 'how to sign in');
+    await host.waitFor(`__toasts.some(t => /Opening Remote Desktop\\. Sign in with that PC’s Windows account: its email address \\(or user name\\) and password\\. Windows Hello or a PIN works only between PCs on the same work or school account/.test(t))`, 3000, 'how to sign in');
     await host.evaluate(`__host.reply('remoteDesktop', () => ({ ok: false, error: 'mstsc failed', code: 'failed' }))`);
     await openThreadMenu(host);
     await clickMenu(host, 'Remote Desktop');
