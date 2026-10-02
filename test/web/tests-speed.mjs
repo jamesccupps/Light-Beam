@@ -165,7 +165,7 @@ export default function register(test) {
     // Two tabs of one browser: they share the cookie and IndexedDB (the default context; cleared afterwards).
     const tab1 = await ctx.browser.newPage({ fresh: false, xff: ctx.nextIp() });
     ctx.defer(() => tab1.send('Storage.clearDataForOrigin', { origin: ctx.srv.base, storageTypes: 'all' }).catch(() => {}));
-    await tab1.goto(`${ctx.srv.base}/?key=${encodeURIComponent(ctx.srv.key)}`);
+    await tab1.goto(await ctx.keyLink(ctx.srv, ctx.srv.base));
     await tab1.waitFor(`typeof paired !== 'undefined' && paired && net.state === 'online' && cache.cursor !== '' && !syncing`, 15000, 'tab 1 signed in, with a cursor');
     const tab2 = await ctx.browser.newPage({ fresh: false, xff: ctx.nextIp() });
     await tab2.goto(`${ctx.srv.base}/`);

@@ -22,7 +22,13 @@ function cleanName(name) {
 function createPeople(ctx) {
   const { db, hub, log, config } = ctx;
   const signinByIp = auth.createLimiter({ limit: 10, windowMs: 10 * 60e3 });
-  const signinByName = auth.createLimiter({ limit: 20, windowMs: 60 * 60e3 });
+  // (1.7.3, audit S-12) Wrong passwords count per name *and* address: guessing at someone's name from elsewhere can't
+  // lock them out (20 tries from 20 addresses did, for an hour). A high cap of wrong passwords per name from
+  // everywhere slows a guess spread over many addresses; an address with a live session for that person passes it.
+  const failByNameIp = auth.createLimiter({ limit: 10, windowMs: 60 * 60e3 });
+  const failByName = auth.createLimiter({ limit: 200, windowMs: 60 * 60e3 });
+  const sessionFrom = (name, ip) => Boolean(db.get(`SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
+    WHERE u.name = ? COLLATE NOCASE AND s.ip = ? AND s.expires_at > ?`, name, ip, now()));
   // (every sign-in costs a deliberately slow password check: many addresses at once can't keep the server busy)
   const signinAll = auth.createLimiter({ limit: 120, windowMs: 60e3 });
   const inviteByIp = auth.createLimiter({ limit: 20, windowMs: 10 * 60e3 });
@@ -58,9 +64,9 @@ function createPeople(ctx) {
       else if (identity.login === ctx.ownerLogin() && !hasOwner()) result = { user: createOwner(identity), identity, via: 'tailscale' };
     }
     if (!result.user && !result.disabled) {
-      const token = parseCookies(req)[auth.COOKIE];
-      const found = token ? auth.sessionUser(db, token) : null;
-      if (found) result = { user: found.user, identity, via: 'session', sessionHash: found.sessionHash };
+      const jar = sessionCookie(req);
+      const found = jar ? auth.sessionUser(db, jar.token) : null;
+      if (found) result = { user: found.user, identity, via: 'session', sessionHash: found.sessionHash, legacyCookie: jar.legacy ? jar.token : null };
     }
     req.famAuth = result;
     return result;
@@ -103,9 +109,23 @@ function createPeople(ctx) {
   // went without when BEAM_FAMILY_URL wasn't set).
   const secure = req => /^https:/i.test(config.publicUrl || '') || (Boolean(req) && auth.fromLoopback(req) && req.headers['x-forwarded-proto'] === 'https');
 
+  // The session cookie: `__Host-fam_s` over https (1.7.3), `fam_s` over plain http (a LAN address, tests). A browser
+  // that still has `fam_s` from before over https gets the new one on its next visit (GET /api/session).
+  function sessionCookie(req) {
+    const jar = parseCookies(req);
+    if (jar[auth.HOST_COOKIE]) return { token: jar[auth.HOST_COOKIE], legacy: false };
+    return jar[auth.COOKIE] ? { token: jar[auth.COOKIE], legacy: true } : null;
+  }
+
+  function setSessionCookie(req, res, token, maxAge) {
+    res.setHeader('Set-Cookie', secure(req)
+      ? [cookie(auth.HOST_COOKIE, token, { maxAge, secure: true }), cookie(auth.COOKIE, '', { maxAge: 0, secure: true })]
+      : cookie(auth.COOKIE, token, { maxAge, secure: false }));
+  }
+
   function startSession(req, res, user) {
     const token = auth.createSession(db, user.id, { agent: req.headers['user-agent'], ip: auth.clientIp(req) });
-    res.setHeader('Set-Cookie', cookie(auth.COOKIE, token, { maxAge: auth.SESSION_DAYS * 86400, secure: secure(req) }));
+    setSessionCookie(req, res, token, auth.SESSION_DAYS * 86400);
   }
 
   // GET /api/session: who am I, or how to get in.
@@ -118,6 +138,7 @@ function createPeople(ctx) {
     if (who.identity) out.tailscale = { login: who.identity.login, name: who.identity.name, known: Boolean(who.user) || Boolean(who.disabled) };
     if (who.disabled) out.disabled = true;
     out.ownerSetUp = hasOwner();
+    if (who.legacyCookie && secure(req)) setSessionCookie(req, res, who.legacyCookie, auth.SESSION_DAYS * 86400);
     send(res, 200, out);
   }
 
@@ -126,19 +147,22 @@ function createPeople(ctx) {
     const body = await readJson(req);
     const ip = auth.clientIp(req);
     const name = String(body.name ?? '').trim().toLowerCase().slice(0, 64);
+    const nameIp = `${name}|${ip}`;
+    const nameHeld = () => failByNameIp.blocked(nameIp) || (failByName.blocked(name) && !sessionFrom(name, ip));
     // (per address first: an address that is already held back mustn't use up everyone's budget; 1.7.2)
-    if (!signinByIp.hit(ip) || !signinAll.hit('all') || (name && !signinByName.hit(name))) {
-      const wait = Math.max(signinAll.wait('all'), signinByIp.wait(ip), signinByName.wait(name));
+    if (!signinByIp.hit(ip) || !signinAll.hit('all') || (name && nameHeld())) {
+      const wait = Math.max(signinAll.wait('all'), signinByIp.wait(ip), name ? Math.max(failByNameIp.wait(nameIp), failByName.wait(name)) : 0);
       throw httpError(429, `Too many tries: wait ${wait > 90 ? `${Math.ceil(wait / 60)} minutes` : `${wait} seconds`}`, { retryAfter: wait });
     }
     const user = name ? db.get('SELECT * FROM users WHERE name = ? COLLATE NOCASE', name) : null;
     const ok = await auth.checkPassword(String(body.password ?? ''), user?.pass_hash || null);
     if (!ok || !user || user.disabled_at) {
+      if (name) { failByNameIp.hit(nameIp); failByName.hit(name); }
       // (the name as typed, quoted and escaped: a public visitor's line breaks can't fake lines in the log)
       log.warn(`Sign-in failed for ${JSON.stringify(name.slice(0, 32))} from ${ip}`);
       throw httpError(401, user?.disabled_at && ok ? 'Your access to this family space was turned off' : 'That name and password don’t match');
     }
-    signinByName.reset(name);
+    failByNameIp.reset(nameIp);
     startSession(req, res, user);
     audit(user.id, 'signin', ip);
     log.info(`${user.name} signed in with a password from ${ip}`);
@@ -147,12 +171,12 @@ function createPeople(ctx) {
 
   // POST /api/signout: this browser's session ends (Tailscale's identity can't be signed out of: it's the device).
   async function signOut(req, res) {
-    const token = parseCookies(req)[auth.COOKIE];
+    const token = sessionCookie(req)?.token;
     if (token) {
       auth.endSession(db, token);
       hub.disconnectSessions([auth.hashToken(token)]);
     }
-    res.setHeader('Set-Cookie', cookie(auth.COOKIE, '', { maxAge: 0, secure: secure(req) }));
+    setSessionCookie(req, res, '', 0);
     send(res, 204);
   }
 
@@ -326,8 +350,13 @@ function createPeople(ctx) {
       // Those checks count like sign-ins (1.7.2: a stolen session could otherwise guess the password without limit).
       if (user.pass_hash && whoIs(req).via !== 'tailscale') {
         const ip = auth.clientIp(req);
-        if (!signinByIp.hit(ip) || !signinByName.hit(user.name.toLowerCase())) throw httpError(429, 'Too many tries: wait a few minutes');
-        if (!(await auth.checkPassword(String(body.current ?? ''), user.pass_hash))) throw httpError(403, 'Your current password isn’t right');
+        const name = user.name.toLowerCase();
+        if (!signinByIp.hit(ip) || failByNameIp.blocked(`${name}|${ip}`) || failByName.blocked(name)) throw httpError(429, 'Too many tries: wait a few minutes');
+        if (!(await auth.checkPassword(String(body.current ?? ''), user.pass_hash))) {
+          failByNameIp.hit(`${name}|${ip}`);
+          failByName.hit(name);
+          throw httpError(403, 'Your current password isn’t right');
+        }
       }
       if (body.password === null) {
         if (!user.login) throw httpError(400, 'You sign in with your password: you can change it but not remove it');

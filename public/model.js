@@ -161,6 +161,7 @@ const pushRead = debounce(() => {
   if (!serverHas('read-markers') || !readDirty.size) return;
   const dirty = [...readDirty];
   readDirty.clear();
+  if (!readMarks) return; // signed out (or wiped) since: those marks went with it
   for (const conv of dirty) {
     api('api/read', jsonBody({ conversation: conv, ts: readMarks[conv] }, 'PUT')).catch(() => readDirty.add(conv));
   }

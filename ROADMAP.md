@@ -11,6 +11,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - Phone notifications on your PCs, with replies and actions.
 - Remote control of a Windows PC's screen from another PC, a browser or a phone.
 - **Beam Family**: the family's own chat, reachable over Tailscale or a public link.
+- Two security audits worked through, including signed Windows updates (the apps install only builds signed with
+  your own key).
 
 ## Next
 - **Several at once:** select several messages or pictures to copy, drag into another program, save or forward them

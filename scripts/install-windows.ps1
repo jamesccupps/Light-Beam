@@ -170,10 +170,12 @@ if ($Server) {
   Stop-Server
   Remove-ServerStartup | Out-Null
   if ($AtBoot) {
-    # Runs as this user without a sign-in (S4U), restarts after a failure, no 3-day time limit.
+    # Runs as this user without a sign-in (S4U), restarts after a failure, no 3-day time limit. Without admin rights
+    # (1.7.3): the server needs none (its port is above 1024, its data folder is this user's), so a bug in it can't do
+    # what an administrator could.
     $action = New-ScheduledTaskAction -Execute $node -Argument "`"$serverJs`" --supervise" -WorkingDirectory $root
     $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Highest
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
       -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null

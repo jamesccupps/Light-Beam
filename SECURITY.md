@@ -24,8 +24,10 @@ for the owner's family, which may face the internet.
 - **Files.** Received files are never opened or run automatically. Files are served with `nosniff` and a sandboxing
   content policy, and only pictures, video and sound are shown inline, so an uploaded page can't run as Beam.
 - **A server move.** Devices follow Beam to a new address only when the new server proves it holds this Beam's key.
-- **Updates.** The apps install only what your own server offers, checked against the SHA-256 it announces, and
-  Android also checks that the update is signed with the same key as the installed app.
+- **Updates.** The apps install only what your own server offers, and only when it's signed with the key they were
+  built with: Windows checks the build's signature (`windows/update-key.mjs`, since 1.7.3), Android that the update is
+  signed with the same key as the installed app. A changed `dist` folder or a server that isn't yours can't push
+  its own build.
 
 ## What Beam trusts
 
@@ -34,9 +36,24 @@ for the owner's family, which may face the internet.
   server on a computer only you use. The data folder is made private to the account Beam runs as.
 - **Your Tailscale account.** Devices signed in to it sign in to Beam by themselves (this can be turned off). Whoever
   controls your Tailscale account controls that.
-- **The `data` and `dist` folders.** `data` holds the key, sign-ins and every stored item, unencrypted. `dist` is what
-  every app updates itself from. Whoever can write there can change every app.
+- **The `data` folder and the signing keys.** `data` holds the key, sign-ins and every stored item, unencrypted. The
+  apps update from `dist` but install only builds signed with your keys (the Windows update key, the Android keystore):
+  whoever has those keys can change every app.
 - **The server itself.** Messages and files are not end-to-end encrypted: the server stores and relays them.
+
+## Trade-offs, on purpose
+
+- **One global cap on password guesses** (30 per 10 minutes, after a per-address one): it stops guessing spread over
+  many addresses, and anyone who can reach the sign-in page can use it up for a while. Approvals, pairing links and
+  Tailscale sign-in still work meanwhile.
+- **Beam and Beam Family on one machine share its name:** browsers send a site's cookies to every port, so each
+  server receives the other's (and ignores it). For full separation, give Family a Tailscale machine of its own.
+- **Plain HTTP:** by default Beam also listens for plain HTTP on every network, for devices that use a local address.
+  The activity log says how each device connects; once all of them use the https address, set `BEAM_HOST=127.0.0.1`.
+- **ntfy:** with the public ntfy.sh, the topic name is the only secret unless `BEAM_NTFY_TOKEN` is set: use a long
+  random topic, a token, or your own ntfy server.
+- **Docker:** the compose file mounts tailscaled's socket into Beam's container (needed to ask who is visiting), and
+  pins images by tag, not digest. It is the least tested way to run Beam.
 
 ## Beam Family
 

@@ -211,7 +211,15 @@
     s.forEach(r => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = s.get(r.selectedCandidatePairId); });
     if (!pair) s.forEach(r => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
     const rc = pair && s.get(pair.remoteCandidateId);
-    return rc ? { ip: rc.address || rc.ip || '', port: rc.port || 0, type: rc.candidateType || '' } : null;
+    // (an address that isn't one, like libwebrtc's "redacted-ip.invalid" for a remote it won't reveal, reads as "":
+    // not known yet; 1.7.3)
+    const ip = rc ? String(rc.address || rc.ip || '') : '';
+    return rc ? { ip: isIp(ip) ? ip : '', port: rc.port || 0, type: rc.candidateType || '' } : null;
+  }
+  function isIp(a) {
+    const s = a.replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) return s !== '0.0.0.0';
+    return s.includes(':') && /^[0-9a-f:.]+$/i.test(s) && /[1-9a-f]/i.test(s); // (IPv6, also with an IPv4 tail)
   }
 
   // The remote end of the selected pair (local addresses read as ""): Beam checks it before anything flows, and again

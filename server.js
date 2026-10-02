@@ -317,6 +317,26 @@ async function readBody(req, limit) {
   return Buffer.concat(chunks);
 }
 
+// (1.7.3, audit S-20) A text arrives whole in memory (up to MAX_TEXT): all texts on their way in together hold at
+// most TEXT_BUFFER_BUDGET, so many slow or stuck senders (a client in a retry loop, say) can't fill a small server's
+// memory. Beyond it a sender hears 503 and tries again.
+const TEXT_BUFFER_BUDGET = 64 * MB;
+let textBuffered = 0;
+async function readTextBody(req) {
+  const chunks = [];
+  let held = 0;
+  try {
+    for await (const chunk of req) {
+      held += chunk.length;
+      textBuffered += chunk.length;
+      if (held > MAX_TEXT) throw httpError(413, 'Too large');
+      if (textBuffered > TEXT_BUFFER_BUDGET) throw Object.assign(httpError(503, 'Beam is busy taking in other texts. Try again in a moment.'), { headers: { 'Retry-After': '10', Connection: 'close' } });
+      chunks.push(chunk);
+    }
+  } finally { textBuffered -= held; }
+  return Buffer.concat(chunks);
+}
+
 const isJsonType = req => /^application\/json\b/i.test(String(req.headers['content-type'] || '').trim());
 
 // JSON bodies must be objects. Cookie-authenticated requests must also say they are JSON: a cross-site page
@@ -472,6 +492,8 @@ function validateTokens(obj) {
   for (const [hash, p] of Object.entries(isPlainObject(obj.pairing) ? obj.pairing : {})) {
     if (/^[a-f0-9]{64}$/.test(hash) && isPlainObject(p) && Number.isFinite(p.expires)) out.pairing[hash] = p;
   }
+  const gens = Object.entries(isPlainObject(obj.migrationGen) ? obj.migrationGen : {}).filter(([id, n]) => DEVICE_ID.test(id) && Number.isSafeInteger(n) && n > 0);
+  if (gens.length) out.migrationGen = Object.fromEntries(gens);
   return out;
 }
 
@@ -480,6 +502,9 @@ function validateSettings(obj) {
   if (!Array.isArray(out.tailscaleOwners)) out.tailscaleOwners = [];
   out.tailscaleOwners = [...new Set(out.tailscaleOwners.map(normalizeLogin).filter(Boolean))];
   if (!isPlainObject(out.ownerSources)) out.ownerSources = {};
+  const seen = isPlainObject(out.tailscaleSeen) ? out.tailscaleSeen : {};
+  out.tailscaleSeen = Object.fromEntries(Object.entries(seen).filter(([login, e]) => normalizeLogin(login) === login && login && isPlainObject(e))
+    .map(([login, e]) => [login, { since: Number(e.since) || 0, last: Number(e.last) || 0, devices: Array.isArray(e.devices) ? e.devices.filter(id => typeof id === 'string' && DEVICE_ID.test(id)) : [] }]));
   if (!Array.isArray(out.knownHosts)) out.knownHosts = [];
   return out;
 }
@@ -529,7 +554,8 @@ function fatal(message) {
 
 function ensureDataDirs() {
   try {
-    for (const dir of [DATA_DIR, ...Object.values(DIR)]) fs.mkdirSync(dir, { recursive: true });
+    // (0700: if the data folder's own permissions are ever loosened, what's inside still isn't open to others; 1.7.3)
+    for (const dir of [DATA_DIR, ...Object.values(DIR)]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.accessSync(DATA_DIR, fs.constants.W_OK);
   } catch (err) {
     fatal(`Beam can't write to its data folder ${DATA_DIR} (${err.code || err.message}). In Docker, check that the volume belongs to the user Beam runs as (PUID/PGID).`);
@@ -553,12 +579,24 @@ function openData() {
   const loaded = loadState(FILE.items, { fallback: [], validate: validateItems, log });
   items = loaded.value.sort((a, b) => b.ts - a.ts);
   dataHealth.itemsSource = loaded.source;
-  devices = loadState(FILE.devices, { fallback: {}, validate: validateDevices, log }).value;
+  const loadedDevices = loadState(FILE.devices, { fallback: {}, validate: validateDevices, log });
+  devices = loadedDevices.value;
   aliases = loadState(FILE.aliases, { fallback: {}, validate: validateAliases, log }).value;
   password = loadState(FILE.password, { fallback: {}, validate: validatePassword, log }).value;
   settings = loadState(FILE.settings, { fallback: {}, validate: validateSettings, log }).value;
   readMarks = loadState(FILE.read, { fallback: {}, validate: validateRead, log }).value;
-  tokenStore = loadState(FILE.tokens, { fallback: { tokens: {}, pairing: {} }, validate: validateTokens, log }).value;
+  const loadedTokens = loadState(FILE.tokens, { fallback: { tokens: {}, pairing: {} }, validate: validateTokens, log });
+  tokenStore = loadedTokens.value;
+  // (1.7.3, audit B-09) Every device and sign-in lost to an unreadable file (with no good .tmp or .bak) is the kind of
+  // trouble BEAM_REQUIRE_DATA is for: refuse to start, as for a missing key, rather than come up looking fine.
+  // (Also on the next start, when the broken one set aside then still has nothing in its place.)
+  const setAside = name => { try { return fs.readdirSync(DATA_DIR).some(f => f.startsWith(`${name}.broken-`)); } catch { return false; } };
+  const lost = [[loadedDevices, 'devices.json'], [loadedTokens, 'tokens.json']]
+    .filter(([l, name]) => l.source === 'lost' || (REQUIRE_DATA && l.source === 'new' && setAside(name))).map(([, name]) => name);
+  if (lost.length && REQUIRE_DATA) {
+    const them = lost.length > 1 ? 'them' : 'it';
+    fatal(`${lost.join(' and ')} in ${DATA_DIR} couldn't be read (kept as .broken-<time>) and BEAM_REQUIRE_DATA=1, so Beam won't start without ${them}. Restore ${them} from a backup (or, to start without ${them}, delete the .broken file).`);
+  }
   alerts = loadState(FILE.alerts, { fallback: [], validate: validateAlerts, log }).value;
   indexTokens();
   if (itemsNeedSave || loaded.source === 'tmp' || loaded.source === 'bak') persist();
@@ -588,6 +626,10 @@ function publicSettings() {
     publicUrlLearned: ENV_SETTINGS.publicUrl === undefined && Boolean(settings.publicUrl && settings.publicUrlLearned),
     tailscaleSignIn: setting('tailscaleSignIn'),
     tailscaleOwners: [...owners()],
+    tailscaleOwnersFixed: ENV_OWNERS, // (1.7.3) from BEAM_TAILSCALE_OWNERS: Settings can't remove these
+    // (1.7.3) Accounts that signed in on purpose but aren't owners: Settings offers to allow them.
+    tailscaleSeen: Object.entries(settings.tailscaleSeen || {}).filter(([login]) => !owners().has(login))
+      .map(([login, e]) => ({ login, since: e.since, last: e.last, devices: e.devices.map(id => devices[id]?.name).filter(Boolean) })),
     retentionDays: setting('retentionDays'),
     maxItems: setting('maxItems'),
     blockedNodes: (settings.blockedNodes || []).map(({ node, name, since, device }) => ({ node, name, since, device })),
@@ -692,7 +734,7 @@ function refreshTailnet(force = false) {
   tsRefreshing = ts.status().then(status => {
     if (status) {
       tsIndex = tailscale.machineIndex(status);
-      tsSelfName = status.Self?.HostName || '';
+      tsSelfName = statusText(status.Self?.HostName || '');
       tsSelfDns = String(status.Self?.DNSName || '').replace(/\.$/, '').toLowerCase();
     }
     tsIndexAt = now();
@@ -956,11 +998,27 @@ function issueToken(options) {
 
 // Clients that still use the master key are offered their own token: the same one every time for a device (so
 // parallel requests agree), derived from the master key so nothing secret needs storing.
+// (1.7.3, audit B-15) Once one is revoked, the device's next one is a different value (migrationGen): a copy of the
+// revoked one mustn't come back to life when the master key is next used for that device.
 function migrationToken(deviceId) {
-  return 'bt_' + crypto.createHmac('sha256', KEY).update(`device-token:${deviceId}`).digest('base64url');
+  const gen = tokenStore.migrationGen?.[deviceId] || 0;
+  return 'bt_' + crypto.createHmac('sha256', KEY).update(gen ? `device-token:${deviceId}:${gen}` : `device-token:${deviceId}`).digest('base64url');
 }
 
-const tokenExpired = t => Boolean(t.session) && now() - (t.lastUsed || t.created) > SESSION_IDLE_MS;
+// Session sign-ins end after 12 h without use; one approved for a move (1.7.3) two days after it was made at most
+// (it's revoked sooner, when the move is done or called off); a browser's (not a Beam app's) after half a year
+// without use (1.7.3, audit S-34: like Family's sessions; on the tailnet a browser signs itself back in).
+const MOVE_TOKEN_MS = 48 * 3600e3;
+const WEB_IDLE_MS = 180 * 24 * 3600e3;
+const expiryOf = t => {
+  const idle = now() - (t.lastUsed || t.created || 0);
+  if (t.session && idle > SESSION_IDLE_MS) return 'session expired';
+  if (t.scope === 'move' && now() - (t.created || 0) > MOVE_TOKEN_MS) return 'a move sign-in expired';
+  if (tokenPlatform(t) === 'web' && idle > WEB_IDLE_MS) return 'a browser unused for half a year';
+  return null;
+};
+const tokenExpired = t => expiryOf(t) !== null;
+const revokeMoveTokens = reason => revokeTokens((h, t) => t.scope === 'move', reason);
 
 function revokeTokens(predicate, reason) {
   const gone = Object.keys(tokenStore.tokens).filter(hash => predicate(hash, tokenStore.tokens[hash]));
@@ -968,6 +1026,10 @@ function revokeTokens(predicate, reason) {
   const records = gone.map(h => tokenStore.tokens[h]);
   const devicesAffected = new Set(records.map(t => t.device).filter(Boolean));
   for (const hash of gone) delete tokenStore.tokens[hash];
+  for (const t of records) {
+    const id = t.via === 'migration' ? t.mid || t.device : null; // (mid: the id its value came from, merges aside)
+    if (id && DEVICE_ID.test(id)) (tokenStore.migrationGen ||= {})[id] = (tokenStore.migrationGen[id] || 0) + 1;
+  }
   indexTokens();
   persistTokens();
   endRcSessionsOfTokens(gone, records); // while their streams can still hear it
@@ -1019,7 +1081,7 @@ function authOf(req) {
     const hash = sha256hex(secret);
     let record = tokenStore.tokens[hash] || (secret.startsWith('bp_') ? redeemPairing(hash, req) : null);
     if (record && tokenExpired(record)) {
-      revokeTokens(h => h === hash, 'session expired');
+      revokeTokens(h => h === hash, expiryOf(record));
       record = null;
     }
     if (record) {
@@ -1459,24 +1521,56 @@ function dropOwnerSource(deviceId) {
     }
     changed = true;
   }
+  for (const [login, entry] of Object.entries(settings.tailscaleSeen || {})) {
+    if (!entry.devices.includes(deviceId)) continue;
+    entry.devices = entry.devices.filter(d => d !== deviceId);
+    if (!entry.devices.length) delete settings.tailscaleSeen[login];
+    changed = true;
+  }
   if (changed) persistSettings();
 }
 
-const ownerChecks = new Map(); // login|device -> time checked
-function learnOwner(req, deviceId) {
+// (1.7.3, audit S-09) A Tailscale account becomes an owner (every machine of it then signs in by itself) only on
+// purpose: the first sign-in on a brand-new Beam, BEAM_TAILSCALE_OWNERS, Settings, or (while a Beam has no owner at
+// all) a sign-in made on purpose. Seeing an account isn't enough: a password typed once on a relative's machine
+// mustn't let all of that account's machines in. Other accounts that sign in on purpose are noted for Settings.
+const ownerChecks = new Map(); // login|device|on purpose -> time checked
+function learnOwner(req, deviceId, auth) {
   const header = identityFromHeaders(req);
   if (!header) return;
-  const key = `${header.login}|${deviceId || ''}`;
+  const deliberate = rcSignInOk(auth);
+  const key = `${header.login}|${deviceId || ''}|${deliberate}`;
   if (now() - (ownerChecks.get(key) || 0) < 10 * 60e3) return;
   ownerChecks.set(key, now());
   if (ownerChecks.size > 1000) ownerChecks.clear();
   verifiedIdentity(req).then(id => {
     if (!id || id.mismatch) return;
     if (deviceId) rememberNode(deviceId, id.tsNode);
-    const entry = settings.ownerSources?.[id.login];
-    if (owners().has(id.login) && (!deviceId || entry?.devices?.includes(deviceId) || !entry)) return;
-    addOwner(id.login, deviceId, 'learned');
+    if (owners().has(id.login)) {
+      const entry = settings.ownerSources?.[id.login];
+      if (deviceId && entry && !entry.devices?.includes(deviceId)) addOwner(id.login, deviceId, entry.how);
+      return;
+    }
+    if (!deliberate) return;
+    if (!owners().size) addOwner(id.login, deviceId, 'learned');
+    else noteSeenAccount(id.login, deviceId);
   }).catch(() => {});
+}
+
+function noteSeenAccount(login, deviceId) {
+  const seen = (settings.tailscaleSeen ||= {});
+  const entry = seen[login];
+  if (entry) {
+    entry.last = now();
+    if (deviceId && !entry.devices.includes(deviceId)) entry.devices = [...entry.devices, deviceId].slice(-10);
+    return persistSettings();
+  }
+  const logins = Object.keys(seen);
+  if (logins.length >= 20) delete seen[logins.reduce((a, b) => (seen[a].last <= seen[b].last ? a : b))];
+  seen[login] = { since: now(), last: now(), devices: deviceId ? [deviceId] : [] };
+  persistSettings();
+  log.info(`Tailscale account ${statusText(login)} signed in on ${whoName(deviceId)}, but its machines don't sign in by themselves (it isn't an owner; Settings → Security can allow it)`);
+  broadcast('settings', publicSettings());
 }
 
 // ---------------------------------------------------------------- activity log
@@ -1526,7 +1620,8 @@ function noteOnline(id, req, url) {
   onlineSince.set(id, now());
   const d = devices[id];
   const version = appVersionOf(req, url) || d?.appVersion || '';
-  log.info(`${whoName(id)} is online (${d?.platform || 'unknown'}${version ? ` ${version}` : ''}, from ${describeWhereSync(req)})`);
+  // (how it connects, 1.7.3: BEAM_HOST=127.0.0.1 can wait until no device uses plain http; audit S-08)
+  log.info(`${whoName(id)} is online (${d?.platform || 'unknown'}${version ? ` ${version}` : ''}, from ${describeWhereSync(req)}, ${isHttps(req) ? 'https' : 'plain http'})`);
 }
 
 function noteOffline(id) {
@@ -2414,7 +2509,7 @@ function rcCaller(req, url) {
 
 // Who may take part (start a session, or be and act as the PC): what decides is the sign-in (its token), never the
 // device id it names. Either a Beam app's own sign-in (made for Windows or Android; the apps' own pages use it as
-// their cookie, and the Android activity's /?key= exchange keeps it), or a browser sign-in made with something only
+// their cookie, and the Android activity's exchange (POST /api/login) keeps it), or a browser sign-in made with something only
 // the user has: the password, a pairing link or code, a sign-in approved on another device, or the master key. Never
 // a browser signed in by Tailscale identity or because a Beam app runs on the same machine (any Windows account on
 // that machine gets those), nor the CLI. And a Beam app's own requests (bearer) say which Windows account they come
@@ -2581,7 +2676,7 @@ function armRcLease(session) {
 const rcDuration = ms => (ms < 60e3 ? `${Math.max(1, Math.round(ms / 1000))} s` : ms < 3600e3 ? `${Math.round(ms / 60e3)} min` : `${(ms / 3600e3).toFixed(1)} h`);
 
 // Ends a session: both parties hear it at once (rc-end), and its lease and signals answer 410 from then on.
-function endRcSession(session, reason, by = null) {
+function endRcSession(session, reason, by = null, detail = '') {
   if (rcSessions.get(session.id) !== session) return;
   rcSessions.delete(session.id);
   clearTimeout(session.timer);
@@ -2594,7 +2689,7 @@ function endRcSession(session, reason, by = null) {
   const data = { id: session.id, reason, from: by, by: by ? nameOf(by) : null };
   sendToPc(session.host, 'rc-end', data);
   sendToViewer(session, 'rc-end', data);
-  const how = by ? `${reason}, by ${whoName(by)}` : reason;
+  const how = (by ? `${reason}, by ${whoName(by)}` : reason) + (detail ? `: ${detail}` : '');
   log.info(session.state === 'live'
     ? `${whoName(session.viewer)} stopped controlling ${nameOf(session.host)} after ${rcDuration(now() - session.liveSince)} (${how})`
     : `${whoName(session.viewer)}'s request to control ${nameOf(session.host)} ended (${how})`);
@@ -2837,10 +2932,16 @@ async function endRemoteControl(req, res, [id], url) {
     throw httpError(404, 'No such remote control session');
   }
   let reason = 'stopped';
-  if (body.reason && me === session.host && (await rcFromPc(devices[session.host], req, url))) reason = body.reason;
+  let party = false;
+  if (body.reason && me === session.host && (await rcFromPc(devices[session.host], req, url))) { reason = body.reason; party = true; }
   else if (body.reason && me === session.viewer && RC_END_REASONS.has(body.reason)
-    && rcCredKey(authOf(req), machineOf(req), profileOf(req, url)) === session.viewerKey) reason = body.reason;
-  endRcSession(session, reason, me); // a no-op if it ended meanwhile
+    && rcCredKey(authOf(req), machineOf(req), profileOf(req, url)) === session.viewerKey) { reason = body.reason; party = true; }
+  // (1.7.3) Why its own check hung up, from the session's viewer or PC: for the log, as kinds only. The log never holds
+  // an address a session used, so anything shaped like one is left out.
+  const detail = party && typeof body.detail === 'string'
+    ? statusText(body.detail).replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<address>').replace(/\b[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}\b/gi, '<address>').slice(0, 160)
+    : '';
+  endRcSession(session, reason, me, detail); // a no-op if it ended meanwhile
   send(res, 204);
 }
 
@@ -3243,9 +3344,10 @@ function sweep() {
   for (const limiter of [passwordIp, passwordGlobal, badSecrets, loginRequestRate, notePuts, noteAsks, rcStarts, rcDisables]) limiter.prune();
 }
 
-// Session sign-ins (borrowed computers) end after 12 h without use; their temporary devices are forgotten.
+// Session sign-ins (borrowed computers) end after 12 h without use; their temporary devices are forgotten. (Also
+// move sign-ins and long-unused browsers': expiryOf.)
 function expireSessions() {
-  revokeTokens((h, t) => tokenExpired(t), 'session expired');
+  for (const reason of new Set(Object.values(tokenStore.tokens).map(expiryOf).filter(Boolean))) revokeTokens((h, t) => expiryOf(t) === reason, reason);
   const withTokens = new Set(Object.values(tokenStore.tokens).map(t => t.device && resolveAlias(t.device)).filter(Boolean));
   for (const d of Object.values(devices)) {
     if (d.temporary && !APP_PLATFORMS.has(d.platform) && !withTokens.has(d.id) && !isOnline(d.id)) {
@@ -3401,7 +3503,7 @@ async function receiveBody(req, dest, limit, { flags = 'w', onData, onWritten, d
   let stored = 0;
   let synced = 0;
   const idle = setTimeout(() => req.destroy(Object.assign(new Error('No data for 60 s'), { code: 'EIDLE' })), BODY_IDLE_MS);
-  const fh = await fsp.open(dest, flags);
+  const fh = await fsp.open(dest, flags, 0o600); // (only this account, like every state file; 1.7.3)
   const sync = async (end, failed = false) => {
     if (stored > synced && durable?.want(stored, end, failed)) {
       await fh.sync();
@@ -3634,7 +3736,7 @@ function newItem(req, url, fields, to) {
 async function postText(req, res, _m, url) {
   const type = String(req.headers['content-type'] || '');
   if (authOf(req).source === 'cookie' && !isJsonType(req)) throw httpError(415, 'Send JSON (Content-Type: application/json)');
-  let text = (await readBody(req, MAX_TEXT)).toString('utf8');
+  let text = (await readTextBody(req)).toString('utf8');
   let bodyTo;
   if (type.includes('application/json')) {
     let body;
@@ -4492,18 +4594,45 @@ const SETTING_RULES = {
 
 async function patchSettings(req, res) {
   const body = await readJson(req);
-  if (body.unblockNode !== undefined) {
-    const nodes = [].concat(body.unblockNode);
-    if (!nodes.every(n => typeof n === 'string')) throw httpError(400, 'unblockNode must be a node id (from blockedNodes)');
-    unblockNodes(nodes);
-    delete body.unblockNode;
+  const url = new URL(req.url, 'http://beam');
+  // (1.7.3) Letting more in (another owner, automatic sign-in back on) takes a sign-in made on purpose, not one that
+  // Tailscale or this machine's Beam app made by itself. Taking away needs no more than any sign-in.
+  const widens = body.allowOwner !== undefined || body.tailscaleOwners !== undefined || body.tailscaleSignIn === true;
+  if (widens && !rcSignInOk(authOf(req))) {
+    throw httpError(403, 'To change who signs in automatically, sign in on this device with the password, a pairing link or an approval first', { reason: 'sign-in' });
   }
+  // Everything is checked before anything changes.
+  const { unblockNode, allowOwner, removeOwner, ...rest } = body;
+  const nodes = unblockNode === undefined ? [] : [].concat(unblockNode);
+  if (!nodes.every(n => typeof n === 'string')) throw httpError(400, 'unblockNode must be a node id (from blockedNodes)');
+  const loginOf = (value, name) => {
+    if (value === undefined) return null;
+    const login = typeof value === 'string' ? normalizeLogin(value) : '';
+    if (!login || login.length > 200) throw httpError(400, `${name} must be a Tailscale login name`);
+    return login;
+  };
+  const allow = loginOf(allowOwner, 'allowOwner');
+  const remove = loginOf(removeOwner, 'removeOwner');
+  if (remove && ENV_OWNERS.includes(remove)) throw httpError(409, `${remove} is set by BEAM_TAILSCALE_OWNERS on the server`);
   const changes = {};
-  for (const [key, value] of Object.entries(body)) {
+  for (const [key, value] of Object.entries(rest)) {
     if (!SETTING_RULES[key]) throw httpError(400, `${key} can't be changed here${key === 'movedTo' ? ' (use POST /api/move)' : ''}`);
     if (ENV_SETTINGS[key] !== undefined) throw httpError(409, `${key} is set by ${ENV_NAMES[key]} on the server`);
     changes[key] = SETTING_RULES[key](value);
   }
+  const by = nameOf(deviceIdOf(req, url));
+  if (nodes.length) unblockNodes(nodes);
+  if (allow && !owners().has(allow)) {
+    settings.tailscaleOwners = [...(settings.tailscaleOwners || []), allow];
+    (settings.ownerSources ||= {})[allow] = { since: now(), how: 'set', devices: settings.tailscaleSeen?.[allow]?.devices || [] };
+    log.info(`Tailscale account ${statusText(allow)} is now an owner of this Beam (allowed by ${by})`);
+  }
+  if (remove && (settings.tailscaleOwners || []).includes(remove)) {
+    settings.tailscaleOwners = settings.tailscaleOwners.filter(l => l !== remove);
+    delete settings.ownerSources?.[remove];
+    log.info(`Tailscale account ${statusText(remove)} is no longer an owner (removed by ${by})`);
+  }
+  for (const login of [allow, remove]) if (login) delete settings.tailscaleSeen?.[login];
   for (const [key, value] of Object.entries(changes)) {
     if (key === 'tailscaleOwners') {
       settings.tailscaleOwners = value;
@@ -4520,7 +4649,7 @@ async function patchSettings(req, res) {
     }
   }
   persistSettings();
-  log.info(`Settings changed by ${nameOf(deviceIdOf(req, new URL(req.url, 'http://beam')))}: ${Object.keys(changes).join(', ')}`);
+  if (Object.keys(changes).length) log.info(`Settings changed by ${by}: ${Object.keys(changes).join(', ')}`);
   if ('retentionDays' in changes || 'maxItems' in changes) setImmediate(sweep);
   broadcast('settings', publicSettings());
   send(res, 200, publicSettings());
@@ -4620,10 +4749,10 @@ async function login(req, res) {
 }
 
 // What a pasted link or key signs in as: the master key, a pairing token (used up), or a device token (a new
-// token for the same device, e.g. an app opening its web view).
-function linkSecret(secret) {
+// token for the same device, e.g. an app opening its web view). `pairingOnly`: only a pairing token (/?key=).
+function linkSecret(secret, { pairingOnly = false } = {}) {
   if (!secret) return null;
-  if (keyMatches(secret)) return { via: 'key' };
+  if (!pairingOnly && keyMatches(secret)) return { via: 'key' };
   const hash = sha256hex(secret);
   const pairing = tokenStore.pairing[hash];
   if (pairing && pairing.expires > now()) {
@@ -4631,6 +4760,7 @@ function linkSecret(secret) {
     persistTokens();
     return { via: 'pairing' };
   }
+  if (pairingOnly) return null;
   const token = tokenStore.tokens[hash];
   if (token && !tokenExpired(token) && !token.scope) {
     return { via: 'link', device: token.device && resolveAlias(token.device), origin: tokenOrigin(token), platform: tokenPlatform(token) };
@@ -4951,6 +5081,7 @@ async function signOutOthers(req, res, _m, url) {
       delete settings.ownerSources[login];
     }
   }
+  settings.tailscaleSeen = {};
   persistSettings();
   const shownKey = deviceKeyOf(req);
   const token = issueToken({
@@ -5017,6 +5148,7 @@ function completeMove(to, by) {
   if (moveWatch) { clearInterval(moveWatch.timer); moveWatch = null; }
   persistSettings();
   log.info(`Beam has moved to ${to} (by ${by}). Every client is being sent there.`);
+  revokeMoveTokens('the move is done'); // (1.7.3: they could export everything until then)
   endAllRcSessions('server');
   broadcast('moved', { movedTo: to });
   setTimeout(() => { for (const c of clients) c.res.end(); }, 1000);
@@ -5056,6 +5188,12 @@ async function postMove(req, res, _m, url) {
         log.info(`Waiting for ${to} to come up before moving (up to 30 minutes); changes are paused meanwhile`);
         return send(res, 202, { status: 'waiting', movedTo: to });
       }
+      // (1.7.3) One answer for "nothing there" and "something that isn't Beam" (which would tell open ports from
+      // closed ones); the details go to the log.
+      if (check.retry) {
+        log.warn(`Not moving to ${to}: ${check.error}`);
+        return send(res, 409, { error: `No Beam server answered at ${to}` });
+      }
       return send(res, 409, { error: check.error });
     }
   }
@@ -5074,6 +5212,7 @@ function deleteMove(req, res) {
   if (moveWatch) { clearInterval(moveWatch.timer); moveWatch = null; }
   persistSettings();
   log.info(was ? `Move to ${was} undone; Beam is served here again` : 'Pending move cancelled');
+  revokeMoveTokens(was ? 'the move was undone' : 'the move was called off'); // (also the end of import-from --no-redirect)
   send(res, 204);
 }
 
@@ -5359,7 +5498,7 @@ async function importArchive(input) {
     }
     const dest = entry.name.startsWith('apps/') ? path.join(DIST_DIR, entry.name.slice(5)) : path.join(DATA_DIR, entry.name);
     if (entry.name.startsWith('apps/') && fs.existsSync(dest)) continue; // keep builds that are already here
-    await fsp.mkdir(path.dirname(dest), { recursive: true });
+    await fsp.mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
     const tmp = `${dest}.importing`;
     await pipeline(Readable.from(entry.content()), fs.createWriteStream(tmp, { mode: 0o600 }));
     await fsp.rename(tmp, dest);
@@ -5761,14 +5900,21 @@ async function handle(req, res) {
     req.routeName = 'static';
     if (!countUnauthenticated(req, res)) return;
     // Opening a pairing link (/?key=...) signs the browser in with its own token, then drops the key from the
-    // address bar.
+    // address bar. (1.7.3, audit S-19) Only a pairing key, which works once and expires: the master key or a
+    // device's sign-in in a link would stay in the browser's history and in a proxy's logs. Those sign in on the
+    // sign-in page (POST /api/login) instead; the page says the link didn't work (and drops it from the address bar).
     if (pathname === '/' && url.searchParams.has('key')) {
-      const linked = linkSecret(url.searchParams.get('key'));
+      const secret = url.searchParams.get('key');
+      const linked = linkSecret(secret, { pairingOnly: true });
       if (linked) {
         const device = claimableId(linked.device || rawDeviceIdOf(req, url), deviceKeyOf(req), 'link');
         const token = issueToken({ device: device ? resolveAlias(device) : null, via: linked.via, origin: linked.origin, platform: linked.platform || 'web' });
         log.info(`Signed in ${device ? `"${nameOf(resolveAlias(device))}"` : 'a browser'} with a pairing link from ${describeWhereSync(req)}`);
         return send(res, 302, '', { Location: './', 'Set-Cookie': authCookie(req, token), 'Referrer-Policy': 'no-referrer' });
+      }
+      if (keyMatches(secret) || tokenStore.tokens[sha256hex(secret || '')]) {
+        logOnce('key link', `A link with a lasting sign-in (not a pairing key) was opened from ${describeWhereSync(req)}: links sign in only with a pairing key now (Add a device makes one)`,
+          n => `${n} more links with a lasting sign-in were opened`);
       }
     }
     // Share-target posts are normally caught by the service worker; if it isn't running yet, just open the app.
@@ -5850,7 +5996,7 @@ async function handle(req, res) {
   if (you && raw && you !== raw) res.setHeader('X-Beam-You', you);
   if (auth.via === 'master' && you) offerDeviceToken(req, res, auth, you);
   withdrawRequestsOf(you);
-  learnOwner(req, you);
+  learnOwner(req, you, auth);
   learnAddress(req);
 
   const method = req.method === 'HEAD' ? 'GET' : req.method;
@@ -5877,6 +6023,7 @@ function offerDeviceToken(req, res, auth, deviceId) {
   const hash = sha256hex(token);
   if (!tokenStore.tokens[hash]) {
     tokenStore.tokens[hash] = newTokenRecord({ device: deviceId, via: 'migration', platform: auth.source === 'cookie' ? 'web' : explicitPlatform(req, new URL(req.url, 'http://beam')) || 'other', keyHash: keyHash || null });
+    tokenStore.tokens[hash].mid = deviceId; // (the device id its value is made from: `device` may follow a merge)
     indexTokens();
     persistTokens();
   }

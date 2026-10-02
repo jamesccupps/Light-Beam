@@ -61,7 +61,9 @@ body:has(> .lock:not([hidden])) {
 }
 [hidden] { display: none !important; }
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
-.visually-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }
+/* (A scroll box holding these needs `position: relative`: otherwise one far down stretches whatever outer box is
+   positioned, as Settings' Devices list once did to the whole dialog.) */
+.visually-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; pointer-events: none; }
 .i { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
@@ -346,13 +348,18 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 
 /* ---------- dialogs ---------- */
 .dlg {
-  width: min(440px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); padding: 18px 20px 20px;
+  width: min(440px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); padding: 0 20px 20px; /* (top: .dlg-head) */
   border: 1px solid var(--border); border-radius: 18px;
   background: var(--surface); color: var(--text); box-shadow: 0 20px 60px rgba(0, 0, 0, .25);
 }
 .dlg.wide { width: min(760px, calc(100vw - 24px)); }
 .dlg::backdrop { background: rgba(10, 12, 16, .45); }
-.dlg-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 -8px 4px 0; }
+/* The title and its × stay in view while a long dialog scrolls. The head carries the dialog's top padding: a sticky
+   box stops below its scroller's padding, which would push it over what follows. */
+.dlg-head {
+  position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin: 0 -8px 4px 0; padding-top: 18px; background: var(--surface);
+}
 .dlg h2 { margin: 0; font-size: 18px; }
 .dlg p { margin: 8px 0; }
 .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
@@ -396,13 +403,15 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .note { padding: 8px 12px; border-radius: 10px; background: var(--accent-soft); font-size: 13.5px; }
 
 /* ---------- settings ---------- */
-.settings { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 16px; min-height: 0; }
-.settings-nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; align-self: start; }
+/* The dialog itself never scrolls: its title and × stay put, the sections scroll beside the list of them. */
+#settingsDlg[open] { display: flex; flex-direction: column; overflow: hidden; }
+.settings { display: grid; flex: 1 1 auto; grid-template-columns: 170px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 16px; min-height: 0; }
+.settings-nav { display: flex; flex-direction: column; gap: 2px; align-self: start; }
 .settings-nav button { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
 .settings-nav button .i { width: 17px; height: 17px; }
 .settings-nav button:hover { background: var(--surface-2); color: var(--text); }
 .settings-nav button[aria-current="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.settings-body { max-height: calc(100dvh - 140px); overflow-y: auto; padding-right: 4px; }
+.settings-body { position: relative; overflow-y: auto; padding-right: 4px; }
 .set-section { padding: 4px 0 14px; border-bottom: 1px solid var(--border); scroll-margin-top: 4px; }
 .set-section:last-child { border-bottom: 0; }
 .set-section h3 { margin: 8px 0 4px; font-size: 16px; }
@@ -643,11 +652,11 @@ html.remote-mode .rc {
   .msg { max-width: 88%; }
   .sidebar { border-right: 0; background: var(--bg); }
   .thread-head { padding-left: 12px; }
-  .settings { grid-template-columns: minmax(0, 1fr); }
-  .settings-nav { flex-direction: row; overflow-x: auto; position: static; padding-bottom: 4px; }
+  .settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-nav { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
   .settings-nav button { flex: none; }
-  .settings-body { max-height: calc(100dvh - 190px); }
-  .dlg { padding: 16px 16px 18px; }
+  .dlg { padding: 0 16px 18px; }
+  .dlg-head { padding-top: 16px; }
   .icon-btn { width: var(--touch); height: var(--touch); }
   .new-pill { bottom: 80px; }
 }

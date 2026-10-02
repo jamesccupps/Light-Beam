@@ -21,6 +21,8 @@ beam-backup.tgz
 node_modules/
 dist/
 windows/bin/
+# (made by windows\build.cmd: the public half of the update-signing key; the key itself lives outside the project)
+windows/obj/
 android/.gradle/
 android/.kotlin/
 android/build/

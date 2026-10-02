@@ -48,6 +48,10 @@ server sets it, `HttpOnly`).
 - **Sessions (v3):** a sign-in with `remember: false` gets a token that expires after **12 hours without use**. The
   browser gets a cookie without `Max-Age`. Its device is marked `temporary: true` and is forgotten when the session
   ends. Use this for borrowed computers.
+- **Other expiry (1.7.3):** a browser's sign-in (platform `web`) ends after **180 days without use** (on the tailnet a
+  browser signs itself back in); one approved for a move **48 hours** after it was made, and sooner when the move is
+  done or called off. A Beam app's sign-in doesn't expire. Once a device's migration token (the one offered to a
+  client still on the master key) is revoked, its next one is a different value.
 - **Reserved fields (v3):**
   - Token records and devices carry `user: "owner"`, tokens also `role: "owner"`, and `/api/me` reports them.
   - Everyone is the owner today. The fields are there for a future multi-user version: ignore them, don't depend on
@@ -58,16 +62,19 @@ UUID without dashes. Store it forever; it is the device's identity.
 
 ## Pairing links
 
-A pairing link looks like `https://beam.example.ts.net/?key=bp_…`. Older links carry the master key instead;
-both work.
+A pairing link looks like `https://beam.example.ts.net/?key=bp_…`.
 
 - **Server base URL** = the link's origin (scheme + host + port). **Key** = the `key` query parameter.
 - **Apps** use the key as their Bearer secret. On first use a pairing token turns into that app's device token
-  (same secret), so they can keep it. Check it with `GET /api/me`.
-- **Browsers** opening `/?key=…` are redirected to `/` with a cookie holding a **new** device token, and the key
+  (same secret), so they can keep it. Check it with `GET /api/me`. (Apps also take an older link with the master key:
+  it goes in the Bearer header, never in a URL the server sees.)
+- **Browsers** opening `/?key=bp_…` are redirected to `/` with a cookie holding a **new** device token, and the key
   disappears from the address bar.
-  - `/?key=<a device token>` signs the browser in **as that same device**, with a new token. The Windows app uses
-    this for its WebView: open `/?key=<app token>` once and the page shares the app's identity.
+  - **(1.7.3)** Only an unused pairing key signs a browser in there. A link with the master key or a device's own
+    token no longer does (it would stay in the browser's history and in a proxy's logs): the page says the link
+    didn't work, and the server logs it once. Those secrets still sign in on the sign-in page (`POST /api/login`).
+  - A page that acts as a device gets a sign-in of its own with `POST /api/login` and that device's token in the
+    body: the Android remote-control viewer does. (The Windows app gives its WebView the app's token as a cookie.)
 - `GET /api/pair` creates a fresh pairing token for building links and QR codes (see Other). **(v3)**
 
 ## Signing in a new device
@@ -193,11 +200,14 @@ Beam can be moved to another machine with its data folder (`node server.js expor
     key.
   - It then remembers the new address in `data/settings.json`, sends the SSE event **`moved { movedTo }`** to every
     connected client, and closes the streams.
-  - Answers `200 { movedTo }`, or `409 { error }` when the target doesn't check out.
+  - Answers `200 { movedTo }`, or `409 { error }` when the target doesn't check out. **(1.7.3)** Nothing answering
+    and something that isn't Beam get the same `error` ("No Beam server answered at …"); the details go to the log.
   - `{ "wait": true }`: when the target isn't answering yet, the server answers `202` and keeps checking every 5 s for
     up to 30 minutes. Meanwhile it refuses changes with `503` so nothing is lost.
   - `{ "force": true }` skips the check (master key only; also `node server.js moved-to <url> --force`).
   - `DELETE /api/move` cancels a pending move. After a move it needs the master key; it undoes the move.
+  - **(1.7.3)** Sign-ins approved for a move (`import-from`) are revoked when the move is done, undone or called off
+    (`import-from --no-redirect` calls it off at its end), and expire 48 hours after they were made anyway.
   - `BEAM_MOVED_TO` still works and overrides the setting.
 - From then on **every** `/api/*` call answers `410 { "error", "movedTo" }`, and `/api/hello` includes `movedTo`.
 - On a `410` or a `moved` event:
@@ -220,9 +230,18 @@ Beam can be moved to another machine with its data folder (`node server.js expor
 Apps update themselves from the Beam server.
 - Each build writes a sidecar next to the app in `dist/`:
   - `beam.apk.json`: `{ "version": "<versionName>", "versionCode": 7 }`
-  - `Beam.exe.json`: `{ "version": "1.2.0" }`
+  - `Beam.exe.json`: `{ "version": "1.7.3", "sha256", "size", "sig" }` (1.7.3: signed by the build; below)
 - `GET /api/updates` answers `{ "android": { "version", "versionCode", "url", "size", "sha256" }, "windows": { … } }`.
-  An app only appears there when both the file and a readable sidecar exist.
+  An app only appears there when both the file and a readable sidecar exist. The sidecar's fields are passed on;
+  `size` and `sha256` are always the server's own, from the file.
+- **Signed Windows updates (1.7.3):** `windows\build.cmd` signs every build with its builder's key (ECDSA P-256 with
+  SHA-256; `windows/update-key.mjs`; the private key stays on the building computer, by default
+  `~/.beam/windows-update-key.pem`), and the app carries the public half. `sig` is base64 of r‖s over the UTF-8 text
+  `beam-windows-update\n<version>\n<sha256, lowercase hex>\n<size>`. The app checks it before downloading (and the
+  download's SHA-256 and size after) and installs nothing else: a Beam.exe in `dist/` that its builder didn't sign,
+  an older signed one offered as new, or one changed on the way is refused (and not downloaded again until offered
+  anew). A build made without a key checks only `sha256`, as before. The Android app has this from Android itself:
+  an update must be signed with the same key as the installed app.
 - When `dist/` changes, the server broadcasts the SSE event `app-update` with the same object.
   - It is sent once per real change.
   - The server re-watches `dist/` if it is deleted and recreated, and also checks every minute (network shares).
@@ -537,7 +556,8 @@ server:
   `?to=id1,id2` query.
 - **Targets may be device ids (merged-away ids are followed, v3) or device names** (matched case-insensitively). An
   unknown target returns `400`.
-- Up to 5 MB.
+- Up to 5 MB. **(1.7.3)** All texts on their way in together hold at most 64 MB of the server's memory; beyond that
+  a sender gets `503` with `Retry-After` and tries again.
 
 ### Sending files: simple (small files, curl, Shortcuts)
 `PUT /api/file?name=<url-encoded name>&to=<ids or names, comma-separated>` (v3: optional `&w=&h=`). The body is the
@@ -799,7 +819,7 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
   or act as the PC, the request's sign-in must be one of these:
   - **a Beam app's own sign-in**: made for Windows or Android, however it was made (Tailscale identity included). A
     Windows sign-in must also be key-bound (see Device keys). The apps' own pages use it as their cookie, so the
-    Windows viewer window qualifies. So does the Android activity's cookie from `/?key=<the app's token>`: a token made
+    Windows viewer window qualifies. So does the Android activity's cookie from `POST /api/login` with the app's token: a token made
     from another keeps its platform and origin;
   - **a browser sign-in made with something only the user has**: the password, a pairing link or code, a sign-in
     request approved on another device, or the master key;
@@ -847,7 +867,7 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
 | `POST /api/rc/sessions` | the viewer | `{ "device": "<PC id>" }` → `201 { "id", "host": { "id", "name", "ip4", "ip6" }, "you": { "ip4", "ip6" } }`; event `rc-request` to the PC. Other fields in the body are ignored |
 | `POST /api/rc/sessions/{id}/signal` | either party | `{ "kind": "offer"\|"answer"\|"candidates"\|"restart", "sdp"?, "candidates"? }` → `204`; event `rc-signal` to the other party only |
 | `POST /api/rc/sessions/{id}/lease` | the PC | → `200 { "ok": true }`. `410 { "reason" }` once the session has ended, `404` when the server doesn't know it (it restarted): end the session then |
-| `POST /api/rc/sessions/{id}/end` | either party, or any other signed-in device | `{ "reason"? }` → `204` (also for a session that has just ended); event `rc-end` to both parties |
+| `POST /api/rc/sessions/{id}/end` | either party, or any other signed-in device | `{ "reason"?, "detail"? }` → `204` (also for a session that has just ended); event `rc-end` to both parties. `detail` (1.7.3, from a party only): why its own check hung up, for the server's log, as kinds only (anything shaped like an address is left out), e.g. "the connection went to no address (prflx candidate)" |
 | `GET /api/rc/sessions` | any signed-in device | `{ "sessions": [{ "id", "host", "viewer", "since", "state" }] }` |
 | `POST /api/rc/disable` | any signed-in device | `{ "device": "<PC id>" }` → `202`; event `rc-disable` to the PC; its sessions end (`revoked`) |
 
@@ -944,9 +964,9 @@ The activity log records only:
 ### Settings (v3)
 | Method & path | Result |
 |---|---|
-| `GET /api/settings` | `{ "movedTo", "publicUrl", "publicUrlLearned", "tailscaleSignIn", "tailscaleOwners": [...], "retentionDays", "maxItems", "blockedNodes": [{ "node", "name", "since", "device" }], "alerts": { "battery", "storage", "serverDisk", "offline": [...] }, "locked": [...] }` |
+| `GET /api/settings` | `{ "movedTo", "publicUrl", "publicUrlLearned", "tailscaleSignIn", "tailscaleOwners": [...], "tailscaleOwnersFixed": [...] (1.7.3: from BEAM_TAILSCALE_OWNERS), "tailscaleSeen": [{ "login", "since", "last", "devices": [names] }] (1.7.3: accounts that signed in on purpose but aren't owners), "retentionDays", "maxItems", "blockedNodes": [{ "node", "name", "since", "device" }], "alerts": { "battery", "storage", "serverDisk", "offline": [...] }, "locked": [...] }` |
 | `DELETE /api/settings/blocked-nodes/{node}` | unblock one Tailscale machine (URI-encode `node`) → the new settings |
-| `PATCH /api/settings` | any of `publicUrl` (`""`/`null` = learn again), `tailscaleSignIn`, `tailscaleOwners`, `retentionDays` (0 = forever … 3650), `maxItems` (0 = no limit … 100000), and `unblockNode: "<node>"` (or a list) to let a blocked Tailscale machine sign in automatically again. Also `alerts` (1.3): any of `battery`, `storage`, `serverDisk` (true/false) and `offline` (the full list of watched device ids); kinds you leave out keep their value. → the new settings; event `settings`. `400` for unknown or invalid values, `409` for ones fixed by an environment variable (listed in `locked`) |
+| `PATCH /api/settings` | any of `publicUrl` (`""`/`null` = learn again), `tailscaleSignIn`, `tailscaleOwners`, `retentionDays` (0 = forever … 3650), `maxItems` (0 = no limit … 100000), and `unblockNode: "<node>"` (or a list) to let a blocked Tailscale machine sign in automatically again. (1.7.3) `allowOwner: "<login>"` / `removeOwner: "<login>"` add or remove one owner (not one from BEAM_TAILSCALE_OWNERS: `409`). Owners are never learned by just seeing an account: a login becomes one on a brand-new Beam's first sign-in, from these settings or BEAM_TAILSCALE_OWNERS, or, on a Beam with no owner at all, from a sign-in made on purpose; other accounts that sign in on purpose are listed in `tailscaleSeen`. Letting more in (`allowOwner`, `tailscaleOwners`, `tailscaleSignIn: true`) needs a sign-in made on purpose (the password, a pairing link or code, an approval, the master key, a Beam app's own): else `403` reason `sign-in`. Everything is checked before anything changes. Also `alerts` (1.3): any of `battery`, `storage`, `serverDisk` (true/false) and `offline` (the full list of watched device ids); kinds you leave out keep their value. → the new settings; event `settings`. `400` for unknown or invalid values, `409` for ones fixed by an environment variable (listed in `locked`) |
 
 `publicUrl` is learned from the first https address seen through `tailscale serve` (or another trusted proxy) on a
 signed-in request, unless configured.
@@ -1072,4 +1092,7 @@ Other limits:
   - the PC (Beam for Windows) reports `remoteControl` and `locked` in its status, leases as soon as it has accepted and
     every 30 s, ends a session on any lease answer but `200`, and turns its switch off on `rc-disable`;
   - both sides check the peer's address against the one the server attested (`rc-request` `viewer`, the `201`'s
-    `host`).
+    `host`). A remote whose address the browser won't tell (a peer-reflexive candidate: "" in `getStats`, and the
+    placeholder `redacted-ip.invalid` from newer `getSelectedCandidatePair()`) is "not known yet": input waits, and
+    only one that stays so for 5 s, or an address that isn't the attested one, hangs up (1.7.3: the Android viewer
+    took the placeholder for a stranger and hung up a moment after connecting).

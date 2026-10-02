@@ -533,6 +533,30 @@ namespace Beam
             }
             Section("policy: the request, the peer and its Tailscale owner", f0);
 
+            // Signed updates (1.7.3): vectors signed by the runner with a key of its own (update-vectors.cs).
+            int u0 = failures;
+            {
+                var uv = UpdateVectors.Version;
+                var usha = UpdateVectors.Sha;
+                var usize = UpdateVectors.Size;
+                var usig = UpdateVectors.Sig;
+                Check(UpdateSignature.Required, "a build with a key installs only signed updates");
+                Check(UpdateSignature.Check(uv, usha, usize, usig) == null, "a signed update passes");
+                Check(UpdateSignature.Check(uv, usha.ToUpperInvariant(), usize, usig) == null, "...its SHA-256 in either case");
+                Check(UpdateSignature.Check("9.8.8", usha, usize, usig) != null && UpdateSignature.Check("9.8.6", usha, usize, usig) != null, "another version: no (an older signed build can't pass as new)");
+                Check(UpdateSignature.Check(uv, "0" + usha.Substring(1), usize, usig) != null, "another SHA-256: no");
+                Check(UpdateSignature.Check(uv, usha, usize + 1, usig) != null, "another size: no");
+                Check(UpdateSignature.Check(uv, usha, usize, null) != null && UpdateSignature.Check(uv, usha, usize, "") != null, "no signature: no");
+                Check(UpdateSignature.Check(uv, usha, usize, "not base64!") != null && UpdateSignature.Check(uv, usha, usize, Convert.ToBase64String(new byte[63])) != null, "a garbled signature: no");
+                var flipped = Convert.FromBase64String(usig);
+                flipped[10] ^= 1;
+                Check(UpdateSignature.Check(uv, usha, usize, Convert.ToBase64String(flipped)) != null, "one bit changed: no");
+                Check(UpdateSignature.Check(uv, usha, usize, UpdateVectors.OtherSig) != null, "signed with another key: no");
+                Check(UpdateSignature.Check(UpdateVectors.OtherKey, uv, usha, usize, UpdateVectors.OtherSig) == null, "...which that key accepts");
+                Check(UpdateSignature.Check("", uv, usha, usize, null) == null, "a build without a key checks only the SHA-256 (as before 1.7.3)");
+            }
+            Section("signed updates: version, SHA-256 and size, from this Beam's key only (1.7.3)", u0);
+
             Console.WriteLine();
             Console.WriteLine(failures == 0 ? "All " + passed + " checks passed." : failures + " of " + (passed + failures) + " checks FAILED.");
             return failures == 0 ? 0 : 1;

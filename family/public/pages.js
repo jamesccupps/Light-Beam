@@ -61,8 +61,8 @@ export async function joinPage(code, onDone) {
   }
   if (info.reset) return resetPage(code, info, onDone);
   const name = h('input', { class: 'input', name: 'name', required: true, maxlength: 32, autocomplete: 'nickname', autocapitalize: 'words', value: info.tailscale?.name || '' });
-  const pw = h('input', { class: 'input', name: 'password', type: 'password', autocomplete: 'new-password', minlength: 8, required: info.needsPassword });
-  const pw2 = h('input', { class: 'input', name: 'password2', type: 'password', autocomplete: 'new-password', minlength: 8, required: info.needsPassword });
+  const pw = h('input', { class: 'input', name: 'password', type: 'password', autocomplete: 'new-password', minlength: 10, required: info.needsPassword });
+  const pw2 = h('input', { class: 'input', name: 'password2', type: 'password', autocomplete: 'new-password', minlength: 10, required: info.needsPassword });
   const error = h('p', { class: 'error-text', hidden: true });
   const btn = h('button', { class: 'btn primary', type: 'submit' }, `Join ${info.space}`);
   const passwords = h('div', {}, field('Choose a password', pw), field('The password again', pw2));
@@ -91,8 +91,8 @@ export async function joinPage(code, onDone) {
 
 // A password reset link from an admin: a new password, and signed in.
 function resetPage(code, info, onDone) {
-  const pw = h('input', { class: 'input', name: 'password', type: 'password', autocomplete: 'new-password', minlength: 8, required: true });
-  const pw2 = h('input', { class: 'input', name: 'password2', type: 'password', autocomplete: 'new-password', minlength: 8, required: true });
+  const pw = h('input', { class: 'input', name: 'password', type: 'password', autocomplete: 'new-password', minlength: 10, required: true });
+  const pw2 = h('input', { class: 'input', name: 'password2', type: 'password', autocomplete: 'new-password', minlength: 10, required: true });
   const error = h('p', { class: 'error-text', hidden: true });
   const btn = h('button', { class: 'btn primary', type: 'submit' }, 'Save the new password');
   const form = h('form', {
@@ -110,7 +110,7 @@ function resetPage(code, info, onDone) {
         btn.disabled = false;
       }
     },
-  }, field('New password (at least 8 characters)', pw), field('The new password again', pw2), error, btn);
+  }, field('New password (at least 10 characters)', pw), field('The new password again', pw2), error, btn);
   return page(h('h1', {}, `A new password for ${info.name}`),
     h('p', { class: 'lede' }, `${info.by ? `${info.by} made this link` : 'This link is'} for ${info.name}: choose a new password to sign in to ${info.space} with. Browsers signed in with the old one are signed out.`),
     form);
@@ -195,8 +195,8 @@ export function settingsView() {
     const fields = [];
     const needCurrent = state.me.password && !state.me.tailscale;
     if (needCurrent) fields.push(field('Current password', h('input', { class: 'input', type: 'password', name: 'current', autocomplete: 'current-password', required: true })));
-    fields.push(field('New password (at least 8 characters)', h('input', { class: 'input', type: 'password', name: 'password', autocomplete: 'new-password', minlength: 8, required: true })),
-      field('The new password again', h('input', { class: 'input', type: 'password', name: 'again', autocomplete: 'new-password', minlength: 8, required: true })));
+    fields.push(field('New password (at least 10 characters)', h('input', { class: 'input', type: 'password', name: 'password', autocomplete: 'new-password', minlength: 10, required: true })),
+      field('The new password again', h('input', { class: 'input', type: 'password', name: 'again', autocomplete: 'new-password', minlength: 10, required: true })));
     const done = await dialog({
       title: state.me.password ? 'Change password' : 'Set a password', body: fields, ok: 'Save',
       onSubmit: v => {

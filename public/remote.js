@@ -334,7 +334,9 @@ function rcTeardown({ endSession = false, reason = 'stopped' } = {}) {
   rc.localTimer = null;
   rc.localQueue = [];
   rcClosePeer();
-  if (endSession && rc.session) rcPostEnd(rc.session.id, reason);
+  rc.watched = null; // (the next connection's pair is read from its own transport)
+  if (endSession && rc.session) rcPostEnd(rc.session.id, reason, { detail: rc.endDetail });
+  rc.endDetail = '';
   rcSetSession(null);
   rc.origin = '';
   rc.early = [];
@@ -380,10 +382,10 @@ function rcClosePeer() {
   if (rcUi.video) rcUi.video.srcObject = null;
 }
 
-function rcPostEnd(id, reason = 'stopped', { keepalive = false } = {}) {
+function rcPostEnd(id, reason = 'stopped', { keepalive = false, detail = '' } = {}) {
   fetch(url(`api/rc/sessions/${encodeURIComponent(id)}/end`), {
     method: 'POST', credentials: 'same-origin', keepalive,
-    headers: { ...idHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }),
+    headers: { ...idHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(detail ? { reason, detail } : { reason }),
   }).catch(() => {});
 }
 
@@ -679,9 +681,11 @@ function rcStripCandidates(sdp) {
 const rcIsTailscale = a => typeof a === 'string' && (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(a) || /^fd7a:115c:a1e0:[0-9a-f:]*$/i.test(a));
 const rcIpFamily = a => (/^\d{1,3}(\.\d{1,3}){3}$/.test(a) ? 4 : a.includes(':') ? 6 : 0);
 
-// One IPv6 address however it's written (zeros compressed or not, any case).
+// One IPv6 address however it's written (zeros compressed or not, any case, a zone, an IPv4 one in IPv6 form).
 function rcNormIp(a) {
-  a = String(a || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  a = String(a || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  const mapped = /^(?:::|(?:0{1,4}:){5})ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(a);
+  if (mapped) return mapped[1];
   if (!a.includes(':')) return a;
   const [head, tail = ''] = a.split('::');
   const h = head ? head.split(':') : [];
@@ -690,6 +694,25 @@ function rcNormIp(a) {
   return [...h, ...fill, ...t].map(x => x.replace(/^0+(?=.)/, '')).join(':');
 }
 const rcIsPeer = addr => Boolean(addr) && Boolean(rc.session) && [rc.session.host.ip4, rc.session.host.ip6].some(ip => ip && rcNormIp(ip) === rcNormIp(addr));
+// An address that is one (not "", 0.0.0.0, ::, a name or anything else). What Chrome gives for a remote it won't reveal
+// (peer-reflexive: its checks came before its candidates) varies: "" in getStats, and from getSelectedCandidatePair
+// newer builds give libwebrtc's placeholder name "redacted-ip.invalid" (2026-10: the phone hung up a moment after its
+// check had passed, at the first pair change). Such a remote is "not known yet": never a pass, never at once a
+// hang-up (1.7.3).
+function rcIpLiteral(a) {
+  const s = rcNormIp(a);
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) return s.split('.').every(n => Number(n) <= 255) && s !== '0.0.0.0';
+  return /^[0-9a-f]{1,4}(:[0-9a-f]{1,4}){7}$/.test(s) && !/^(0:){7}0$/.test(s);
+}
+
+// What the viewer saw when it hung up, for the server's log: kinds only, never the address (1.7.3).
+function rcSeen(addr, type) {
+  const a = String(addr ?? '');
+  const n = rcNormIp(a);
+  const what = !a ? 'no address' : !rcIpLiteral(a) ? `something that isn't an address (shaped "${a.replace(/[0-9]/g, '9').replace(/[a-z]/gi, 'x').slice(0, 24)}")`
+    : `${rcIsTailscale(n) ? 'another Tailscale' : 'a non-Tailscale'} IPv${rcIpFamily(n)} address`;
+  return `the connection went to ${what}${type ? ` (${String(type).slice(0, 12)} candidate)` : ''}`;
+}
 
 // Our own candidates, a few at a time (the PC does its own rewrite): at most 20 a signal, each at most 256 characters.
 function rcLocalCandidate(c) {
@@ -782,19 +805,23 @@ async function rcCheckPeer() {
     if (!rc.verified) rcTimer('pair', rcCheckPeer, 250); // connected, but the stats don't show the pair yet
     return;
   }
-  // (once the ICE transport is known, its own selected pair is the current one: getStats can lag behind a change)
+  // (once the ICE transport is known, its own selected pair is the current one: getStats can lag behind a change. When
+  // the transport won't say its address, the stats' reading of that same remote (same port) counts.)
   const cur = rc.watched?.getSelectedCandidatePair?.()?.remote;
-  const remote = cur ? String(cur.address || '') : pair.remote;
+  let remote = '';
+  if (!cur) remote = rcIpLiteral(pair.remote) ? pair.remote : '';
+  else if (rcIpLiteral(cur.address)) remote = String(cur.address);
+  else if (rcIpLiteral(pair.remote) && cur.port != null && cur.port === pair.port) remote = pair.remote;
   rc.pair = { remote, port: pair.port, type: cur?.type || pair.type, rtt: pair.rtt };
-  // The PC's checks often come before its candidates: the remote is then peer-reflexive, and Chrome reads its address
-  // as "" until the PC's own (rewritten) candidate takes its place. Read it again every 200 ms, with nothing shown or
-  // sent meanwhile; only an address that isn't the PC's, or none within the connection's 5 s, hangs up.
+  // The PC's checks often come before its candidates: the remote is then peer-reflexive, and Chrome won't say its
+  // address until the PC's own (rewritten) candidate takes its place. Read it again every 200 ms, with nothing shown
+  // or sent meanwhile; only an address that isn't the PC's, or none within the connection's 5 s, hangs up.
   if (!remote) {
-    if (rcUnresolved()) return rcHangUp();
+    if (rcUnresolved()) return rcHangUp(rcSeen(cur ? cur.address : pair.remote, cur?.type || pair.type));
     return rcTimer('pair', rcCheckPeer, 200);
   }
   rcResolved();
-  if (!rcIsPeer(remote)) return rcHangUp();
+  if (!rcIsPeer(remote)) return rcHangUp(rcSeen(remote, cur?.type || pair.type));
   rcWatchPair(pc);
   rcClearTimer('ice');
   if (rc.verified) { if (rc.state === 'reconnecting') rcSetState('live'); return; }
@@ -813,7 +840,8 @@ async function rcCheckPeer() {
   if (!rcTouchUi()) rcFocusSink();
 }
 
-function rcHangUp() {
+function rcHangUp(seen = '') {
+  rc.endDetail = seen; // (sent with the end: rcTeardown)
   rcEnded('peer', { endSession: true, endReason: 'failed' });
 }
 
@@ -842,9 +870,10 @@ function rcWatchPair(pc) {
   rc.watched = it;
   it.addEventListener?.('selectedcandidatepairchange', () => {
     if (rc.pc !== pc) return;
-    const addr = it.getSelectedCandidatePair?.()?.remote?.address;
-    if (addr && rc.verified && !rcIsPeer(addr)) return rcHangUp();
-    if (!addr && rc.verified && rcUnresolved()) return rcHangUp();
+    const remote = it.getSelectedCandidatePair?.()?.remote;
+    // (an address that is one and isn't the PC's hangs up at once; anything else is checked as above, which waits a
+    // moment for a remote that isn't known yet: input is let go of meanwhile)
+    if (rcIpLiteral(remote?.address) && rc.verified && !rcIsPeer(remote.address)) return rcHangUp(rcSeen(remote.address, remote.type));
     rcCheckPeer();
   });
 }

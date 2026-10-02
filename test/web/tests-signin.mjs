@@ -99,7 +99,7 @@ export default function register(test) {
     const laptop = dev(ctx, 'Laptop', 'windows', other);
     await laptop.me();
     await laptop.text('from the other Beam');
-    await page.goto(`${proxy.base}/?key=${encodeURIComponent(other.key)}`);
+    await page.goto(await ctx.keyLink(other, proxy.base));
     const onB = `typeof paired !== 'undefined' && paired && items.some(i => i.text === 'from the other Beam')`;
     await page.waitFor(onB, 10000, 'signed in to the other Beam');
     await page.waitFor(`${saved}.then(o => o.serverId === '${otherId}' && o.items === 1)`, 5000, 'the cache is the other Beam’s, fresh');
@@ -128,7 +128,7 @@ export default function register(test) {
       if (visit === 'next start') eq(await page.evaluate('__flash.other'), 0, 'a dormant history isn’t shown at start, even for a moment');
       await leave();
     }
-    await page.goto(`${proxy.base}/?key=${encodeURIComponent(ctx.srv.key)}`);
+    await page.goto(await ctx.keyLink(ctx.srv, proxy.base));
     await page.waitFor(`typeof paired !== 'undefined' && paired && itemsIn('${phone.id}').some(i => i.text === 'kept 3')`, 10000, 'signed in to the first Beam again');
     await page.waitFor(`${saved}.then(o => o.serverId === '${ownId}' && o.items >= 4 && o.aside === '')`, 5000, 'the cache is the first Beam’s again');
     eq(await page.evaluate(`items.some(i => i.text === 'from the other Beam')`), false, 'nothing of the replaced history in memory');
@@ -177,7 +177,7 @@ export default function register(test) {
     proxy.upstream = 8822;
     const t2 = await ctx.browser.newTabBeside(t1, { xff: ctx.nextIp() });
     ctx.defer(() => t2.close());
-    await t2.goto(`${proxy.base}/?key=${encodeURIComponent(other.key)}`);
+    await t2.goto(await ctx.keyLink(other, proxy.base));
     await t2.waitFor(`typeof paired !== 'undefined' && paired && cache.owner === '${otherId}'`, 15000, 'the second tab on the other Beam');
     // The old tab comes back (its retry, made at once here): the other Beam's stream; its message stays out of sight.
     await t1.evaluate(`(reconnectNow(), true)`);
@@ -188,7 +188,7 @@ export default function register(test) {
     // Its Beam is back and this browser signs in there again: the message goes out, once.
     await t1.goto('about:blank');
     proxy.upstream = 8821;
-    await t2.goto(`${proxy.base}/?key=${encodeURIComponent(ctx.srv.key)}`);
+    await t2.goto(await ctx.keyLink(ctx.srv, proxy.base));
     await t2.waitFor(`typeof paired !== 'undefined' && paired && cache.owner === '${ownId}'`, 15000, 'signed in to its Beam again');
     const onOwn = async () => (await textsOn(ctx.srv)).filter(t => t === 'queued in the old tab').length;
     for (let i = 0; i < 50 && !(await onOwn()); i++) await ctx.sleep(200);
@@ -227,7 +227,7 @@ export default function register(test) {
     proxy.upstream = 8822;
     const t2 = await ctx.browser.newTabBeside(t1, { xff: ctx.nextIp() });
     ctx.defer(() => t2.close());
-    await t2.goto(`${proxy.base}/?key=${encodeURIComponent(other.key)}`);
+    await t2.goto(await ctx.keyLink(other, proxy.base));
     await t2.waitFor(`typeof paired !== 'undefined' && paired && cache.owner === '${otherId}' && live.serverId === '${otherId}'`, 15000, 'the second tab on the other Beam');
     await t2.waitFor(`kvGet('meta').then(m => m?.serverId === '${otherId}')`, 5000, 'the store is the other Beam’s');
     // The old tab, still offline as far as it knows, gets another message written: it's stored, for its own Beam.
@@ -243,7 +243,7 @@ export default function register(test) {
     eq([await count(other, M1), await count(other, M2)], [0, 0], 'the other Beam got neither');
     // Its own Beam is back; the second tab signs in there, and the old tab follows: each message reaches it once.
     proxy.upstream = 8821;
-    await t2.goto(`${proxy.base}/?key=${encodeURIComponent(ctx.srv.key)}`);
+    await t2.goto(await ctx.keyLink(ctx.srv, proxy.base));
     await t2.waitFor(`typeof paired !== 'undefined' && paired && live.serverId === '${ownId}'`, 15000, 'the second tab on its Beam');
     await t1.evaluate(`(reconnectNow(), true)`);
     for (let i = 0; i < 50 && ((await count(ctx.srv, M1)) < 1 || (await count(ctx.srv, M2)) < 1); i++) await ctx.sleep(200);
@@ -295,7 +295,7 @@ export default function register(test) {
     appOffline();
     await page.goto('about:blank');
     proxy.upstream = 8821;
-    await page.goto(`${proxy.base}/?key=${encodeURIComponent(ctx.srv.key)}`);
+    await page.goto(await ctx.keyLink(ctx.srv, proxy.base));
     await page.waitFor(`typeof paired !== 'undefined' && paired && cache.owner === '${ownId}'`, 15000, 'signed in to its Beam again');
     const delivered = async () => (await textsOn(ctx.srv)).includes('written while its Beam was down');
     for (let i = 0; i < 50 && !(await delivered()); i++) await ctx.sleep(200);

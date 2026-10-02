@@ -332,7 +332,8 @@ async function main() {
   cleanups.push(phone.online());
 
   const page = await browser.newPage({ xff: '100.64.9.10', width: 1280, height: 800, init: [INSTRUMENT] });
-  await page.goto(`${base}/?key=${encodeURIComponent(srv.key)}`);
+  const { key: pairKey } = await (await fetch(`${base}/api/pair`, { headers: { Authorization: `Bearer ${srv.key}` } })).json(); // (a link signs in only with a pairing key, 1.7.3)
+  await page.goto(`${base}/?key=${encodeURIComponent(pairKey)}`);
   await page.waitFor(`typeof paired !== 'undefined' && paired && net.state === 'online'`, 15000, 'signed in');
   const [meId, meName] = await page.evaluate(`[me.id, me.name]`);
   const self = srv.device(meId, meName, 'web', '100.64.9.10');

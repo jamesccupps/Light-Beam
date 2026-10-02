@@ -127,7 +127,7 @@ export default function register(test) {
     ctx.defer(() => proxy.stop());
     const page = await ctx.browser.newPage({ xff: ctx.nextIp() });
     const api = ctx.track(page, /\/api\//);
-    await page.goto(`${proxy.base}/?key=${encodeURIComponent(ctx.srv.key)}`);
+    await page.goto(await ctx.keyLink(ctx.srv, proxy.base));
     await page.waitFor(`typeof paired !== 'undefined' && paired && net.state === 'online'`, 15000, 'signed in under /beam/');
     await page.evaluate(`sendText('hello from under a prefix', 'all')`);
     await page.waitFor(`items.some(i => i.text === 'hello from under a prefix')`);

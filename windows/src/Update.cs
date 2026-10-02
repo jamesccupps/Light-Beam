@@ -22,6 +22,7 @@ namespace Beam
         public string Url;
         public long Size;
         public string Sha256;
+        public string Sig; // (1.7.3) the build's signature: UpdateSignature
     }
 
     // What the old version does after its UI has shut down (see Program.Main).
@@ -144,6 +145,7 @@ namespace Beam
             u.Url = Json.Str(w, "url") ?? "/download/windows";
             u.Size = Json.Long(w, "size", 0);
             u.Sha256 = Json.Str(w, "sha256");
+            u.Sig = Json.Str(w, "sig");
             return u.Version == null || string.IsNullOrEmpty(u.Sha256) ? null : u;
         }
 
@@ -185,10 +187,14 @@ namespace Beam
             catch { }
         }
 
-        // Downloads the update with the key into Beam.new.exe next to the exe and checks its SHA-256.
+        // Downloads the update with the key into Beam.new.exe next to the exe and checks its SHA-256 and size.
         // Gives up after 60 s without data or 10 minutes in total.
         public static async Task<string> Download(Api api, UpdateInfo u, string exe, CancellationToken outer)
         {
+            // (1.7.3) Signed with this Beam's key, before a byte is downloaded: the signature covers the version,
+            // SHA-256 and size offered, and the download must then have exactly that SHA-256 and size.
+            string refused = UpdateSignature.Check(u.Version, u.Sha256, u.Size, u.Sig);
+            if (refused != null) throw new InvalidDataException(refused);
             string path = u.Url;
             Uri abs;
             if (Uri.TryCreate(path, UriKind.Absolute, out abs))
@@ -242,6 +248,12 @@ namespace Beam
             {
                 FileUtil.TryDelete(part);
                 throw new InvalidDataException("the download doesn't match its checksum (expected " + u.Sha256 + ", got " + hex + ")");
+            }
+            long got = new FileInfo(part).Length;
+            if (u.Size > 0 && got != u.Size)
+            {
+                FileUtil.TryDelete(part);
+                throw new InvalidDataException("the download isn't the size offered (" + got + " bytes, not " + u.Size + ")");
             }
             FileUtil.TryDelete(final);
             File.Move(part, final);

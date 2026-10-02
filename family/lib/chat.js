@@ -201,8 +201,9 @@ function createChat(ctx) {
         j.read = last || null;
         j.unread = c.last_id && c.last_id > last ? db.get(`SELECT count(*) n FROM (SELECT 1 FROM messages WHERE channel_id = ? AND id > ? AND deleted_at IS NULL
           AND kind = 'user' AND (author_id IS NULL OR author_id != ?) LIMIT 100)`, c.id, last, user.id).n : 0;
-        j.mentions = j.unread ? db.get(`SELECT count(*) n FROM messages m WHERE m.channel_id = ? AND m.id > ? AND m.deleted_at IS NULL AND m.author_id != ?
-          AND (m.mentions_all = 1 OR EXISTS (SELECT 1 FROM mentions x WHERE x.message_id = m.id AND x.user_id = ?))`, c.id, last, user.id, user.id).n : 0;
+        // (counted up to 100, like unread: 1.7.3, audit B-08)
+        j.mentions = j.unread ? db.get(`SELECT count(*) n FROM (SELECT 1 FROM messages m WHERE m.channel_id = ? AND m.id > ? AND m.deleted_at IS NULL AND m.author_id != ?
+          AND (m.mentions_all = 1 OR EXISTS (SELECT 1 FROM mentions x WHERE x.message_id = m.id AND x.user_id = ?)) LIMIT 100)`, c.id, last, user.id, user.id).n : 0;
         j.notify = levels.get(c.id) || 'all';
         return j;
       }),
