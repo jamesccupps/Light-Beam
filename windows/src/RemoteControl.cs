@@ -901,6 +901,34 @@ namespace Beam
             });
         }
 
+        // ------------------------------------------------------------------ from Remote Desktop to this PC's screen
+
+        // Signed in through Remote Desktop, this session isn't on the PC's own screen, so Beam's control sees a locked
+        // PC. The tray's "Back to this PC's screen" (Beam 1.7.5, the user's request) moves it there with Windows' tscon.
+        // That needs administrator rights, so Windows asks every time; the program has no window and ends at once.
+        // Remote Desktop's window on the other computer then closes.
+        public static bool InRemoteDesktop { get { return SystemInformation.TerminalServerSession; } }
+
+        public void BackToScreen()
+        {
+            int session = Process.GetCurrentProcess().SessionId;
+            string dir = Environment.Is64BitOperatingSystem && !Environment.Is64BitProcess ? "Sysnative" : "System32";
+            var psi = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), dir, "tscon.exe"), session + " /dest:console");
+            psi.UseShellExecute = true;
+            psi.Verb = "runas";
+            psi.WindowStyle = ProcessWindowStyle.Hidden;
+            try
+            {
+                Process.Start(psi);
+                Log.Write("Remote Desktop: this session (" + session + ") goes back to this PC's own screen");
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                if (ex.NativeErrorCode == 1223) Log.Write("Remote Desktop: back to this PC's screen, cancelled at Windows' prompt");
+                else Log.Error("Remote Desktop: back to this PC's screen", ex);
+            }
+        }
+
         // ------------------------------------------------------------------ lock and console (WTS)
 
         void ReadLockState()
