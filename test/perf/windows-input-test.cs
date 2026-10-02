@@ -520,6 +520,8 @@ namespace Beam
                 Check(RcPolicy.OwnerRefusal(theirs, status, "100.101.102.103") != null, "whois: another owner (a user ID one apart) → hang up");
                 Check(RcPolicy.OwnerRefusal(mine, status, "100.101.102.104") != null, "whois names a node without that address → hang up");
                 Check(RcPolicy.OwnerRefusal(Msg("{}"), status, "100.101.102.103") != null && RcPolicy.OwnerRefusal(mine, Msg("{}"), "100.101.102.103") != null, "nothing known → hang up");
+                var noAddresses = Msg("{\"Node\":{\"User\":1234567890123456,\"ComputedName\":\"laptop\"},\"UserProfile\":{\"ID\":1234567890123456,\"LoginName\":\"me@example.com\"}}");
+                Check(RcPolicy.OwnerRefusal(noAddresses, status, "100.101.102.103") != null, "whois lists no addresses for the node → hang up (1.7.2: it passed)");
                 Check(RcPolicy.DisplayName("Robin\u202E Laptop\r\n") == "Robin Laptop" && RcPolicy.DisplayName("") == "Another device" && RcPolicy.DisplayName(new string('x', 60)).Length == 40, "banner names: no control or direction characters, 40 at most");
                 var widens = new[] { "GET /api/pair", "GET /api/qr.svg", "GET /api/qr.png", "POST /api/login-requests/approve", "POST /api/password", "PATCH /api/settings",
                     "DELETE /api/settings/blocked-nodes/abc", "POST /api/security/sign-out-others", "POST /api/move", "DELETE /api/move", "GET /api/admin/export", "POST /api/admin/shutdown",

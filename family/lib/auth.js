@@ -4,7 +4,7 @@
 
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
-const { decodeHeaderWords } = require('../../lib/tailscale');
+const { decodeHeaderWords, isTailscaleIp } = require('../../lib/tailscale');
 const { newId } = require('./ids');
 
 const scrypt = promisify(crypto.scrypt);
@@ -88,7 +88,9 @@ const fromLoopback = req => LOOPBACK.has(req.socket.remoteAddress);
 // is the one that connects from here. Funnel's public visitors never have them.
 function identityOf(req) {
   const raw = req.headers['tailscale-user-login'];
-  if (!raw || !fromLoopback(req)) return null;
+  if (!raw || Array.isArray(raw) || !fromLoopback(req)) return null;
+  // (1.7.2, as Beam's own server does) never on a Funnel request, and only for a caller at a Tailscale address
+  if (req.headers['tailscale-funnel-request'] || !isTailscaleIp(clientIp(req))) return null;
   const login = decodeHeaderWords(raw).trim().toLowerCase();
   if (!login || login.length > 200) return null;
   return {

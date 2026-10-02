@@ -99,11 +99,13 @@ function createPeople(ctx) {
 
   // ---------------------------------------------------------------- sessions in the browser
 
-  const secure = () => /^https:/i.test(config.publicUrl || '');
+  // Secure when the address is https, or this request came over https through tailscale serve / Funnel (1.7.2: it
+  // went without when BEAM_FAMILY_URL wasn't set).
+  const secure = req => /^https:/i.test(config.publicUrl || '') || (Boolean(req) && auth.fromLoopback(req) && req.headers['x-forwarded-proto'] === 'https');
 
   function startSession(req, res, user) {
     const token = auth.createSession(db, user.id, { agent: req.headers['user-agent'], ip: auth.clientIp(req) });
-    res.setHeader('Set-Cookie', cookie(auth.COOKIE, token, { maxAge: auth.SESSION_DAYS * 86400, secure: secure() }));
+    res.setHeader('Set-Cookie', cookie(auth.COOKIE, token, { maxAge: auth.SESSION_DAYS * 86400, secure: secure(req) }));
   }
 
   // GET /api/session: who am I, or how to get in.
@@ -124,7 +126,8 @@ function createPeople(ctx) {
     const body = await readJson(req);
     const ip = auth.clientIp(req);
     const name = String(body.name ?? '').trim().toLowerCase().slice(0, 64);
-    if (!signinAll.hit('all') || !signinByIp.hit(ip) || (name && !signinByName.hit(name))) {
+    // (per address first: an address that is already held back mustn't use up everyone's budget; 1.7.2)
+    if (!signinByIp.hit(ip) || !signinAll.hit('all') || (name && !signinByName.hit(name))) {
       const wait = Math.max(signinAll.wait('all'), signinByIp.wait(ip), signinByName.wait(name));
       throw httpError(429, `Too many tries: wait ${wait > 90 ? `${Math.ceil(wait / 60)} minutes` : `${wait} seconds`}`, { retryAfter: wait });
     }
@@ -145,8 +148,11 @@ function createPeople(ctx) {
   // POST /api/signout: this browser's session ends (Tailscale's identity can't be signed out of: it's the device).
   async function signOut(req, res) {
     const token = parseCookies(req)[auth.COOKIE];
-    if (token) auth.endSession(db, token);
-    res.setHeader('Set-Cookie', cookie(auth.COOKIE, '', { maxAge: 0, secure: secure() }));
+    if (token) {
+      auth.endSession(db, token);
+      hub.disconnectSessions([auth.hashToken(token)]);
+    }
+    res.setHeader('Set-Cookie', cookie(auth.COOKIE, '', { maxAge: 0, secure: secure(req) }));
     send(res, 204);
   }
 
@@ -232,12 +238,15 @@ function createPeople(ctx) {
     const problem = auth.passwordProblem(body.password, person.name);
     if (problem) throw httpError(400, problem);
     const hash = await auth.hashPassword(body.password);
-    db.tx(() => {
+    const ended = db.tx(() => {
       if (!auth.findInvite(db, code)) throw httpError(404, 'This link doesn’t work any more. Ask for a new one.');
       db.run('UPDATE invites SET uses = uses + 1 WHERE id = ?', invite.id);
       db.run('UPDATE users SET pass_hash = ? WHERE id = ?', hash, person.id);
+      const hashes = db.all('SELECT hash FROM sessions WHERE user_id = ?', person.id).map(s => s.hash);
       db.run('DELETE FROM sessions WHERE user_id = ?', person.id);
+      return hashes;
     });
+    hub.disconnectSessions(ended);
     audit(person.id, 'password-reset', invite.id);
     log.info(`${person.name} set a new password with a reset link from ${auth.clientIp(req)}`);
     startSession(req, res, person);
@@ -314,8 +323,11 @@ function createPeople(ctx) {
     }
     if (body.password !== undefined) {
       // Changing a password needs the current one, unless signed in by Tailscale (who already proved who they are).
-      if (user.pass_hash && whoIs(req).via !== 'tailscale' && !(await auth.checkPassword(String(body.current ?? ''), user.pass_hash))) {
-        throw httpError(403, 'Your current password isn’t right');
+      // Those checks count like sign-ins (1.7.2: a stolen session could otherwise guess the password without limit).
+      if (user.pass_hash && whoIs(req).via !== 'tailscale') {
+        const ip = auth.clientIp(req);
+        if (!signinByIp.hit(ip) || !signinByName.hit(user.name.toLowerCase())) throw httpError(429, 'Too many tries: wait a few minutes');
+        if (!(await auth.checkPassword(String(body.current ?? ''), user.pass_hash))) throw httpError(403, 'Your current password isn’t right');
       }
       if (body.password === null) {
         if (!user.login) throw httpError(400, 'You sign in with your password: you can change it but not remove it');
@@ -330,9 +342,11 @@ function createPeople(ctx) {
     if (keys.length) {
       db.run(`UPDATE users SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, ...keys.map(k => changes[k]), user.id);
       if (changes.pass_hash !== undefined) {
-        // Other browsers signed in with the old password are signed out.
+        // Other browsers signed in with the old password are signed out, and their open streams end.
         const keep = whoIs(req).sessionHash || '';
+        const ended = db.all('SELECT hash FROM sessions WHERE user_id = ? AND hash != ?', user.id, keep).map(s => s.hash);
         db.run('DELETE FROM sessions WHERE user_id = ? AND hash != ?', user.id, keep);
+        hub.disconnectSessions(ended);
         audit(user.id, 'password', changes.pass_hash ? 'set' : 'removed');
       }
     }
@@ -353,9 +367,15 @@ function createPeople(ctx) {
   function endSessions(req, res, { id }) {
     const user = requireUser(req);
     const current = whoIs(req).sessionHash || '';
-    if (id === 'others') db.run('DELETE FROM sessions WHERE user_id = ? AND hash != ?', user.id, current);
-    else if (/^[A-Za-z0-9_-]{16}$/.test(id)) db.run('DELETE FROM sessions WHERE user_id = ? AND substr(hash, 1, 16) = ?', user.id, id);
-    else throw httpError(404, 'No such session');
+    let ended;
+    if (id === 'others') {
+      ended = db.all('SELECT hash FROM sessions WHERE user_id = ? AND hash != ?', user.id, current).map(s => s.hash);
+      db.run('DELETE FROM sessions WHERE user_id = ? AND hash != ?', user.id, current);
+    } else if (/^[A-Za-z0-9_-]{16}$/.test(id)) {
+      ended = db.all('SELECT hash FROM sessions WHERE user_id = ? AND substr(hash, 1, 16) = ?', user.id, id).map(s => s.hash);
+      db.run('DELETE FROM sessions WHERE user_id = ? AND substr(hash, 1, 16) = ?', user.id, id);
+    } else throw httpError(404, 'No such session');
+    hub.disconnectSessions(ended); // (their open streams end now too; 1.7.2)
     send(res, 204);
   }
 

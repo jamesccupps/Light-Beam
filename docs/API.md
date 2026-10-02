@@ -78,20 +78,27 @@ Here are the ways in, from most to least seamless.
 `{ "client": "app" | "web", "deviceId", "name", "platform" }`. It succeeds when:
 - **Tailscale vouches for an owner.** This means the request came through `tailscale serve` on the Beam machine, with
   the `Tailscale-User-Login` header. It must come from a Tailscale address and not through Funnel. `tailscale whois`
-  must agree (when available), the login must be one of this Beam's owners, and the `tailscaleSignIn` setting must be
-  on. Owners are:
+  must confirm that address belongs to that login (since 1.7.2 no answer counts as no: while tailscaled can't be
+  reached, automatic sign-in waits), the login must be one of this Beam's owners, and the `tailscaleSignIn` setting
+  must be on. Owners are:
   - `BEAM_TAILSCALE_OWNERS`;
   - accounts learned automatically when a signed-in device makes a request through tailscale serve;
   - the first account to sign in to a brand-new Beam.
 - **Or, for browsers only,** a Beam app is connected right now from the same machine (a Tailscale address or the
   server itself).
 
+Either way only at **this Beam's own address** (1.7.2): the `Host` (or a trusted proxy's `X-Forwarded-Host`) must be
+an IP address, `localhost`, this machine's name (or `<name>.local`), its Tailscale name, the public address, or an
+address Beam has seen through tailscale serve. A page on another name pointed at the server (DNS rebinding) gets no
+sign-in. Behind your own reverse proxy with its own name, set `BEAM_PUBLIC_URL`.
+
 Answers:
 - apps: `200 { "key": "bt_…", "server", "via": "tailscale", "you": "<device id>" }` (the server makes up a device
   id if you sent none);
 - browsers: `200 { "device", "via" }` plus a cookie;
 - otherwise `403 { "error", "reason" }`. `reason` is one of `no-identity`, `not-owner`, `disabled`,
-  `whois-mismatch`, `no-app`, `blocked` (the machine was removed; see Revocation).
+  `whois-mismatch`, `whois-unavailable` (tailscaled couldn't confirm it), `host` (not this Beam's own address), `no-app`,
+  `blocked` (the machine was removed; see Revocation).
 
 Apps should try this first when they reach Beam over its `https://…ts.net` address.
 
@@ -950,7 +957,7 @@ signed-in request, unless configured.
 | `GET /api/me` | `{ "ok": true, "you", "api": 3, "read": {...}, "auth": { "via": "master"|"token", "user", "role", "session"? }, "machine": { "name" } | null }`. `machine.name` is this device's Tailscale machine name when known (v3) |
 | `GET /api/info` | `{ "version", "api", "serverId", "features": [...], "uptime", "retentionDays", "maxItems", "maxUpload", "chunkSize", "maxChunkSize" (1.4), "maxStorage", "storage": { "used", "items", "files", "free", "total" }, "publicUrl", "urls", "tailscaleSignIn", "tailscaleOwners", "moving", "apps": { "windows", "android" }, "passwordSet", "ntfy", "settings", "family" (1.7: Beam Family's address from `BEAM_FAMILY_URL`, or null; see docs/FAMILY.md) }` |
 | `GET /api/pair` | `{ "key": "bp_…", "lanUrl", "publicUrl", "expiresAt", "link" }`. `key` is a single-use pairing token valid 15 minutes (v3; it was the master key) |
-| `POST /api/password` | `{ "password" }` sets it (≥ 8 characters); `""` removes it |
+| `POST /api/password` | `{ "password", "current"? }` sets it (≥ 8 characters); `""` removes it. Changing or removing a set password takes `current` (1.7.2; `403 reason: "current-password"` without it or when wrong), except from a sign-in made deliberately (the password, a pairing link, an approval, the master key, a Beam app's own) |
 | `POST /api/security/sign-out-others` | **(v3)** optional body `{ "disableTailscaleSignIn": true }`. New master key, every sign-in revoked, every other device's Tailscale machine blocked, learned Tailscale owners dropped; the caller gets `{ "key": "bt_…", "revoked": n, "tailscaleSignIn" }` (and `X-Beam-Token` / a cookie). `409` when the key comes from `BEAM_KEY` |
 | `POST /api/logout` | Signs this browser out: revokes its token, clears the cookie, and sends `Clear-Site-Data: "cache", "storage"` (v3) |
 | `GET /api/logs?lines=200` | **(v3)** `{ "lines": [...] }`, the end of the server log (`data/logs/server.log`) |

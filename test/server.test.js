@@ -165,7 +165,8 @@ function fakeTailscale({ self = [], peers = [], whois = {}, servePort = null } =
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://local-tailscaled.sock');
     const reply = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
-    if (u.pathname === '/localapi/v0/status') return reply(200, { Self: { HostName: 'beam-host', TailscaleIPs: self, UserID: 1 }, Peer: peerMap, User: { 1: { LoginName: 'owner@example.com' }, ...users } });
+    // (Self.DNSName: the name tailscale serve answers at, which automatic sign-in requires as the Host, 1.7.2)
+    if (u.pathname === '/localapi/v0/status') return reply(200, { Self: { HostName: 'beam-host', DNSName: 'beam.tail1234.ts.net.', TailscaleIPs: self, UserID: 1 }, Peer: peerMap, User: { 1: { LoginName: 'owner@example.com' }, ...users } });
     if (u.pathname === '/localapi/v0/whois') {
       const addr = u.searchParams.get('addr') || '';
       const ip = addr.startsWith('[') ? addr.slice(1, addr.indexOf(']')) : addr.split(':')[0];
@@ -776,6 +777,44 @@ test('A11: pending sign-in requests are capped; a device that signs in otherwise
   } finally { await s.stop(); }
 });
 
+// ---------------------------------------------------------------- 1.7.2: the consolidated audit's fixes
+
+test('1.7.2: automatic sign-in needs a Tailscale identity tailscaled confirms and this Beam’s own address; a set password changes only with the current one from such a sign-in; an outdated Windows app hears of the update at once', async () => {
+  const ts = await fakeTailscale({ whois: { '100.64.60.1': { login: 'alice@example.com', node: 'alice-laptop' } } });
+  const s = await startServer('audit172', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket } });
+  try {
+    // tailscaled has no answer for that address: no sign-in (it used to count as yes; here it would even own a new Beam)
+    let r = await post(s, '/api/autopair', { client: 'app', name: 'Unknown' }, viaServe('100.64.60.9', 'alice@example.com'));
+    assert.deepEqual([r.status, r.json.reason], [403, 'whois-unavailable'], r.body);
+    // another name pointed at this server (what a page on another site does): no automatic sign-in
+    r = await post(s, '/api/autopair', { client: 'app', name: 'Elsewhere' }, viaServe('100.64.60.1', 'alice@example.com', { Host: 'evil.example.com', 'X-Forwarded-Host': 'evil.example.com' }));
+    assert.deepEqual([r.status, r.json.reason], [403, 'host'], r.body);
+    assert.match(s.out, /Refused an automatic sign-in at an address that isn't this Beam's \(evil\.example\.com\)/);
+    // its own name, confirmed: signed in (the first account on a new Beam owns it)
+    r = await post(s, '/api/autopair', { client: 'app', platform: 'web', name: 'Alice browser' }, viaServe('100.64.60.1', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    const ambient = { Authorization: `Bearer ${r.json.key}` };
+    // a password set with the master key (a deliberate sign-in); from the Tailscale sign-in it changes only with it
+    assert.equal((await post(s, '/api/password', { password: 'first password' }, { Authorization: `Bearer ${s.key}` })).status, 200);
+    r = await post(s, '/api/password', { password: 'taken over' }, ambient);
+    assert.deepEqual([r.status, r.json.reason], [403, 'current-password'], r.body);
+    r = await post(s, '/api/password', { password: 'taken over', current: 'a wrong guess' }, ambient);
+    assert.deepEqual([r.status, r.json.reason], [403, 'current-password'], r.body);
+    r = await post(s, '/api/password', { password: 'second password', current: 'first password' }, ambient);
+    assert.equal(r.status, 200, r.body);
+    // a device id that is an Object.prototype name is no device id
+    r = await s.req('GET', '/api/me', { headers: { Authorization: `Bearer ${s.key}`, 'X-Beam-Device-Id': '__proto__' } });
+    assert.notEqual(r.json?.you, '__proto__');
+    // a Windows app older than the build in dist hears of it as soon as it connects (not hours later)
+    fs.writeFileSync(path.join(s.dist, 'Beam.exe'), 'not really an app');
+    fs.writeFileSync(path.join(s.dist, 'Beam.exe.json'), JSON.stringify({ version: '9.9.9' }));
+    const old = await openEvents(s.port, app(s.key, 'oldwinpc001', 'Old PC', 'windows', { 'X-Beam-App-Version': '1.7.1' }));
+    const offer = await old.wait('app-update', d => d.windows?.version === '9.9.9', 5000);
+    assert.equal(offer.data.windows.version, '9.9.9');
+    old.close?.();
+  } finally { await s.stop(); await ts.close(); }
+});
+
 // ---------------------------------------------------------------- A12/A13 streams & big texts
 
 test('A12: a stream that stops reading is dropped once 1 MB is queued', async () => {
@@ -786,8 +825,13 @@ test('A12: a stream that stops reading is dropped once 1 MB is queued', async ()
     await ev.wait('hello');
     ev.res.pause();
     const h = app(K, 'sender00001');
-    for (let i = 0; i < 90; i++) await sendText(s, h, 'x'.repeat(16000) + i);
-    await waitFor(() => /Dropped a stalled event stream/.test(s.out), 10000);
+    // How much a stalled stream swallows before Beam's own queue grows depends on the system's socket buffers (about
+    // 1.4 MB here, tens of MB in some containers): send until the server drops it, within a time limit.
+    const until = Date.now() + 90_000;
+    for (let i = 0; !/Dropped a stalled event stream/.test(s.out); i++) {
+      assert.ok(Date.now() < until, 'the stalled stream was never dropped');
+      await sendText(s, h, 'x'.repeat(16000) + i);
+    }
   } finally { await s.stop(); }
 });
 

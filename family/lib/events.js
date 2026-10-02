@@ -9,23 +9,34 @@ const { BASE_HEADERS } = require('./http');
 
 const KEEP = 2000;
 const HEARTBEAT_MS = 25_000;
+const MAX_QUEUED = 1024 * 1024; // a stream that doesn't read this much of what it was sent is dropped (it reconnects)
+const MAX_PER_PERSON = 20;      // open streams per person; a new one ends their oldest
 
-function createHub({ onPresence = () => {} } = {}) {
+function createHub({ onPresence = () => {}, onDrop = () => {} } = {}) {
   const boot = crypto.randomBytes(4).toString('hex');
   let seq = 0;
-  const recent = []; // { seq, to: Set|null, type, data }
-  const clients = new Map(); // id -> { id, user, res, focus, visible }
+  const recent = []; // { seq, to: Set|null, type, frame }
+  const clients = new Map(); // id -> { id, user, session, res, focus, visible }
   const byUser = new Map(); // user id -> Set of client ids
 
+  // (1.7.2) The event is written out once for everyone; a stream that stopped reading is dropped rather than buffered
+  // without end (a stalled phone on the public link must not grow the server's memory).
   function write(client, event) {
+    if (!client) return;
     try {
-      client.res.write(`id: ${boot}-${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
+      if (client.res.writableLength > MAX_QUEUED) {
+        onDrop(client.user);
+        client.res.destroy();
+        return;
+      }
+      client.res.write(event.frame);
     } catch {}
   }
 
   // `to`: an array of person ids, or null for everyone.
   function emit(to, type, data) {
-    const event = { seq: ++seq, to: to ? new Set(to) : null, type, data };
+    const event = { seq: ++seq, to: to ? new Set(to) : null, type };
+    event.frame = `id: ${boot}-${event.seq}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
     recent.push(event);
     if (recent.length > KEEP) recent.shift();
     if (to) {
@@ -35,8 +46,12 @@ function createHub({ onPresence = () => {} } = {}) {
     }
   }
 
-  function connect(req, res, user) {
+  // session: the sign-in's session hash (null when signed in by Tailscale), so ending it ends this stream too.
+  function connect(req, res, user, session = null) {
     const id = crypto.randomBytes(9).toString('base64url');
+    // (1.7.2) at most MAX_PER_PERSON streams each: a new one ends that person's oldest
+    const open = byUser.get(user.id);
+    if (open && open.size >= MAX_PER_PERSON) { try { clients.get(open.values().next().value)?.res.end(); } catch {} }
     res.writeHead(200, {
       ...BASE_HEADERS,
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -46,7 +61,7 @@ function createHub({ onPresence = () => {} } = {}) {
     });
     res.socket?.setNoDelay?.(true);
     res.socket?.setKeepAlive?.(true, 30_000);
-    const client = { id, user: user.id, res, focus: null, visible: false };
+    const client = { id, user: user.id, session, res, focus: null, visible: false };
     clients.set(id, client);
     let mine = byUser.get(user.id);
     const wasOnline = Boolean(mine?.size);
@@ -107,11 +122,20 @@ function createHub({ onPresence = () => {} } = {}) {
     }
   }
 
+  // Sign-ins ended (signed out, "other browsers", a new password, a reset link): the streams they opened end now too
+  // (1.7.2: they went on receiving everything until they disconnected by themselves).
+  function disconnectSessions(hashes) {
+    const ended = new Set(hashes);
+    for (const client of [...clients.values()]) {
+      if (client.session && ended.has(client.session)) { try { client.res.end(); } catch {} }
+    }
+  }
+
   function closeAll() {
     for (const client of clients.values()) { try { client.res.end(); } catch {} }
   }
 
-  return { emit, connect, setFocus, watching, isOnline, onlineIds, disconnectUser, closeAll, boot, count: () => clients.size };
+  return { emit, connect, setFocus, watching, isOnline, onlineIds, disconnectUser, disconnectSessions, closeAll, boot, count: () => clients.size };
 }
 
 module.exports = { createHub };

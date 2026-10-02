@@ -99,6 +99,10 @@ function createFiles(ctx) {
     const size = Number(body.size);
     if (!Number.isSafeInteger(size) || size < 0) throw httpError(400, 'size must be a whole number of bytes');
     if (size > config.maxUpload) throw httpError(413, `Files can be at most ${Math.round(config.maxUpload / 1024 / 1024)} MB`);
+    // (1.7.2) a few unsent uploads at a time: declared sizes count against the storage until they're sent or swept
+    if (db.get('SELECT count(*) n FROM attachments WHERE uploader_id = ? AND message_id IS NULL', user.id).n >= 30) {
+      throw httpError(429, 'Send or remove the files you’re already sending first');
+    }
     if (storageUsed() + size > config.maxStorage) {
       log.warn(`Storage is full: refused ${name} from ${user.name}`);
       throw httpError(507, 'The family space’s storage is full. Ask the owner to make room.');
@@ -135,10 +139,16 @@ function createFiles(ctx) {
       handle = await fsp.open(partPath(id), 'r+');
       const limit = Math.min(MAX_PIECE, a.size - a.received);
       let written = 0;
-      for await (const chunk of req) {
-        if (written + chunk.length > limit) throw httpError(413, 'That is more than the file’s size');
-        await handle.write(chunk, 0, chunk.length, offset + written);
-        written += chunk.length;
+      try {
+        for await (const chunk of req) {
+          if (written + chunk.length > limit) throw httpError(413, 'That is more than the file’s size');
+          await handle.write(chunk, 0, chunk.length, offset + written);
+          written += chunk.length;
+        }
+      } catch (err) {
+        // A piece cut off on the way (the app goes on from the offset): not a server error (1.7.2)
+        if (!err.status && (req.aborted || err.code === 'ECONNRESET' || err.code === 'ERR_STREAM_PREMATURE_CLOSE')) throw httpError(400, 'The piece was cut off');
+        throw err;
       }
       await handle.sync();
       received = offset + written;
@@ -239,9 +249,13 @@ function createFiles(ctx) {
     await Promise.all([filePath(a.id), partPath(a.id), thumbPath(a.id)].map(f => fsp.rm(f, { force: true })));
   }
 
-  // Files uploaded but never sent go after a day.
+  // Files uploaded but never sent go after a day, counted from the last piece that came (1.7.2: from the start, so a
+  // big upload paused overnight went mid-way).
   function sweepUnsent() {
-    const old = db.all('SELECT * FROM attachments WHERE message_id IS NULL AND created_at < ?', now() - UNSENT_HOURS * 3600e3);
+    const cutoff = now() - UNSENT_HOURS * 3600e3;
+    const old = db.all('SELECT * FROM attachments WHERE message_id IS NULL AND created_at < ?', cutoff).filter(a => {
+      try { return fs.statSync(a.received < a.size ? partPath(a.id) : filePath(a.id)).mtimeMs < cutoff; } catch { return true; }
+    });
     for (const a of old) {
       db.run('DELETE FROM attachments WHERE id = ?', a.id);
       removeStored(a).catch(() => {});
@@ -250,6 +264,13 @@ function createFiles(ctx) {
   }
   setInterval(sweepUnsent, 3600e3).unref();
   setTimeout(sweepUnsent, 60e3).unref();
+
+  // (1.7.2) A crash between recording an upload's last piece and moving it into place: move it now.
+  for (const a of db.all('SELECT id FROM attachments WHERE received >= size AND size > 0')) {
+    if (!fs.existsSync(filePath(a.id)) && fs.existsSync(partPath(a.id))) {
+      try { fs.renameSync(partPath(a.id), filePath(a.id)); log.info(`Finished moving an upload a restart interrupted (${a.id})`); } catch {}
+    }
+  }
 
   return {
     attachmentJson, removeStored, storageUsed, sweepUnsent,

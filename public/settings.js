@@ -219,17 +219,21 @@ async function removeDevice(d) {
 function sectionSecurity() {
   const info = server.info || {};
   const pw = el('input', { type: 'password', placeholder: 'New password (8+ characters)', autocomplete: 'new-password', 'aria-label': 'New sign-in password' });
+  // (1.7.2) Changing or removing a set password takes the current one (the server may also accept it without, from a
+  // sign-in made with the password or an approval: then this is just ignored).
+  const current = info.passwordSet && el('input', { type: 'password', placeholder: 'Current password', autocomplete: 'current-password', 'aria-label': 'Current sign-in password' });
   const save = el('button', { class: 'btn', type: 'button' }, info.passwordSet ? 'Change' : 'Set');
   save.addEventListener('click', () => {
     if (pw.value.length < 8) return toast('Use at least 8 characters', { error: true });
-    savePassword(pw.value);
+    savePassword(pw.value, current?.value);
   });
   pw.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } });
   const parts = [
     field('Sign-in password',
       note(info.passwordSet ? 'A password is set: type it on any sign-in page to sign in there.' : 'Not set yet. With a password you can sign in on any browser by typing it.'),
+      current,
       row(pw, save),
-      info.passwordSet && el('button', { class: 'btn small-btn ghost', type: 'button', onclick: async () => { if (await confirmDialog({ title: 'Remove the sign-in password?', text: 'Devices that are already signed in stay signed in.', confirm: 'Remove', danger: true })) savePassword(''); } }, 'Remove password')),
+      info.passwordSet && el('button', { class: 'btn small-btn ghost', type: 'button', onclick: async () => { if (await confirmDialog({ title: 'Remove the sign-in password?', text: 'Devices that are already signed in stay signed in.', confirm: 'Remove', danger: true })) savePassword('', current?.value); } }, 'Remove password')),
   ];
   const s = serverSettings;
   if (s && 'tailscaleSignIn' in s) {
@@ -255,9 +259,9 @@ function sectionSecurity() {
   return parts;
 }
 
-async function savePassword(value) {
+async function savePassword(value, current) {
   try {
-    const { passwordSet } = await apiJson('api/password', jsonBody({ password: value }));
+    const { passwordSet } = await apiJson('api/password', jsonBody(current ? { password: value, current } : { password: value }));
     if (server.info) server.info.passwordSet = passwordSet;
     toast(passwordSet ? 'Password saved' : 'Password removed');
     renderSettings();

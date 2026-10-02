@@ -70,8 +70,15 @@ iPad, notifications need the home-screen app (Share → Add to Home Screen). Bea
 ## Security model
 
 - It listens on 127.0.0.1 only. Tailscale's identity headers are believed only from this machine (where `tailscale
-  serve` connects from). **Limit:** a program running on the server machine itself can connect directly and claim
-  any identity, as with Beam's own server: the machine is trusted.
+  serve` connects from), for a caller at a Tailscale address, and never on a Funnel request (1.7.2: local checks on
+  top of serve removing any such header a client sends, as Tailscale documents). **Limit:** a program running on the
+  server machine itself can connect directly and claim any identity, as with Beam's own server: the machine is
+  trusted.
+- Live streams: ending a sign-in (signing out, "other browsers", a new password, a reset link) ends the streams it
+  opened at once; at most 20 per person; a stream that stops reading is dropped at 1 MB unread; 1,000 connections in
+  all. A request body has 60 s to arrive (a piece of a file 15 min). (1.7.2)
+- Unsent uploads: 30 at a time per person (their declared sizes count against the storage until sent or swept);
+  expired sign-ins and invites are cleaned up daily. (1.7.2)
 - Changes need the app's own pages: `Sec-Fetch-Site` same-origin (or a matching `Origin`) and JSON bodies; both ways
   in are ambient (cookies, Tailscale), so this is what stops another site from acting as you.
 - Who sees what is checked on every request: channels for the space's members, DMs and groups for theirs; files only
@@ -79,8 +86,10 @@ iPad, notifications need the home-screen app (Share → Add to Home Screen). Bea
 - Text is always text in the app (no HTML from messages); only http(s) links become links. Files show inline only as
   pictures, video or sound a browser plays, everything else downloads; every file answer is sandboxed and `nosniff`.
 - Passwords: scrypt (N=2^15, r=8, p=1), at least 8 characters, not a well-known one. Sign-in: 10 tries per address
-  per 10 minutes (the address Funnel saw: the last `X-Forwarded-For` entry), 20 per name per hour, 120 a minute in
-  all. Unknown names take as long as wrong passwords.
+  per 10 minutes (the address Funnel saw: the last `X-Forwarded-For` entry; checked first, so a held-back address
+  doesn't use up the rest), 20 per name per hour, 120 a minute in all; checking the current password when changing it
+  counts the same. Unknown names take as long as wrong passwords. The session cookie is `Secure` whenever the request
+  came over https (1.7.2).
 - Anonymous visitors (the public address is in certificate logs) see the sign-in page only, not the family's name.
 - Notifications: Web Push signed with the server's VAPID key and encrypted for each browser (RFC 8291); only the push
   services browsers use (Google, Apple, Mozilla, Microsoft) are ever contacted.
