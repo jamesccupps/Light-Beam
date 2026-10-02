@@ -137,6 +137,7 @@ namespace Beam
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ToggleMain(); };
             tray.Visible = !cfg.Quiet;
             notifier = new Notifier(tray, () => ShowMain(null, null), cfg.Quiet);
+            notifier.OpenItem = OpenItem;
             phone = new PhoneNotices(this, notifier);
             phoneGrace = new Timer();
             phoneGrace.Interval = 10000;
@@ -1703,7 +1704,7 @@ namespace Beam
             {
                 FileUtil.OpenUrl(text.Trim());
                 Log.Write("Opened the link in " + it.Id);
-                if (!Watching(it)) notifier.Show("Opened a link from " + SenderName(it), Fmt.OneLine(text, 180), null, "link opened " + it.Id);
+                if (!Watching(it)) notifier.ShowItem("Opened a link from " + SenderName(it), Fmt.OneLine(text, 180), null, "link opened " + it.Id, it.Id);
                 St.MarkHandled(it.Id);
                 receiving.Remove(it.Id);
                 Ack(it);
@@ -1719,7 +1720,7 @@ namespace Beam
                 if (link && Cfg.OpenLinks) { string url = text.Trim(); click = () => FileUtil.OpenUrl(url); hint = "Click to open the link"; }
                 else if (!copied) { string full = text; click = () => { if (ClipPayload.SetText(full, Cfg.ClipboardHistory)) notifier.Show("Copied", Fmt.OneLine(full, 80), null, "copied"); }; hint = "Click to copy it"; }
                 else { click = () => OpenItem(id); hint = "Copied to the clipboard"; }
-                notifier.Show((link ? "Link from " : "Text from ") + SenderName(it), body + "\n" + hint, click, "text item " + id);
+                notifier.ShowItem((link ? "Link from " : "Text from ") + SenderName(it), body + "\n" + hint, click, "text item " + id, id);
             }
             St.MarkHandled(it.Id);
             receiving.Remove(it.Id);
@@ -1736,7 +1737,7 @@ namespace Beam
             }
             string why = !Cfg.AutoSave ? "Click to save it." : "It's larger than " + Fmt.Size(Cfg.MaxSaveBytes) + ". Click to save it.";
             string id = it.Id;
-            if (!Watching(it)) notifier.Show("File from " + from, it.Name + " (" + Fmt.Size(it.Size) + ")\n" + why, () => SaveItemById(id, "reveal", null), "file item " + id);
+            if (!Watching(it)) notifier.ShowItem("File from " + from, it.Name + " (" + Fmt.Size(it.Size) + ")\n" + why, () => SaveItemById(id, "reveal", null), "file item " + id, id);
             St.MarkHandled(it.Id);
             receiving.Remove(it.Id);
             Ack(it);
@@ -1806,8 +1807,13 @@ namespace Beam
                 if (job.Auto)
                 {
                     string path = job.FinalPath;
+                    string itemId = it.Id;
+                    // A picture or a video opens in its conversation (where it can be seen, copied or dragged on, 1.7.1);
+                    // other files show in their folder.
+                    bool media = it.Mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase) || it.Mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
                     if (!Watching(it))
-                        notifier.Show("Saved " + it.Name + " from " + SenderName(it), Fmt.Size(it.Size) + " · Click to show it in the folder", () => FileUtil.ShowInFolder(path), "file item " + it.Id + " saved");
+                        notifier.ShowItem("Saved " + it.Name + " from " + SenderName(it), Fmt.Size(it.Size) + (media ? " · Click to see it in Beam" : " · Click to show it in the folder"),
+                            media ? (Action)(() => OpenItem(itemId)) : () => FileUtil.ShowInFolder(path), "file item " + it.Id + " saved", it.Id);
                     St.MarkHandled(it.Id);
                     Ack(it);
                 }
@@ -1826,7 +1832,7 @@ namespace Beam
             }
             else if (state == JobState.Failed)
             {
-                if (job.Auto || !Watching(it)) notifier.Show("Couldn't save " + it.Name, job.Error ?? "Download failed", () => OpenItem(it.Id), "download failed " + it.Id);
+                if (job.Auto || !Watching(it)) notifier.ShowItem("Couldn't save " + it.Name, job.Error ?? "Download failed", () => OpenItem(it.Id), "download failed " + it.Id, it.Id);
                 // Network trouble: left unhandled so the next catch-up resumes the partial file.
                 // Local problems (folder not writable, disk full): the user was told; Save retries by hand.
                 // A refused sign-in isn't about this file: it's saved after signing in again.
@@ -2979,6 +2985,9 @@ namespace Beam
         readonly bool quiet;
         readonly List<Note> pending = new List<Note>();
         Action click, lastClick;
+        // Opens an item's conversation at that item: a click on several merged notifications about items that came
+        // (Beam 1.7.1; it used to just bring Beam up, wherever it was).
+        public Action<string> OpenItem;
 
         class Note
         {
@@ -2988,6 +2997,7 @@ namespace Beam
             public bool Phone;    // a phone notification's balloon (Beam 1.5)
             public long Newest;   // ...and how new its newest notification is (higher: newer)
             public ToolTipIcon Icon;
+            public string ItemId; // about an item that came (1.7.1)
         }
 
         // A phone notification's balloon. Merged with others due at the same time, a click still opens the Phone panel
@@ -3060,6 +3070,13 @@ namespace Beam
             timer.Start();
         }
 
+        // About an item that came: on its own it does onClick; merged with others, a click opens the newest such item.
+        public void ShowItem(string title, string text, Action onClick, string logLine, string itemId)
+        {
+            Show(title, text, onClick, logLine, false, ToolTipIcon.None);
+            pending[pending.Count - 1].ItemId = itemId;
+        }
+
         void Flush()
         {
             timer.Stop();
@@ -3084,7 +3101,10 @@ namespace Beam
                 int sent = pending.Count(p => p.Sent);
                 title = sent == pending.Count ? "Sent " + sent + " items" : sent == 0 ? pending.Count + " new items" : pending.Count + " updates";
                 text = string.Join("\n", pending.Take(4).Select(p => p.Title)) + (pending.Count > 4 ? "\n…" : "");
-                click = openMain;
+                // Items that came (photos sent from the phone, say): their conversation, at the newest of them.
+                var newest = pending.LastOrDefault(p => p.ItemId != null);
+                if (newest != null && OpenItem != null) { string itemId = newest.ItemId; click = () => OpenItem(itemId); }
+                else click = openMain;
             }
             Log.Write("Notification: " + string.Join(", ", pending.Select(p => p.LogLine)));
             pending.Clear();

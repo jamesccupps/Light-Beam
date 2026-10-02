@@ -13,6 +13,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Beam Family**: the family's own chat, reachable over Tailscale or a public link.
 
 ## Next
+- **Several at once:** select several messages or pictures to copy, drag into another program, save or forward them
+  together, and a gallery of everything a device sent.
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server.
 - **A shared mouse and keyboard** between computers (KVM).
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.

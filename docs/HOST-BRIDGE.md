@@ -29,7 +29,7 @@ The host injects `window.beamHost` before any page script runs (on every documen
 | `deviceName` | `"Desktop"` | This device's name. The app owns it; rename through `setSettings`. |
 | `platform` | `"windows"` | Send it as `X-Beam-Platform` and `platform=` (see §2). |
 | `server` | `"https://beam.tail1234.ts.net"` | The origin the host trusts. The bridge only works on this origin. |
-| `features` | `["transfers","localFiles","settings","clipboard","pickFiles","pickFolder","dragOut","openPanel","remoteDesktop","phoneNotifications","remoteControl"]` | What this host supports (`remoteDesktop` since Beam for Windows 1.3.0, `phoneNotifications` since 1.5.0: see §10, `remoteControl` since 1.6.0: see §11). |
+| `features` | `["transfers","localFiles","settings","clipboard","pickFiles","pickFolder","dragOut","dragOutDone","openPanel","remoteDesktop","phoneNotifications","remoteControl"]` | What this host supports (`remoteDesktop` since Beam for Windows 1.3.0, `phoneNotifications` since 1.5.0: see §10, `remoteControl` since 1.6.0: see §11, `dragOutDone` since 1.7.1: §5). |
 | `debug` | `false` | `true` when Beam.exe runs with `--devtools` (DevTools and extra logging on). |
 
 `beamHost` is informational. Never treat it as a security boundary; the host re-checks everything it is asked to do.
@@ -123,7 +123,7 @@ every device.
 | `copyImage` **(1.6.2)** | `itemId` (an image file), or `png`: base64 PNG bytes | `{}`; `code: "unsupported"` (a type Windows can't read, e.g. WebP or HEIC: send it again as `png`), `"too-big"` (over 64 MB or 100 megapixels), `"not-found"`, `"failed"` | Puts the picture on the clipboard as a bitmap, plus PNG when it has transparency, turned as its EXIF orientation says; honours "keep out of clipboard history". The page's own clipboard can't take images over http. An app before 1.6.2 answers `unknown-type`. |
 | `openLink` | `url` | `{}` | Opens an `http:`, `https:` or `mailto:` link in the default browser. Anything else → `bad-request`. |
 | `remoteDesktop` | `host`: a DNS name or IP address (use the device's `tailscale.dns`, else its Tailscale IP) | `{}`; `code: "bad-request"` if `host` isn't a plain name/address; `code: "failed"` if the client couldn't start | Runs Windows' Remote Desktop client: `mstsc.exe /v:<host>`. Only if `features` has `remoteDesktop`; offer it for devices with `can.remoteDesktop`. |
-| `dragOut` | `itemId` | `{}` or `code: "not-saved"` | Starts a native drag of the local file (call it from `dragstart` on a file bubble with the mouse still down, after `preventDefault()`). Only if `features` has `dragOut`. |
+| `dragOut` | `itemId` | `{}`, `{ copied: true }`, or `code: "not-saved"` / `"clipboard"` | Starts a native drag of the local file (call it from `dragstart` on a file bubble with the mouse still down, after `preventDefault()`); `dragOutDone` follows when it ends. Only if `features` has `dragOut`. **While another device controls this PC** (1.7.1) there is no drag: the file goes onto the clipboard as Explorer's Copy puts it, and the reply is `{ copied: true }` (the page says to paste it). A drag's modal loop on the app's thread held up the remote session's own input, so the mouse button never came back up. |
 | `read` | `conversation`, `ts` | (no reply needed) | Updates the tray unread count. |
 | `viewing` | `conversation`, `visible` | (no reply needed) | Which conversation is on screen. The host doesn't notify about items in it while the window is visible and focused. Send on every conversation switch. Use `"phone"` while the **Phone panel** is open: the host then shows no phone-notification balloons (1.5.0). |
 | `getSettings` | | `{ settings }` | See §6. |
@@ -153,6 +153,7 @@ every device.
 | `conn` | `conn` | Optional: the host's own connection state. |
 | `openPanel` | `panel`: `"settings"` or `"pair"` | Open that dialog (the tray's "Settings" and "Add a device…" land here). Scroll Settings to the "This PC" section. |
 | `openPhoneNotification` | `id` (a phone notification's `id`, `"<phone id>/<key>"`) | Open the **Phone panel** with that notification selected and its reply box focused (no reply action: just selected). If it's gone meanwhile, open the panel. Sent after a click on its balloon (1.5.0, `features` has `phoneNotifications`). |
+| `dragOutDone` | `itemId` | The native drag started by `dragOut` ended (dropped anywhere, or cancelled). Until then a file drag over the page is that drag coming back: no "Drop to send", and a drop on the page sends nothing (1.7.1, `features` has `dragOutDone`). |
 
 **Transfer**
 

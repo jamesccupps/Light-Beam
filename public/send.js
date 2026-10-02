@@ -1208,9 +1208,16 @@ const hasFiles = e => dragHas(e, 'Files');
 let internalDrag = false; // text dragged around inside the page (a selection) must never be sent by accident
 const hasText = e => !internalDrag && !hasFiles(e) && (dragHas(e, 'text/uri-list') || dragHas(e, 'text/plain')) && !dragHas(e, 'application/x-beam-item');
 const hasBeamItem = e => dragHas(e, 'application/x-beam-item');
+// The Windows app's own drag of a file out of the chat (bindDragOut) comes back to the page as a file drag: it must
+// never count as a file dropped here (1.7.1: it was sent straight back). It ends when the app says so (dragOutDone,
+// from Beam for Windows 1.7.1 on), or after 10 minutes in case that never comes.
+let ownDragOut = 0;
+const ownDrag = () => ownDragOut > 0 && Date.now() - ownDragOut < 10 * 60e3;
+function ownDragEnded() { ownDragOut = 0; }
 
 function bindDropTarget(node, conv) {
   node.addEventListener('dragover', e => {
+    if (ownDrag()) return; // (the window's handler below says "no drop here")
     if (!(hasFiles(e) || hasText(e) || hasBeamItem(e)) || !canSendTo(conv)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
@@ -1219,7 +1226,7 @@ function bindDropTarget(node, conv) {
   });
   node.addEventListener('dragleave', () => node.classList.remove('drop-target'));
   node.addEventListener('drop', e => {
-    if (!canSendTo(conv)) return;
+    if (ownDrag() || !canSendTo(conv)) return;
     e.preventDefault();
     e.stopPropagation();
     endDrag();
@@ -1260,12 +1267,14 @@ function bindDragAndDrop() {
   window.addEventListener('dragenter', e => {
     if (!hasFiles(e) || !signedIn()) return;
     e.preventDefault();
+    if (ownDrag()) return; // the app's own drag out of the chat: no "Drop to send"
     dragDepth++;
     $('#drop').classList.add('show');
   });
   window.addEventListener('dragover', e => {
     // Always swallow file drags: otherwise the browser (or WebView2) would open the file instead of Beam.
     if (hasFiles(e)) e.preventDefault();
+    if (ownDrag()) { if (hasFiles(e)) e.dataTransfer.dropEffect = 'none'; return; }
     if (!signedIn()) return;
     if (hasText(e) && e.target.closest?.('#thread')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
     if (hasFiles(e) && !e.target.closest?.('.conv')) {
@@ -1278,6 +1287,7 @@ function bindDragAndDrop() {
   });
   window.addEventListener('drop', e => {
     if (hasFiles(e)) e.preventDefault();
+    if (ownDrag() && hasFiles(e)) { endDrag(); return; } // dropped back on the chat: nothing to send
     if (!signedIn()) { endDrag(); internalDrag = false; return; }
     if (hasFiles(e)) {
       endDrag();
@@ -1299,8 +1309,14 @@ function bindDragOut(node, item) {
     if (HOST) {
       if (hostHas('dragOut')) {
         e.preventDefault();
-        hostCall('dragOut', { itemId: item.id }).catch(err => {
+        if (hostHas('dragOutDone')) ownDragOut = Date.now();
+        hostCall('dragOut', { itemId: item.id }).then(r => {
+          // While this PC is being controlled from another device the app copies the file instead (a drag froze it).
+          if (r?.copied) { ownDragEnded(); toast('Copied. Paste it where you want it (Ctrl+V): files can’t be dragged out of Beam while this PC is being controlled.', { ms: 8000 }); }
+        }).catch(err => {
+          ownDragEnded();
           if (err.code === 'not-saved') toast('Save the file first, then drag it.', { action: 'Save', onAction: () => hostDo('saveFile', { itemId: item.id }) });
+          else if (err.code === 'clipboard') toast('Couldn’t copy it. Try again.', { error: true });
         });
       }
       return;
