@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/SettingsRow">
+
+    <LinearLayout style="@style/SettingsTexts">
+
+        <TextView
+            android:id="@+id/title"
+            style="@style/SettingsTitle" />
+
+        <TextView
+            android:id="@+id/summary"
+            style="@style/SettingsSummary" />
+    </LinearLayout>
+</LinearLayout>

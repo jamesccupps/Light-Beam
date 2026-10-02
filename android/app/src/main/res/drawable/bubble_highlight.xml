@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Outlines the message a search result opened. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <corners android:radius="18dp" />
+    <solid android:color="@color/drop_scrim" />
+    <stroke android:width="2dp" android:color="@color/accent" />
+</shape>

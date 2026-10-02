@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Beam talks to the user's own server, which may be a plain-HTTP LAN address such as http://192.168.1.5:8765,
+    or a NAS behind a reverse proxy with a certificate from the user's own authority (installed under
+    Settings › Security › Encryption & credentials), so user-installed CAs are trusted too.
+-->
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration,AcceptsUserCertificates">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

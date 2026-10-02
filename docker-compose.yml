@@ -1,0 +1,70 @@
+# Beam on a NAS or server, as its own Tailscale machine called "beam": its address is
+# https://beam.<your-tailnet>.ts.net wherever it runs. See README → "Docker and NAS".
+#
+# 1. Make an auth key at https://login.tailscale.com/admin/settings/keys (pre-approved; not reusable).
+#    If your tailnet uses tags, add tag:beam to it: tagged machines don't expire. Otherwise, after the first start,
+#    open the "beam" machine in the Tailscale admin console and choose "Disable key expiry", or Beam drops off
+#    the tailnet when its key expires (after 180 days by default).
+# 2. Next to this file, create .env:
+#      TS_AUTHKEY=tskey-auth-...
+#      PUID=1000      # the user that owns ./data. Synology: often 1026, Unraid: 99, TrueNAS apps: 568
+#      PGID=1000      # its group. Synology and Unraid: 100 (users)
+#    and make ./data belong to it:  mkdir -p data && sudo chown -R 1000:1000 data   (your PUID:PGID)
+# 3. docker compose up -d, then open https://beam.<your-tailnet>.ts.net
+#    Moving an existing Beam here instead of starting fresh: README → "Moving Beam".
+#
+# Notes: Beam needs a hostname of its own (it can't live under a sub-path). If you put another reverse proxy in
+# front of it anyway, allow request bodies of at least 9 MB (nginx: client_max_body_size 9m) for the 8 MB upload
+# chunks, and list the proxy's address in BEAM_TRUSTED_PROXIES.
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.102.4 # pinned; update deliberately (hub.docker.com/r/tailscale/tailscale/tags)
+    hostname: beam
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SERVE_CONFIG=/config/serve.json
+      - TS_SOCKET=/var/run/tailscale/tailscaled.sock
+      # Userspace networking needs no /dev/net/tun or NET_ADMIN (Synology, QNAP and most NAS systems lack them).
+      # Beam reaches other tailnet machines (for moves) through this proxy.
+      - TS_USERSPACE=true
+      - TS_OUTBOUND_HTTP_PROXY_LISTEN=127.0.0.1:1055
+      - TS_EXTRA_ARGS=${TS_EXTRA_ARGS:-} # e.g. --advertise-tags=tag:beam
+    volumes:
+      # The machine's Tailscale identity is kept with Beam's data: moving ./data to new hardware keeps the address.
+      - ./data/tailscale:/var/lib/tailscale
+      - ./deploy/serve.json:/config/serve.json:ro
+      - tailscale-socket:/var/run/tailscale
+    restart: unless-stopped
+    # Kernel networking instead (a little faster; needs the tun device):
+    #   environment: TS_USERSPACE=false   (and drop TS_OUTBOUND_HTTP_PROXY_LISTEN / BEAM_TAILNET_PROXY)
+    #   devices: [/dev/net/tun:/dev/net/tun]
+    #   cap_add: [net_admin]
+
+  beam:
+    build: .
+    network_mode: service:tailscale # reachable only through Tailscale
+    user: "${PUID:-1000}:${PGID:-1000}"
+    init: true
+    environment:
+      - BEAM_HOST=127.0.0.1
+      # tailscaled's LocalAPI: machine names, whois (for "sign in with Tailscale") and the served address.
+      - BEAM_TAILSCALE_SOCKET=/var/run/tailscale/tailscaled.sock
+      - BEAM_TAILNET_PROXY=http://127.0.0.1:1055
+      # Optional: Beam learns its address from the first visit through Tailscale.
+      - BEAM_PUBLIC_URL=${BEAM_PUBLIC_URL:-}
+    volumes:
+      - ./data:/data
+      - tailscale-socket:/var/run/tailscale:ro
+    depends_on:
+      - tailscale
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8765/api/hello').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  tailscale-socket:

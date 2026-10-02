@@ -1,0 +1,17 @@
+# Gradle / IDE
+.gradle/
+.kotlin/
+build/
+/app/build/
+/captures/
+.idea/
+*.iml
+.cxx/
+.externalNativeBuild/
+local.properties
+
+# Release signing (never commit)
+keystore/
+keystore.properties
+*.jks
+*.keystore

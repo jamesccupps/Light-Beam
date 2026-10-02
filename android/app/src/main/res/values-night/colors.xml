@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0E1014</color>
+    <color name="surface">#171A20</color>
+    <color name="surface2">#20242C</color>
+    <color name="border">#2A2F39</color>
+    <color name="text">#E8EAEE</color>
+    <color name="muted">#9AA2AF</color>
+    <color name="accent">#8D80FF</color>
+    <color name="on_accent">#0E1014</color>
+    <color name="accent_soft">#252148</color>
+    <color name="mine">#4B3FD6</color>
+    <color name="mine_ink">#FFFFFF</color>
+    <color name="mine_muted">#C9C3FF</color>
+    <color name="online">#34D399</color>
+    <color name="danger">#FF6B6B</color>
+    <color name="drop_scrim">#448D80FF</color>
+</resources>

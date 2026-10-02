@@ -1,0 +1,18 @@
+# Store text with LF in the repository; check out with the platform's endings.
+* text=auto
+
+# Windows scripts keep CRLF, shell scripts keep LF, wherever they are checked out.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.vbs text eol=crlf
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Binary files
+*.dll binary
+*.exe binary
+*.ico binary
+*.png binary
+*.jar binary
+*.webp binary
