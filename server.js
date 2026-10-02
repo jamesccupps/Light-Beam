@@ -1074,7 +1074,11 @@ function authOf(req) {
   let auth = null;
   for (const [secret, source, name] of candidates) {
     if (secret && (auth = authBySecret(secret, source, req))) {
-      if (name === HOST_COOKIE && auth.deviceId) logOnce(`host-cookie:${auth.deviceId}`, `${whoName(auth.deviceId)}'s pages use the ${HOST_COOKIE} sign-in cookie`);
+      // (once per device while the server runs; not logOnce, whose summary a minute later needs a `more` text)
+      if (name === HOST_COOKIE && auth.deviceId && !hostCookieSeen.has(auth.deviceId)) {
+        hostCookieSeen.add(auth.deviceId);
+        log.info(`${whoName(auth.deviceId)}'s pages use the ${HOST_COOKIE} sign-in cookie`);
+      }
       break;
     }
   }
@@ -1082,6 +1086,7 @@ function authOf(req) {
 }
 
 const HOST_COOKIE = '__Host-beam_key';
+const hostCookieSeen = new Set(); // devices whose pages used HOST_COOKIE, logged once each
 
 function authBySecret(secret, source, req) {
   if (keyMatches(secret)) return { via: 'master', tokenId: null, hash: null, token: null, deviceId: null, user: 'owner', role: 'owner', scope: null, source };
