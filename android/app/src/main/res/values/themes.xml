@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.Beam" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorOnPrimary">@color/on_accent</item>
+        <item name="colorPrimaryContainer">@color/accent_soft</item>
+        <item name="colorOnPrimaryContainer">@color/text</item>
+        <item name="colorSecondary">@color/accent</item>
+        <item name="colorOnSecondary">@color/on_accent</item>
+        <item name="colorSecondaryContainer">@color/accent_soft</item>
+        <item name="colorOnSecondaryContainer">@color/text</item>
+        <item name="colorTertiary">@color/accent</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="colorOnBackground">@color/text</item>
+        <item name="colorSurface">@color/bg</item>
+        <item name="colorOnSurface">@color/text</item>
+        <item name="colorSurfaceVariant">@color/surface2</item>
+        <item name="colorOnSurfaceVariant">@color/muted</item>
+        <item name="colorSurfaceContainerLowest">@color/surface</item>
+        <item name="colorSurfaceContainerLow">@color/surface</item>
+        <item name="colorSurfaceContainer">@color/surface</item>
+        <item name="colorSurfaceContainerHigh">@color/surface</item>
+        <item name="colorSurfaceContainerHighest">@color/surface2</item>
+        <item name="colorOutline">@color/muted</item>
+        <item name="colorOutlineVariant">@color/border</item>
+        <item name="colorError">@color/danger</item>
+        <item name="android:windowLightStatusBar">@bool/light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/light_system_bars</item>
+        <item name="snackbarStyle">@style/Widget.Beam.Snackbar</item>
+    </style>
+
+    <style name="Widget.Beam.Snackbar" parent="Widget.Material3.Snackbar" />
+
+    <!-- The share-sheet / clipboard chooser: a see-through activity that shows a bottom sheet. -->
+    <style name="Theme.Beam.Translucent">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+
+    <!-- Remote control: the PC's screen, black around it, nothing else. -->
+    <style name="Theme.Beam.Remote">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+
+    <!-- Invisible helper activity for notification actions (open/share a saved file). -->
+    <style name="Theme.Beam.Invisible" parent="Theme.Beam.Translucent">
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+
+    <style name="TextAppearance.Beam.Badge" parent="TextAppearance.Material3.LabelSmall">
+        <item name="android:textColor">@color/on_accent</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <style name="Widget.Beam.BubbleButton" parent="Widget.Material3.Button.TextButton">
+        <item name="android:minHeight">36dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:paddingStart">10dp</item>
+        <item name="android:paddingEnd">10dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <!-- Photos in bubbles: rounded like the bubbles themselves. -->
+    <style name="ShapeAppearance.Beam.Photo" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">18dp</item>
+    </style>
+
+</resources>

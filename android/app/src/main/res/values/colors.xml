@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light palette (matches the web app's CSS tokens) -->
+    <color name="bg">#F5F6F8</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface2">#EEF0F4</color>
+    <color name="border">#E1E4EA</color>
+    <color name="text">#14161B</color>
+    <color name="muted">#5F6672</color>
+    <color name="accent">#5A4BF0</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="accent_soft">#EBE9FF</color>
+    <color name="mine">#5A4BF0</color>
+    <color name="mine_ink">#FFFFFF</color>
+    <color name="mine_muted">#D6D2FF</color>
+    <color name="online">#16A34A</color>
+    <color name="danger">#D23A3A</color>
+    <color name="drop_scrim">#335A4BF0</color>
+    <!-- The same in light and dark: launcher and share-sheet icons (shortcuts). -->
+    <color name="accent_fixed">#5A4BF0</color>
+    <color name="accent_soft_fixed">#EBE9FF</color>
+
+</resources>

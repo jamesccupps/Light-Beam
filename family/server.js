@@ -1,0 +1,294 @@
+#!/usr/bin/env node
+// Beam Family: the family's own chat (spaces, channels, direct and group messages), separate from Beam's device hub.
+// It runs as its own server with its own data, on 127.0.0.1 behind `tailscale serve` (people on the tailnet, or
+// whom the machine is shared with, are signed in by Tailscale) and Funnel (the public link: invite + password).
+// docs/FAMILY.md describes it. `node family/server.js help` lists the commands.
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+try { process.loadEnvFile(path.join(ROOT, '.env')); } catch {}
+
+const { createLogger } = require('../lib/log');
+const { makePrivate } = require('../lib/private-dir');
+const tailscale = require('../lib/tailscale');
+const { version: VERSION } = require('../package.json');
+const { openDb } = require('./lib/db');
+const { send, httpError, createRouter, createStatic } = require('./lib/http');
+const auth = require('./lib/auth');
+const { createHub } = require('./lib/events');
+const { createPeople } = require('./lib/people');
+const { createChat } = require('./lib/chat');
+const { createFiles } = require('./lib/files');
+const { createPush } = require('./lib/push');
+
+const env = process.env;
+const num = (v, fallback) => (v === undefined || v === '' || isNaN(Number(v)) ? fallback : Number(v));
+const now = () => Date.now();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const MB = 1024 * 1024;
+
+// ---------------------------------------------------------------- config
+
+const DATA_DIR = path.resolve(env.BEAM_FAMILY_DATA || path.join(ROOT, 'family-data'));
+const HOST = env.BEAM_FAMILY_HOST || '127.0.0.1';
+const PORT = num(env.BEAM_FAMILY_PORT, 8766);
+const FILE = {
+  db: path.join(DATA_DIR, 'family.db'),
+  control: path.join(DATA_DIR, 'control.key'),
+  stop: path.join(DATA_DIR, 'stop'),
+};
+const DIR = { logs: path.join(DATA_DIR, 'logs'), files: path.join(DATA_DIR, 'files'), uploads: path.join(DATA_DIR, 'uploads'), thumbs: path.join(DATA_DIR, 'thumbs'), avatars: path.join(DATA_DIR, 'avatars') };
+const config = {
+  publicUrl: String(env.BEAM_FAMILY_URL || '').trim().replace(/\/+$/, ''),
+  spaceName: env.BEAM_FAMILY_NAME || 'Family',
+  maxUpload: num(env.BEAM_FAMILY_MAX_UPLOAD_MB, 2048) * MB,
+  maxStorage: num(env.BEAM_FAMILY_MAX_STORAGE_GB, 100) * 1024 * MB,
+  owner: String(env.BEAM_FAMILY_OWNER || '').trim().toLowerCase(),
+  postsPer10s: num(env.BEAM_FAMILY_POSTS_PER_10S, 20), // (how fast one person may post; tests that post a lot raise it)
+  tailscale: env.BEAM_TAILSCALE !== 'off',
+};
+const LOCAL_URL = `http://${HOST.includes(':') ? `[${HOST}]` : HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}`;
+const EXIT_FATAL = 3;
+
+const log = createLogger();
+
+// ---------------------------------------------------------------- the server
+
+function serve() {
+  for (const d of [DATA_DIR, ...Object.values(DIR)]) fs.mkdirSync(d, { recursive: true });
+  log.setFile(path.join(DIR.logs, 'family.log'));
+  makePrivate(DATA_DIR, { log, env, label: 'family data folder' });
+  if (fs.existsSync(FILE.stop)) fs.rmSync(FILE.stop, { force: true });
+  let db;
+  try {
+    db = openDb(FILE.db);
+  } catch (err) {
+    log.error(`Can't open the database ${FILE.db}: ${err.message}`);
+    process.exit(EXIT_FATAL);
+  }
+  // A secret only this account can read: `family/server.js stop` proves it's this machine's owner with it.
+  let control;
+  try { control = fs.readFileSync(FILE.control, 'utf8').trim(); } catch {}
+  if (!control) {
+    control = crypto.randomBytes(32).toString('base64url');
+    fs.writeFileSync(FILE.control, control, { mode: 0o600 });
+  }
+
+  // The machine owner's Tailscale login (they become the owner on their first visit), refreshed now and then.
+  const ts = config.tailscale ? tailscale.createClient({ socket: env.BEAM_TAILSCALE_SOCKET || '' }) : null;
+  let machineOwner = '';
+  const refreshOwner = async () => {
+    if (!ts) return;
+    const status = await ts.status().catch(() => null);
+    const login = status?.User?.[status?.Self?.UserID]?.LoginName;
+    if (login) machineOwner = String(login).toLowerCase();
+  };
+  refreshOwner();
+  setInterval(refreshOwner, 10 * 60e3).unref();
+
+  const hub = createHub({ onPresence: (user, online) => hub.emit(null, 'presence', { person: user, online }) });
+  const ctx = {
+    db, hub, log, config, version: VERSION, dirs: DIR,
+    ownerLogin: () => config.owner || machineOwner,
+    spaceName: () => ctx.chat.spaceName(),
+  };
+  ctx.people = createPeople(ctx);
+  ctx.chat = createChat(ctx);
+  ctx.files = createFiles(ctx);
+  ctx.push = createPush(ctx, { file: path.join(DATA_DIR, 'vapid.json'), contact: /^https:/.test(config.publicUrl) ? config.publicUrl : '' });
+  const router = createRouter([...ctx.people.routes, ...ctx.chat.routes, ...ctx.files.routes, ...ctx.push.routes]);
+  const serveStatic = createStatic(path.join(__dirname, 'public'));
+
+  let server;
+  async function shutdown(reason) {
+    log.info(`Stopping (${reason})`);
+    hub.closeAll();
+    server.close();
+    setTimeout(() => process.exit(0), 3000).unref();
+    await new Promise(r => server.close(r));
+    try { db.close(); } catch {}
+    process.exit(0);
+  }
+
+  async function handle(req, res) {
+    const url = new URL(req.url, 'http://family');
+    const p = url.pathname;
+    try {
+      if (p.startsWith('/api/')) {
+        if (p === '/api/hello') return send(res, 200, { family: true, version: VERSION });
+        if (p === '/api/admin/shutdown') {
+          const given = Buffer.from(String(req.headers['x-family-control'] || ''));
+          const ok = req.method === 'POST' && auth.fromLoopback(req) && !req.headers['x-forwarded-for'] && given.length === Buffer.byteLength(control) && crypto.timingSafeEqual(given, Buffer.from(control));
+          if (!ok) throw httpError(404, 'Not found');
+          send(res, 202, {});
+          return shutdown('requested with "family/server.js stop"');
+        }
+        if (req.method !== 'GET' && req.method !== 'HEAD' && !auth.sameOrigin(req)) throw httpError(403, 'Changes must come from Beam Family’s own pages');
+        const route = router(req.method, p);
+        if (!route) throw httpError(404, 'Not found');
+        if (route.allowed) return send(res, 405, { error: 'Method not allowed' }, { Allow: route.allowed.join(', ') });
+        return await route.handler(req, res, route.params, url);
+      }
+      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, HEAD' });
+      // The app's pages: its files, and index.html for its own routes (/c/…, /join/…, /settings…).
+      const rel = p === '/' ? 'index.html' : p.slice(1);
+      const appRoute = /^\/(c|join|dm|settings|admin)(\/|$)/.test(p);
+      if (await serveStatic(req, res, rel, { fallback: appRoute ? 'index.html' : null })) return;
+      send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
+    } catch (err) {
+      // An error with a status is an answer (its message is for the person); anything else is a bug.
+      const status = err.status || 500;
+      if (!err.status) log.error(`${req.method} ${p}: ${err.stack || err.message}`);
+      const headers = {};
+      if (status === 429 && err.extra?.retryAfter) headers['Retry-After'] = String(err.extra.retryAfter);
+      if (res.headersSent) return res.destroy();
+      send(res, status, { error: err.status ? err.message : 'Something went wrong on the server' }, headers);
+    }
+  }
+
+  // (a request has 15 minutes to arrive in full: enough for a 16 MB piece of a file over a slow link, not for ever)
+  server = http.createServer({ requestTimeout: 15 * 60e3, headersTimeout: 30_000, keepAliveTimeout: 65_000 }, handle);
+  server.on('clientError', (err, socket) => { try { socket.destroy(); } catch {} });
+  server.listen(PORT, HOST, () => {
+    log.info(`Beam Family ${VERSION} is running on ${HOST}:${PORT}; data in ${DATA_DIR}${config.publicUrl ? `; address ${config.publicUrl}` : ''}`);
+    process.send?.({ ready: true });
+  });
+  server.on('error', err => {
+    log.error(`Can't listen on ${HOST}:${PORT}: ${err.message}`);
+    process.exit(err.code === 'EADDRINUSE' ? EXIT_FATAL : 1);
+  });
+  process.on('message', m => { if (m?.cmd === 'shutdown') shutdown('the supervisor is stopping'); });
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => shutdown(signal));
+  process.on('uncaughtException', err => { log.error(`Uncaught: ${err.stack || err.message}`); process.exit(1); });
+  process.on('unhandledRejection', err => log.error(`Unhandled: ${err?.stack || err}`));
+}
+
+// ---------------------------------------------------------------- commands
+
+async function runningServer() {
+  try {
+    const hello = await (await fetch(`${LOCAL_URL}/api/hello`, { signal: AbortSignal.timeout(2000) })).json();
+    return Boolean(hello.family);
+  } catch {
+    return false;
+  }
+}
+
+async function commandStop() {
+  try { fs.writeFileSync(FILE.stop, String(now())); } catch {}
+  if (!(await runningServer())) return console.log('Beam Family is not running (the supervisor, if any, will not restart it).');
+  const control = fs.readFileSync(FILE.control, 'utf8').trim();
+  await fetch(`${LOCAL_URL}/api/admin/shutdown`, { method: 'POST', headers: { 'X-Family-Control': control } }).catch(() => {});
+  for (let i = 0; i < 50 && (await runningServer()); i++) await sleep(200);
+  console.log('Beam Family stopped.');
+}
+
+// An invite link, made straight in the database (works whether or not the server runs).
+function commandInvite(flags, options) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const db = openDb(FILE.db);
+  try {
+    const owner = flags.has('--owner');
+    if (owner && db.get("SELECT 1 FROM users WHERE role = 'owner'")) throw new Error('The family space already has an owner');
+    if (!owner && !db.get("SELECT 1 FROM users WHERE role = 'owner'")) throw new Error('Set up the owner first: open Beam Family over Tailscale on your own device, or use "invite --owner"');
+    const role = owner ? 'owner' : flags.has('--admin') ? 'admin' : 'member';
+    const invite = auth.createInvite(db, { createdBy: null, role, maxUses: owner ? 1 : Math.min(50, Math.max(1, num(options.uses, 1))), days: Math.min(30, Math.max(1, num(options.days, 7))) });
+    const base = config.publicUrl || LOCAL_URL;
+    console.log(`Invite (${role}, until ${new Date(invite.expiresAt).toLocaleString()}):\n${base}/join/${invite.code}`);
+  } finally {
+    db.close();
+  }
+}
+
+function commandStatus() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const db = openDb(FILE.db);
+  try {
+    const people = db.get('SELECT count(*) n FROM users WHERE disabled_at IS NULL').n;
+    const messages = db.get("SELECT count(*) n FROM messages WHERE deleted_at IS NULL AND kind = 'user'").n;
+    console.log(`Beam Family: ${people} ${people === 1 ? 'person' : 'people'}, ${messages} messages; data in ${DATA_DIR}`);
+  } finally {
+    db.close();
+  }
+}
+
+// Runs the server as a child and restarts it when it crashes (1 s, 2 s, 4 s … up to a minute).
+function supervise(args) {
+  fs.mkdirSync(DIR.logs, { recursive: true });
+  log.setFile(path.join(DIR.logs, 'supervisor.log'));
+  try { fs.rmSync(FILE.stop, { force: true }); } catch {}
+  let child = null;
+  let stopping = false;
+  let failures = 0;
+  const stopRequested = () => fs.existsSync(FILE.stop);
+  const finish = code => { try { fs.rmSync(FILE.stop, { force: true }); } catch {} process.exit(code); };
+  const start = () => {
+    if (stopping || stopRequested()) return finish(0);
+    const started = now();
+    child = spawn(process.execPath, [__filename, ...args], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], windowsHide: true, env: { ...process.env, BEAM_SUPERVISED: '1' } });
+    child.on('exit', (code, signal) => {
+      child = null;
+      if (stopping || code === 0 || stopRequested()) return finish(code ?? 0);
+      if (code === EXIT_FATAL) { log.error('Beam Family stopped because of a setup problem (see family.log); not restarting.'); return finish(code); }
+      failures = now() - started > 60_000 ? 1 : failures + 1;
+      const delay = Math.min(60_000, 1000 * 2 ** (failures - 1));
+      log.warn(`Beam Family stopped unexpectedly (${signal || `exit ${code}`}); restarting in ${Math.round(delay / 1000)} s`);
+      setTimeout(start, delay);
+    });
+  };
+  const stop = () => {
+    stopping = true;
+    if (!child) return finish(0);
+    try { child.send({ cmd: 'shutdown' }); } catch { child.kill(); }
+    setTimeout(() => child?.kill(), 10_000).unref();
+  };
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) { try { process.on(signal, stop); } catch {} }
+  log.info(`Supervising Beam Family ${VERSION} (restarts it if it crashes)`);
+  start();
+}
+
+const HELP = `Beam Family ${VERSION}
+
+  node family/server.js                          run the server
+  node family/server.js --supervise              run it and restart it if it crashes
+  node family/server.js stop                     stop a running server cleanly (and its supervisor)
+  node family/server.js invite [--admin] [--uses n] [--days n]
+                                                 print an invite link
+  node family/server.js invite --owner           the owner's link, when nobody owns the family space yet
+  node family/server.js status                   how many people and messages
+
+Settings (environment or .env): BEAM_FAMILY_DATA (${DATA_DIR}), BEAM_FAMILY_HOST/PORT (${HOST}:${PORT}),
+BEAM_FAMILY_URL (the address people use), BEAM_FAMILY_NAME, BEAM_FAMILY_OWNER, BEAM_FAMILY_MAX_UPLOAD_MB,
+BEAM_FAMILY_MAX_STORAGE_GB.`;
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const flags = new Set(argv.filter(a => a.startsWith('--')));
+  const options = {};
+  for (let i = 0; i < argv.length; i++) if (/^--(uses|days)$/.test(argv[i])) options[argv[i].slice(2)] = argv[i + 1];
+  const positional = argv.filter((a, i) => !a.startsWith('--') && !/^--(uses|days)$/.test(argv[i - 1] || ''));
+  const [command] = positional;
+  if (flags.has('--help') || command === 'help') return console.log(HELP);
+  if (flags.has('--supervise')) return supervise(argv.filter(a => a !== '--supervise'));
+  if (!command) return serve();
+  const commands = { stop: commandStop, invite: () => commandInvite(flags, options), status: commandStatus };
+  if (!commands[command]) {
+    console.error(`Unknown command "${command}".\n\n${HELP}`);
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    await commands[command]();
+  } catch (err) {
+    console.error(`beam family: ${err.message}`);
+    process.exitCode = 1;
+  }
+}
+
+main();

@@ -1,0 +1,39 @@
+# ---- Private: never commit ----
+# Beam's data: items, files, devices, sign-ins, the key, logs. Anchored to the root: a bare "data/" also hid the
+# Android app's source package (android/app/src/main/java/app/beam/android/data/) from git until 1.6.2.
+/data/
+/tailscale-state/
+# Beam Family's data (messages, files, sign-ins, its push key)
+/family-data/
+# Server settings for this machine (may hold tokens later, e.g. BEAM_NTFY_TOKEN)
+.env
+# Android release signing key
+android/keystore/
+android/keystore.properties
+*.jks
+*.keystore
+# Exports and backups contain everything, including the key
+beam-export-*.tar.gz
+beam-backup.tgz
+*.tar.gz
+
+# ---- Built or downloaded ----
+node_modules/
+dist/
+windows/bin/
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+*.apk
+*.aab
+
+# ---- Test and tool output ----
+test/web/shots/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

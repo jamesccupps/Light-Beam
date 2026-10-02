@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Launcher shortcuts and Direct Share. The per-device shortcuts are dynamic (Shortcuts.kt): the same ones
+    appear in Android's share sheet ("Share → Desktop" in one tap) and name the conversation notifications.
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_clipboard"
+        android:shortcutId="send_clipboard"
+        android:shortcutLongLabel="@string/send_clipboard"
+        android:shortcutShortLabel="@string/send_clipboard">
+        <intent
+            android:action="app.beam.android.action.SEND_CLIPBOARD"
+            android:targetClass="app.beam.android.ui.SendActivity"
+            android:targetPackage="app.beam.android" />
+    </shortcut>
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_search"
+        android:shortcutId="search"
+        android:shortcutLongLabel="@string/search"
+        android:shortcutShortLabel="@string/search">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="app.beam.android.ui.SearchActivity"
+            android:targetPackage="app.beam.android" />
+    </shortcut>
+
+    <share-target android:targetClass="app.beam.android.ui.SendActivity">
+        <data android:mimeType="text/*" />
+        <data android:mimeType="image/*" />
+        <data android:mimeType="*/*" />
+        <category android:name="app.beam.android.category.SHARE_TARGET" />
+    </share-target>
+</shortcuts>

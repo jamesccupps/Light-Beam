@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- "Ring this phone": vibrates along with the alarm sound. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Android 16: big transfers may show as a Live Update (progress chip in the status bar). -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Background receiving: messages and files from the user's other devices. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <!-- Sending and saving large files. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Settings › Background use: Android's one-tap "let Beam run in the background" prompt. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Scanning the pairing QR code. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Installing updates downloaded from the user's Beam server. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Android 12+: Beam may update itself without asking each time (Android still decides). -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+
+    <queries>
+        <!-- To pass links Beam doesn't handle on to the browser. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+        <!-- "Open Tailscale" in the offline banner. -->
+        <package android:name="com.tailscale.ipn" />
+        <!-- The composer's camera button. -->
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+        <!-- "Notifications on your PCs": the apps the user can pick from (launcher apps only). -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- "Remote Desktop" on a Windows PC: only offered when a Remote Desktop app handles rdp:// links. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="rdp" />
+        </intent>
+    </queries>
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <application
+        android:name=".BeamApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Beam"
+        tools:targetApi="36">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Launcher shortcuts (Send clipboard, Search) and the Direct Share target. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+
+        <activity
+            android:name=".ui.ThreadActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ui.SearchActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity"
+            android:windowSoftInputMode="adjustResize|stateVisible" />
+
+        <activity
+            android:name=".ui.PairActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <!--
+            Remote control (1.6): the server's viewer page. Rotating or a keyboard arriving keeps the page (and its
+            session); one viewer at a time. No permission: it only receives the PC's screen.
+        -->
+        <activity
+            android:name=".ui.RemoteActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Beam.Remote"
+            android:windowSoftInputMode="adjustResize|stateHidden" />
+
+        <activity
+            android:name=".ui.PhoneNotificationsActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.SettingsActivity"
+            android:windowSoftInputMode="adjustResize|stateHidden" />
+
+        <!-- Share sheet target (also Direct Share: "Share → Desktop") and the Quick Settings chooser. -->
+        <activity
+            android:name=".ui.SendActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Beam.Translucent">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            The clipboard tile and the app's own "Send clipboard": SendActivity reads the clipboard and may send it
+            without asking only when started through this alias, which no other app can start.
+        -->
+        <activity-alias
+            android:name=".ui.ClipboardSendActivity"
+            android:exported="false"
+            android:targetActivity=".ui.SendActivity" />
+
+        <activity
+            android:name=".ui.OpenActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Beam.Invisible" />
+
+        <!-- Approve a new device's sign-in. Not exported: only Beam and its notifications open it. -->
+        <activity
+            android:name=".ui.ApproveActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Beam.Translucent" />
+
+        <!--
+            Sign-in QR codes encode https://<server>/?approve=CODE; pairing links https://<server>/?key=…
+            Beam's servers are usually on Tailscale (*.ts.net). Unverified links: Android 12+ opens them in
+            the browser unless the user adds them under App info › Open by default (Settings › Open sign-in
+            codes in Beam goes straight there). Other links go on to the browser.
+        -->
+        <activity
+            android:name=".ui.ApproveLinkActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Beam.Invisible">
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="*.ts.net"
+                    android:path="/"
+                    android:scheme="https" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.UpdateActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Beam.Translucent" />
+
+        <!-- ZXing's scanner, allowed to follow the device orientation. -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:screenOrientation="fullSensor"
+            tools:ignore="DiscouragedApi"
+            tools:replace="screenOrientation" />
+
+        <!-- Photos taken with the composer's camera button, handed to the upload service. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <service
+            android:name=".service.ConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+
+        <service
+            android:name=".service.TransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".service.ClipboardTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_clipboard"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="false" />
+        </service>
+
+        <!-- "Notifications on your PCs": the notifications of the apps the user picked (one-time access). -->
+        <service
+            android:name=".phone.ShareListenerService"
+            android:exported="true"
+            android:label="@string/pc_notifications_title"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".phone.PcNotificationsTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_pc_notifications"
+            android:label="@string/pc_notifications_tile"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="true" />
+        </service>
+
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".service.ActionReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".service.InstallReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

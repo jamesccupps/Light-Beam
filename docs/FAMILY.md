@@ -1,0 +1,115 @@
+# Beam Family
+
+The family's own chat, like Discord or Teams but on your own machine: a family space with channels, direct and group
+conversations, photos and files, replies, reactions, mentions, notifications, history kept for good, and search.
+
+It is a **separate server** (`family/server.js`) with its own process, data, port and address. Beam's device hub
+(clipboard, files between your devices, remote control, phone notifications) is a different server and doesn't
+change. That separation is deliberate: Beam Family can be opened from the internet (the public link), and the
+internet must never be one bug away from the server that can control your PCs.
+
+## Running it
+
+```
+node family/server.js               run it (127.0.0.1:8766)
+node family/server.js --supervise   run it and restart it if it crashes
+node family/server.js stop          stop it cleanly (and its supervisor)
+node family/server.js invite [--admin] [--uses n] [--days n]
+node family/server.js invite --owner   the owner's link, when nobody owns it yet
+node family/server.js status
+```
+
+Settings (environment or `.env`):
+
+| Setting | Default | |
+|---|---|---|
+| `BEAM_FAMILY_DATA` | `family-data/` | its data folder (made private to the account it runs as) |
+| `BEAM_FAMILY_HOST`, `BEAM_FAMILY_PORT` | `127.0.0.1`, `8766` | where it listens: keep it on 127.0.0.1, behind `tailscale serve` / Funnel |
+| `BEAM_FAMILY_URL` | — | the address people use (invite links, push); also read by Beam's own server for its "Beam Family" link |
+| `BEAM_FAMILY_NAME` | `Family` | the first space's name (rename it later in the app) |
+| `BEAM_FAMILY_OWNER` | the machine's Tailscale user | whose first visit over Tailscale sets them up as the owner |
+| `BEAM_FAMILY_MAX_UPLOAD_MB` | `2048` | the largest file |
+| `BEAM_FAMILY_MAX_STORAGE_GB` | `100` | all files together; when full, uploads are refused (nothing is ever deleted to make room) |
+
+It needs Node 22.13 or later (it uses the built-in `node:sqlite`). No other dependencies besides Beam's own
+(`qrcode`, for invite QR codes).
+
+## How people get in
+
+One address for everyone, e.g. `https://<machine>.<tailnet>.ts.net:8443`:
+
+```
+tailscale serve --bg --https=8443 http://127.0.0.1:8766     tailnet only
+tailscale funnel --bg --https=8443 http://127.0.0.1:8766    also the public link (Funnel: ports 443, 8443, 10000)
+```
+
+Funnel is per port: Beam's own server stays on 443, tailnet-only.
+
+- **Over Tailscale** (your tailnet, and people you **share the machine with** in the Tailscale admin console):
+  `tailscale serve` adds `Tailscale-User-Login` / `-Name` / `-Profile-Pic` and strips any a client sends. A known
+  login is signed in at once. An invite link opened over Tailscale binds that login (no password needed).
+  - Sharing a machine needs a Tailscale account and app on the other person's side, and shares **every port** of it
+    (Beam's own server too) unless the tailnet policy limits `autogroup:shared`, e.g. to `tcp:8443`. For family
+    members, the public link is usually simpler.
+- **The public link** (Funnel): never any identity headers. People join with an invite link and choose a name and a
+  password; afterwards they sign in with them. Sessions are cookies (`fam_s`, HttpOnly, SameSite=Lax, Secure on
+  https), kept 90 days from their last use.
+- **The owner**: the machine's Tailscale user (or `BEAM_FAMILY_OWNER`) on their first visit over Tailscale, or whoever
+  opens `invite --owner`'s link. They get the space "Family" with #general and #photos.
+- **Roles**: owner (everything), admins (invites, people, channels, deleting any message), members.
+- **Invites**: single use by default, 7 days, shown once (with a QR code), withdrawable. A **password reset link** for
+  one person (admins: People & channels → ⋯) lets them choose a new password once within 3 days.
+- **Turning someone off** ends their sessions, live connection and notifications at once; their messages stay.
+
+## The app
+
+`family/public/` (no build step): the browser, and as an installed app (PWA) on phones and computers. On an iPhone or
+iPad, notifications need the home-screen app (Share → Add to Home Screen). Beam's own apps link to it: the web app's
+♥ button and the Android app's menu open it in the browser, where notifications work.
+
+## Security model
+
+- It listens on 127.0.0.1 only. Tailscale's identity headers are believed only from this machine (where `tailscale
+  serve` connects from). **Limit:** a program running on the server machine itself can connect directly and claim
+  any identity, as with Beam's own server: the machine is trusted.
+- Changes need the app's own pages: `Sec-Fetch-Site` same-origin (or a matching `Origin`) and JSON bodies; both ways
+  in are ambient (cookies, Tailscale), so this is what stops another site from acting as you.
+- Who sees what is checked on every request: channels for the space's members, DMs and groups for theirs; files only
+  through a message you can see (or your own unsent upload).
+- Text is always text in the app (no HTML from messages); only http(s) links become links. Files show inline only as
+  pictures, video or sound a browser plays, everything else downloads; every file answer is sandboxed and `nosniff`.
+- Passwords: scrypt (N=2^15, r=8, p=1), at least 8 characters, not a well-known one. Sign-in: 10 tries per address
+  per 10 minutes (the address Funnel saw: the last `X-Forwarded-For` entry), 20 per name per hour, 120 a minute in
+  all. Unknown names take as long as wrong passwords.
+- Anonymous visitors (the public address is in certificate logs) see the sign-in page only, not the family's name.
+- Notifications: Web Push signed with the server's VAPID key and encrypted for each browser (RFC 8291); only the push
+  services browsers use (Google, Apple, Mozilla, Microsoft) are ever contacted.
+- Requests have 15 minutes to arrive in full; JSON bodies are at most 64 KB.
+
+## API
+
+JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event-ID` replays what was missed, else
+`resync`). The code is the reference (`family/lib/*.js`); in short:
+
+- Session: `GET /api/session`, `POST /api/signin {name, password}`, `POST /api/signout`.
+- Invites: `GET|POST /api/invites/:code` (see / join, or use a reset link), `POST /api/invites {role, uses, days}`,
+  `GET /api/invites`, `DELETE /api/invites/:id`; `POST /api/people/:id/reset`.
+- `GET /api/bootstrap`: me, people, spaces, channels with unread/mention counts and notification levels.
+- Me: `PATCH /api/me {name, color, password, current}`, `PUT|DELETE /api/me/avatar`, `GET /api/me/sessions`,
+  `DELETE /api/me/sessions/:id|others`. Admins: `PATCH /api/people/:id {role, disabled}`.
+- Spaces and channels: `PATCH /api/spaces/:id`, `POST /api/spaces/:id/channels`, `PATCH /api/channels/:id`,
+  `POST /api/dms {people, name}`, `DELETE /api/channels/:id/members/me`.
+- Messages: `GET /api/channels/:id/messages?before|after|around`, `POST /api/channels/:id/messages {body, reply,
+  files, nonce}` (mentions as `<@id>`, `@everyone`), `PATCH|DELETE /api/messages/:id`,
+  `PUT|DELETE /api/messages/:id/reactions/:emoji`, `PUT|DELETE /api/messages/:id/pin`, `GET /api/channels/:id/pins`,
+  `POST /api/channels/:id/read {id}`, `POST /api/channels/:id/typing`, `PUT /api/channels/:id/notify {level}`,
+  `GET /api/search?q=&channel=`, `PUT /api/focus {client, channel, visible}`.
+- Files: `POST /api/uploads {name, size, mime}`, `PUT /api/uploads/:id?offset=`, `GET /api/uploads/:id`,
+  `PUT /api/files/:id/thumb?w=&h=`, `GET /api/files/:id[?download]`, `GET /api/files/:id/thumb`,
+  `GET /api/people/:id/avatar`.
+- Push: `GET /api/push` (VAPID key), `PUT /api/push {endpoint, keys}`, `DELETE /api/push {endpoint}`.
+
+## Tests
+
+`node test/family.test.js` (the server; ports 8841–8849) and the `family:` tests in `node test/web/run.mjs` (the
+app in a headless browser; port 8828).

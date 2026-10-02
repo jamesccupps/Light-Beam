@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_search"
+        android:icon="@drawable/ic_search"
+        android:title="@string/search"
+        app:showAsAction="always" />
+    <item
+        android:id="@+id/action_send_clipboard"
+        android:icon="@drawable/ic_paste"
+        android:title="@string/send_clipboard"
+        app:showAsAction="always" />
+    <item
+        android:id="@+id/action_settings"
+        android:icon="@drawable/ic_settings"
+        android:title="@string/settings"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_family"
+        android:title="@string/family"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_scan"
+        android:icon="@drawable/ic_scan"
+        android:title="@string/scan_code"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_pair"
+        android:title="@string/pair_another"
+        app:showAsAction="never" />
+</menu>

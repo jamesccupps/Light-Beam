@@ -1,0 +1,17 @@
+# Only the server goes into the image: no data, builds, app sources or private notes.
+node_modules
+data
+dist
+android
+windows
+cli
+scripts
+test
+tailscale-state
+**/*.md
+!README.md
+.env
+.git
+*.log
+*.tgz
+*.tar.gz

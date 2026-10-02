@@ -1,0 +1,787 @@
+#!/usr/bin/env node
+// Beam Family server tests. No dependencies. Starts family/server.js on 127.0.0.1:8841–8849 with temporary data
+// (Tailscale lookups off): Tailscale's identity headers are sent the way `tailscale serve` sends them (from this
+// machine), and a fake push service on this machine receives the notifications, which are decrypted as a browser
+// would.
+//   node test/family.test.js            run everything
+//   node test/family.test.js invite dm  run the tests whose names contain one of the words
+'use strict';
+
+const assert = require('node:assert/strict');
+const http = require('node:http');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawn, spawnSync } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const SERVER = path.join(ROOT, 'family', 'server.js');
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'beam-family-test-'));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const OWNER = 'owner@example.com';
+
+// ---------------------------------------------------------------- harness
+
+const children = new Set();
+process.on('exit', () => { for (const c of children) try { c.kill(); } catch {} });
+
+function familyEnv(port, dir, env = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('BEAM_')) out[k] = v;
+  return { ...out, BEAM_FAMILY_DATA: path.join(dir, 'data'), BEAM_FAMILY_PORT: String(port), BEAM_FAMILY_HOST: '127.0.0.1', BEAM_TAILSCALE: 'off',
+    BEAM_FAMILY_OWNER: OWNER, BEAM_FAMILY_TEST_PUSH: '1', ...env };
+}
+
+async function start(name, port, { env = {}, keep = false, args = [] } = {}) {
+  assert.ok(port >= 8841 && port <= 8849, 'family test ports are 8841–8849');
+  const dir = path.join(TMP, name);
+  if (!keep) fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const child = spawn(process.execPath, [SERVER, ...args], { env: familyEnv(port, dir, env), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  children.add(child);
+  let out = '';
+  child.stdout.on('data', d => { out += d; });
+  child.stderr.on('data', d => { out += d; });
+  const exited = new Promise(resolve => child.once('exit', code => { children.delete(child); resolve(code); }));
+  const srv = {
+    port, dir, data: path.join(dir, 'data'), child, exited, env: familyEnv(port, dir, env),
+    get out() { return out; },
+    stop: async () => { if (child.exitCode === null) { child.kill(); await exited; } },
+    req: (method, route, opts) => request(port, method, route, opts),
+  };
+  const deadline = Date.now() + 15000;
+  while (!/is running/.test(out)) {
+    if (child.exitCode !== null) throw new Error(`family server ${name} exited: ${out}`);
+    if (Date.now() > deadline) throw new Error(`family server ${name} did not start: ${out}`);
+    await sleep(50);
+  }
+  return srv;
+}
+
+function request(port, method, route, { headers = {}, body, raw = false, host = '127.0.0.1' } = {}) {
+  return new Promise((resolve, reject) => {
+    const r = http.request({ host, port, method, path: route, headers, agent: false }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        let json;
+        try { json = JSON.parse(buf.toString('utf8')); } catch {}
+        resolve({ status: res.statusCode, headers: res.headers, body: raw ? buf : buf.toString('utf8'), json });
+      });
+    });
+    r.setTimeout(20000, () => r.destroy(new Error('timeout')));
+    r.on('error', e => (['ECONNRESET', 'EPIPE'].includes(e.code) ? resolve({ status: 'reset', headers: {}, body: '', json: null }) : reject(e)));
+    r.end(body);
+  });
+}
+
+function openEvents(port, headers) {
+  return new Promise((resolve, reject) => {
+    const events = [];
+    let closed = false;
+    const r = http.request({ host: '127.0.0.1', port, path: '/api/events', headers, agent: false }, res => {
+      let buf = '';
+      res.on('data', d => {
+        buf += d;
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          const lines = block.split('\n');
+          const event = lines.find(l => l.startsWith('event: '))?.slice(7);
+          const data = lines.find(l => l.startsWith('data: '))?.slice(6);
+          const id = lines.find(l => l.startsWith('id: '))?.slice(4);
+          if (event) events.push({ event, id, data: data ? JSON.parse(data) : null });
+        }
+      });
+      res.on('close', () => { closed = true; });
+      resolve({
+        status: res.statusCode, events, get closed() { return closed; }, close: () => r.destroy(),
+        wait: (name, pred = () => true, ms = 5000) => waitFor(() => events.find(e => e.event === name && pred(e.data)), ms),
+        lastId: () => [...events].reverse().find(e => e.id)?.id,
+      });
+    });
+    r.on('error', e => (e.code === 'ECONNRESET' ? null : reject(e)));
+    r.end();
+  });
+}
+
+async function waitFor(check, ms = 5000, step = 40) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const v = await check();
+    if (v) return v;
+    if (Date.now() > deadline) throw new Error('timed out waiting');
+    await sleep(step);
+  }
+}
+
+// Ways in: Tailscale (as serve sends it) or a session cookie.
+const ts = (login, name = '') => ({ 'Tailscale-User-Login': login, ...(name ? { 'Tailscale-User-Name': name } : {}) });
+const as = who => (typeof who === 'string' ? { Cookie: who } : who);
+const call = (srv, method, route, who = {}, body) => srv.req(method, route, {
+  headers: { ...as(who), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+  body: body !== undefined ? JSON.stringify(body) : undefined,
+});
+const sessionOf = res => /fam_s=([^;]*)/.exec([].concat(res.headers['set-cookie'] || []).join('\n'))?.[1];
+
+// An owner (by Tailscale) and the family space's channels.
+async function family(srv) {
+  const owner = ts(OWNER, 'Robin');
+  const b = (await call(srv, 'GET', '/api/bootstrap', owner)).json;
+  return { owner, me: b.me, space: b.spaces[0].id, general: b.channels.find(c => c.name === 'general').id, photos: b.channels.find(c => c.name === 'photos').id };
+}
+
+// A new person through an invite: by password (returns their cookie) or by Tailscale identity.
+async function join(srv, inviter, name, { login = null, role } = {}) {
+  const inv = await call(srv, 'POST', '/api/invites', inviter, role ? { role } : {});
+  assert.equal(inv.status, 201, inv.body);
+  const code = inv.json.url.split('/join/')[1];
+  if (login) {
+    const r = await call(srv, 'POST', `/api/invites/${code}`, ts(login), { name });
+    assert.equal(r.status, 201, r.body);
+    return { who: ts(login), id: r.json.me.id };
+  }
+  const r = await call(srv, 'POST', `/api/invites/${code}`, {}, { name, password: 'a long family password' });
+  assert.equal(r.status, 201, r.body);
+  return { who: `fam_s=${sessionOf(r)}`, id: r.json.me.id };
+}
+
+const post = async (srv, who, channel, body, extra = {}) => {
+  const r = await call(srv, 'POST', `/api/channels/${channel}/messages`, who, { body, ...extra });
+  assert.equal(r.status, 201, r.body);
+  return r.json.message;
+};
+
+const tests = [];
+const test = (name, fn) => tests.push({ name, fn });
+
+// ---------------------------------------------------------------- push: a fake push service, and a browser's keys
+
+function pushService() {
+  const got = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      got.push({ path: req.url, headers: req.headers, body: Buffer.concat(chunks) });
+      res.writeHead(req.url.startsWith('/gone') ? 410 : 201);
+      res.end();
+    });
+  });
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ got, url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() })));
+}
+
+function browserKeys() {
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  const auth = crypto.randomBytes(16);
+  return { ecdh, auth, keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: auth.toString('base64url') } };
+}
+
+// RFC 8291: what the browser does with a push message.
+function decryptPush(body, { ecdh, auth }) {
+  const salt = body.subarray(0, 16);
+  const idlen = body[20];
+  const asPublic = body.subarray(21, 21 + idlen);
+  const data = body.subarray(21 + idlen);
+  const secret = ecdh.computeSecret(asPublic);
+  const ikm = Buffer.from(crypto.hkdfSync('sha256', secret, auth, Buffer.concat([Buffer.from('WebPush: info\0'), ecdh.getPublicKey(), asPublic]), 32));
+  const cek = Buffer.from(crypto.hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: aes128gcm\0'), 16));
+  const nonce = Buffer.from(crypto.hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: nonce\0'), 12));
+  const decipher = crypto.createDecipheriv('aes-128-gcm', cek, nonce);
+  decipher.setAuthTag(data.subarray(-16));
+  const plain = Buffer.concat([decipher.update(data.subarray(0, -16)), decipher.final()]);
+  let end = plain.length - 1;
+  while (end >= 0 && plain[end] === 0) end--;
+  assert.equal(plain[end], 2, 'last record delimiter');
+  return JSON.parse(plain.subarray(0, end).toString('utf8'));
+}
+
+// ---------------------------------------------------------------- tests
+
+test('F-A: the machine owner becomes the owner over Tailscale; nobody else; the app pages carry their protections', async () => {
+  const s = await start('owner', 8841);
+  try {
+    let r = await call(s, 'GET', '/api/session');
+    assert.deepEqual([r.status, r.json.signedIn, r.json.ownerSetUp], [200, false, false]);
+    r = await call(s, 'GET', '/api/session', ts('someone@example.com', 'Someone'));
+    assert.deepEqual([r.json.signedIn, r.json.tailscale.known, r.json.ownerSetUp], [false, false, false], 'a stranger over Tailscale is not let in');
+    r = await call(s, 'GET', '/api/session', ts('=?utf-8?q?Owner=40Example=2Ecom?=', 'Robin'));
+    assert.deepEqual([r.json.signedIn, r.json.me.role, r.json.me.name, r.json.via], [true, 'owner', 'Robin', 'tailscale'], 'RFC 2047 login decoded; the owner set up');
+    r = await call(s, 'GET', '/api/bootstrap', ts(OWNER));
+    assert.deepEqual(r.json.channels.map(c => c.name).sort(), ['general', 'photos']);
+    assert.equal(r.json.me.tailscale, OWNER, 'the owner sees how they sign in');
+    assert.match(s.out, /Robin set up the family space and owns it \(Tailscale owner@example\.com\)/);
+    // The page: strict CSP, no framing; its own routes get the page; other paths 404.
+    r = await s.req('GET', '/');
+    assert.equal(r.status, 200);
+    assert.match(r.headers['content-security-policy'], /default-src 'self'; script-src 'self'/);
+    assert.equal(r.headers['x-frame-options'], 'DENY');
+    assert.equal(r.headers['referrer-policy'], 'no-referrer');
+    for (const route of ['/c/01ABCDEFGHJKMNPQRSTVWXYZ01', '/join/abcdefghijklmnopqrstuv', '/settings']) assert.equal((await s.req('GET', route)).status, 200, route);
+    assert.equal((await s.req('GET', '/nothing-here')).status, 404);
+    assert.equal((await s.req('GET', '/../server.js')).status, 404, 'no way out of the app folder');
+    assert.equal((await s.req('GET', '/api/nothing')).status, 404);
+    assert.equal((await s.req('DELETE', '/api/bootstrap')).status, 405);
+  } finally { await s.stop(); }
+});
+
+test('F-B: invites: admins make them, single use, by password over the public link or bound to a Tailscale login; names and passwords checked', async () => {
+  const s = await start('invites', 8842);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    let r = await call(s, 'POST', '/api/invites', mary.who, {});
+    assert.equal(r.status, 403, 'a member can’t invite');
+    r = await call(s, 'POST', '/api/invites', f.owner, { uses: 2, days: 3 });
+    const code = r.json.url.split('/join/')[1];
+    assert.equal(r.json.uses, 2);
+    r = await call(s, 'GET', `/api/invites/${code}`);
+    assert.deepEqual([r.json.by, r.json.needsPassword, r.json.role], ['Robin', true, 'member']);
+    r = await call(s, 'GET', `/api/invites/${code}`, ts('aunt@example.com', 'Aunt Sue'));
+    assert.deepEqual([r.json.needsPassword, r.json.tailscale.login], [false, 'aunt@example.com'], 'over Tailscale no password is needed');
+    for (const [body, status] of [[{ name: 'Bob', password: 'short' }, 400], [{ name: 'Bob', password: 'password123' }, 400], [{ name: 'MARY', password: 'a long family password' }, 409],
+      [{ name: '', password: 'a long family password' }, 400], [{ name: 'x'.repeat(33), password: 'a long family password' }, 400]]) {
+      assert.equal((await call(s, 'POST', `/api/invites/${code}`, {}, body)).status, status, JSON.stringify(body));
+    }
+    r = await call(s, 'POST', `/api/invites/${code}`, ts('aunt@example.com', 'Aunt Sue'), { name: 'Aunt Sue' });
+    assert.equal(r.status, 201, r.body);
+    assert.equal(sessionOf(r), undefined, 'Tailscale needs no session cookie');
+    r = await call(s, 'GET', '/api/session', ts('AUNT@example.com'));
+    assert.deepEqual([r.json.signedIn, r.json.me.name], [true, 'Aunt Sue'], 'her Tailscale login signs her in');
+    r = await call(s, 'POST', `/api/invites/${code}`, ts('aunt@example.com'), { name: 'Sue again' });
+    assert.equal(r.status, 409, 'already in');
+    r = await call(s, 'POST', `/api/invites/${code}`, {}, { name: 'Bob', password: 'a long family password' });
+    assert.equal(r.status, 201, 'the second use');
+    r = await call(s, 'POST', `/api/invites/${code}`, {}, { name: 'Carl', password: 'a long family password' });
+    assert.equal(r.status, 404, 'used up');
+    // Withdrawn: stops working; only admins can.
+    r = await call(s, 'POST', '/api/invites', f.owner, {});
+    const id = r.json.id;
+    const code2 = r.json.url.split('/join/')[1];
+    assert.equal((await call(s, 'DELETE', `/api/invites/${id}`, mary.who)).status, 403);
+    assert.equal((await call(s, 'DELETE', `/api/invites/${id}`, f.owner)).status, 204);
+    assert.equal((await call(s, 'GET', `/api/invites/${code2}`)).status, 404);
+    assert.equal((await call(s, 'GET', '/api/invites/not-a-real-code-at-all')).status, 404);
+    // Signing in: case-insensitive name, wrong password, 10 tries per address per 10 minutes.
+    r = await call(s, 'POST', '/api/signin', {}, { name: 'bob', password: 'a long family password' });
+    assert.equal(r.status, 200, r.body);
+    assert.match([].concat(r.headers['set-cookie']).join(), /HttpOnly; SameSite=Lax/);
+    for (let i = 0; i < 9; i++) assert.equal((await s.req('POST', '/api/signin', { headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.9' }, body: JSON.stringify({ name: 'bob', password: `wrong ${i}` }) })).status, 401);
+    r = await s.req('POST', '/api/signin', { headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.9' }, body: JSON.stringify({ name: 'bob', password: 'wrong 9' }) });
+    assert.equal(r.status, 401);
+    r = await s.req('POST', '/api/signin', { headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.9' }, body: JSON.stringify({ name: 'bob', password: 'a long family password' }) });
+    assert.equal(r.status, 429, 'the 11th try from that address waits, right password or not');
+    // Made-up addresses in front of the one Funnel adds (the last) change nothing.
+    r = await s.req('POST', '/api/signin', { headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.77, 203.0.113.9' }, body: JSON.stringify({ name: 'bob', password: 'a long family password' }) });
+    assert.equal(r.status, 429, 'a forged first X-Forwarded-For entry doesn’t dodge the limit');
+    assert.ok(Number(r.headers['retry-after']) > 0);
+    r = await s.req('POST', '/api/signin', { headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.10' }, body: JSON.stringify({ name: 'bob', password: 'a long family password' }) });
+    assert.equal(r.status, 200, 'another address is fine');
+    // A name with a line break can't fake a line in the log (it's quoted and escaped).
+    const forged = await s.req('POST', '/api/signin', { headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.11' }, body: JSON.stringify({ name: 'x\nINFO  Bob owns it now', password: 'not the password' }) });
+    assert.equal(forged.status, 401);
+    assert.match(s.out, /Sign-in failed for "x\\ninfo {2}bob owns it now" from 203\.0\.113\.11/);
+    assert.doesNotMatch(s.out, /^info {2}bob owns it now/m);
+    // Signing out ends that session only.
+    const bob = `fam_s=${sessionOf(r)}`;
+    assert.equal((await call(s, 'POST', '/api/signout', bob)).status, 204);
+    assert.equal((await call(s, 'GET', '/api/bootstrap', bob)).status, 401);
+    // An owner invite is refused while there's an owner; the CLI's invite needs an owner first.
+    const cli = spawnSync(process.execPath, [SERVER, 'invite', '--owner'], { env: s.env, encoding: 'utf8' });
+    assert.match(cli.stderr, /already has an owner/);
+    const cli2 = spawnSync(process.execPath, [SERVER, 'invite', '--uses', '3'], { env: s.env, encoding: 'utf8' });
+    assert.match(cli2.stdout, /Invite \(member, until .*\):\n.*\/join\/[A-Za-z0-9_-]{22}/);
+    assert.equal((await call(s, 'GET', `/api/invites/${cli2.stdout.trim().split('/join/')[1]}`)).status, 200, 'the running server takes the CLI’s invite');
+  } finally { await s.stop(); }
+});
+
+test('F-C: Tailscale’s identity headers count only from this machine (as tailscale serve sends them), never from the network', async () => {
+  const lan = Object.values(os.networkInterfaces()).flat().find(a => a && a.family === 'IPv4' && !a.internal)?.address;
+  if (!lan) return console.log('      (skipped: no network address)');
+  const s = await start('trust', 8843, { env: { BEAM_FAMILY_HOST: '0.0.0.0' } });
+  try {
+    await family(s);
+    let r = await s.req('GET', '/api/session', { headers: ts(OWNER), host: lan });
+    assert.deepEqual([r.status, r.json.signedIn, r.json.tailscale], [200, false, undefined], `from ${lan}: no identity`);
+    r = await s.req('GET', '/api/bootstrap', { headers: ts(OWNER), host: lan });
+    assert.equal(r.status, 401);
+    r = await s.req('GET', '/api/session', { headers: ts(OWNER) });
+    assert.equal(r.json.signedIn, true, 'from this machine: yes');
+  } finally { await s.stop(); }
+});
+
+test('F-D: who sees what: DMs and groups private to their members, channels to the space, archived ones read-only and hidden from members', async () => {
+  const s = await start('visibility', 8844);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const bob = await join(s, f.owner, 'Bob');
+    let r = await call(s, 'POST', '/api/dms', mary.who, { people: [f.me.id] });
+    assert.equal(r.status, 201);
+    const dm = r.json.channel.id;
+    await post(s, mary.who, dm, 'just between us: the surprise party is Saturday');
+    // Bob: not in the DM.
+    assert.equal((await call(s, 'GET', `/api/channels/${dm}/messages`, bob.who)).status, 404);
+    assert.equal((await call(s, 'POST', `/api/channels/${dm}/messages`, bob.who, { body: 'hi' })).status, 404);
+    assert.ok(!(await call(s, 'GET', '/api/bootstrap', bob.who)).json.channels.some(c => c.id === dm));
+    assert.deepEqual((await call(s, 'GET', '/api/search?q=surprise', bob.who)).json.messages, [], 'search doesn’t reach into others’ DMs');
+    assert.equal((await call(s, 'GET', '/api/search?q=surprise', f.owner)).json.messages.length, 1);
+    assert.equal((await call(s, 'GET', `/api/search?q=surprise&channel=${dm}`, bob.who)).status, 404);
+    // The same DM again; nobody can open one with someone disabled or unknown.
+    assert.equal((await call(s, 'POST', '/api/dms', f.owner, { people: [mary.id] })).json.channel.id, dm);
+    assert.equal((await call(s, 'POST', '/api/dms', mary.who, { people: ['01ABCDEFGHJKMNPQRSTVWXYZ01'] })).status, 400);
+    assert.equal((await call(s, 'POST', '/api/dms', mary.who, { people: [] })).status, 400);
+    // A group: members rename it; others can't; leaving.
+    r = await call(s, 'POST', '/api/dms', mary.who, { people: [bob.id, f.me.id], name: 'Trip planning' });
+    const group = r.json.channel.id;
+    assert.deepEqual([r.json.channel.kind, r.json.channel.name, r.json.channel.members.length], ['group', 'Trip planning', 3]);
+    r = await call(s, 'PATCH', `/api/channels/${group}`, bob.who, { name: 'Beach trip 🏖️' });
+    assert.equal(r.json.channel.name, 'Beach trip 🏖️');
+    assert.equal((await call(s, 'PATCH', `/api/channels/${group}`, bob.who, { topic: 'x' })).status, 400);
+    assert.equal((await call(s, 'DELETE', `/api/channels/${group}/members/me`, bob.who)).status, 204);
+    assert.equal((await call(s, 'GET', `/api/channels/${group}/messages`, bob.who)).status, 404, 'gone after leaving');
+    // Channels: admins make them, the name is unique, members can't; archived: hidden from members, read-only.
+    assert.equal((await call(s, 'POST', `/api/spaces/${f.space}/channels`, mary.who, { name: 'recipes' })).status, 403);
+    r = await call(s, 'POST', `/api/spaces/${f.space}/channels`, f.owner, { name: '#Recipes 🍲', topic: 'Grandma’s cookbook' });
+    assert.equal(r.status, 201);
+    const recipes = r.json.channel.id;
+    assert.equal(r.json.channel.name, 'Recipes 🍲');
+    assert.equal((await call(s, 'POST', `/api/spaces/${f.space}/channels`, f.owner, { name: 'recipes 🍲' })).status, 409);
+    await post(s, mary.who, recipes, 'Lasagne');
+    assert.equal((await call(s, 'PATCH', `/api/channels/${recipes}`, mary.who, { archived: true })).status, 403);
+    assert.equal((await call(s, 'PATCH', `/api/channels/${recipes}`, f.owner, { archived: true })).status, 200);
+    assert.ok(!(await call(s, 'GET', '/api/bootstrap', mary.who)).json.channels.some(c => c.id === recipes));
+    assert.equal((await call(s, 'GET', `/api/channels/${recipes}/messages`, mary.who)).status, 404);
+    assert.equal((await call(s, 'POST', `/api/channels/${recipes}/messages`, f.owner, { body: 'x' })).status, 403, 'archived: read-only');
+    assert.equal((await call(s, 'GET', `/api/channels/${recipes}/messages`, f.owner)).json.messages.length, 1);
+    // A newcomer's channels start read; renaming the space.
+    await post(s, mary.who, f.general, 'before Carl');
+    const carl = await join(s, f.owner, 'Carl');
+    const g = (await call(s, 'GET', '/api/bootstrap', carl.who)).json.channels.find(c => c.id === f.general);
+    assert.equal(g.unread, 0, 'no backlog for a newcomer');
+    assert.equal((await call(s, 'PATCH', `/api/spaces/${f.space}`, mary.who, { name: 'x' })).status, 403);
+    assert.equal((await call(s, 'PATCH', `/api/spaces/${f.space}`, f.owner, { name: 'The Smiths' })).json.space.name, 'The Smiths');
+    assert.equal((await call(s, 'GET', '/api/session', mary.who)).json.name, 'The Smiths');
+    assert.equal((await call(s, 'GET', '/api/session')).json.name, null, 'not to anonymous visitors (the public address can be found by anyone)');
+  } finally { await s.stop(); }
+});
+
+test('F-E: messages: replies, mentions and unread counts, edits and deletes by whom, reactions, pins, paging, read state, limits', async () => {
+  const s = await start('messages', 8845, { env: { BEAM_FAMILY_POSTS_PER_10S: '1000' } });
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const bob = await join(s, f.owner, 'Bob');
+    const first = await post(s, mary.who, f.general, 'Hello\r\nfamily  ‮txt.exe\u0007 ');
+    assert.equal(first.body, 'Hello\nfamily  txt.exe', 'CRLF → LF; control characters, direction overrides and trailing spaces gone');
+    const reply = await post(s, f.owner, f.general, `Welcome <@${mary.id}> and <@01ABCDEFGHJKMNPQRSTVWXYZ01>`, { reply: first.id });
+    assert.deepEqual([reply.reply.id, reply.reply.author, reply.reply.body], [first.id, mary.id, first.body]);
+    let b = (await call(s, 'GET', '/api/bootstrap', mary.who)).json.channels.find(c => c.id === f.general);
+    assert.deepEqual([b.unread, b.mentions], [1, 1]);
+    b = (await call(s, 'GET', '/api/bootstrap', bob.who)).json.channels.find(c => c.id === f.general);
+    assert.deepEqual([b.unread, b.mentions], [2, 0], 'Bob: unread, not mentioned (unknown ids aren’t mentions)');
+    await post(s, f.owner, f.general, 'Dinner at 6, @everyone');
+    b = (await call(s, 'GET', '/api/bootstrap', bob.who)).json.channels.find(c => c.id === f.general);
+    assert.deepEqual([b.unread, b.mentions], [3, 1], '@everyone mentions Bob');
+    // Replies only within the conversation.
+    const dm = (await call(s, 'POST', '/api/dms', mary.who, { people: [bob.id] })).json.channel.id;
+    assert.equal((await call(s, 'POST', `/api/channels/${dm}/messages`, mary.who, { body: 'x', reply: first.id })).status, 400);
+    // Limits.
+    assert.equal((await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { body: '   ' })).status, 400, 'empty');
+    assert.equal((await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { body: 'x'.repeat(4001) })).status, 400, 'too long');
+    assert.equal((await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { body: '😀'.repeat(4000) })).status, 201, '4,000 characters (code points) is fine');
+    assert.equal((await s.req('POST', `/api/channels/${f.general}/messages`, { headers: { Cookie: mary.who }, body: '{"body":"x"}' })).status, 415, 'JSON only');
+    // Edits: the author only; deletes: the author or an admin.
+    assert.equal((await call(s, 'PATCH', `/api/messages/${first.id}`, bob.who, { body: 'hacked' })).status, 403);
+    let r = await call(s, 'PATCH', `/api/messages/${first.id}`, mary.who, { body: `Hi all, especially <@${bob.id}>` });
+    assert.ok(r.json.message.edited);
+    b = (await call(s, 'GET', '/api/bootstrap', bob.who)).json.channels.find(c => c.id === f.general);
+    assert.equal(b.mentions, 2, 'an edit can add a mention');
+    assert.equal((await call(s, 'DELETE', `/api/messages/${reply.id}`, bob.who)).status, 403);
+    const bobs = await post(s, bob.who, f.general, 'oops');
+    assert.equal((await call(s, 'DELETE', `/api/messages/${bobs.id}`, f.owner)).status, 204, 'an admin deletes another’s message');
+    assert.match(s.out, /Robin deleted a message by Bob/);
+    assert.equal((await call(s, 'PATCH', `/api/messages/${bobs.id}`, bob.who, { body: 'x' })).status, 404, 'deleted: gone');
+    // A reply to a deleted message says so.
+    const quoted = await post(s, mary.who, f.general, 'to be deleted');
+    const answer = await post(s, bob.who, f.general, 'answer', { reply: quoted.id });
+    await call(s, 'DELETE', `/api/messages/${quoted.id}`, mary.who);
+    let page = (await call(s, 'GET', `/api/channels/${f.general}/messages`, bob.who)).json.messages;
+    assert.deepEqual(page.find(m => m.id === answer.id).reply, { id: quoted.id, deleted: true });
+    assert.ok(!page.some(m => m.id === quoted.id), 'deleted messages aren’t listed');
+    // Reactions: emoji only (ZWJ sequences, flags, keycaps, skin tones), on and off, at most 20 kinds.
+    for (const e of ['👍', '❤️', '👨‍👩‍👧', '🇬🇧', '1️⃣', '👋🏽']) assert.equal((await call(s, 'PUT', `/api/messages/${first.id}/reactions/${encodeURIComponent(e)}`, bob.who)).status, 204, e);
+    for (const e of ['a', '<b>', '👍x', '']) assert.ok([400, 404].includes((await call(s, 'PUT', `/api/messages/${first.id}/reactions/${encodeURIComponent(e)}`, bob.who)).status), JSON.stringify(e));
+    await call(s, 'PUT', `/api/messages/${first.id}/reactions/${encodeURIComponent('👍')}`, mary.who);
+    await call(s, 'DELETE', `/api/messages/${first.id}/reactions/${encodeURIComponent('❤️')}`, bob.who);
+    page = (await call(s, 'GET', `/api/channels/${f.general}/messages`, bob.who)).json.messages;
+    const reacted = page.find(m => m.id === first.id).reactions;
+    assert.deepEqual(reacted.find(x => x.emoji === '👍').users.sort(), [bob.id, mary.id].sort());
+    assert.ok(!reacted.some(x => x.emoji === '❤️'));
+    const emoji = ['😀', '😃', '😄', '😁', '😆', '😅', '🤣', '😂', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😌']; // 20 kinds with the 5 above
+    for (const e of emoji) await call(s, 'PUT', `/api/messages/${first.id}/reactions/${encodeURIComponent(e)}`, bob.who);
+    assert.equal((await call(s, 'PUT', `/api/messages/${first.id}/reactions/${encodeURIComponent('😍')}`, bob.who)).status, 400, 'a 21st kind');
+    // Pins.
+    assert.equal((await call(s, 'PUT', `/api/messages/${reply.id}/pin`, mary.who)).status, 200);
+    assert.deepEqual((await call(s, 'GET', `/api/channels/${f.general}/pins`, bob.who)).json.messages.map(m => m.id), [reply.id]);
+    // Paging: 120 messages, then before / after / around.
+    const ids = [];
+    for (let i = 0; i < 120; i++) ids.push((await post(s, bob.who, dm, `n${i}`)).id);
+    page = (await call(s, 'GET', `/api/channels/${dm}/messages`, mary.who)).json;
+    assert.deepEqual([page.messages.length, page.more.before, page.messages.at(-1).body], [50, true, 'n119']);
+    page = (await call(s, 'GET', `/api/channels/${dm}/messages?before=${ids[50]}&limit=100`, mary.who)).json;
+    assert.deepEqual([page.messages.length, page.more.before, page.messages[0].body, page.messages.at(-1).body], [50, false, 'n0', 'n49']);
+    page = (await call(s, 'GET', `/api/channels/${dm}/messages?after=${ids[100]}`, mary.who)).json;
+    assert.deepEqual([page.messages.length, page.more.after, page.messages[0].body], [19, false, 'n101']);
+    page = (await call(s, 'GET', `/api/channels/${dm}/messages?around=${ids[60]}&limit=10`, mary.who)).json;
+    assert.deepEqual(page.messages.map(m => m.body), ['n55', 'n56', 'n57', 'n58', 'n59', 'n60', 'n61', 'n62', 'n63', 'n64']);
+    assert.equal((await call(s, 'GET', `/api/channels/${dm}/messages?before=junk`, mary.who)).status, 400);
+    // Read state: only forward, never past the last message; counts stop at 100 ("99+"); posting reads up to there.
+    b = (await call(s, 'GET', '/api/bootstrap', mary.who)).json.channels.find(c => c.id === dm);
+    assert.equal(b.unread, 100);
+    await call(s, 'POST', `/api/channels/${dm}/read`, mary.who, { id: ids[100] });
+    await call(s, 'POST', `/api/channels/${dm}/read`, mary.who, { id: ids[10] });
+    b = (await call(s, 'GET', '/api/bootstrap', mary.who)).json.channels.find(c => c.id === dm);
+    assert.deepEqual([b.read, b.unread], [ids[100], 19]);
+    const own = await post(s, mary.who, dm, 'caught up');
+    b = (await call(s, 'GET', '/api/bootstrap', mary.who)).json.channels.find(c => c.id === dm);
+    assert.deepEqual([b.read, b.unread], [own.id, 0]);
+    // Notification levels.
+    assert.equal((await call(s, 'PUT', `/api/channels/${f.general}/notify`, mary.who, { level: 'mentions' })).status, 204);
+    assert.equal((await call(s, 'PUT', `/api/channels/${f.general}/notify`, mary.who, { level: 'loud' })).status, 400);
+    assert.equal((await call(s, 'GET', '/api/bootstrap', mary.who)).json.channels.find(c => c.id === f.general).notify, 'mentions');
+    // Search: words, the last one as a prefix; FTS syntax is just text.
+    assert.equal((await call(s, 'GET', `/api/search?q=${encodeURIComponent('dinn')}`, mary.who)).json.messages.length, 1);
+    assert.equal((await call(s, 'GET', `/api/search?q=${encodeURIComponent('"NEAR( OR * dinner')}`, mary.who)).status, 200);
+  } finally { await s.stop(); }
+});
+
+test('F-F: live events go only to who sees the conversation; a reconnect gets what it missed; after a restart: resync', async () => {
+  const s = await start('events', 8846);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const bob = await join(s, f.owner, 'Bob');
+    const evMary = await openEvents(s.port, as(mary.who));
+    const evBob = await openEvents(s.port, as(bob.who));
+    await evMary.wait('hello');
+    await evBob.wait('hello');
+    const dm = (await call(s, 'POST', '/api/dms', f.owner, { people: [mary.id] })).json.channel.id;
+    await evMary.wait('channel', d => d.channel.id === dm);
+    const m = await post(s, f.owner, dm, 'secret', { nonce: 'abc' });
+    const got = await evMary.wait('msg', d => d.message.id === m.id);
+    assert.equal(got.data.nonce, 'abc');
+    await call(s, 'POST', `/api/channels/${dm}/typing`, mary.who);
+    await call(s, 'PUT', `/api/messages/${m.id}/reactions/${encodeURIComponent('👍')}`, mary.who);
+    await evMary.wait('react', d => d.id === m.id);
+    await post(s, mary.who, f.general, 'in general');
+    await evBob.wait('msg', d => d.message.body === 'in general');
+    await sleep(200);
+    assert.ok(!evBob.events.some(e => JSON.stringify(e.data).includes('secret') || e.data?.channel === dm || e.data?.channel?.id === dm), 'Bob gets nothing of the DM');
+    // Presence: Bob goes, everyone hears.
+    evBob.close();
+    await evMary.wait('presence', d => d.person === bob.id && d.online === false);
+    // Missed while away: replayed from Last-Event-ID.
+    const last = evMary.lastId();
+    evMary.close();
+    await post(s, f.owner, dm, 'while you were away');
+    const back = await openEvents(s.port, { ...as(mary.who), 'Last-Event-ID': last });
+    await back.wait('msg', d => d.message.body === 'while you were away');
+    assert.ok(!back.events.some(e => e.event === 'resync'));
+    const lastAgain = back.lastId();
+    back.close();
+    // A restart: the old ids mean nothing, so resync.
+    await s.stop();
+    const s2 = await start('events', 8846, { keep: true });
+    try {
+      const again = await openEvents(s2.port, { ...as(mary.who), 'Last-Event-ID': lastAgain });
+      await again.wait('resync');
+      again.close();
+      // Focus: what an open app is looking at.
+      const ev = await openEvents(s2.port, as(mary.who));
+      const hello = await ev.wait('hello');
+      assert.equal((await call(s2, 'PUT', '/api/focus', mary.who, { client: hello.data.client, channel: dm, visible: true })).status, 204);
+      assert.equal((await call(s2, 'PUT', '/api/focus', bob.who, { client: hello.data.client, channel: null })).status, 404, 'not someone else’s connection');
+      // Turned off: the stream ends at once.
+      await call(s2, 'PATCH', `/api/people/${mary.id}`, f.owner, { disabled: true });
+      await waitFor(() => ev.closed);
+      assert.equal((await call(s2, 'GET', '/api/bootstrap', mary.who)).status, 401);
+    } finally { await s2.stop(); }
+  } finally { await s.stop(); }
+});
+
+test('F-G: files: resumable uploads, limits, only sent to the conversation, inline only for pictures/videos/sounds, previews, avatars', async () => {
+  const s = await start('files', 8847, { env: { BEAM_FAMILY_MAX_UPLOAD_MB: '1', BEAM_FAMILY_MAX_STORAGE_GB: String(3 / 1024) } });
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const bob = await join(s, f.owner, 'Bob');
+    const upload = async (who, name, data, mime) => {
+      const r = await call(s, 'POST', '/api/uploads', who, { name, size: data.length, mime });
+      assert.equal(r.status, 201, r.body);
+      const id = r.json.id;
+      const half = Math.floor(data.length / 2);
+      let p = await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(who), 'Content-Type': 'application/octet-stream' }, body: data.subarray(0, half) });
+      assert.deepEqual(p.json, { offset: half, done: false });
+      p = await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(who), 'Content-Type': 'application/octet-stream' }, body: data.subarray(half) });
+      assert.deepEqual([p.status, p.json.offset], [409, half], 'the wrong offset is refused, with the right one');
+      p = await s.req('PUT', `/api/uploads/${id}?offset=${half}`, { headers: { ...as(who), 'Content-Type': 'application/octet-stream' }, body: data.subarray(half) });
+      assert.deepEqual(p.json, { offset: data.length, done: true });
+      return id;
+    };
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), crypto.randomBytes(300_000)]);
+    const photo = await upload(mary.who, 'beach.jpg', jpeg, 'image/jpeg');
+    // Not sent yet: only Mary sees it.
+    assert.equal((await call(s, 'GET', `/api/files/${photo}`, bob.who)).status, 404);
+    assert.equal((await call(s, 'GET', `/api/files/${photo}`, mary.who)).status, 200);
+    // A preview with the picture's size.
+    let r = await s.req('PUT', `/api/files/${photo}/thumb?w=4000&h=3000`, { headers: { ...as(mary.who), 'Content-Type': 'image/jpeg' }, body: Buffer.from([0xff, 0xd8, 0xff, 1, 2, 3]) });
+    assert.equal(r.status, 204);
+    r = await s.req('PUT', `/api/files/${photo}/thumb`, { headers: { ...as(mary.who), 'Content-Type': 'image/jpeg' }, body: Buffer.from('<svg/>') });
+    assert.equal(r.status, 400, 'a preview must be what it says');
+    // Sending it: in a DM with the owner.
+    const dm = (await call(s, 'POST', '/api/dms', mary.who, { people: [f.me.id] })).json.channel.id;
+    r = await call(s, 'POST', `/api/channels/${dm}/messages`, mary.who, { body: '', files: [photo] });
+    assert.equal(r.status, 201, r.body);
+    assert.deepEqual([r.json.message.files[0].name, r.json.message.files[0].width, r.json.message.files[0].thumb], ['beach.jpg', 4000, `/api/files/${photo}/thumb`]);
+    assert.equal((await call(s, 'POST', `/api/channels/${dm}/messages`, mary.who, { files: [photo] })).status, 400, 'a file is sent once');
+    r = await s.req('GET', `/api/files/${photo}`, { headers: as(f.owner), raw: true });
+    assert.deepEqual([r.status, r.headers['content-type'], r.body.equals(jpeg)], [200, 'image/jpeg', true]);
+    assert.match(r.headers['content-disposition'], /^inline; filename="beach.jpg"/);
+    assert.match(r.headers['content-security-policy'], /sandbox/);
+    assert.equal(r.headers['x-content-type-options'], 'nosniff');
+    r = await s.req('GET', `/api/files/${photo}`, { headers: { ...as(f.owner), Range: 'bytes=4-13' }, raw: true });
+    assert.deepEqual([r.status, r.headers['content-range'], r.body.equals(jpeg.subarray(4, 14))], [206, `bytes 4-13/${jpeg.length}`, true]);
+    assert.equal((await call(s, 'GET', `/api/files/${photo}`, bob.who)).status, 404, 'not in Bob’s conversations');
+    assert.equal((await call(s, 'GET', `/api/files/${photo}/thumb`, bob.who)).status, 404);
+    assert.equal((await call(s, 'GET', `/api/files/${photo}/thumb`, f.owner)).status, 200);
+    // Pages and scripts never show inline (they'd run as the app); the declared type of a .html file is ignored.
+    const page = await upload(mary.who, 'page.html', Buffer.from('<script>alert(1)</script>'), 'text/html');
+    const svg = await upload(mary.who, 'logo.svg', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'), 'image/svg+xml');
+    await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { body: 'files', files: [page, svg] });
+    for (const id of [page, svg]) {
+      r = await s.req('GET', `/api/files/${id}`, { headers: as(bob.who) });
+      assert.match(r.headers['content-disposition'], /^attachment;/, id);
+      assert.match(r.headers['content-security-policy'], /sandbox/);
+    }
+    assert.notEqual((await s.req('GET', `/api/files/${page}`, { headers: as(bob.who) })).headers['content-type'], 'text/html');
+    // Limits: 1 MB a file; 3 MB in all (then 507, nothing evicted).
+    assert.equal((await call(s, 'POST', '/api/uploads', mary.who, { name: 'big.bin', size: 2 * 1024 * 1024 })).status, 413);
+    await upload(bob.who, 'a.bin', crypto.randomBytes(1024 * 1024), 'application/octet-stream');
+    await upload(bob.who, 'b.bin', crypto.randomBytes(1024 * 1024), 'application/octet-stream');
+    r = await call(s, 'POST', '/api/uploads', bob.who, { name: 'c.bin', size: 900 * 1024 });
+    assert.equal(r.status, 507, r.body);
+    assert.match(r.json.error, /storage is full/);
+    // Someone else's upload can't be continued or sent.
+    const mine = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'x.txt', size: 3 })).json.id;
+    assert.equal((await s.req('PUT', `/api/uploads/${mine}?offset=0`, { headers: { ...as(bob.who), 'Content-Type': 'application/octet-stream' }, body: 'abc' })).status, 404);
+    assert.equal((await call(s, 'POST', `/api/channels/${f.general}/messages`, bob.who, { files: [mine] })).status, 400);
+    // Deleting the message deletes its files.
+    const gone = (await call(s, 'GET', `/api/channels/${dm}/messages`, mary.who)).json.messages[0].id;
+    await call(s, 'DELETE', `/api/messages/${gone}`, mary.who);
+    assert.equal((await call(s, 'GET', `/api/files/${photo}`, mary.who)).status, 404);
+    await waitFor(() => !fs.existsSync(path.join(s.data, 'files', photo)));
+    // Avatars: JPEG/PNG/WebP that are what they say, seen by everyone signed in.
+    r = await s.req('PUT', '/api/me/avatar', { headers: { ...as(mary.who), 'Content-Type': 'image/png' }, body: Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), crypto.randomBytes(100)]) });
+    assert.equal(r.status, 200, r.body);
+    const avatar = r.json.me.avatar;
+    assert.match(avatar, /^\/api\/people\/[0-9A-Z]{26}\/avatar\?v=/);
+    assert.equal((await s.req('GET', avatar, { headers: as(bob.who) })).headers['content-type'], 'image/png');
+    assert.equal((await s.req('GET', avatar)).status, 401);
+    assert.equal((await s.req('PUT', '/api/me/avatar', { headers: { ...as(mary.who), 'Content-Type': 'image/png' }, body: '<svg/>' })).status, 400);
+  } finally { await s.stop(); }
+});
+
+test('F-H: push: only the push services browsers use; encrypted for that browser; not to the author, someone looking at it, or as each person chose', async () => {
+  const push = await pushService();
+  const s = await start('push', 8848);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const bob = await join(s, f.owner, 'Bob');
+    let r = await call(s, 'GET', '/api/push', mary.who);
+    assert.equal(Buffer.from(r.json.key, 'base64url').length, 65, 'the VAPID public key');
+    const key = r.json.key;
+    for (const endpoint of ['https://evil.example.com/push', 'http://fcm.googleapis.com/x', 'https://fcm.googleapis.com.evil.net/x', 'file:///etc/passwd']) {
+      assert.equal((await call(s, 'PUT', '/api/push', mary.who, { endpoint, keys: browserKeys().keys })).status, 400, endpoint);
+    }
+    const maryKeys = browserKeys();
+    const bobKeys = browserKeys();
+    assert.equal((await call(s, 'PUT', '/api/push', mary.who, { endpoint: `${push.url}/mary`, keys: maryKeys.keys })).status, 204);
+    assert.equal((await call(s, 'PUT', '/api/push', bob.who, { endpoint: `${push.url}/bob`, keys: bobKeys.keys })).status, 204);
+    // A message in #general: Mary and Bob are told, not the owner who wrote it.
+    await post(s, f.owner, f.general, `Look at this, <@${mary.id}>!`);
+    await waitFor(() => push.got.length >= 2);
+    await sleep(200);
+    assert.deepEqual(push.got.map(g => g.path).sort(), ['/bob', '/mary']);
+    const toMary = push.got.find(g => g.path === '/mary');
+    assert.equal(toMary.headers['content-encoding'], 'aes128gcm');
+    assert.equal(toMary.headers.urgency, 'high', 'a mention is urgent');
+    assert.match(toMary.headers.authorization, new RegExp(`^vapid t=[\\w-]+\\.[\\w-]+\\.[\\w-]+, k=${key}$`));
+    const [head, claims, sig] = toMary.headers.authorization.slice(8).split(', k=')[0].split('.');
+    assert.equal(JSON.parse(Buffer.from(claims, 'base64url')).aud, push.url, 'the token is for that push service');
+    const jwk = { kty: 'EC', crv: 'P-256', x: Buffer.from(key, 'base64url').subarray(1, 33).toString('base64url'), y: Buffer.from(key, 'base64url').subarray(33).toString('base64url') };
+    assert.ok(crypto.verify('sha256', Buffer.from(`${head}.${claims}`), { key: crypto.createPublicKey({ key: jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')), 'signed with the VAPID key');
+    const payload = decryptPush(toMary.body, maryKeys);
+    assert.deepEqual([payload.title, payload.body, payload.channel, payload.url], ['Robin in #general', 'Look at this, @Mary!', f.general, `/c/${f.general}`]);
+    assert.equal(push.got.find(g => g.path === '/bob').headers.urgency, 'normal');
+    // Mary looks at #general in an open app: not pushed to her. Bob mutes it except mentions.
+    const ev = await openEvents(s.port, as(mary.who));
+    const hello = await ev.wait('hello');
+    await call(s, 'PUT', '/api/focus', mary.who, { client: hello.data.client, channel: f.general, visible: true });
+    await call(s, 'PUT', `/api/channels/${f.general}/notify`, bob.who, { level: 'mentions' });
+    push.got.length = 0;
+    await post(s, f.owner, f.general, 'Nothing special');
+    await sleep(500);
+    assert.deepEqual(push.got.map(g => g.path), [], 'Mary is looking; Bob only wants mentions');
+    await post(s, f.owner, f.general, `<@${bob.id}> your turn`);
+    await waitFor(() => push.got.length === 1);
+    assert.equal(push.got[0].path, '/bob');
+    // A DM always notifies (unless none); a 410 forgets that browser.
+    push.got.length = 0;
+    await call(s, 'PUT', '/api/push', bob.who, { endpoint: `${push.url}/gone`, keys: browserKeys().keys });
+    const dm = (await call(s, 'POST', '/api/dms', f.owner, { people: [bob.id] })).json.channel.id;
+    await post(s, f.owner, dm, 'private');
+    await waitFor(() => push.got.length === 2);
+    await sleep(200);
+    const subs = await (async () => {
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(path.join(s.data, 'family.db'), { readOnly: true });
+      try { return db.prepare('SELECT endpoint FROM push_subs').all().map(r => r.endpoint).sort(); } finally { db.close(); }
+    })();
+    assert.deepEqual(subs, [`${push.url}/bob`, `${push.url}/mary`], 'the gone subscription was removed');
+    assert.equal(decryptPush(push.got.find(g => g.path === '/bob').body, bobKeys).title, 'Robin', 'a DM is titled with the sender');
+    ev.close();
+  } finally { await s.stop(); push.close(); }
+});
+
+test('F-I: changes only from the app’s own pages; admins and roles; turning someone off ends everything', async () => {
+  const s = await start('rules', 8849);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const admin = await join(s, f.owner, 'Ann', { role: 'admin' });
+    // Same-origin: cross-site or same-site (another machine on the tailnet) is refused, even with Tailscale's identity.
+    for (const site of ['cross-site', 'same-site']) {
+      const r = await s.req('POST', `/api/channels/${f.general}/messages`, { headers: { ...f.owner, 'Content-Type': 'application/json', 'Sec-Fetch-Site': site }, body: '{"body":"x"}' });
+      assert.equal(r.status, 403, site);
+    }
+    let r = await s.req('POST', `/api/channels/${f.general}/messages`, { headers: { ...f.owner, 'Content-Type': 'application/json', Origin: 'https://evil.example.com' }, body: '{"body":"x"}' });
+    assert.equal(r.status, 403, 'a foreign Origin');
+    r = await s.req('POST', `/api/channels/${f.general}/messages`, { headers: { ...f.owner, 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: '{"body":"from the app"}' });
+    assert.equal(r.status, 201);
+    // Too fast: 20 posts in 10 seconds per person.
+    let limited = 0;
+    for (let i = 0; i < 25; i++) if ((await call(s, 'POST', `/api/channels/${f.photos}/messages`, mary.who, { body: `fast ${i}` })).status === 429) limited++;
+    assert.ok(limited >= 5, `slowed down (${limited})`);
+    assert.equal((await call(s, 'POST', `/api/channels/${f.photos}/messages`, admin.who, { body: 'not me' })).status, 201, 'per person');
+    // Roles: only the owner makes admins; admins can't change admins or the owner; nobody changes themselves.
+    assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, admin.who, { role: 'admin' })).status, 403);
+    assert.equal((await call(s, 'PATCH', `/api/people/${f.me.id}`, admin.who, { disabled: true })).status, 403);
+    assert.equal((await call(s, 'PATCH', `/api/people/${admin.id}`, admin.who, { role: 'member' })).status, 403);
+    assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, mary.who, { disabled: true })).status, 403);
+    assert.equal((await call(s, 'POST', '/api/invites', admin.who, { role: 'admin' })).status, 403, 'only the owner invites admins');
+    assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, f.owner, { role: 'admin' })).json.person.role, 'admin');
+    assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, f.owner, { role: 'member' })).json.person.role, 'member');
+    // Me: name, colour, password (the current one is needed with a password session).
+    assert.equal((await call(s, 'PATCH', '/api/me', mary.who, { name: 'ann' })).status, 409);
+    assert.equal((await call(s, 'PATCH', '/api/me', mary.who, { name: 'Mary B', color: 3 })).json.me.name, 'Mary B');
+    assert.equal((await call(s, 'PATCH', '/api/me', mary.who, { password: 'another long password', current: 'wrong' })).status, 403);
+    // A second browser signed in as Mary is signed out by her password change.
+    const other = `fam_s=${sessionOf(await call(s, 'POST', '/api/signin', {}, { name: 'Mary B', password: 'a long family password' }))}`;
+    assert.equal((await call(s, 'GET', '/api/me/sessions', mary.who)).json.sessions.length, 2);
+    assert.equal((await call(s, 'PATCH', '/api/me', mary.who, { password: 'another long password', current: 'a long family password' })).status, 200);
+    assert.equal((await call(s, 'GET', '/api/bootstrap', other)).status, 401);
+    assert.equal((await call(s, 'GET', '/api/bootstrap', mary.who)).status, 200, 'the browser that changed it stays in');
+    // A forgotten password: an admin's reset link (members can't make one; only the owner for the owner).
+    assert.equal((await call(s, 'POST', `/api/people/${mary.id}/reset`, mary.who)).status, 403);
+    assert.equal((await call(s, 'POST', `/api/people/${f.me.id}/reset`, admin.who)).status, 403);
+    r = await call(s, 'POST', `/api/people/${mary.id}/reset`, admin.who);
+    assert.equal(r.status, 201, r.body);
+    const resetCode = r.json.url.split('/join/')[1];
+    assert.ok(r.json.qr.startsWith('<svg'), 'a QR code');
+    assert.ok(!(await call(s, 'GET', '/api/invites', f.owner)).json.invites.some(i => i.uses === 0 && i.max === 1 && i.role === 'member' && i.id === r.json.id), 'not among the open invites');
+    r = await call(s, 'GET', `/api/invites/${resetCode}`);
+    assert.deepEqual([r.json.reset, r.json.name, r.json.by], [true, 'Mary B', 'Ann']);
+    assert.equal((await call(s, 'POST', `/api/invites/${resetCode}`, {}, { password: 'short' })).status, 400);
+    r = await call(s, 'POST', `/api/invites/${resetCode}`, {}, { password: 'a brand new password' });
+    assert.equal(r.status, 201, r.body);
+    assert.equal(r.json.me.name, 'Mary B', 'the same person, not a new one');
+    const fresh = `fam_s=${sessionOf(r)}`;
+    assert.equal((await call(s, 'GET', '/api/bootstrap', mary.who)).status, 401, 'her old sessions ended');
+    assert.equal((await call(s, 'GET', '/api/bootstrap', fresh)).status, 200, 'signed in by the reset');
+    assert.equal((await call(s, 'POST', `/api/invites/${resetCode}`, {}, { password: 'yet another password' })).status, 404, 'used once');
+    assert.equal((await call(s, 'POST', '/api/signin', {}, { name: 'Mary B', password: 'another long password' })).status, 401, 'the old password is gone');
+    mary.who = fresh;
+    assert.match(s.out, /Mary B set a new password with a reset link/);
+    // Turning off: no sign-in, no session; turned back on: signs in again.
+    assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, admin.who, { disabled: true })).status, 200);
+    assert.equal((await call(s, 'GET', '/api/bootstrap', mary.who)).status, 401);
+    r = await call(s, 'POST', '/api/signin', {}, { name: 'Mary B', password: 'a brand new password' });
+    assert.deepEqual([r.status, r.json.error], [401, 'Your access to this family space was turned off']);
+    await call(s, 'PATCH', `/api/people/${mary.id}`, admin.who, { disabled: false });
+    assert.equal((await call(s, 'POST', '/api/signin', {}, { name: 'Mary B', password: 'a brand new password' })).status, 200);
+    assert.match(s.out, /Ann turned off Mary B’s access/);
+  } finally { await s.stop(); }
+});
+
+test('F-J: the CLI: an owner invite before anyone owns it; status; stop under the supervisor', async () => {
+  const dir = path.join(TMP, 'cli');
+  fs.mkdirSync(dir, { recursive: true });
+  const env = familyEnv(8841, dir, { BEAM_FAMILY_OWNER: '' });
+  let r = spawnSync(process.execPath, [SERVER, 'invite'], { env, encoding: 'utf8' });
+  assert.match(r.stderr, /Set up the owner first/);
+  r = spawnSync(process.execPath, [SERVER, 'invite', '--owner'], { env, encoding: 'utf8' });
+  const code = /\/join\/([A-Za-z0-9_-]{22})/.exec(r.stdout)?.[1];
+  assert.ok(code, r.stdout + r.stderr);
+  const child = spawn(process.execPath, [SERVER, '--supervise'], { env, stdio: 'ignore', windowsHide: true });
+  children.add(child);
+  try {
+    await waitFor(async () => { try { return (await request(8841, 'GET', '/api/hello')).json?.family; } catch { return false; } }, 15000);
+    // The owner invite over the public link: name and password, then that's the owner.
+    let res = await request(8841, 'POST', `/api/invites/${code}`, { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Owner', password: 'the owner password' }) });
+    assert.equal(res.status, 201, res.body);
+    assert.equal(res.json.me.role, 'owner');
+    r = spawnSync(process.execPath, [SERVER, 'status'], { env, encoding: 'utf8' });
+    assert.match(r.stdout, /Beam Family: 1 person, 0 messages/);
+    r = spawnSync(process.execPath, [SERVER, 'stop'], { env, encoding: 'utf8' });
+    assert.match(r.stdout, /Beam Family stopped/);
+    await waitFor(() => child.exitCode !== null, 15000);
+    assert.equal(child.exitCode, 0, 'the supervisor ends too');
+    // Only this machine's owner (with the control key, from here, not through a proxy) can stop it.
+    const again = await start('cli-again', 8842, {});
+    res = await again.req('POST', '/api/admin/shutdown', { headers: { 'X-Family-Control': 'guess' } });
+    assert.equal(res.status, 404);
+    const key = fs.readFileSync(path.join(again.data, 'control.key'), 'utf8');
+    res = await again.req('POST', '/api/admin/shutdown', { headers: { 'X-Family-Control': key, 'X-Forwarded-For': '203.0.113.5' } });
+    assert.equal(res.status, 404, 'not through tailscale serve or Funnel');
+    await again.stop();
+  } finally { try { child.kill(); } catch {} }
+});
+
+// ---------------------------------------------------------------- runner
+
+(async () => {
+  const filters = process.argv.slice(2).map(s => s.toLowerCase());
+  const chosen = tests.filter(t => !filters.length || filters.some(f => t.name.toLowerCase().includes(f)));
+  let failed = 0;
+  const started = Date.now();
+  for (const t of chosen) {
+    const t0 = Date.now();
+    try {
+      await t.fn();
+      console.log(`ok    ${t.name} (${Date.now() - t0} ms)`);
+    } catch (err) {
+      failed++;
+      console.log(`FAIL  ${t.name}\n      ${String(err.stack || err).split('\n').slice(0, 6).join('\n      ')}`);
+    }
+    for (const c of children) try { c.kill(); } catch {}
+  }
+  console.log(`\n${chosen.length - failed} passed, ${failed} failed (${Math.round((Date.now() - started) / 1000)} s)`);
+  fs.rmSync(TMP, { recursive: true, force: true });
+  process.exit(failed ? 1 : 0);
+})();

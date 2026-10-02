@@ -1,0 +1,499 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:ignore="TooManyViews"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.AppBarLayout
+        android:id="@+id/appbar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?android:colorBackground"
+        app:liftOnScroll="true"
+        app:liftOnScrollTargetViewId="@id/scroll">
+
+        <com.google.android.material.appbar.MaterialToolbar
+            android:id="@+id/toolbar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="?attr/actionBarSize"
+            app:navigationContentDescription="@string/back"
+            app:navigationIcon="@drawable/ic_back"
+            app:title="@string/settings" />
+    </com.google.android.material.appbar.AppBarLayout>
+
+    <ScrollView
+        android:id="@+id/scroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false">
+
+        <LinearLayout
+            android:id="@+id/content"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="24dp">
+
+            <!-- This device -->
+            <TextView
+                style="@style/SettingsHeader"
+                android:text="@string/settings_device" />
+
+            <LinearLayout
+                android:id="@+id/rowName"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_name" />
+
+                    <TextView
+                        android:id="@+id/nameValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowPhoneNotifications"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/pc_notifications_title" />
+
+                    <TextView
+                        android:id="@+id/phoneNotificationsValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Receiving -->
+            <TextView
+                style="@style/SettingsHeader"
+                android:text="@string/settings_receiving" />
+
+            <LinearLayout
+                android:id="@+id/rowStay"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_stay_connected" />
+
+                    <TextView
+                        style="@style/SettingsSummary"
+                        android:text="@string/settings_stay_connected_summary" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/stay"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="false"
+                    android:focusable="false" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowAutoCopy"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_auto_copy" />
+
+                    <TextView
+                        style="@style/SettingsSummary"
+                        android:text="@string/settings_auto_copy_summary" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/autoCopy"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="false"
+                    android:focusable="false" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowAutoDownload"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_auto_download" />
+
+                    <TextView
+                        style="@style/SettingsSummary"
+                        android:text="@string/settings_auto_download_summary" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/autoDownload"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="false"
+                    android:focusable="false" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowWifiOnly"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_wifi_only" />
+
+                    <TextView
+                        style="@style/SettingsSummary"
+                        android:text="@string/settings_wifi_only_summary" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/wifiOnly"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="false"
+                    android:focusable="false" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowMaxSize"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_max_size" />
+
+                    <TextView
+                        android:id="@+id/maxSizeValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowNotifications"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_notifications" />
+
+                    <TextView
+                        android:id="@+id/notificationsValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowBattery"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_battery" />
+
+                    <TextView
+                        android:id="@+id/batteryValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Quick access -->
+            <TextView
+                style="@style/SettingsHeader"
+                android:text="@string/settings_quick_access" />
+
+            <LinearLayout
+                android:id="@+id/rowTile"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_tile" />
+
+                    <TextView
+                        android:id="@+id/tileValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowOpenLinks"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_open_links" />
+
+                    <TextView
+                        android:id="@+id/openLinksValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Alerts (server 1.3; hidden for older servers). They're the server's settings, shared by all devices. -->
+            <LinearLayout
+                android:id="@+id/alertsSection"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    style="@style/SettingsHeader"
+                    android:text="@string/settings_alerts" />
+
+                <LinearLayout
+                    android:id="@+id/rowAlertBattery"
+                    style="@style/SettingsRow">
+
+                    <LinearLayout style="@style/SettingsTexts">
+
+                        <TextView
+                            style="@style/SettingsTitle"
+                            android:text="@string/settings_alert_battery" />
+
+                        <TextView
+                            style="@style/SettingsSummary"
+                            android:text="@string/settings_alert_battery_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/alertBattery"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:clickable="false"
+                        android:focusable="false" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/rowAlertStorage"
+                    style="@style/SettingsRow">
+
+                    <LinearLayout style="@style/SettingsTexts">
+
+                        <TextView
+                            style="@style/SettingsTitle"
+                            android:text="@string/settings_alert_storage" />
+
+                        <TextView
+                            style="@style/SettingsSummary"
+                            android:text="@string/settings_alert_storage_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/alertStorage"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:clickable="false"
+                        android:focusable="false" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/rowAlertServerDisk"
+                    style="@style/SettingsRow">
+
+                    <LinearLayout style="@style/SettingsTexts">
+
+                        <TextView
+                            style="@style/SettingsTitle"
+                            android:text="@string/settings_alert_server_disk" />
+
+                        <TextView
+                            style="@style/SettingsSummary"
+                            android:text="@string/settings_alert_server_disk_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/alertServerDisk"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:clickable="false"
+                        android:focusable="false" />
+                </LinearLayout>
+
+                <TextView
+                    style="@style/SettingsSummary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingHorizontal="24dp"
+                    android:paddingBottom="8dp"
+                    android:text="@string/settings_alerts_note" />
+            </LinearLayout>
+
+            <!-- Devices -->
+            <TextView
+                style="@style/SettingsHeader"
+                android:text="@string/settings_devices" />
+
+            <LinearLayout
+                android:id="@+id/devicesList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
+            <!-- Sign-in -->
+            <TextView
+                style="@style/SettingsHeader"
+                android:text="@string/settings_signin" />
+
+            <LinearLayout
+                android:id="@+id/rowApprove"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_approve" />
+
+                    <TextView
+                        style="@style/SettingsSummary"
+                        android:text="@string/settings_approve_summary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowPairAnother"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/pair_another" />
+
+                    <TextView
+                        style="@style/SettingsSummary"
+                        android:text="@string/settings_pair_another_summary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowPassword"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_password" />
+
+                    <TextView
+                        android:id="@+id/passwordValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Server -->
+            <TextView
+                style="@style/SettingsHeader"
+                android:text="@string/settings_server" />
+
+            <LinearLayout
+                android:id="@+id/rowServer"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        android:id="@+id/serverValue"
+                        style="@style/SettingsTitle" />
+
+                    <TextView
+                        android:id="@+id/serverStatus"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowServerInfo"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_server_info" />
+
+                    <TextView
+                        android:id="@+id/serverInfoValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- About -->
+            <TextView
+                style="@style/SettingsHeader"
+                android:text="@string/settings_about" />
+
+            <LinearLayout
+                android:id="@+id/rowUpdates"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_updates" />
+
+                    <TextView
+                        android:id="@+id/updatesValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/settings_version" />
+
+                    <TextView
+                        android:id="@+id/versionValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/unpair"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="16dp"
+                android:text="@string/settings_unpair"
+                android:textColor="?attr/colorError"
+                app:strokeColor="?attr/colorError" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

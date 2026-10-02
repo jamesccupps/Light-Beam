@@ -1,0 +1,38 @@
+# Beam as a Linux service without Docker (Debian/Ubuntu/Raspberry Pi OS…). See README → "Moving Beam".
+#   sudo useradd --system --home /opt/beam --shell /usr/sbin/nologin beam
+#   sudo cp -r beam /opt/beam && cd /opt/beam && sudo npm ci --omit=dev && sudo chown -R root: /opt/beam
+#   sudo cp deploy/beam.service /etc/systemd/system/ && sudo systemctl enable --now beam
+#   sudo tailscale serve --bg 8765
+# Data (items, keys, logs, app builds) is kept in /var/lib/beam, created for the beam user by systemd.
+# Bringing an existing Beam: sudo -u beam BEAM_DATA=/var/lib/beam node /opt/beam/server.js import <export file>
+# (or import-from <old address>) before starting the service.
+[Unit]
+Description=Beam: send text and files between your devices
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=beam
+WorkingDirectory=/opt/beam
+ExecStart=/usr/bin/node /opt/beam/server.js
+Environment=BEAM_HOST=127.0.0.1
+Environment=BEAM_DATA=/var/lib/beam
+Environment=BEAM_DIST=/var/lib/beam/dist
+# Refuse to start (instead of creating a new, empty Beam) if the data folder has no key, e.g. a disk not mounted.
+# Remove this line for a brand-new installation, start once, then put it back.
+Environment=BEAM_REQUIRE_DATA=1
+# Optional: the address your devices use. Beam learns it from the first visit through tailscale serve.
+# Environment=BEAM_PUBLIC_URL=https://my-server.my-tailnet.ts.net
+StateDirectory=beam
+StateDirectoryMode=0700
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/beam
+
+[Install]
+WantedBy=multi-user.target

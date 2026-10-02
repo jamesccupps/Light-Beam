@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_send_clipboard"
+        android:icon="@drawable/ic_paste"
+        android:title="@string/send_clipboard"
+        app:showAsAction="ifRoom" />
+    <!-- A PC that allows remote control (server 1.6). -->
+    <item
+        android:id="@+id/action_control"
+        android:icon="@drawable/ic_remote_control"
+        android:title="@string/device_control"
+        android:visible="false"
+        app:showAsAction="ifRoom" />
+    <!-- Another device: shown when it can do it (server 1.3). -->
+    <item
+        android:id="@+id/action_ring"
+        android:title="@string/device_ring"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_stop_ringing"
+        android:title="@string/device_stop_ringing"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_wake"
+        android:title="@string/device_wake"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_remote_desktop"
+        android:title="@string/device_remote_desktop"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_clear"
+        android:title="@string/clear_conversation"
+        app:showAsAction="never" />
+</menu>

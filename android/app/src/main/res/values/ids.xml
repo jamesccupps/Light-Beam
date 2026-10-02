@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="thumb_key" type="id" />
+    <!-- Beam's actions in the text selection toolbar of a bubble. -->
+    <item name="selection_forward" type="id" />
+    <item name="selection_delete" type="id" />
+    <item name="selection_more" type="id" />
+</resources>
