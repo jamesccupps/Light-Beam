@@ -284,6 +284,8 @@ data class ServerInfo(
     val storageItems: Int?,
     /** (1.7) Beam Family's address (the family's chat, its own server), if this Beam knows it. */
     val family: String? = null,
+    /** (1.7.6) Every address this Beam answers on, for finding it after a move (signed in; audit S-33). */
+    val urls: List<String> = emptyList(),
 ) {
     /** A v3 feature such as "forward"; servers that don't list features have all of them from API 3. */
     fun has(feature: String) = if (features.isNotEmpty()) feature in features else api >= 3
@@ -308,6 +310,7 @@ data class ServerInfo(
                 storageTotal = long("total"),
                 storageItems = storage?.takeIf { it.has("items") }?.optInt("items"),
                 family = o.str("family")?.takeIf { it.startsWith("https://") || it.startsWith("http://") },
+                urls = o.optJSONArray("urls").strings(),
             )
         }
     }

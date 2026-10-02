@@ -129,5 +129,10 @@ class ServerMoves(private val app: BeamApp) {
             learn(*hello.urls.toTypedArray())
         } catch (_: Exception) {
         }
+        // (1.7.6, audit S-33) and from the signed-in /api/info: a later server leaves them out of /api/hello
+        try {
+            app.api?.info()?.urls?.let { learn(*it.toTypedArray()) }
+        } catch (_: Exception) {
+        }
     }
 }

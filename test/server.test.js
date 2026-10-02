@@ -1482,6 +1482,24 @@ test('B5: import-from copies a running Beam after approval and moves everyone ov
   } finally { await old.stop(); await neu?.stop(); }
 });
 
+test('1.7.6: __Host-beam_key signs in before the legacy beam_key, a stale one falls back to it, and signing out over https clears both', async () => {
+  const s = await startServer('hostcookie', 8792);
+  try {
+    const key = (await post(s, '/api/login', { secret: s.key, client: 'app', platform: 'windows' }, { 'X-Beam-Device-Id': 'hostcook001', ...from('100.64.76.1') })).json.key;
+    const me = c => s.req('GET', '/api/me', { headers: { Cookie: c, ...from('100.64.76.1') } });
+    assert.equal((await me(`__Host-beam_key=${key}`)).status, 200, 'the new name');
+    assert.equal((await me(`beam_key=${key}`)).status, 200, 'the old name, while the apps move over');
+    assert.equal((await me(`__Host-beam_key=notatoken; beam_key=${key}`)).status, 200, 'a stale new one falls back to the old');
+    assert.equal((await me('__Host-beam_key=notatoken')).status, 401);
+    await waitFor(() => /pages use the __Host-beam_key sign-in cookie/.test(fs.readFileSync(path.join(s.data, 'logs', 'server.log'), 'utf8')));
+    const out = await post(s, '/api/logout', {}, { ...viaServe('100.64.76.1'), ...sameOrigin, Cookie: `__Host-beam_key=${key}` });
+    assert.equal(out.status, 204);
+    const cleared = [].concat(out.headers['set-cookie'] || []);
+    assert.ok(cleared.some(c => /^beam_key=;.*Max-Age=0/.test(c)) && cleared.some(c => /^__Host-beam_key=; Path=\/; Max-Age=0;.*Secure/.test(c)), cleared.join(' | '));
+    assert.equal((await me(`__Host-beam_key=${key}`)).status, 401, 'signed out');
+  } finally { await s.stop(); }
+});
+
 test('1.7.3: a revoked migration sign-in never comes back; one answer for a move target that isn’t a Beam; a move called off revokes its sign-in; browsers unused for half a year are signed out; BEAM_REQUIRE_DATA won’t start without devices.json', async () => {
   let s = await startServer('audit173', 8791);
   try {

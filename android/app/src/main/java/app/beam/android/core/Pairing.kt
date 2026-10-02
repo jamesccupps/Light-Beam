@@ -67,6 +67,13 @@ object Pairing {
     /** The server address in an approval link (to explain codes that belong to another server). */
     fun approveHost(input: String): String? = firstUrl(input.trim())?.takeIf { it.queryParameter("approve") != null }?.let(::origin)
 
+    /**
+     * Whether an approval link's server ([origin], from [approveHost]) is this phone's own Beam: its address or one it's
+     * also known by (1.7.6, audit S-35: a link for any other server never opens the approval sheet).
+     */
+    fun isOwnServer(origin: String?, base: String?, alternates: Set<String>): Boolean =
+        origin != null && base != null && (alternates + base).any { it.equals(origin, ignoreCase = true) }
+
     // ---------------------------------------------------------------- server addresses
 
     /**

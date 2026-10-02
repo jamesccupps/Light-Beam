@@ -455,7 +455,7 @@ namespace Beam
                 Configure();
                 await WebHost.ClearLeftovers(core); // a sign-out's data that couldn't be deleted (in use) goes first
                 await InjectIdentity();
-                SetCookie();
+                await SetCookie();
                 try { web.ZoomFactor = app.Cfg.Zoom; } catch { }
                 web.ZoomFactorChanged += (s, e) => { app.Cfg.Zoom = web.ZoomFactor; app.Cfg.Save(); };
                 Navigate();
@@ -555,10 +555,10 @@ namespace Beam
             identityScriptId = await core.AddScriptToExecuteOnDocumentCreatedAsync(IdentityScript());
         }
 
-        void SetCookie()
+        Task SetCookie()
         {
             Uri u;
-            if (core == null || app.Cfg.Key == null || !Uri.TryCreate(Origin, UriKind.Absolute, out u)) return;
+            if (core == null || app.Cfg.Key == null || !Uri.TryCreate(Origin, UriKind.Absolute, out u)) return Task.FromResult(0);
             try
             {
                 var c = core.CookieManager.CreateCookie("beam_key", app.Cfg.Key, u.Host, "/");
@@ -569,6 +569,7 @@ namespace Beam
                 core.CookieManager.AddOrUpdateCookie(c);
             }
             catch (Exception ex) { Log.Error("Web window: cookie", ex); }
+            return WebHost.SetHostCookie(core, u, app.Cfg.Key, "Web window");
         }
 
         void Navigate()
@@ -591,7 +592,7 @@ namespace Beam
             await clearing; // a sign-out's clearing first: it would take the new cookie too
             if (core == null) return;
             await InjectIdentity();
-            SetCookie();
+            await SetCookie();
             PostEvent("settings", "settings", app.SettingsObject());
         }
 
@@ -602,7 +603,7 @@ namespace Beam
             await clearing; // the reload never races a sign-out's clearing (cookie, storage, cache)
             if (core == null) return;
             await InjectIdentity();
-            SetCookie();
+            await SetCookie();
             Navigate();
         }
 

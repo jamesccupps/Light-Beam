@@ -91,6 +91,30 @@ namespace Beam
             loaderReady = true;
         }
 
+        // Beam 1.7.6 (audit S-10): over https the page also gets the sign-in as `__Host-beam_key`, which the browser keeps
+        // host-only, Secure and on path / (so no other machine of the tailnet can plant one under that name). The cookie
+        // manager's CreateCookie names a Domain, which that prefix forbids, so it goes through DevTools with the page's
+        // URL instead. At most 2 s: until the server reads only the new name, the old `beam_key` signs the page in too.
+        public static async Task SetHostCookie(CoreWebView2 core, Uri origin, string key, string who)
+        {
+            if (core == null || origin == null || origin.Scheme != Uri.UriSchemeHttps || string.IsNullOrEmpty(key)) return;
+            var p = new Dictionary<string, object>();
+            p["name"] = "__Host-beam_key";
+            p["value"] = key;
+            p["url"] = "https://" + origin.Authority + "/";
+            p["secure"] = true;
+            p["httpOnly"] = true;
+            p["sameSite"] = "Lax";
+            p["expires"] = (long)(DateTime.UtcNow.AddYears(10) - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+            try
+            {
+                var call = core.CallDevToolsProtocolMethodAsync("Network.setCookie", Json.Stringify(p));
+                if (await Task.WhenAny(call, Task.Delay(2000)) != call) { Log.Write(who + ": the __Host- sign-in cookie took over 2 s"); return; }
+                await call; // (throws if DevTools refused it)
+            }
+            catch (Exception ex) { Log.Error(who + ": the __Host- sign-in cookie", ex); }
+        }
+
         // For the other web views (Beam 1.6 remote control): the loader, before their own environments.
         public static void EnsureLoader(Config cfg)
         {

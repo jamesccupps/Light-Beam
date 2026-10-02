@@ -2,6 +2,7 @@ package app.beam.android.data
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -16,8 +17,11 @@ import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Everything Beam stores on the device (plain SharedPreferences; excluded from backups). */
-class Prefs(context: Context) {
+/**
+ * Everything Beam stores on the device (SharedPreferences, excluded from backups). The sign-in is sealed with a key in
+ * Android's Keystore (1.7.6, [SecretBox]).
+ */
+class Prefs(context: Context, private val box: SecretBox = KeystoreBox()) {
     private val ctx = context.applicationContext
     private val sp = ctx.getSharedPreferences("beam", Context.MODE_PRIVATE)
 
@@ -25,8 +29,35 @@ class Prefs(context: Context) {
 
     val baseUrl: String? get() = sp.getString(K_BASE, null)
 
-    /** The secret sent as `Authorization: Bearer`: the master key, or (API v3) this device's own token. */
-    val key: String? get() = sp.getString(K_KEY, null)
+    /**
+     * The secret sent as `Authorization: Bearer`: the master key, or (API v3) this device's own token. Sealed on disk
+     * (1.7.6, audit S-23); one kept in clear by an older version is sealed the first time it's read.
+     */
+    val key: String?
+        get() {
+            cachedKey?.let { return it }
+            val sealed = sp.getString(K_KEY_SEALED, null)
+            val key = if (sealed != null) box.open(sealed) ?: sp.getString(K_KEY, null)
+            else sp.getString(K_KEY, null)?.also { plain -> sp.edit(commit = true) { putKey(plain) } }
+            cachedKey = key
+            return key
+        }
+
+    @Volatile private var cachedKey: String? = null
+
+    /** Writes [key] sealed, once it opens again; where the Keystore doesn't work it's kept as before (never lost). */
+    private fun SharedPreferences.Editor.putKey(key: String) {
+        val sealed = box.seal(key)?.takeIf { box.open(it) == key }
+        if (sealed != null) {
+            putString(K_KEY_SEALED, sealed)
+            remove(K_KEY)
+        } else {
+            putString(K_KEY, key)
+            remove(K_KEY_SEALED)
+        }
+        cachedKey = key
+    }
+
     val paired: Boolean get() = !baseUrl.isNullOrEmpty() && !key.isNullOrEmpty()
 
     /** True once the app switched from the master key to its own device token (API v3). */
@@ -95,13 +126,13 @@ class Prefs(context: Context) {
 
     /** Swaps the secret in place (the server issued this device its own token). */
     fun switchKey(key: String, deviceToken: Boolean) = sp.edit(commit = true) {
-        putString(K_KEY, key)
+        putKey(key)
         putString(K_KEY_KIND, if (deviceToken) KIND_TOKEN else KIND_MASTER)
     }
 
     fun savePairing(baseUrl: String, key: String, name: String, serverId: String? = null) = sp.edit(commit = true) {
         putString(K_BASE, baseUrl)
-        putString(K_KEY, key)
+        putKey(key)
         // API v3 sign-ins (Tailscale, password, approval, one-time links) hand out this device's own token.
         if (key.startsWith("bt_") || key.startsWith("bp_")) putString(K_KEY_KIND, KIND_TOKEN) else remove(K_KEY_KIND)
         remove(K_EFFECTIVE_ID)
@@ -132,6 +163,7 @@ class Prefs(context: Context) {
         sp.edit(commit = true) {
             remove(K_BASE)
             remove(K_KEY)
+            remove(K_KEY_SEALED)
             remove(K_KEY_KIND)
             remove(K_EFFECTIVE_ID)
             remove(K_SERVER_ID)
@@ -157,6 +189,7 @@ class Prefs(context: Context) {
         _lastRead.value = emptyMap()
         _localFiles.value = emptyMap()
         _drafts.value = emptyMap()
+        cachedKey = null
     }
 
     /**
@@ -437,6 +470,7 @@ class Prefs(context: Context) {
         private const val MAX_HANDLED = 2000
         private const val K_BASE = "baseUrl"
         private const val K_KEY = "key"
+        private const val K_KEY_SEALED = "keySealed"
         private const val K_KEY_KIND = "keyKind"
         private const val KIND_MASTER = "master"
         private const val KIND_TOKEN = "token"

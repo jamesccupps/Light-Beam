@@ -238,7 +238,10 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
                 ex.sendResponseHeaders(204, -1)
             }
             path == "/api/logout" && method == "POST" -> {
-                Regex("beam_key=([^;]+)").find(ex.requestHeaders.getFirst("Cookie").orEmpty())?.let { pageSignOuts += it.groupValues[1] }
+                // The token signed out, as the server reads it: a bearer token (the app since 1.7.6) or the cookie.
+                val bearer = ex.requestHeaders.getFirst("Authorization")?.takeIf { it.startsWith("Bearer ") }?.substring(7)?.trim()
+                (bearer ?: Regex("beam_key=([^;]+)").find(ex.requestHeaders.getFirst("Cookie").orEmpty())?.groupValues?.get(1))
+                    ?.let { pageSignOuts += it }
                 json(ex, 204, "")
             }
             path.startsWith("/api/rc/") && "remote-control" !in features -> json(ex, 404, JSONObject().put("error", "Not found"))

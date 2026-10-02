@@ -190,9 +190,13 @@ class ApproveLinkActivity : AppCompatActivity() {
         val data = intent.data
         val link = data?.toString().orEmpty()
         val code = Pairing.approveCode(link)
-        val paired = BeamApp.from(this).prefs.paired
+        val prefs = BeamApp.from(this).prefs
+        val paired = prefs.paired
         if (code != null && paired) {
-            startActivity(ApproveActivity.intent(this, code, host = Pairing.approveHost(link)))
+            // (1.7.6, audit S-35) Only a link for this phone's own Beam opens the approval sheet.
+            val host = Pairing.approveHost(link)
+            if (Pairing.isOwnServer(host, prefs.baseUrl, prefs.alternates)) startActivity(ApproveActivity.intent(this, code, host = host))
+            else Toast.makeText(this, getString(R.string.signin_link_other_server, host?.substringAfter("://") ?: "?"), Toast.LENGTH_LONG).show()
         } else if (!paired && Pairing.parse(link) != null) {
             // A pairing link opened from the camera or a web page: sign this phone in with it.
             startActivity(Intent(this, PairActivity::class.java).putExtra(PairActivity.EXTRA_LINK, link).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

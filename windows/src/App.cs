@@ -1153,6 +1153,10 @@ namespace Beam
                 {
                     ServerVersion = Json.Str(ServerInfo, "version") ?? ServerVersion;
                     ServerApi = (int)Json.Long(ServerInfo, "api", ServerApi);
+                    // (1.7.6, audit S-33) every address this Beam answers on, from the signed-in /api/info: a later
+                    // server leaves them out of /api/hello, which answers anyone
+                    var urls = Json.StrList(ServerInfo, "urls").Select(Api.NormalizeBase).Where(x => x != null).Distinct().ToList();
+                    if (urls.Count > 0 && !urls.SequenceEqual(Cfg.KnownUrls)) { Cfg.KnownUrls = urls; Cfg.Save(); }
                 }
                 if (SettingsChanged != null) SettingsChanged();
             }

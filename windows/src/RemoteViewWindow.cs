@@ -87,7 +87,7 @@ namespace Beam
         }
 
         // The app's sign-in changed (a new token): the page's cookie follows.
-        public void CookieAgain() { SetCookie(); }
+        public void CookieAgain() { var _ = SetCookie(); }
 
         protected override void OnHandleCreated(EventArgs e)
         {
@@ -137,7 +137,7 @@ namespace Beam
                     try { await core.Profile.ClearBrowsingDataAsync(); } catch (Exception ex) { Log.Error("Remote view: clearing old data", ex); }
                 }
                 await core.AddScriptToExecuteOnDocumentCreatedAsync(IdentityScript());
-                SetCookie();
+                await SetCookie();
                 core.Navigate(Origin + "/#remote=" + Uri.EscapeDataString(device));
             }
             catch (Exception ex)
@@ -224,10 +224,10 @@ namespace Beam
                 "try{localStorage.setItem('beam.deviceId',h.deviceId);localStorage.setItem('beam.device',h.deviceName);}catch(e){}})();";
         }
 
-        void SetCookie()
+        Task SetCookie()
         {
             Uri u;
-            if (core == null || app.Cfg.Key == null || !Uri.TryCreate(Origin, UriKind.Absolute, out u)) return;
+            if (core == null || app.Cfg.Key == null || !Uri.TryCreate(Origin, UriKind.Absolute, out u)) return Task.FromResult(0);
             try
             {
                 var c = core.CookieManager.CreateCookie("beam_key", app.Cfg.Key, u.Host, "/");
@@ -238,6 +238,7 @@ namespace Beam
                 core.CookieManager.AddOrUpdateCookie(c);
             }
             catch (Exception ex) { Log.Error("Remote view: cookie", ex); }
+            return WebHost.SetHostCookie(core, u, app.Cfg.Key, "Remote view");
         }
 
         // Signed out or revoked: the profile holds the sign-in cookie. Windows are closed first (App), then it goes;
