@@ -25,10 +25,12 @@ handed as their `key`.
 | **Pairing token** (v3) | `bp_…` | Goes in pairing links and QR codes. It works **once**, within **15 minutes**, and then becomes the device token of the device that used it. |
 | **Master key** | anything else | The original shared key, in `data/key`. It still works everywhere (legacy clients, admin), but no sign-in path hands it out any more. |
 
-Send the secret as `Authorization: Bearer <secret>` (apps, CLI) or in the `beam_key` cookie (browsers; the
-server sets it, `HttpOnly`). Since 1.7.6 the server also reads `__Host-beam_key`, first (host-only, `Secure`, `Path=/`:
-no other machine of the tailnet can plant it); the apps set it over https. A later version sets that name itself
-over https and stops reading the old one there (audit S-10).
+Send the secret as `Authorization: Bearer <secret>` (apps, CLI) or in a cookie (browsers; the server sets it,
+`HttpOnly`): over https `__Host-beam_key` (host-only, `Secure`, `Path=/`: no other machine of the tailnet can plant
+it; audit S-10), over plain http `beam_key`. The server reads `__Host-beam_key` first (since 1.7.6), then `beam_key`.
+Since 1.7.7 every sign-in over https sets `__Host-beam_key` and clears `beam_key`, and a page still signed in with
+`beam_key` over https gets the same sign-in moved to `__Host-beam_key`. The next release stops reading `beam_key` over
+https.
 
 - **A device token speaks for its device (v3).** Once a token is bound to a device, the server uses that device's id
   whatever `X-Beam-Device-Id` says. A token issued without a device id is bound to the first id it is used with.
@@ -162,10 +164,9 @@ Apps should try this first when they reach Beam over its `https://…ts.net` add
 **3. Pairing link.** See above.
 
 **Finding the server.** `GET /api/hello` answers without a key:
-`{ "beam": true, "version", "serverId", "api": 3, "urls": [...], "movedTo"?, "proof"? }`.
-- `urls` (v3) lists every address this Beam is known by. Remember them for finding it again after a move. Since 1.7.6
-  the apps read them from the signed-in `GET /api/info` (`urls`) instead; a later server leaves them out of hello,
-  which answers anyone (audit S-33).
+`{ "beam": true, "version", "serverId", "api": 3, "movedTo"?, "proof"? }`.
+- Every address this Beam is known by is in the signed-in `GET /api/info` (`urls`). Remember them for finding it
+  again after a move. Servers before 1.7.7 also listed them here, to anyone (audit S-33).
 - An app on a new computer can find Beam by running `tailscale status --json` and probing
   `https://<peer DNSName>/api/hello` on each online peer (strip the trailing dot from `DNSName`).
 
