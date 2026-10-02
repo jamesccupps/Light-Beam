@@ -14,6 +14,7 @@ const now = () => Date.now();
 const MAX_THUMB = 256 * 1024;
 const MAX_AVATAR = 512 * 1024;
 const MAX_PIECE = 16 * 1024 * 1024;
+const KEEP_EVERY = 2 * 1024 * 1024;
 const UNSENT_HOURS = 24;
 
 const MIME = {
@@ -139,11 +140,19 @@ function createFiles(ctx) {
       handle = await fsp.open(partPath(id), 'r+');
       const limit = Math.min(MAX_PIECE, a.size - a.received);
       let written = 0;
+      let kept = 0;
       try {
         for await (const chunk of req) {
           if (written + chunk.length > limit) throw httpError(413, 'That is more than the file’s size');
           await handle.write(chunk, 0, chunk.length, offset + written);
           written += chunk.length;
+          // Progress is kept every 2 MB on the way: a phone whose connection drops goes on from there, not from the
+          // start of the 16 MB piece (1.7.3, audit O-10).
+          if (written - kept >= KEEP_EVERY && written < limit) {
+            await handle.sync();
+            kept = written;
+            db.run('UPDATE attachments SET received = ? WHERE id = ?', offset + kept, id);
+          }
         }
       } catch (err) {
         // A piece cut off on the way (the app goes on from the offset): not a server error (1.7.2)
@@ -194,12 +203,15 @@ function createFiles(ctx) {
     const a = visibleAttachment(user, id);
     if (a.received < a.size) throw httpError(409, 'That file hasn’t finished uploading');
     const inline = INLINE.has(a.mime) && !url.searchParams.has('download');
+    // (Checked again on every use, a quick 304: once a message is deleted or someone leaves its conversation, a copy in
+    // their browser's cache no longer shows it; it was kept a day. 1.7.3, audit B-10)
     await sendFile(req, res, filePath(a.id), {
       type: inline ? a.mime : a.mime === 'application/octet-stream' ? a.mime : a.mime + (a.mime.startsWith('text/') ? '; charset=utf-8' : ''),
+      etag: `"${a.id}.${a.size}"`,
       headers: {
         'Content-Disposition': contentDisposition(inline ? 'inline' : 'attachment', a.name),
         'Content-Security-Policy': "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox",
-        'Cache-Control': 'private, max-age=86400, immutable',
+        'Cache-Control': 'private, no-cache',
       },
     });
   }
@@ -209,7 +221,7 @@ function createFiles(ctx) {
     const user = people().requireUser(req);
     const a = visibleAttachment(user, id);
     if (!a.thumb) throw httpError(404, 'No preview');
-    await sendFile(req, res, thumbPath(a.id), { type: `image/${a.thumb}`, headers: { 'Cache-Control': 'private, max-age=86400, immutable', 'Content-Security-Policy': "default-src 'none'; sandbox" } });
+    await sendFile(req, res, thumbPath(a.id), { type: `image/${a.thumb}`, etag: `"${a.id}.t"`, headers: { 'Cache-Control': 'private, no-cache', 'Content-Security-Policy': "default-src 'none'; sandbox" } });
   }
 
   // PUT /api/me/avatar (a square JPEG, WebP or PNG from the app, at most 512 KB); DELETE /api/me/avatar

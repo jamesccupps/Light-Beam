@@ -15,9 +15,28 @@ const DAY = 86400e3;
 
 const SCRYPT = { N: 32768, r: 8, p: 1, maxmem: 96 * 1024 * 1024 };
 
+// A few slow password checks at once (each takes 32 MB and a moment of CPU): a crowd of sign-ins or password
+// changes waits its turn, and past a long queue is told to come back, instead of taking the server's memory
+// (1.7.3, audit S-17).
+const SCRYPT_AT_ONCE = 4;
+const SCRYPT_QUEUE = 200;
+let scryptBusy = 0;
+const scryptWaiting = [];
+async function slowHash(...args) {
+  if (scryptBusy >= SCRYPT_AT_ONCE) {
+    if (scryptWaiting.length >= SCRYPT_QUEUE) throw Object.assign(new Error('Too many sign-ins right now: try again in a minute'), { status: 503 });
+    await new Promise(resolve => scryptWaiting.push(resolve)); // (a finished one hands its turn over)
+  } else scryptBusy++;
+  try { return await scrypt(...args); } finally {
+    const next = scryptWaiting.shift();
+    if (next) next();
+    else scryptBusy--;
+  }
+}
+
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16);
-  const key = await scrypt(String(password).normalize('NFC'), salt, 64, SCRYPT);
+  const key = await slowHash(String(password).normalize('NFC'), salt, 64, SCRYPT);
   return `scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$${salt.toString('base64url')}$${key.toString('base64url')}`;
 }
 
@@ -26,28 +45,41 @@ let decoy = null;
 
 async function checkPassword(password, stored) {
   if (!stored) {
-    decoy ??= hashPassword(crypto.randomBytes(12).toString('base64url'));
+    // (made again if it couldn't be: a busy moment mustn't leave it failed for good)
+    decoy ??= hashPassword(crypto.randomBytes(12).toString('base64url')).catch(err => { decoy = null; throw err; });
     stored = await decoy;
   }
   const [kind, n, r, p, salt, hash] = String(stored).split('$');
   if (kind !== 'scrypt' || !hash) return false;
   const expected = Buffer.from(hash, 'base64url');
-  const key = await scrypt(String(password).normalize('NFC'), Buffer.from(salt, 'base64url'), expected.length,
+  const key = await slowHash(String(password).normalize('NFC'), Buffer.from(salt, 'base64url'), expected.length,
     { N: Number(n), r: Number(r), p: Number(p), maxmem: SCRYPT.maxmem });
   return crypto.timingSafeEqual(key, expected) && stored !== (await decoy);
 }
 
-const COMMON = new Set(['password', 'password1', 'password123', '12345678', '123456789', '1234567890', 'qwertyuiop', 'iloveyou',
-  'letmein1', 'welcome1', 'abcd1234', '11111111', '00000000', 'baseball', 'football', 'sunshine', 'princess', 'qwerty123']);
+// (1.7.3, audit S-12: the public path, so at least 10 characters, and the usual long ones turned away.)
+const MIN_PASSWORD = 10;
+const COMMON = new Set(['password12', 'password123', 'password1234', 'passw0rd123', 'iloveyou12', 'iloveyou123', 'qwerty1234',
+  'qwerty12345', 'qwertyuiop1', '1q2w3e4r5t', '1q2w3e4r5t6y', 'q1w2e3r4t5', 'q1w2e3r4t5y6', 'zaq12wsxcde3', 'qazwsxedc123',
+  '1qaz2wsx3edc', 'abc1234567', 'abcd123456', 'welcome123', 'welcome1234', 'letmein123', 'football123', 'baseball123',
+  'sunshine123', 'princess123', 'monkey12345', 'dragon12345', 'trustno1234', 'starwars123', 'superman123', 'pokemon123',
+  'liverpool1', 'chocolate1', 'basketball', 'basketball1', 'football12', 'baseball12', 'whatever12', 'charlie123',
+  'michael123', 'jennifer12', 'jordan2323', 'ashley1234', 'computer12', 'internet12', 'administrator', 'changeme123',
+  'family1234', 'familypassword', 'ourfamily1', 'mypassword', 'mypassword1', 'secret1234', 'letmein1234', 'test123456',
+  'iloveyou1234', 'lovelove12', 'asdfghjkl1', 'asdfghjkl12', 'zxcvbnm123', 'qwertyuiop12']);
+// Runs along the keyboard or the alphabet ("1234567890", "qwertyuiop", "abcdefghij"), either way round.
+const RUNS = ['01234567890123456789', 'abcdefghijklmnopqrstuvwxyz', 'qwertyuiopasdfghjklzxcvbnm', '1q2w3e4r5t6y7u8i9o0p', 'qazwsxedcrfvtgbyhnujmikolp'];
 
 // Why a password won't do, or null.
 function passwordProblem(password, name = '') {
   if (typeof password !== 'string') return 'Choose a password';
   const length = [...password].length;
-  if (length < 8) return 'Use at least 8 characters';
+  if (length < MIN_PASSWORD) return `Use at least ${MIN_PASSWORD} characters`;
   if (length > 200) return 'Use at most 200 characters';
   const lower = password.toLowerCase();
-  if (COMMON.has(lower) || (name && lower === String(name).toLowerCase()) || /^(.)\1+$/.test(password)) return 'That password is too easy to guess';
+  const run = RUNS.some(r => r.includes(lower) || r.includes([...lower].reverse().join('')));
+  if (COMMON.has(lower) || run || (name && lower.includes(String(name).toLowerCase()) && lower.replace(String(name).toLowerCase(), '').length < 6)
+    || /^(.)\1+$/.test(password) || /^(..?)\1+$/.test(lower)) return 'That password is too easy to guess';
   return null;
 }
 
@@ -55,6 +87,9 @@ function passwordProblem(password, name = '') {
 
 const SESSION_DAYS = 90;
 const COOKIE = 'fam_s';
+// (1.7.3, audit S-10) Over https: host-only, Secure and Path=/ by the browser's own rules, so another machine under
+// the same ts.net name can't plant a session cookie for this site.
+const HOST_COOKIE = '__Host-fam_s';
 const hashToken = token => crypto.createHash('sha256').update(String(token)).digest('base64url');
 
 function createSession(db, userId, { agent = '', ip = '' } = {}) {
@@ -150,6 +185,14 @@ function createLimiter({ limit, windowMs }) {
       const list = hits.get(key);
       return list && list.length >= limit ? Math.max(1, Math.ceil((list[0] + windowMs - now()) / 1000)) : 0;
     },
+    // Whether a hit now would be refused, without counting one (for limits that only count failures).
+    blocked(key) {
+      const list = hits.get(key);
+      if (!list) return false;
+      const cutoff = now() - windowMs;
+      while (list.length && list[0] <= cutoff) list.shift();
+      return list.length >= limit;
+    },
     reset: key => hits.delete(key),
   };
 }
@@ -176,8 +219,8 @@ function findInvite(db, code) {
 }
 
 module.exports = {
-  hashPassword, checkPassword, passwordProblem,
-  COOKIE, SESSION_DAYS, createSession, sessionUser, endSession, hashToken,
+  hashPassword, checkPassword, passwordProblem, MIN_PASSWORD,
+  COOKIE, HOST_COOKIE, SESSION_DAYS, createSession, sessionUser, endSession, hashToken,
   identityOf, clientIp, fromLoopback, sameOrigin, createLimiter,
   createInvite, findInvite,
 };

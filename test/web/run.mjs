@@ -50,9 +50,16 @@ const ctx = {
   async signedIn({ server = ctx.srv, base = server.base, ...opts } = {}) {
     await ctx.denyPending(server); // sign-in requests other tests left behind would pop up here
     const page = await ctx.browser.newPage({ xff: ctx.nextIp(), ...opts });
-    await page.goto(`${base}/?key=${encodeURIComponent(server.key)}`);
+    await page.goto(await ctx.keyLink(server, base));
     await page.waitFor(`typeof paired !== 'undefined' && paired && net.state === 'online'`, 15000, 'signed in and online');
     return page;
+  },
+  // A pairing link to `server` through `base` (since 1.7.3 a link signs in only with a pairing key, never the key).
+  async keyLink(server = ctx.srv, base = server.base) {
+    const res = await fetch(`${server.base}/api/pair`, { headers: { Authorization: `Bearer ${server.key}` } });
+    const { key } = await res.json();
+    if (!key?.startsWith('bp_')) throw new Error(`no pairing key from ${server.base} (HTTP ${res.status})`);
+    return `${base}/?key=${encodeURIComponent(key)}`;
   },
   async denyPending(server = ctx.srv) {
     const auth = { Authorization: `Bearer ${server.key}`, 'Content-Type': 'application/json' };
@@ -74,7 +81,7 @@ const ctx = {
   track(page, pattern) {
     const seen = [];
     page.on(m => {
-      if (m.method === 'Network.requestWillBeSent' && pattern.test(m.params.request.url)) seen.push({ method: m.params.request.method, url: m.params.request.url, t: Date.now() });
+      if (m.method === 'Network.requestWillBeSent' && pattern.test(m.params.request.url)) seen.push({ method: m.params.request.method, url: m.params.request.url, body: m.params.request.postData, t: Date.now() });
     });
     return seen;
   },

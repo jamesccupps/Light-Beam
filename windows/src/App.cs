@@ -88,6 +88,7 @@ namespace Beam
         DateTime lastRediscovery = DateTime.MinValue;
         UpdateInfo pendingUpdate;
         string updateOfferedVersion, updateFailNotified;
+        string refusedOffer; // (1.7.3) an offer that failed its checks (signature, checksum): not downloaded again by itself
         bool cleanedUp;
         EventStream events;
         Outbox outbox;
@@ -1365,6 +1366,7 @@ namespace Beam
                 if (report != null) report("Beam " + u.Version + " didn't work on this PC before, so it's skipped.");
                 return;
             }
+            if (!manual && refusedOffer == u.Version + "|" + u.Sha256) return; // (each reconnect would fetch it again)
             Log.Write("Update available: " + u.Version + " (running " + AppVersion.Text + ")");
             SetUpdateState("available", u.Version, null);
             if (!Cfg.AutoUpdate && !manual)
@@ -1440,7 +1442,7 @@ namespace Beam
                 updating = false;
                 // A bad download is dropped; anything else (antivirus holding a file, network) is tried again later.
                 bool retry = !(ex is InvalidDataException);
-                if (!retry) pendingUpdate = null;
+                if (!retry) { pendingUpdate = null; refusedOffer = u.Version + "|" + u.Sha256; }
                 string why = ex is InvalidDataException || ex is IOException ? ex.Message : Api.Describe(ex);
                 Log.Write("Update " + u.Version + " failed: " + why + (retry ? "; trying again in 10 minutes" : ""));
                 SetUpdateState("failed", u.Version, why);

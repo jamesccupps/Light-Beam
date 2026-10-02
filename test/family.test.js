@@ -181,6 +181,55 @@ test('F-K (1.7.2): Tailscale identity only for a caller at a Tailscale address a
   } finally { await s.stop(); }
 });
 
+test('F-L (1.7.3): over https the session cookie is __Host- (older ones move over); guessing at a name can’t lock its person out; longer passwords; a file in the cache is checked again', async () => {
+  const s = await start('audit173', 8848);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const https = { 'X-Forwarded-Proto': 'https' }; // (as tailscale serve / Funnel send it, from this machine)
+    const cookies = r => [].concat(r.headers['set-cookie'] || []);
+    // Signing in over https: __Host-fam_s, and any old fam_s goes.
+    let r = await call(s, 'POST', '/api/signin', https, { name: 'mary', password: 'a long family password' });
+    assert.equal(r.status, 200, r.body);
+    const token = /__Host-fam_s=([^;]+)/.exec(cookies(r).join('\n'))?.[1];
+    assert.ok(token && cookies(r).some(c => /^__Host-fam_s=.*; Path=\/;.*Secure/.test(c)) && cookies(r).some(c => /^fam_s=;.*Max-Age=0/.test(c)), cookies(r).join(' | '));
+    assert.equal((await call(s, 'GET', '/api/session', { ...https, Cookie: `__Host-fam_s=${token}` })).json.signedIn, true);
+    // A browser with the old cookie gets the new one on its next visit (same session); plain http keeps fam_s.
+    r = await call(s, 'GET', '/api/session', { ...https, Cookie: mary.who });
+    assert.equal(r.json.signedIn, true);
+    assert.equal(/__Host-fam_s=([^;]+)/.exec(cookies(r).join('\n'))?.[1], mary.who.split('=')[1], 'moved over');
+    assert.deepEqual(cookies(await call(s, 'GET', '/api/session', mary.who)), [], 'nothing to move over plain http');
+    r = await call(s, 'POST', '/api/signout', { ...https, Cookie: `__Host-fam_s=${token}` });
+    assert.ok(cookies(r).some(c => /^__Host-fam_s=;.*Max-Age=0/.test(c)) && cookies(r).some(c => /^fam_s=;.*Max-Age=0/.test(c)), 'both go on signing out');
+    // Wrong passwords for a name from 25 addresses: its person still gets in from their own (it was 20 an hour, from anywhere).
+    for (let i = 0; i < 25; i++) {
+      const w = await s.req('POST', '/api/signin', { headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `203.0.113.${100 + i}` }, body: JSON.stringify({ name: 'mary', password: `guess ${i}` }) });
+      assert.equal(w.status, 401, `guess ${i}`);
+    }
+    r = await s.req('POST', '/api/signin', { headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.5' }, body: JSON.stringify({ name: 'mary', password: 'a long family password' }) });
+    assert.equal(r.status, 200, r.body);
+    // New passwords: at least 10 characters, not a run along the keyboard or the alphabet, not a short pattern again and again.
+    const inv = (await call(s, 'POST', '/api/invites', f.owner, {})).json.url.split('/join/')[1];
+    for (const password of ['nine char', 'qwertyuiop', '0987654321', 'abababababab']) {
+      r = await call(s, 'POST', `/api/invites/${inv}`, {}, { name: 'Tom', password });
+      assert.equal(r.status, 400, `${password}: ${r.body}`);
+    }
+    assert.equal((await call(s, 'POST', `/api/invites/${inv}`, {}, { name: 'Tom', password: 'ten chars!' })).status, 201);
+    // A file is checked again on every use: a quick 304 while its message is there, gone once it's deleted.
+    const data = crypto.randomBytes(3000);
+    const id = (await call(s, 'POST', '/api/uploads', f.owner, { name: 'note.bin', size: data.length })).json.id;
+    await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(f.owner), 'Content-Type': 'application/octet-stream' }, body: data });
+    const msg = await post(s, f.owner, f.general, '', { files: [id] });
+    r = await call(s, 'GET', `/api/files/${id}`, f.owner);
+    assert.deepEqual([r.status, r.headers['cache-control']], [200, 'private, no-cache']);
+    const etag = r.headers.etag;
+    assert.ok(etag);
+    assert.equal((await call(s, 'GET', `/api/files/${id}`, { ...f.owner, 'If-None-Match': etag })).status, 304);
+    assert.equal((await call(s, 'DELETE', `/api/messages/${msg.id}`, f.owner)).status, 204);
+    assert.equal((await call(s, 'GET', `/api/files/${id}`, { ...f.owner, 'If-None-Match': etag })).status, 404, 'not from the cache either');
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- push: a fake push service, and a browser's keys
 
 function pushService() {

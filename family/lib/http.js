@@ -32,12 +32,21 @@ function send(res, status, body = '', headers = {}) {
   if (body !== null && typeof body === 'object' && !Buffer.isBuffer(body)) {
     payload = JSON.stringify(body);
     headers['Content-Type'] ??= 'application/json; charset=utf-8';
-    if (payload.length > 1024 && /\bgzip\b/.test(String(res.req?.headers['accept-encoding'] || '')) && res.req?.method !== 'HEAD') {
-      payload = zlib.gzipSync(payload);
-      headers['Content-Encoding'] = 'gzip';
-      headers.Vary = 'Accept-Encoding';
+    // Compressed off the event loop, and only when it's worth it (1.7.3, audit O-06: every answer over 1 KB was
+    // compressed in place, holding up everyone else meanwhile).
+    if (payload.length > 4096 && /\bgzip\b/.test(String(res.req?.headers['accept-encoding'] || '')) && res.req?.method !== 'HEAD') {
+      zlib.gzip(payload, (err, gz) => {
+        if (res.destroyed || res.writableEnded) return;
+        if (err) return finish(res, status, payload, headers);
+        finish(res, status, gz, { ...headers, 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+      });
+      return;
     }
   }
+  finish(res, status, payload, headers);
+}
+
+function finish(res, status, payload, headers) {
   if (bodyUnread(res.req)) headers.Connection = 'close'; // a refused upload isn't read to the end
   if (status !== 204 && status !== 304 && payload !== '' && headers['Content-Length'] === undefined) headers['Content-Length'] = Buffer.byteLength(payload);
   res.writeHead(status, headers);
@@ -186,12 +195,18 @@ function contentDisposition(type, name) {
   return `${type}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
-// A file from disk, with Range support (videos seek). `headers` are added to the answer.
-async function sendFile(req, res, file, { type, headers = {}, size = null }) {
+// A file from disk, with Range support (videos seek). `headers` are added to the answer. `etag`: a file that never
+// changes; the browser checks it again before each use (Cache-Control no-cache), and a quick 304 answers once the
+// caller has been allowed to see it again (1.7.3).
+async function sendFile(req, res, file, { type, headers = {}, size = null, etag = null }) {
   let stat;
   try { stat = await fsp.stat(file); } catch { return send(res, 404, { error: 'Not found' }); }
   const total = size ?? stat.size;
-  const base = { ...BASE_HEADERS, 'Content-Type': type, 'Accept-Ranges': 'bytes', ...headers };
+  const base = { ...BASE_HEADERS, 'Content-Type': type, 'Accept-Ranges': 'bytes', ...(etag && { ETag: etag }), ...headers };
+  if (etag && req.headers['if-none-match'] === etag && !req.headers.range) {
+    res.writeHead(304, base);
+    return res.end();
+  }
   const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
   let start = 0;
   let end = total - 1;

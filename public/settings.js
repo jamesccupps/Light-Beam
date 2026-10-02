@@ -38,7 +38,8 @@ async function loadServerSettings() {
 function jumpToSection(id) {
   settingsSection = id;
   const target = $(`#set-${id}`);
-  if (target) target.scrollIntoView({ block: 'start' });
+  // Only the sections scroll (scrollIntoView would scroll the dialog too, hiding its title and ×).
+  if (target) $('#settingsBody').scrollTop = Math.max(0, target.offsetTop - 4);
   for (const b of $$('#settingsNav button')) b.setAttribute('aria-current', String(b.dataset.section === id));
 }
 
@@ -240,10 +241,23 @@ function sectionSecurity() {
     const owners = [].concat(s.tailscaleOwners || info.tailscaleOwners || []);
     const locked = new Set(s.locked || []);
     const blocked = [].concat(s.blockedNodes || []);
+    const fixed = new Set(s.tailscaleOwnersFixed || []);
+    const seen = [].concat(s.tailscaleSeen || []);
     parts.push(field('Tailscale sign-in',
       toggle('Sign in automatically on devices in my tailnet that belong to these accounts', s.tailscaleSignIn, v => patchServerSettings({ tailscaleSignIn: v }),
         { disabled: locked.has('tailscaleSignIn'), hint: locked.has('tailscaleSignIn') ? 'Fixed by the server’s configuration.' : '' }),
-      owners.length ? el('ul', { class: 'plain' }, ...owners.map(o => el('li', {}, o))) : note('No trusted accounts yet. Beam learns yours the first time you use it from a signed-in device.'),
+      owners.length
+        ? el('ul', { class: 'device-list' }, ...owners.map(o => el('li', {}, icon('user'),
+          el('div', { class: 'dev-body' }, el('strong', {}, o), fixed.has(o) && el('span', { class: 'muted small' }, 'Set in the server’s configuration')),
+          !fixed.has(o) && el('button', { class: 'btn small-btn ghost', type: 'button', onclick: () => removeOwner(o) }, 'Remove'))))
+        : note('No trusted accounts yet. Beam learns yours the first time you sign in on purpose (the password, a pairing link or an approval) from a device in your tailnet.'),
+      // (1.7.3) Accounts that signed in on purpose somewhere but aren't trusted: never learned by just seeing them.
+      seen.length > 0 && el('div', {}, el('span', { class: 'field-label' }, 'Other accounts that signed in'),
+        note('Each signed in on a device here, but their other machines don’t sign in by themselves unless you allow it.'),
+        el('ul', { class: 'device-list' }, ...seen.map(a => el('li', {}, icon('user'),
+          el('div', { class: 'dev-body' }, el('strong', {}, a.login),
+            el('span', { class: 'muted small' }, [a.devices?.length && `on ${a.devices.join(', ')}`, a.last && `seen ${timeAgo(a.last)}`].filter(Boolean).join(' · '))),
+          el('button', { class: 'btn small-btn ghost', type: 'button', onclick: () => allowOwner(a.login) }, 'Allow'))))),
       blocked.length > 0 && el('div', {}, el('span', { class: 'field-label' }, 'Blocked machines'),
         note('Signed-out devices whose Tailscale machine may not sign itself back in.'),
         el('ul', { class: 'device-list' }, ...blocked.map(b => el('li', {}, icon('lock'),
@@ -293,6 +307,16 @@ async function unblockNode(b) {
     toast(`${b.name || 'That machine'} can sign in automatically again`);
   } catch (err) { toast(friendlyError(err), { error: true }); }
   renderSettings();
+}
+
+async function allowOwner(login) {
+  const ok = await confirmDialog({ title: `Let ${login} sign in by itself?`, text: 'Every machine of this Tailscale account will then sign in to Beam without a password. Only allow accounts that are yours.', confirm: 'Allow' });
+  if (ok) patchServerSettings({ allowOwner: login });
+}
+
+async function removeOwner(login) {
+  const ok = await confirmDialog({ title: `Stop ${login} signing in by itself?`, text: 'Devices signed in now stay signed in. New ones of this account will need the password, a pairing link or an approval.', confirm: 'Remove', danger: true });
+  if (ok) patchServerSettings({ removeOwner: login });
 }
 
 async function patchServerSettings(fields) {

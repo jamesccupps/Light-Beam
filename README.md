@@ -72,7 +72,9 @@ Every device needs the **Tailscale app**, signed in to the same account. Then:
 
 1. **Automatically.** Your own devices sign in by themselves:
    - Any device signed in to your Tailscale account (Tailscale tells Beam who is visiting, when it goes through the
-     Beam address).
+     Beam address). Beam trusts your account from your first sign-in. Another account (a relative's laptop you
+     signed in on with the password, say) isn't trusted just because Beam saw it: it shows under **Settings →
+     Security** with an **Allow** button, and trusted accounts can be removed there.
    - A browser on a device that's already running the Beam app.
 2. **With your phone.** A new browser or app shows a QR code and a short code. Scan it with a signed-in phone (camera
    or the Beam app) and tap **Approve**. Signed-in devices also pop up an Approve / Deny prompt by themselves. You can
@@ -496,9 +498,12 @@ update themselves from there**:
 A new build reaches every device within seconds of landing in `dist/`.
 
 - **Windows:** run `windows\build.cmd` (bump the version in `windows\src\Version.cs` first for an update). It uses the
-  C# compiler built into Windows (.NET Framework 4.8), so nothing needs installing, and writes `dist\Beam.exe` and
-  `dist\Beam.exe.json`. The app isn't code-signed, so SmartScreen and some antivirus programs may hold it the first
-  time.
+  C# compiler built into Windows (.NET Framework 4.8) and Node.js (already there for the server), so nothing needs
+  installing, and writes `dist\Beam.exe` and `dist\Beam.exe.json`. The app isn't code-signed, so SmartScreen and some
+  antivirus programs may hold it the first time.
+  - **Its updates are signed:** the first build makes a key, `%USERPROFILE%\.beam\windows-update-key.pem` (or wherever
+    `BEAM_UPDATE_KEY` points), and puts its public half into the app, which then installs only updates signed with
+    it. **Back that key up, like the Android keystore:** without it, every PC needs the next Beam installed by hand.
 - **Android:** you need [Android Studio](https://developer.android.com/studio) (its JDK and SDK) and **your own signing
   key**, made once:
   ```bash
@@ -558,8 +563,11 @@ The short version (the threat model and how to report a problem are in [SECURITY
   also SYSTEM and Administrators; elsewhere `chmod 700`).
 - **The Beam server's computer is trusted:** `tailscale serve` hands requests to Beam on this machine, so programs
   and other accounts on it could pose as Tailscale traffic. Run the server on a computer only you use.
-- **Updates come from your server:** the apps install what your server's `dist` folder offers (checked against the
-  SHA-256 it announces). Whoever can change that folder can change every app, so keep it as private as `data`.
+- **Updates are signed:** the apps install what your server's `dist` folder offers only when it's signed with the key
+  they were built with (Windows: `windows\build.cmd`'s key; Android: your keystore, checked by Android itself). Keep
+  those keys private and backed up.
+- **Who signs in by itself:** only Tailscale accounts you trust: yours from the first sign-in, others only when you
+  allow them in Settings → Security, from a sign-in made on purpose (password, pairing link, approval).
 - Received files are never opened or run automatically. Uploaded files are served with a locked-down content policy,
   so an uploaded web page can't run scripts inside Beam.
 - **Beam Family** is the only part meant to face the internet (through Funnel), and it's a separate server that can't

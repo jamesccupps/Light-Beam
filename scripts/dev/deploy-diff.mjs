@@ -19,7 +19,7 @@ const SKIP = [
   /^CLAUDE\.md$/, /^README\.md$/, /^docs\/IDEAS\.md$/, /^PROGRESS-[a-z]+\.md$/,
   /^android\/keystore(\/|$)/, /^android\/keystore\.properties$/, /^android\/local\.properties$/,
   /(^|\/)build(\/|$)/, /^android\/\.gradle(\/|$)/, /^android\/\.kotlin(\/|$)/, /^android\/\.idea(\/|$)/,
-  /^windows\/bin(\/|$)/, /^windows\/lib\/webview2(\/|$)/,
+  /^windows\/bin(\/|$)/, /^windows\/obj(\/|$)/, /^windows\/lib\/webview2(\/|$)/,
   /^test\/web\/shots(\/|$)/, /^test\/.*\/(tmp|scratch)(\/|$)/, /\.log$/,
 ];
 const skipped = rel => SKIP.some(re => re.test(rel));

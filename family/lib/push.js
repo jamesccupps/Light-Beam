@@ -116,7 +116,9 @@ function createPush(ctx, { file, contact = '' }) {
     if (!recipients.length) return;
     const levels = new Map(db.all(`SELECT user_id, level FROM notify WHERE channel_id = ? AND user_id IN (${recipients.map(() => '?').join(', ')})`, channel.id, ...recipients)
       .map(r => [r.user_id, r.level]));
-    const names = new Map(db.all('SELECT id, name FROM users').map(u => [u.id, u.name]));
+    // (only the people it mentions: every user was loaded for every message; 1.7.3, audit O-09)
+    const ids = [...new Set([...String(message.body || '').matchAll(/<@([0-9A-HJKMNP-TV-Z]{26})>/g)].map(m => m[1]))].slice(0, 50);
+    const names = new Map(ids.length ? db.all(`SELECT id, name FROM users WHERE id IN (${ids.map(() => '?').join(', ')})`, ...ids).map(u => [u.id, u.name]) : []);
     const files = message.files || [];
     let text = preview(message.body, names);
     if (!text && files.length) text = files.every(f => f.mime.startsWith('image/')) ? (files.length > 1 ? `📷 ${files.length} photos` : '📷 Photo') : `📎 ${files[0].name}`;

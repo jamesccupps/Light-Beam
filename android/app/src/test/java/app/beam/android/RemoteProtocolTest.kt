@@ -186,7 +186,7 @@ class RemoteProtocolTest {
         idleUntil("connected to a 1.6 server") { app.repo.state.value.conn == Repository.Conn.CONNECTED && app.remote.available }
         idleUntil("Control for the PC") { app.repo.state.value.devicesById[PC]?.let(app.remote::canControl) == true }
 
-        // The viewer page's own sign-in: a new token (traded for the app's at /?key=), acting as the phone.
+        // The viewer page's own sign-in: a new token (traded for the app's with POST /api/login), acting as the phone.
         val api = app.api!!.pinned()
         val cookie = offMain { app.remote.signIn(api, app.remote.opening()) }
         val token = app.prefs.remotePageTokens.single().substringAfterLast(' ')

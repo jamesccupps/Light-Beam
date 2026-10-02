@@ -569,6 +569,25 @@ export default function register(test) {
     eq(await page.evaluate('[rc.state, rc.end?.reason, rcUi.video.hidden]'), ['ended', 'peer', true], 'hung up at once');
     await pc.page.waitFor(`fakePc.rec.events.some(e => e.ev === 'rc-end' && e.reason === 'failed')`, 5000, 'the session ended (failed)');
     eq((await rec(pc, 'in')).slice(n).filter(m => m.t !== 'release'), [], 'nothing more sent');
+    // (1.7.3) The server's log says what the viewer saw, as kinds only: never the address.
+    const logged = () => ctx.srv.log.split('\n').filter(l => /stopped controlling .*: the connection went to another Tailscale IPv4 address/.test(l)).pop() || '';
+    for (let i = 0; i < 30 && !logged(); i++) await sleep(100);
+    assert(logged() && !logged().includes('100.64.9.9'), `logged without the address: ${logged() || ctx.srv.log.split('\n').filter(l => /the connection went to/.test(l)).join(' | ')}`);
+  }, { requires: FEATURE, timeout: 60000 });
+
+  test('remote control: a pair change to something that isn’t an address (some Android WebViews give one for a remote they won’t reveal) holds input like an unreadable one, and goes on once the attested address reads back (1.7.3)', async ctx => {
+    const pc = await fakePc(ctx);
+    const page = await viewer(ctx, pc.id);
+    await live(page, pc);
+    const setPair = addr => page.evaluate(`(() => { rc.watched.getSelectedCandidatePair = () => ({ remote: { address: ${JSON.stringify(addr)}, type: 'prflx' }, local: {} }); rc.watched.dispatchEvent(new Event('selectedcandidatepairchange')); return true; })()`);
+    for (const placeholder of ['redacted-ip.invalid', '54321', '0.0.0.0', '::', 'abcd.local']) {
+      await setPair(placeholder);
+      await page.waitFor('rc.resolving > 0', 2000, `${placeholder}: not known yet`);
+      eq(await page.evaluate('[rc.state, rcLive()]'), ['live', false], `${placeholder}: still on, input held`);
+      await setPair(TS4);
+      await page.waitFor('rcLive() && rc.resolving === 0', 3000, `${placeholder}: input again once the address reads back`);
+    }
+    eq(await page.evaluate('rc.state'), 'live', 'never hung up');
   }, { requires: FEATURE, timeout: 60000 });
 
   test('remote control: a pair change to an unreadable address holds input (one release); the connection has one 5 s budget for that, an attested read in between doesn’t renew it', async ctx => {

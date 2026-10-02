@@ -82,18 +82,31 @@ iPad, notifications need the home-screen app (Share → Add to Home Screen). Bea
 - Changes need the app's own pages: `Sec-Fetch-Site` same-origin (or a matching `Origin`) and JSON bodies; both ways
   in are ambient (cookies, Tailscale), so this is what stops another site from acting as you.
 - Who sees what is checked on every request: channels for the space's members, DMs and groups for theirs; files only
-  through a message you can see (or your own unsent upload).
+  through a message you can see (or your own unsent upload). A file or preview a browser has cached is checked again
+  before each use (a quick `304`), so it stops showing once its message is deleted or you leave its conversation
+  (1.7.3; it was kept a day).
 - Text is always text in the app (no HTML from messages); only http(s) links become links. Files show inline only as
   pictures, video or sound a browser plays, everything else downloads; every file answer is sandboxed and `nosniff`.
-- Passwords: scrypt (N=2^15, r=8, p=1), at least 8 characters, not a well-known one. Sign-in: 10 tries per address
-  per 10 minutes (the address Funnel saw: the last `X-Forwarded-For` entry; checked first, so a held-back address
-  doesn't use up the rest), 20 per name per hour, 120 a minute in all; checking the current password when changing it
-  counts the same. Unknown names take as long as wrong passwords. The session cookie is `Secure` whenever the request
-  came over https (1.7.2).
+- Passwords: scrypt (N=2^15, r=8, p=1), at least 10 characters (1.7.3; was 8), not a well-known one, not a run along
+  the keyboard or the alphabet, not one or two characters over and over. At most 4 are checked at once (a crowd waits
+  its turn; past 200 waiting: "try again"). Sign-in: 10 tries per address per 10 minutes (the address Funnel saw: the
+  last `X-Forwarded-For` entry; checked first, so a held-back address doesn't use up the rest), 120 a minute in all;
+  wrong passwords count per name *and* address (10 an hour), so guessing at someone's name from elsewhere can't lock
+  them out (1.7.3: it was 20 per name per hour from anywhere), plus 200 an hour per name from everywhere, which an
+  address with a live session for that person doesn't hit. Checking the current password when changing it counts the
+  same. Unknown names take as long as wrong passwords.
+- The session cookie: over https `__Host-fam_s` (1.7.3: host-only, `Secure`, `Path=/` by the browser's own rules, so
+  another machine under the same ts.net name can't plant one; a browser with the old `fam_s` gets the new one on its
+  next visit), over plain http `fam_s`. `Secure` whenever the request came over https (1.7.2). Cookies don't tell
+  ports apart: a browser sends Beam's own cookie (`beam_key`) here too and this server ignores it; for full separation
+  run Family on a Tailscale machine of its own.
+- Admins can make a reset link for anyone's password (they could then sign in as them and read their messages): an
+  admin is trusted with that, as with turning someone off.
 - Anonymous visitors (the public address is in certificate logs) see the sign-in page only, not the family's name.
 - Notifications: Web Push signed with the server's VAPID key and encrypted for each browser (RFC 8291); only the push
   services browsers use (Google, Apple, Mozilla, Microsoft) are ever contacted.
-- Requests have 15 minutes to arrive in full; JSON bodies are at most 64 KB.
+- JSON bodies are at most 64 KB (and have 60 s to arrive, above). Answers over 4 KB are compressed off the event
+  loop (1.7.3).
 
 ## API
 

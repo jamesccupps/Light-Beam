@@ -205,6 +205,24 @@ export default function register(test) {
     eq(calls.map(c => [c.method, new URL(c.url).pathname]), [['DELETE', '/api/settings/blocked-nodes/nABC123']], 'unblock request');
   });
 
+  test('settings: Tailscale accounts: an owner from Settings can be removed, one from the configuration not; another account that signed in can be allowed, after asking (1.7.3)', async ctx => {
+    const page = await ctx.signedIn();
+    const calls = ctx.track(page, /\/api\/settings$/);
+    await page.evaluate(`openSettings('security')`);
+    await page.waitFor(`serverSettings !== null && $('#set-security') !== null`, 8000);
+    await page.evaluate(`serverSettings = { ...serverSettings, tailscaleSignIn: true, tailscaleOwners: ['me@example.com', 'env@example.com'], tailscaleOwnersFixed: ['env@example.com'],
+      tailscaleSeen: [{ login: 'aunt@example.com', since: Date.now() - 3600e3, last: Date.now() - 60e3, devices: ['Aunt PC'] }] }; document.activeElement.blur(); renderSettings()`);
+    const text = await page.evaluate(`$('#set-security').textContent`);
+    assert(/me@example\.com/.test(text) && /Set in the server’s configuration/.test(text) && /Other accounts that signed in/.test(text) && /aunt@example\.com/.test(text) && /on Aunt PC/.test(text), `listed: ${text}`);
+    eq(await page.evaluate(`[...$('#set-security').querySelectorAll('button')].filter(b => b.textContent === 'Remove').length`), 1, 'only the owner from Settings has Remove');
+    await page.evaluate(`[...$('#set-security').querySelectorAll('button')].find(b => b.textContent === 'Allow').click()`);
+    await page.waitFor(`$('#genDlg').open && /aunt@example\\.com/.test($('#genTitle').textContent)`, 3000, 'asks first');
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent === 'Allow').click()`);
+    await page.waitFor(`true`);
+    await ctx.sleep(500);
+    eq(calls.filter(c => c.method === 'PATCH').map(c => JSON.parse(c.body || '{}')), [{ allowOwner: 'aunt@example.com' }], 'the allow request');
+  });
+
   test('settings: devices, password, retention (server settings), pairing link with expiry', async ctx => {
     const page = await ctx.signedIn();
     const phone = dev(ctx, 'Pixel');
@@ -223,6 +241,32 @@ export default function register(test) {
     await page.waitFor(`$('#pairDlg').open`);
     await page.evaluate(`$('#pairLinkBox').open = true`);
     await page.waitFor(`/\\?key=bp_/.test($('#pairLink').value) && /Works once/.test($('#pairLinkExpiry').textContent)`, 5000, 'single-use link with expiry');
+  });
+
+  test('settings: only the sections scroll, its title and × stay in view (devices listed, a small window); a click outside closes it', async ctx => {
+    const page = await ctx.signedIn();
+    await page.viewport(1000, 640);
+    for (const name of ['Pixel', 'Laptop', 'Camera PC']) await dev(ctx, name).me();
+    await page.evaluate(`openSettings('devices')`);
+    await page.waitFor(`$('#set-devices')?.textContent.includes('Camera PC')`, 8000, 'devices listed');
+    // (1.7.3) Hidden labels far down (the device facts' screen-reader text) made the whole dialog scroll as well, and
+    // opening it scrolled the title and × out of view.
+    const r = await page.evaluate(`(async () => {
+      const d = $('#settingsDlg'), b = $('#settingsBody');
+      const deep = el('span', { class: 'visually-hidden' }, 'Battery ');
+      b.lastElementChild.append(deep);
+      jumpToSection('help');
+      await new Promise(res => setTimeout(res, 50));
+      const head = d.querySelector('.dlg-head').getBoundingClientRect(), box = d.getBoundingClientRect();
+      const out = { dialogScrolls: d.scrollHeight > d.clientHeight + 1, dialogTop: d.scrollTop, sectionsMoved: b.scrollTop > 0, headInView: head.top >= box.top && head.bottom <= box.bottom };
+      deep.remove();
+      return out;
+    })()`);
+    eq(r, { dialogScrolls: false, dialogTop: 0, sectionsMoved: true, headInView: true }, 'one scrolling area');
+    const left = await page.evaluate(`$('#settingsDlg').getBoundingClientRect().left`);
+    const p = { x: Math.max(2, Math.round(left / 2)), y: 300 };
+    for (const type of ['mousePressed', 'mouseReleased']) await page.send('Input.dispatchMouseEvent', { type, x: p.x, y: p.y, button: 'left', clickCount: 1 });
+    await page.waitFor(`!$('#settingsDlg').open`, 3000, 'closed by a click outside');
   });
 
   test('dialogs: one that replaces another (or a second chooser) is not ended by the first one closing', async ctx => {

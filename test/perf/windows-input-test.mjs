@@ -8,6 +8,7 @@
 // asserts them exactly: several monitors with mixed DPI, scancodes, extended keys, AltGr, Unicode text, release-all,
 // rate caps, plus the session policy and peer checks. Exits 1 if anything fails.
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,9 +24,24 @@ let code = 1;
 try {
   if (!csc) throw new Error('No .NET Framework C# compiler');
   const exe = path.join(TMP, 'input-test.exe');
+  // Signed updates (1.7.3): two throwaway keys (never the builder's), a signature from each over a made-up update.
+  const xy = key => { const j = crypto.createPublicKey(key).export({ format: 'jwk' }); return Buffer.concat([Buffer.from(j.x, 'base64url'), Buffer.from(j.y, 'base64url')]).toString('base64'); };
+  const [mine, other] = [0, 1].map(() => crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey);
+  const update = { version: '9.8.7', sha: crypto.randomBytes(32).toString('hex'), size: 1234567 };
+  const sign = key => crypto.sign('sha256', Buffer.from(`beam-windows-update\n${update.version}\n${update.sha}\n${update.size}`), { key, dsaEncoding: 'ieee-p1363' }).toString('base64');
+  const vectors = path.join(TMP, 'update-vectors.cs');
+  fs.writeFileSync(vectors, `namespace Beam {
+  static class UpdateKey { public const string PublicKey = "${xy(mine)}"; }
+  static class UpdateVectors {
+    public const string Version = "${update.version}", Sha = "${update.sha}", Sig = "${sign(mine)}", OtherKey = "${xy(other)}", OtherSig = "${sign(other)}";
+    public const long Size = ${update.size};
+  }
+}
+`);
   const build = spawnSync(csc, ['/nologo', '/target:exe', '/platform:anycpu', '/langversion:5', '/codepage:65001', '/define:NO_REAL_INPUT',
     `/out:${exe}`, '/r:System.dll', '/r:System.Core.dll', '/r:System.Web.Extensions.dll',
-    path.join(HERE, 'windows-input-test.cs'), path.join(ROOT, 'windows', 'src', 'InputInjector.cs'), path.join(ROOT, 'windows', 'src', 'RcPolicy.cs')],
+    path.join(HERE, 'windows-input-test.cs'), path.join(ROOT, 'windows', 'src', 'InputInjector.cs'), path.join(ROOT, 'windows', 'src', 'RcPolicy.cs'),
+    path.join(ROOT, 'windows', 'src', 'UpdateSignature.cs'), vectors],
   { encoding: 'utf8', windowsHide: true });
   if (build.status !== 0) throw new Error('Build failed:\n' + build.stdout + build.stderr);
   // The binary must not even contain SendInput (nor the backend that calls it).

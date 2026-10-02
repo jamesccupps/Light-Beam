@@ -397,9 +397,10 @@ async function desktopNotify(title, body = '', launch = webUrl) {
 // Opens the web app signed in, with a pairing key that works once: never the CLI's own key, which would stay in the
 // browser's history (and on a command line).
 async function openWebApp(cfg, opt) {
-  let key = cfg.key;
-  try { key = (await (await api(cfg, '/api/pair')).json()).key || key; } catch {}
-  openInBrowser(`${cfg.url}/?key=${encodeURIComponent(key)}${opt.pair ? '#pair' : ''}`);
+  let key = null;
+  try { key = (await (await api(cfg, '/api/pair')).json()).key || null; } catch {}
+  // (Without a pairing key, the sign-in page: since 1.7.3 a link signs in only with one.)
+  openInBrowser(`${cfg.url}/${key ? `?key=${encodeURIComponent(key)}` : ''}${opt.pair ? '#pair' : ''}`);
 }
 
 function openInBrowser(url) {

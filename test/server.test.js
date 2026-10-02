@@ -950,8 +950,16 @@ test('A17/A18/A19: banner hides the key, pair command, logs, hello and info', as
     assert.ok(info.storage && info.uptime >= 0 && info.settings);
     const logs = (await s.req('GET', '/api/logs?lines=50', { headers: app(K, 'opsdev00001') })).json.lines;
     assert.ok(logs.some(l => /Signed in/.test(l)));
+    // (1.7.3, S-19) a link signs in only with a pairing key: not with the master key or a device's own sign-in
+    r = await s.req('GET', `/?key=${K}`);
+    assert.ok(r.status === 200 && !cookieValue(r), 'not with the master key');
+    const minted = cookieValue(await post(s, '/api/login', { secret: K }));
+    assert.ok(minted?.startsWith('bt_'), 'the sign-in page takes it');
+    r = await s.req('GET', `/?key=${minted}`);
+    assert.ok(r.status === 200 && !cookieValue(r), 'not with a device’s sign-in');
+    await waitFor(() => /A link with a lasting sign-in \(not a pairing key\) was opened/.test(fs.readFileSync(path.join(s.data, 'logs', 'server.log'), 'utf8')));
     const file = fs.readFileSync(path.join(s.data, 'logs', 'server.log'), 'utf8');
-    assert.ok(!file.includes(K) && !file.includes(cookieValue(await s.req('GET', `/?key=${K}`))), 'no secrets in the log');
+    assert.ok(!file.includes(K) && !file.includes(minted), 'no secrets in the log');
   } finally { await s.stop(); }
 });
 
@@ -1050,28 +1058,67 @@ test('B2: Tailscale identity sign-in: first owner, learned owners, checks and re
     assert.equal(r.status, 403, 'never through Funnel');
     r = await post(s, '/api/autopair', { client: 'app' }, viaServe('192.168.1.5', 'alice@example.com'));
     assert.equal(r.status, 403, 'only from Tailscale addresses');
-    // Bob becomes an owner when he uses the key through tailscale serve; removing his devices forgets him again
-    const owners = async () => (await s.req('GET', '/api/settings', { headers: app(aliceKey, 'x') })).json.tailscaleOwners;
+    // (1.7.3, S-09) Bob uses the key through tailscale serve: on a Beam that has an owner he's only noted, never
+    // learned, so his machines can't sign themselves in until an owner allows him (from a sign-in made on purpose)
+    const settingsNow = async () => (await s.req('GET', '/api/settings', { headers: app(aliceKey, 'x') })).json;
+    const owners = async () => (await settingsNow()).tailscaleOwners;
     const K = s.key;
     await s.req('GET', '/api/me', { headers: { ...app(K, 'bobdevice01', 'Bob'), ...viaServe('100.64.30.50', 'bob@example.com') } });
-    await waitFor(async () => (await owners()).includes('bob@example.com'));
+    await waitFor(async () => (await settingsNow()).tailscaleSeen?.some(a => a.login === 'bob@example.com' && a.devices.includes('Bob')));
+    assert.ok(!(await owners()).includes('bob@example.com'), 'not learned by being seen');
+    r = await post(s, '/api/autopair', { client: 'app', name: 'Bob phone' }, viaServe('100.64.30.50', 'bob@example.com'));
+    assert.equal(r.json.reason, 'not-owner');
+    r = await s.req('PATCH', '/api/settings', { headers: json(app(aliceKey, 'x')), body: JSON.stringify({ allowOwner: 'bob@example.com' }) });
+    assert.deepEqual([r.status, r.json.reason], [403, 'sign-in'], 'not from a sign-in Tailscale made by itself');
+    r = await s.req('PATCH', '/api/settings', { headers: json(app(K, 'x')), body: JSON.stringify({ allowOwner: 'Bob@Example.com' }) });
+    assert.equal(r.status, 200, r.body);
+    assert.ok(r.json.tailscaleOwners.includes('bob@example.com') && !r.json.tailscaleSeen.length, 'allowed');
     r = await post(s, '/api/autopair', { client: 'app', name: 'Bob phone' }, viaServe('100.64.30.50', 'bob@example.com'));
     assert.equal(r.status, 200);
     const bobPhone = r.json.you;
+    r = await s.req('PATCH', '/api/settings', { headers: json(app(aliceKey, 'x')), body: JSON.stringify({ removeOwner: 'bob@example.com' }) });
+    assert.ok(r.status === 200 && !r.json.tailscaleOwners.includes('bob@example.com'), 'any sign-in can take one away');
+    r = await post(s, '/api/autopair', { client: 'app' }, viaServe('100.64.30.50', 'bob@example.com'));
+    assert.equal(r.json.reason, 'not-owner');
     assert.equal((await s.req('DELETE', '/api/devices/bobdevice01', { headers: app(aliceKey, 'x') })).status, 204);
-    assert.ok((await owners()).includes('bob@example.com'), 'still vouched for by the device autopair created');
     assert.equal((await s.req('DELETE', `/api/devices/${bobPhone}`, { headers: app(aliceKey, 'x') })).status, 204);
-    assert.ok(!(await owners()).includes('bob@example.com'), 'forgotten with his last device');
     r = await post(s, '/api/autopair', { client: 'app' }, viaServe('100.64.30.50', 'bob@example.com'));
     assert.equal(r.json.reason, 'blocked', 'his machine was blocked when its device was removed');
-    // RFC 2047 names
-    await s.req('PATCH', '/api/settings', { headers: json(app(aliceKey, 'x')), body: JSON.stringify({ tailscaleOwners: ['alice@example.com', 'jürgen@example.com'] }) });
+    // RFC 2047 names (a list of owners is set from a sign-in made on purpose)
+    r = await s.req('PATCH', '/api/settings', { headers: json(app(aliceKey, 'x')), body: JSON.stringify({ tailscaleOwners: ['alice@example.com'] }) });
+    assert.equal(r.status, 403);
+    await s.req('PATCH', '/api/settings', { headers: json(app(K, 'x')), body: JSON.stringify({ tailscaleOwners: ['alice@example.com', 'jürgen@example.com'] }) });
     r = await post(s, '/api/autopair', { client: 'app' }, viaServe('100.64.30.60', '=?utf-8?q?j=C3=BCrgen@example.com?='));
     assert.equal(r.status, 200, r.body);
     // turned off
     await s.req('PATCH', '/api/settings', { headers: json(app(aliceKey, 'x')), body: JSON.stringify({ tailscaleSignIn: false }) });
     r = await post(s, '/api/autopair', { client: 'app' }, viaServe('100.64.30.30', 'alice@example.com'));
     assert.equal(r.json.reason, 'disabled');
+  } finally { await s.stop(); await ts.close(); }
+});
+
+test('1.7.3: a Beam with no owner learns one only from a sign-in made on purpose; other accounts are only noted (S-09)', async () => {
+  const ts = await fakeTailscale({ whois: {
+    '100.64.31.1': { login: 'bob@example.com', node: 'bob-pc' },
+    '100.64.31.2': { login: 'carol@example.com', node: 'carol-pc' },
+  } });
+  const s = await startServer('tslearn', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket } });
+  try {
+    const K = s.key;
+    assert.equal((await s.req('GET', '/api/me', { headers: app(K, 'lanpc000001', 'LAN PC') })).status, 200, 'a device without Tailscale first');
+    const settingsNow = async () => (await s.req('GET', '/api/settings', { headers: app(K, 'lanpc000001') })).json;
+    // Bob uses the key through serve: the Beam has no owner yet, so he becomes it
+    await s.req('GET', '/api/me', { headers: { ...app(K, 'bobdevice01', 'Bob PC'), ...viaServe('100.64.31.1', 'bob@example.com') } });
+    await waitFor(async () => (await settingsNow()).tailscaleOwners.includes('bob@example.com'));
+    // Carol does the same afterwards: only noted
+    await s.req('GET', '/api/me', { headers: { ...app(K, 'caroldev001', 'Carol PC'), ...viaServe('100.64.31.2', 'carol@example.com') } });
+    await waitFor(async () => (await settingsNow()).tailscaleSeen.some(a => a.login === 'carol@example.com'));
+    assert.deepEqual((await settingsNow()).tailscaleOwners, ['bob@example.com']);
+    // a learned owner goes with the device he was learned from; a note goes with its devices
+    assert.equal((await s.req('DELETE', '/api/devices/bobdevice01', { headers: app(K, 'lanpc000001') })).status, 204);
+    assert.equal((await s.req('DELETE', '/api/devices/caroldev001', { headers: app(K, 'lanpc000001') })).status, 204);
+    const after = await settingsNow();
+    assert.deepEqual([after.tailscaleOwners, after.tailscaleSeen], [[], []]);
   } finally { await s.stop(); await ts.close(); }
 });
 
@@ -1430,7 +1477,85 @@ test('B5: import-from copies a running Beam after approval and moves everyone ov
     const items = (await neu.req('GET', '/api/items', { headers: h })).json.items;
     assert.equal(items.length, 2);
     assert.ok(!fs.readFileSync(path.join(target, 'data', 'tokens.json'), 'utf8').includes('"scope":"move"'), 'the move sign-in is not kept');
+    // (1.7.3, S-14) ...and the old server revokes it once the move is done (it could export everything until then)
+    await waitFor(() => !fs.readFileSync(path.join(old.data, 'tokens.json'), 'utf8').includes('"scope":"move"'), 10000);
   } finally { await old.stop(); await neu?.stop(); }
+});
+
+test('1.7.3: a revoked migration sign-in never comes back; one answer for a move target that isn’t a Beam; a move called off revokes its sign-in; browsers unused for half a year are signed out; BEAM_REQUIRE_DATA won’t start without devices.json', async () => {
+  let s = await startServer('audit173', 8791);
+  try {
+    const K = s.key;
+    const admin = { ...app(K, 'admin000001', 'Admin'), ...from('100.64.73.2') };
+    // B-15: a master-key client is offered its own sign-in; once revoked, the next offer is a new value. Also when its
+    // device was merged into another first (two ids from this machine: the older goes into the newer) and that one
+    // is removed.
+    for (const [id, merge] of [['migdev00001', null], ['migdev00002', 'migdev00003']]) {
+      const net = merge ? {} : from('100.64.73.1');
+      let r = await s.req('GET', '/api/me', { headers: { ...app(K, id, 'Mig'), ...net } });
+      const t1 = r.headers['x-beam-token'];
+      assert.ok(t1?.startsWith('bt_'), `${id}: offered its own sign-in`);
+      assert.equal((await s.req('GET', '/api/me', { headers: { ...app(t1, id), ...net } })).status, 200);
+      if (merge) assert.equal((await s.req('GET', '/api/me', { headers: app(K, merge, 'Mig 2') })).json.you, merge);
+      assert.equal((await s.req('DELETE', `/api/devices/${merge || id}`, { headers: admin })).status, 204);
+      r = await s.req('GET', '/api/me', { headers: { ...app(K, id, 'Mig'), ...net } });
+      assert.ok(r.headers['x-beam-token'] && r.headers['x-beam-token'] !== t1, `${id}: a new value`);
+      assert.equal((await s.req('GET', '/api/me', { headers: { ...app(t1, id), ...net } })).status, 401, `${id}: the revoked one stays revoked`);
+    }
+    let r;
+    // S-15: nothing listening and something that isn't Beam get the same answer.
+    const other = http.createServer((q, a) => { a.writeHead(200, { 'Content-Type': 'text/plain' }); a.end('hello'); });
+    await new Promise(res => other.listen(0, '127.0.0.1', res));
+    const closed = http.createServer();
+    await new Promise(res => closed.listen(0, '127.0.0.1', res));
+    const closedPort = closed.address().port;
+    await new Promise(res => closed.close(res));
+    try {
+      const answers = [];
+      for (const to of [`http://127.0.0.1:${other.address().port}`, `http://127.0.0.1:${closedPort}`]) {
+        r = await post(s, '/api/move', { to }, admin);
+        answers.push([r.status, String(r.json.error).replace(to, '<to>')]);
+      }
+      assert.deepEqual(answers, [[409, 'No Beam server answered at <to>'], [409, 'No Beam server answered at <to>']]);
+    } finally { other.close(); }
+    // S-14: a move sign-in (approved like import-from's) is revoked when the move is called off.
+    const lr = (await post(s, '/api/login-requests', { name: 'Move Beam', platform: 'server', purpose: 'move' })).json;
+    await post(s, '/api/login-requests/approve', { code: lr.code }, admin);
+    const moveKey = (await s.req('GET', `/api/login-requests/${lr.id}`, { headers: { 'X-Beam-Login-Secret': lr.secret } })).json.key;
+    assert.ok(moveKey);
+    assert.equal((await s.req('DELETE', '/api/move', { headers: { Authorization: `Bearer ${moveKey}` } })).status, 204);
+    assert.equal((await s.req('DELETE', '/api/move', { headers: { Authorization: `Bearer ${moveKey}` } })).status, 401, 'revoked');
+    // S-07: the build's signature in Beam.exe.json goes out with the offer; the SHA-256 and size are the server's own.
+    const exeBytes = crypto.randomBytes(5000);
+    fs.writeFileSync(path.join(s.dist, 'Beam.exe'), exeBytes);
+    fs.writeFileSync(path.join(s.dist, 'Beam.exe.json'), JSON.stringify({ version: '9.9.9', sha256: 'stale', size: 1, sig: 'c2lnbmF0dXJl' }));
+    const offer = (await s.req('GET', '/api/updates', { headers: admin })).json.windows;
+    assert.deepEqual([offer.version, offer.sig, offer.size, offer.sha256], ['9.9.9', 'c2lnbmF0dXJl', 5000, crypto.createHash('sha256').update(exeBytes).digest('hex')]);
+    // S-34: a browser's sign-in that went unused for half a year ends; a Beam app's doesn't.
+    const browser = cookieValue(await post(s, '/api/login', { secret: K }, { Cookie: 'beam_device_id=oldbrowser1' }));
+    const appKey = (await post(s, '/api/login', { secret: K, client: 'app', platform: 'windows' }, { 'X-Beam-Device-Id': 'oldappdev01' })).json.key;
+    const tokensFile = path.join(s.data, 'tokens.json');
+    const hashOf = t => crypto.createHash('sha256').update(t).digest('hex');
+    await waitFor(() => { const f = fs.readFileSync(tokensFile, 'utf8'); return f.includes(hashOf(browser)) && f.includes(hashOf(appKey)); });
+    await s.stop();
+    const store = JSON.parse(fs.readFileSync(tokensFile, 'utf8'));
+    for (const t of [browser, appKey]) Object.assign(store.tokens[hashOf(t)], { created: Date.now() - 200 * 86400e3, lastUsed: Date.now() - 181 * 86400e3 });
+    fs.writeFileSync(tokensFile, JSON.stringify(store));
+    s = await startServer('audit173', 8791, { keep: true });
+    assert.equal((await s.req('GET', '/api/me', { headers: { Cookie: `beam_key=${browser}; beam_device_id=oldbrowser1` } })).status, 401, 'the browser signs in again');
+    assert.equal((await s.req('GET', '/api/me', { headers: app(appKey, 'oldappdev01') })).status, 200, 'the app stays signed in');
+    // B-09: with BEAM_REQUIRE_DATA=1 an unreadable devices.json (no .tmp or .bak to fall back on) stops the start, also the next one.
+    await s.stop();
+    for (const f of fs.readdirSync(s.data)) if (f.startsWith('devices.json')) fs.rmSync(path.join(s.data, f));
+    fs.writeFileSync(path.join(s.data, 'devices.json'), '[]');
+    for (let i = 0; i < 2; i++) {
+      s = await startServer('audit173', 8791, { keep: true, expectExit: true, env: { BEAM_REQUIRE_DATA: '1' } });
+      assert.equal(await s.exited, 78, s.out);
+      assert.match(s.out, /devices\.json .*couldn't be read .*BEAM_REQUIRE_DATA=1/);
+    }
+    for (const f of fs.readdirSync(s.data)) if (f.startsWith('devices.json.broken-')) fs.rmSync(path.join(s.data, f));
+    s = await startServer('audit173', 8791, { keep: true, env: { BEAM_REQUIRE_DATA: '1' } });
+  } finally { await s.stop(); }
 });
 
 // ---------------------------------------------------------------- B6–B9, C5 items
@@ -3613,12 +3738,14 @@ test('1.6 Remote control is for an app\'s own sign-in or a browser signed in wit
     await refused(winApp, 'a Windows sign-in without its device key', 'device-key');
     let id = await allowed({ ...winApp, 'X-Beam-Device-Key': KEY }, "the Windows app's own sign-in, with its device key");
     await rc('POST', `sessions/${id}/end`, pc);
-    // ...the Android app's own sign-in (a pairing link), exchanged for its remote-control activity's cookie (/?key=)...
+    // ...the Android app's own sign-in (a pairing link), exchanged for its remote-control activity's cookie (POST
+    // /api/login with it in the body, as the app does: since 1.7.3 /?key= takes only an unused pairing key)...
     const phoneKey = (await s.req('GET', '/api/pair', { headers: laptop })).json.key;
     const phoneApp = { Authorization: `Bearer ${phoneKey}`, 'X-Beam-Device-Id': 'rcphone0001', 'X-Beam-Platform': 'android', 'X-Beam-Profile': RC_PROFILE.phone, 'X-Beam-App-Version': '1.6.0', ...from(RC_NET.phone.ip6) };
     assert.equal((await s.req('GET', '/api/me', { headers: phoneApp })).status, 200);
-    const exchange = await s.req('GET', `/?key=${encodeURIComponent(phoneKey)}`, { headers: { Cookie: 'beam_device_id=rcphone0001', ...from(RC_NET.phone.ip6) } });
-    assert.equal(exchange.status, 302);
+    assert.ok(!cookieValue(await s.req('GET', `/?key=${encodeURIComponent(phoneKey)}`, { headers: { Cookie: 'beam_device_id=rcphone0001', ...from(RC_NET.phone.ip6) } })), 'not as a link');
+    const exchange = await post(s, '/api/login', { secret: phoneKey }, { 'X-Beam-Device-Id': 'rcphone0001', 'X-Beam-Platform': 'android', ...from(RC_NET.phone.ip6) });
+    assert.equal(exchange.status, 204, exchange.body);
     const activity = { Cookie: `beam_key=${cookieValue(exchange)}; beam_device_id=rcphone0001`, 'X-Beam-Platform': 'android', ...sameOrigin, ...from(RC_NET.phone.ip6) };
     id = await allowed(activity, "the Android activity's exchange token");
     await rc('POST', `sessions/${id}/end`, pc);
