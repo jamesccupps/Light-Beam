@@ -1620,8 +1620,10 @@ function noteOnline(id, req, url) {
   onlineSince.set(id, now());
   const d = devices[id];
   const version = appVersionOf(req, url) || d?.appVersion || '';
-  // (how it connects, 1.7.3: BEAM_HOST=127.0.0.1 can wait until no device uses plain http; audit S-08)
-  log.info(`${whoName(id)} is online (${d?.platform || 'unknown'}${version ? ` ${version}` : ''}, from ${describeWhereSync(req)}, ${isHttps(req) ? 'https' : 'plain http'})`);
+  // How it connects (1.7.3, audit S-08): https; loopback from this PC itself, which never leaves it (1.7.4: not called
+  // plain http any more); or plain http over a network.
+  const how = isHttps(req) ? 'https' : !viaTrustedProxy(req) && isLoopback(peerIp(req)) ? 'never leaves this PC' : 'plain http';
+  log.info(`${whoName(id)} is online (${d?.platform || 'unknown'}${version ? ` ${version}` : ''}, from ${describeWhereSync(req)}, ${how})`);
 }
 
 function noteOffline(id) {

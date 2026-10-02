@@ -33,6 +33,7 @@ namespace Beam
         public bool AutoOpenLinks;             // a link sent to this PC opens in the browser at once
         public bool PhonePopupText = true;     // phone notification balloons show the message (off: app and count only)
         public bool AllowRemoteControl;        // Beam 1.6 "Allow remote control": off by default, turned on only at this PC
+        public string RcBannerSpot;            // Beam 1.7.4: where the remote-control banner was put ("screen|fx|fy", RcBannerPlace)
         public List<RcAllowed> RemoteControlDevices = new List<RcAllowed>(); // ...and the devices that may (pinned to their Tailscale node)
         public bool AutoSave = true;
         public long MaxSaveMB = 2048;
@@ -191,6 +192,7 @@ namespace Beam
                 c.AutoOpenLinks = Json.Bool(d, "autoOpenLinks", false);
                 c.PhonePopupText = Json.Bool(d, "phonePopupText", true);
                 c.AllowRemoteControl = Json.Bool(d, "allowRemoteControl", false);
+                c.RcBannerSpot = Json.Str(d, "rcBannerSpot");
                 var rcList = Json.Get(d, "remoteControlDevices") as object[];
                 if (rcList != null)
                     foreach (var o in rcList)
@@ -315,6 +317,7 @@ namespace Beam
                 d["autoOpenLinks"] = AutoOpenLinks;
                 d["phonePopupText"] = PhonePopupText;
                 d["allowRemoteControl"] = AllowRemoteControl;
+                if (!string.IsNullOrEmpty(RcBannerSpot)) d["rcBannerSpot"] = RcBannerSpot; else d.Remove("rcBannerSpot");
                 d["remoteControlDevices"] = RemoteControlDevices.Select(x => (object)x.ToJson()).ToArray();
                 d["autoSave"] = AutoSave;
                 d["maxSaveMB"] = MaxSaveMB;

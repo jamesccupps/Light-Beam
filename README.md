@@ -207,7 +207,9 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Off on every PC until you switch it on at that PC:** tray menu → **Allow remote control**. You tick which of your
   devices may control it. Only tick devices you trust: Beam in another Windows account on the same PC counts as a
   different device. A device added to Beam later needs ticking on that PC (tray → **Remote control devices…**).
-- **While someone is connected** the PC shows "*device* (*machine* · *address*) is controlling this PC · **Stop**".
+- **While someone is connected** the PC shows a red bar, "*device* (*machine* · *address*) is controlling this PC ·
+  **Stop**". After 5 seconds it shrinks to a small "Beam · Stop" pill that grows back when the mouse rests on it. Drag it
+  anywhere on the screen (it starts there next time); double-click it to put it back at the top.
   **Ctrl+Alt+Shift+F12** on the PC ends every session at once. You can also end a session, or turn remote control off
   for a PC, from any of your devices (Settings → Devices). Nothing but the PC itself can turn it on.
 - **In the viewer:** Sharp text or Smooth motion, choose a screen, full screen, a Keys menu (Win, Alt+Tab, Lock this

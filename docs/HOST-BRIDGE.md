@@ -321,6 +321,11 @@ ends: the **PC** (native, plus a hidden capture page of its own) and, in a **vie
   own whois, ignores clicks for 500 ms and re-asserts itself; closing it is Stop. **Ctrl+Alt+Shift+F12** ends every
   session at once (the banner's tooltip says so). Windows' own "beam-remote-control is sharing your screen" bar also
   shows, at the bottom; its "Stop sharing" ends the session too.
+  **1.7.4:** the banner can be dragged anywhere but never off a screen (anything else that moves it off puts it back at
+  the top within a second); the next session's banner starts where it was put (`rcBannerSpot` in config.json: Stop's
+  centre as fractions of that screen's working area); a double-click puts it back at the top and forgets the spot.
+  After 5 s it shrinks to a "Beam · Stop" pill that grows back when the mouse rests on it for 0.4 s; Stop (the right
+  end) stays where it is through all of that, and a drag that ends over Stop isn't a click on it.
 - **Capture** happens only while a session is on and its banner is up. The gate is `ScreenCaptureStarting` in a
   WebView2 with a profile of its own (`WebView2\RemoteHost`), never shown.
 - **Ends:**

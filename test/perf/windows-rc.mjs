@@ -70,6 +70,15 @@ async function waitLog(re, from = 0, ms = 15000) {
   }
   return null;
 }
+// The banner (1.7.4) through --test-rc banner:…: where it is on the test instance's made-up screen (far off the real
+// ones), its size, the screen's size and the spot it saved.
+async function bannerInfo(cmd = 'banner') {
+  const n = logLines().length;
+  rc(cmd);
+  const l = await waitLog(/\(test\) banner (pill|full) at /, n, 4000);
+  const m = l && /banner (pill|full) at (-?\d+),(-?\d+) size (\d+)x(\d+) of (\d+)x(\d+), spot (.*)$/.exec(l);
+  return m ? { state: m[1], x: +m[2], y: +m[3], w: +m[4], h: +m[5], W: +m[6], H: +m[7], spot: m[8], right: +m[2] + +m[4] } : null;
+}
 
 // ---------------------------------------------------------------- the server API as a device
 // An app's own requests carry its Windows account / install (X-Beam-Profile); the server ties a viewer's session to its
@@ -506,6 +515,8 @@ try {
   check(r.status === 201 && (r.data.host.ip4 === ip4 || r.data.host.ip6 === ip6), 'the viewer asks: 201 with the PC\'s attested addresses');
   const banner = await waitLog(/banner up: /, from, 10000);
   check(!!banner && banner.includes(`Test Phone (rc-test-machine · ${ip4 || ip6}) is controlling this PC`), `the banner leads with what's verified: ${banner ? banner.replace(/.*banner up: /, '') : 'none'}`);
+  check(!!(await waitLog(/the banner is at the top centre/, from, 1000)), 'the banner starts at the top centre (nowhere saved yet; 1.7.4)');
+  const bannerAt = Date.now();
   check(!!(await waitLog(/kill switch hotkey isn't registered by a test instance/, from, 1000)), 'a test instance registers no hotkey (the kill switch goes through --test-rc kill)');
   const list = await waitFor(async () => { const l = (await call(VIEWER(), 'GET', '/api/rc/sessions')).data.sessions; return l.find(x => x.id === live.id && x.state === 'live'); }, 8000);
   check(!!list, 'the PC leased it as soon as the banner was up: the server says live');
@@ -657,6 +668,36 @@ try {
     check(!!(await waitLog(/Drag out of \w+ while this PC is being controlled: copied instead/, before, 3000)), '...and beam.log says why');
   }
 
+  // The banner (1.7.4; the user: it covered the browser's tabs): a pill after 5 s, whole again under the mouse with
+  // Stop where it was, dragged anywhere but never off its screen, remembered, and put back by anything else that moves
+  // it off. All on the test instance's made-up screen, far off the real ones.
+  {
+    await sleep(Math.max(0, bannerAt + 6000 - Date.now()));
+    let b = await bannerInfo();
+    check(!!b && b.state === 'pill', `after 5 s it's a pill (${b ? b.state + ' ' + b.w + 'x' + b.h : 'no answer'})`);
+    const right = b && b.right, pillW = b ? b.w : 0;
+    b = await bannerInfo('banner:hover:on');
+    check(!!b && b.state === 'full' && b.right === right && b.w > pillW + 100, `under the mouse it grows back (${pillW} → ${b ? b.w : '?'} wide), its right end (Stop) where it was`);
+    rc('banner:hover:off');
+    await sleep(2200);
+    b = await bannerInfo();
+    check(!!b && b.state === 'pill' && b.right === right, '...and it shrinks again 1.5 s after the mouse leaves');
+    const grabX = Math.round(16 * (b ? b.h : 40) / 40); // (Ui.S(16): where the test drag holds it)
+    b = await bannerInfo('banner:drag:300,500');
+    check(!!b && Math.abs(b.x - (300 - grabX)) <= 1 && Math.abs(b.y - (500 - Math.floor(b.h / 2))) <= 1, `dragged: it goes where it's let go (${b ? b.x + ',' + b.y : 'no answer'})`);
+    check(!!b && /^test\|0\.\d+\|0\.\d+$/.test(b.spot) && readConfig().rcBannerSpot === b.spot, `...and the spot is saved for next time (${b ? b.spot : '-'})`);
+    b = await bannerInfo('banner:drag:-500,-500');
+    check(!!b && b.x === 0 && b.y === 0, `dragged past the top left: it stops at the screen's edge (${b ? b.x + ',' + b.y : 'no answer'})`);
+    b = await bannerInfo('banner:drag:5000,5000');
+    check(!!b && b.x === b.W - b.w && b.y === b.H - b.h, `...and past the bottom right (${b ? b.x + ',' + b.y : 'no answer'})`);
+    const n = logLines().length;
+    rc('banner:jump:3000,3000');
+    check(!!(await waitLog(/the banner was moved off the screen; it's back at the top/, n, 3000)), 'moved off its screen by something else: back within a second');
+    b = await bannerInfo();
+    check(!!b && b.y < b.h && Math.abs(b.x - Math.floor((b.W - b.w) / 2)) <= 1, `...at the top centre (${b ? b.x + ',' + b.y : 'no answer'})`);
+    check(!!b && b.spot === readConfig().rcBannerSpot && b.spot !== 'none', '...which isn\'t saved: the spot is still where it was put');
+  }
+
   // Stop on the banner.
   t1 = Date.now();
   const sid = live.id;
@@ -676,6 +717,15 @@ try {
   r = await startSession();
   const ignored = await waitLog(/Stop ignored, the banner appeared \d+ ms ago/, from, 10000);
   check(!!ignored, `a click on Stop as the banner appears is ignored (${ignored ? ignored.replace(/.*appeared /, '') : 'none'})`);
+  {
+    // 1.7.4: the next session's banner starts where the last one was put (the bottom right), whole; a double-click
+    // puts it back at the top and forgets the spot.
+    check(!!(await waitLog(/the banner is where it was put last time/, from, 3000)), 'the next banner starts where the last one was put');
+    let b = await bannerInfo();
+    check(!!b && b.state === 'full' && Math.abs(b.x - (b.W - b.w)) <= 1 && b.y === b.H - b.h, `...whole, its Stop on the saved spot (${b ? b.state + ' at ' + b.x + ',' + b.y : 'no answer'})`);
+    b = await bannerInfo('banner:top');
+    check(!!b && b.y < b.h && b.spot === 'none' && !('rcBannerSpot' in readConfig()), `a double-click: back at the top, spot forgotten (${b ? b.x + ',' + b.y : 'no answer'})`);
+  }
   check(!!(await waitLog(/capture host reused/, from, 10000)), 'a session soon after the last one reuses its warm capture host');
   check(!!(await waitLog(/a screen capture was allowed/, from, 15000)), '...and the session goes on');
   const sid2 = live.id;
