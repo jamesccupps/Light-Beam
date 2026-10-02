@@ -31,7 +31,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   phone as a remote, quick actions, reminders.
 - **More platforms:** iPhone, Mac and Linux apps; the Android app on the Play Store as a client for anyone's own Beam.
 - **Sharing:** share links for people without Beam; a browser extension.
-- **Security and server:** end-to-end encryption, a code-signed Windows app, a server dashboard, automatic backups.
+- **Security and server:** end-to-end encryption, a code-signed Windows app, a server dashboard, automatic backups
+  of the server and of every device's settings, with a restore.
 - **Integrations:** Home Assistant, webhooks.
 - **Off-grid:** devices on one network carrying on when the server is down, and maybe messaging over mesh radios
   (Meshtastic / Reticulum).
