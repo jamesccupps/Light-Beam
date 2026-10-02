@@ -19,8 +19,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   together, and a gallery of everything a device sent.
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server.
 - **Remote control: faster, lighter, sharper:** an Auto mode next to Sharp text and Smooth motion, a Data saver for
-  phones on mobile data, lower delay (measured end to end), sending only the size the viewer can show, and a details
-  panel.
+  phones on mobile data, lower delay (measured end to end), sending only the size the viewer can show, a details
+  panel, and settings you can change while connected (resolution, frame rate, data cap, codec, cursor, keys).
 - **A shared mouse and keyboard** between computers (KVM).
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
 - **Builds and releases** with GitHub Actions.
