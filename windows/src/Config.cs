@@ -35,6 +35,8 @@ namespace Beam
         public bool AllowRemoteControl;        // Beam 1.6 "Allow remote control": off by default, turned on only at this PC
         public string RcBannerSpot;            // Beam 1.7.4: where the remote-control banner was put ("screen|fx|fy", RcBannerPlace)
         public string RcDisplayRestore;        // Beam 1.8: a screen fitted to a viewer, as it was ("device|w|h|hz|percent", RcDisplay)
+        public string InstallId;               // Beam 1.8.1: this install's own id (its settings backups on the server go by it)
+        public bool RestoreChecked;            // ...and an earlier install's backup was looked for (offered once)
         public List<RcAllowed> RemoteControlDevices = new List<RcAllowed>(); // ...and the devices that may (pinned to their Tailscale node)
         public bool AutoSave = true;
         public long MaxSaveMB = 2048;
@@ -195,6 +197,8 @@ namespace Beam
                 c.AllowRemoteControl = Json.Bool(d, "allowRemoteControl", false);
                 c.RcBannerSpot = Json.Str(d, "rcBannerSpot");
                 c.RcDisplayRestore = Json.Str(d, "rcDisplayRestore");
+                c.InstallId = Json.Str(d, "installId");
+                c.RestoreChecked = Json.Bool(d, "restoreChecked", false);
                 var rcList = Json.Get(d, "remoteControlDevices") as object[];
                 if (rcList != null)
                     foreach (var o in rcList)
@@ -245,6 +249,11 @@ namespace Beam
             if (string.IsNullOrEmpty(c.DeviceId) || !ValidId(c.DeviceId))
             {
                 c.DeviceId = Guid.NewGuid().ToString("N");
+                dirty = true;
+            }
+            if (!ValidId(c.InstallId))
+            {
+                c.InstallId = Guid.NewGuid().ToString("N").Substring(0, 16);
                 dirty = true;
             }
             if (string.IsNullOrEmpty(c.DeviceName)) c.DeviceName = DefaultName();
@@ -321,6 +330,8 @@ namespace Beam
                 d["allowRemoteControl"] = AllowRemoteControl;
                 if (!string.IsNullOrEmpty(RcBannerSpot)) d["rcBannerSpot"] = RcBannerSpot; else d.Remove("rcBannerSpot");
                 if (!string.IsNullOrEmpty(RcDisplayRestore)) d["rcDisplayRestore"] = RcDisplayRestore; else d.Remove("rcDisplayRestore");
+                d["installId"] = InstallId;
+                d["restoreChecked"] = RestoreChecked;
                 d["remoteControlDevices"] = RemoteControlDevices.Select(x => (object)x.ToJson()).ToArray();
                 d["autoSave"] = AutoSave;
                 d["maxSaveMB"] = MaxSaveMB;

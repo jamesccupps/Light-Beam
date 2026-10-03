@@ -72,6 +72,16 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const DIST_DIR = path.resolve(env.BEAM_DIST || path.join(__dirname, 'dist'));
 const MAX_UPLOAD = num(env.BEAM_MAX_UPLOAD_MB, 4096) * MB;
 const MAX_STORAGE = num(env.BEAM_MAX_STORAGE_GB, 0) * 1024 * MB; // 0 = no limit besides the disk
+// (1.8.1) Backups of this server: an export every BEAM_BACKUP_HOURS (0: none) into BEAM_BACKUP_DIR (default: a
+// "backups" folder next to the data folder, or in it when the data folder is at a drive's root), the newest
+// BEAM_BACKUP_KEEP kept; item files go in while they add up to at most BEAM_BACKUP_FILES_MB.
+const BACKUP_DIR = path.resolve(env.BEAM_BACKUP_DIR || (() => {
+  const parent = path.dirname(DATA_DIR);
+  return parent === path.parse(parent).root ? path.join(DATA_DIR, 'backups') : path.join(parent, 'backups');
+})());
+const BACKUP_HOURS = Math.max(0, num(env.BEAM_BACKUP_HOURS, 24));
+const BACKUP_KEEP = Math.max(1, Math.floor(num(env.BEAM_BACKUP_KEEP, 14)));
+const BACKUP_FILES = Math.max(0, num(env.BEAM_BACKUP_FILES_MB, 1024)) * MB;
 const MAX_TEXT = 5 * MB;
 const INLINE_TEXT_LIMIT = 64 * 1024; // longer texts live in data/texts, not in items.json
 const LIST_TEXT_LIMIT = 16 * 1024; // texts are cut to this in lists and live events
@@ -1386,6 +1396,8 @@ function mergeDevice(fromId, toId, reason) {
   if (devices[toId] && devices[fromId]?.settings?.phoneNotifications && !devices[toId].settings?.phoneNotifications) {
     devices[toId].settings = { ...devices[toId].settings, phoneNotifications: true };
   }
+  // (1.8.1) The old install's settings backups go along: a reinstalled app offers to restore them.
+  if (devices[toId] && devices[fromId]?.backups?.length) devices[toId].backups = mergedBackups(devices[toId].backups, devices[fromId].backups);
   dropPhoneNotes(fromId);
   if (settings.alerts?.offline?.includes(fromId)) {
     settings.alerts.offline = [...new Set(settings.alerts.offline.map(id => (id === fromId ? toId : id)))];
@@ -1450,6 +1462,8 @@ function deviceList() {
         ...(ts && { tailscale: ts }),
         can: capabilitiesOf(d, ts),
         settings: { phoneNotifications: d.settings?.phoneNotifications === true },
+        // (1.8.1) when its app last backed up its settings (only that: the settings are at /backups)
+        ...(d.backups?.length && { backup: { at: d.backups[0].at, app: d.backups[0].app } }),
       };
     })
     .sort((a, b) => (b.online - a.online) || (b.lastSeen - a.lastSeen));
@@ -2465,6 +2479,50 @@ async function putDeviceSettings(req, res, [id], url) {
   }
   broadcastDevices();
   send(res, 204);
+}
+
+// ---------------------------------------------------------------- the apps' settings backups (1.8.1)
+
+// Each app keeps a copy of its own settings here (the user: "we should definetly have a way to backup setting and
+// everything and restore them if needed for all computers"), sent when they change: never a sign-in or a key. One per
+// install of the app (`install`, an id the install made up), the newest three per device; they go along when a
+// reinstall's new device is linked to the old one, so the new install can offer to put them back. They're part of
+// devices.json, so of every export and backup. Any of the owner's devices signed in for good may read them (to set a
+// new PC up like an old one); a session-only sign-in may not.
+const BACKUP_SETTINGS_MAX = 32 * 1024;
+const BACKUPS_PER_DEVICE = 3;
+
+function mergedBackups(...lists) {
+  const seen = new Set();
+  return lists.flat().filter(Boolean).sort((a, b) => b.at - a.at).filter(b => !seen.has(b.install) && seen.add(b.install)).slice(0, BACKUPS_PER_DEVICE);
+}
+
+// PUT /api/devices/me/backup { install, app: "windows" | "android", version, settings: {...} }
+async function putDeviceBackup(req, res, _m, url) {
+  const auth = authOf(req);
+  if (auth.session) throw httpError(403, 'A sign-in for this browser session only keeps no backups');
+  const d = devices[deviceIdOf(req, url)];
+  if (!d) throw httpError(400, 'X-Beam-Device-Id is required');
+  const body = await readJson(req, { limit: BACKUP_SETTINGS_MAX + 4096 });
+  const install = typeof body.install === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(body.install) ? body.install : null;
+  const app = ['windows', 'android'].includes(body.app) ? body.app : null;
+  const ok = body.settings && typeof body.settings === 'object' && !Array.isArray(body.settings);
+  if (!install || !app || !ok) throw httpError(400, 'Expected {"install": "<its id>", "app": "windows" | "android", "version", "settings": {...}}');
+  if (JSON.stringify(body.settings).length > BACKUP_SETTINGS_MAX) throw httpError(413, 'Those settings are too big to keep (32 KB at most)');
+  const fresh = !(d.backups || []).some(b => b.install === install);
+  d.backups = mergedBackups([{ install, app, version: noteText(body.version, 20, 'version') || null, at: now(), settings: body.settings }], (d.backups || []).filter(b => b.install !== install));
+  persistDevices();
+  if (fresh) log.info(`${d.name}'s Beam app keeps a backup of its settings here now`);
+  broadcastDevices();
+  send(res, 204);
+}
+
+// GET /api/devices/{id|me}/backups: { device, name, backups: [{ install, app, version, at, settings }] }, newest first.
+function getDeviceBackups(req, res, [id], url) {
+  if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read backups');
+  const target = id ? targetDevice(id) : devices[deviceIdOf(req, url)];
+  if (!target) throw httpError(400, 'X-Beam-Device-Id is required');
+  send(res, 200, { device: target.id, name: target.name, backups: target.backups || [] });
 }
 
 // A device that goes away (removed, or merged into another) takes its shared notifications with it.
@@ -4525,7 +4583,7 @@ const FEATURES = [
   'logs', 'text-files', 'thumbnails', 'sessions', 'upload-progress', 'proof',
   'device-status', 'ring', 'wake', 'remote-desktop', 'alerts',
   'stream-modes', 'items-since', 'gzip', 'live-download', 'big-chunks', 'clear-cache',
-  'phone-notifications', 'remote-control',
+  'phone-notifications', 'remote-control', 'backups',
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -5500,6 +5558,95 @@ async function exportApi(req, res, _m, url) {
   }
 }
 
+// ---------------------------------------------------------------- backups of this server (1.8.1)
+
+// An export every BACKUP_HOURS into BACKUP_DIR as beam-backup-<UTC time>.tar.gz; the newest BACKUP_KEEP of that name
+// are kept (nothing else in the folder is touched). Item files go in while they add up to at most BACKUP_FILES:
+// items expire anyway, and the key, sign-ins, devices, their apps' settings and the server's own are what a backup is
+// for; above that, the items that are files stay out. To restore one: stop Beam, then
+// `node server.js import <backup> --force` (the data folder's contents are moved aside, not deleted).
+const BACKUP_NAME = /^beam-backup-\d{8}-\d{6}\.tar\.gz$/;
+let backupTimer = null;
+let backupRun = null;  // the backup being written
+let lastBackup = null; // { at, name, bytes, files, why } or { at, error, why }
+
+async function listBackups() {
+  let names = [];
+  try { names = (await fsp.readdir(BACKUP_DIR)).filter(n => BACKUP_NAME.test(n)); } catch { return []; }
+  const list = [];
+  for (const name of names) {
+    try { const st = await fsp.stat(path.join(BACKUP_DIR, name)); list.push({ name, at: Math.round(st.mtimeMs), bytes: st.size }); } catch {}
+  }
+  return list.sort((a, b) => b.at - a.at || (a.name < b.name ? 1 : -1));
+}
+
+// One at a time: a second asks while one is written get that one.
+function backupNow(why) {
+  return (backupRun ||= (async () => {
+    const stamp = new Date(now()).toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    const name = `beam-backup-${stamp}.tar.gz`;
+    const file = path.join(BACKUP_DIR, name);
+    const partial = `${file}.partial`;
+    try {
+      await fsp.mkdir(BACKUP_DIR, { recursive: true });
+      const state = snapshotState();
+      const fileBytes = state.items.filter(i => i.kind === 'file').reduce((n, i) => n + (i.size || 0), 0);
+      const files = fileBytes <= BACKUP_FILES;
+      if (!files) state.items = state.items.filter(i => i.kind !== 'file');
+      await writeExport(fs.createWriteStream(partial, { mode: 0o600 }), state);
+      await fsp.rename(partial, file);
+      const bytes = (await fsp.stat(file)).size;
+      lastBackup = { at: now(), name, bytes, files, why };
+      log.info(`Backed up this Beam (${why}): ${name}, ${formatSize(bytes)}${files ? '' : `, without its ${formatSize(fileBytes)} of files`}, in ${BACKUP_DIR}`);
+      const old = (await listBackups()).slice(BACKUP_KEEP);
+      for (const b of old) await rmQuiet(path.join(BACKUP_DIR, b.name));
+      if (old.length) log.info(`Removed ${old.length} old backup${old.length > 1 ? 's' : ''} (the newest ${BACKUP_KEEP} are kept)`);
+      return lastBackup;
+    } catch (err) {
+      await rmQuiet(partial);
+      lastBackup = { at: now(), error: err.message, why };
+      log.warn(`The backup (${why}) failed: ${err.message}`);
+      throw err;
+    } finally {
+      backupRun = null;
+    }
+  })());
+}
+
+// The next backup BACKUP_HOURS after the newest one, and 10 minutes after the start at the earliest (a start stays light).
+async function scheduleBackups() {
+  if (!BACKUP_HOURS) return log.info('Backups are off (BEAM_BACKUP_HOURS=0)');
+  for (const n of await fsp.readdir(BACKUP_DIR).catch(() => [])) if (/^beam-backup-.*\.partial$/.test(n)) await rmQuiet(path.join(BACKUP_DIR, n));
+  const newest = (await listBackups())[0];
+  if (newest) lastBackup = { at: newest.at, name: newest.name, bytes: newest.bytes };
+  const every = BACKUP_HOURS * 3600e3;
+  const plan = ms => {
+    clearTimeout(backupTimer);
+    backupTimer = setTimeout(() => backupNow(`every ${BACKUP_HOURS} h`).catch(() => {}).finally(() => plan(every)), Math.min(ms, 2 ** 31 - 1));
+    backupTimer.unref();
+  };
+  plan(Math.max(10 * 60e3, newest ? newest.at + every - now() : 0));
+}
+
+function backupsInfo(list) {
+  return { dir: BACKUP_DIR, hours: BACKUP_HOURS, keep: BACKUP_KEEP, filesMB: Math.round(BACKUP_FILES / MB), running: Boolean(backupRun), last: lastBackup, backups: list };
+}
+
+// GET /api/backups: where they go, how often, the last one and the ones there (names, times, sizes).
+async function getBackups(req, res) {
+  if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t see backups');
+  send(res, 200, backupsInfo(await listBackups()));
+}
+
+// POST /api/backups: one now (`node server.js backup`, Settings → Server). 201 with the backups after it.
+async function postBackup(req, res) {
+  const auth = authOf(req);
+  if (auth.session) throw httpError(403, 'A sign-in for this browser session only can’t make backups');
+  const who = auth.via === 'master' && machineOf(req) === 'host' && !viaTrustedProxy(req) ? 'asked on this PC' : `asked by ${whoName(deviceIdOf(req, new URL(req.url, 'http://beam')), 'a device')}`;
+  try { await backupNow(who); } catch (err) { throw httpError(500, `The backup failed: ${err.message}`); }
+  send(res, 201, backupsInfo(await listBackups()));
+}
+
 // Writes an archive into DATA_DIR (and app builds into DIST_DIR when they aren't there yet).
 async function importArchive(input) {
   let manifest = null;
@@ -5559,8 +5706,9 @@ function setAsideData() {
   const aside = path.join(DATA_DIR, `replaced-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   fs.mkdirSync(aside, { recursive: true });
   for (const name of fs.readdirSync(DATA_DIR)) {
-    // Logs stay, and so does Tailscale's state (docker-compose keeps the machine's identity in data/tailscale).
-    if (name.startsWith('replaced-') || name === 'logs' || name === 'tailscale') continue;
+    // Logs stay, and so does Tailscale's state (docker-compose keeps the machine's identity in data/tailscale), and the
+    // backups when they're kept in here (1.8.1).
+    if (name.startsWith('replaced-') || name === 'logs' || name === 'tailscale' || name === 'backups') continue;
     fs.renameSync(path.join(DATA_DIR, name), path.join(aside, name));
   }
   return aside;
@@ -5704,6 +5852,11 @@ const routes = [
   ['GET', '/api/devices', getDevices],
   ['PUT', '/api/devices/me/status', putStatus],
   ['PUT', '/api/devices/me/settings', putDeviceSettings],
+  ['PUT', '/api/devices/me/backup', putDeviceBackup],
+  ['GET', '/api/devices/me/backups', getDeviceBackups],
+  ['GET', `/api/devices/${DEV}/backups`, getDeviceBackups],
+  ['GET', '/api/backups', getBackups],
+  ['POST', '/api/backups', postBackup],
   ['PUT', `/api/devices/${DEV}/settings`, putDeviceSettings],
   ['GET', '/api/phone/notifications', listPhoneNotifications],
   ['DELETE', '/api/phone/notifications', clearPhoneNotifications],
@@ -6165,6 +6318,7 @@ function serve() {
     }).catch(() => {});
     setTimeout(() => logStatus().catch(() => {}), 60_000).unref();
     setInterval(() => logStatus().catch(() => {}), 3600e3).unref();
+    scheduleBackups().catch(err => log.warn(`Backups couldn't be planned: ${err.message}`));
     console.log(`\n  This computer:  http://localhost:${PORT}`);
     if (lan) console.log(`  Local network:  ${lan}`);
     if (remote) console.log(`  Address:        ${remote}`);
@@ -6248,6 +6402,21 @@ async function commandExport(file) {
     await writeExport(out, snapshotState());
   }
   if (target !== '-') console.error(`Saved ${path.resolve(target)} (${formatSize(fs.statSync(target).size)}). It contains the Beam key: keep it private.`);
+}
+
+// (1.8.1) A backup now, into BEAM_BACKUP_DIR: by the running server, else here.
+async function commandBackup() {
+  let dir = BACKUP_DIR, last;
+  if (await runningServer()) {
+    const res = await localApi('/api/backups', { method: 'POST' });
+    const info = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(info.error || `HTTP ${res.status}`);
+    ({ dir, last } = info);
+  } else {
+    openData();
+    last = await backupNow('node server.js backup, with Beam stopped');
+  }
+  console.error(`Saved ${path.join(dir, last.name)} (${formatSize(last.bytes)}). It contains the Beam key: keep it private.`);
 }
 
 async function assertDataFolderFree(force) {
@@ -6402,8 +6571,10 @@ const HELP = `Beam server ${VERSION}
   node server.js stop                stop a running server cleanly (and its supervisor)
   node server.js pair                print a one-time link + QR code to add a device
   node server.js export [file]       save everything to a .tar.gz (default beam-export-<date>.tar.gz; - = stdout)
+  node server.js backup              a backup now, into ${BACKUP_DIR} (Beam makes one every ${BACKUP_HOURS || '(off)'} h itself)
   node server.js import <file> [--force] [--keep-public-url]
-                                     load an export into an empty data folder (--force moves the old one aside)
+                                     load an export or a backup into an empty data folder (--force moves the old
+                                     one aside)
   node server.js import-from <old address> [--public-url <new address>] [--no-redirect] [--force]
                                      copy a running Beam here after you approve it on a signed-in device; the old
                                      server then sends every device here
@@ -6425,6 +6596,7 @@ async function main() {
   const commands = {
     pair: () => commandPair(),
     export: () => commandExport(arg),
+    backup: () => commandBackup(),
     import: () => commandImport(arg, flags),
     'import-from': () => commandImportFrom(arg, flags, options),
     'moved-to': () => commandMovedTo(arg, flags),

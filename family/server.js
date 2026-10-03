@@ -26,6 +26,7 @@ const { createPeople } = require('./lib/people');
 const { createChat } = require('./lib/chat');
 const { createFiles } = require('./lib/files');
 const { createPush } = require('./lib/push');
+const { createBackups, restoreBackup } = require('./lib/backup');
 
 const env = process.env;
 const num = (v, fallback) => (v === undefined || v === '' || isNaN(Number(v)) ? fallback : Number(v));
@@ -53,8 +54,20 @@ const config = {
   postsPer10s: num(env.BEAM_FAMILY_POSTS_PER_10S, 20), // (how fast one person may post; tests that post a lot raise it)
   tailscale: env.BEAM_TAILSCALE !== 'off',
 };
+// (1.8.1) Backups (lib/backup.js): every BEAM_FAMILY_BACKUP_HOURS (0: none) into BEAM_FAMILY_BACKUP_DIR (default the
+// "backups" folder next to the data folder, as Beam's), the newest BEAM_FAMILY_BACKUP_KEEP kept.
+const BACKUP = {
+  dir: path.resolve(env.BEAM_FAMILY_BACKUP_DIR || (() => {
+    const parent = path.dirname(DATA_DIR);
+    return parent === path.parse(parent).root ? path.join(DATA_DIR, 'backups') : path.join(parent, 'backups');
+  })()),
+  hours: Math.max(0, num(env.BEAM_FAMILY_BACKUP_HOURS, 24)),
+  keep: Math.max(1, Math.floor(num(env.BEAM_FAMILY_BACKUP_KEEP, 14))),
+  filesMB: Math.max(0, num(env.BEAM_FAMILY_BACKUP_FILES_MB, 1024)),
+};
 const LOCAL_URL = `http://${HOST.includes(':') ? `[${HOST}]` : HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}`;
 const EXIT_FATAL = 3;
+const backupsOf = db => createBackups({ db, dataDir: DATA_DIR, backupDir: BACKUP.dir, hours: BACKUP.hours, keep: BACKUP.keep, filesMB: BACKUP.filesMB, version: VERSION, log });
 
 const log = createLogger();
 
@@ -107,10 +120,12 @@ function serve() {
   ctx.push = createPush(ctx, { file: path.join(DATA_DIR, 'vapid.json'), contact: /^https:/.test(config.publicUrl) ? config.publicUrl : '' });
   const router = createRouter([...ctx.people.routes, ...ctx.chat.routes, ...ctx.files.routes, ...ctx.push.routes]);
   const serveStatic = createStatic(path.join(__dirname, 'public'));
+  const backups = backupsOf(db);
 
   let server;
   async function shutdown(reason) {
     log.info(`Stopping (${reason})`);
+    backups.stop();
     hub.closeAll();
     server.close();
     setTimeout(() => process.exit(0), 3000).unref();
@@ -133,10 +148,11 @@ function serve() {
     try {
       if (p.startsWith('/api/')) {
         if (p === '/api/hello') return send(res, 200, { family: true, version: VERSION });
-        if (p === '/api/admin/shutdown') {
+        if (p === '/api/admin/shutdown' || p === '/api/admin/backup') {
           const given = Buffer.from(String(req.headers['x-family-control'] || ''));
           const ok = req.method === 'POST' && auth.fromLoopback(req) && !req.headers['x-forwarded-for'] && given.length === Buffer.byteLength(control) && crypto.timingSafeEqual(given, Buffer.from(control));
           if (!ok) throw httpError(404, 'Not found');
+          if (p === '/api/admin/backup') return send(res, 201, { dir: BACKUP.dir, last: await backups.now('asked on this PC') }); // (1.8.1)
           send(res, 202, {});
           return shutdown('requested with "family/server.js stop"');
         }
@@ -180,6 +196,7 @@ function serve() {
   setInterval(purge, 24 * 3600e3).unref();
   server.listen(PORT, HOST, () => {
     log.info(`Beam Family ${VERSION} is running on ${HOST}:${PORT}; data in ${DATA_DIR}${config.publicUrl ? `; address ${config.publicUrl}` : ''}`);
+    backups.schedule().catch(err => log.warn(`Backups couldn't be planned: ${err.message}`));
     process.send?.({ ready: true });
   });
   server.on('error', err => {
@@ -227,6 +244,31 @@ function commandInvite(flags, options) {
   } finally {
     db.close();
   }
+}
+
+// (1.8.1) A backup now, into the backups folder: by the running server, else here.
+async function commandBackup() {
+  let dir = BACKUP.dir, last;
+  if (await runningServer()) {
+    const control = fs.readFileSync(FILE.control, 'utf8').trim();
+    const r = await fetch(`${LOCAL_URL}/api/admin/backup`, { method: 'POST', headers: { 'X-Family-Control': control } });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    ({ dir, last } = body);
+  } else {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const db = openDb(FILE.db);
+    try { last = await backupsOf(db).now('family/server.js backup, with Beam Family stopped'); } finally { db.close(); }
+  }
+  console.log(`Saved ${path.join(dir, last.name)} (${Math.max(1, Math.round(last.bytes / 1024))} KB). It holds the family's messages and keys: keep it private.`);
+}
+
+// (1.8.1) A backup back into the data folder, with the server stopped (--force: the data there is moved aside).
+async function commandRestore(file, flags) {
+  if (!file) throw new Error('Usage: node family/server.js restore <family-backup-….tar.gz> [--force]');
+  if (await runningServer()) throw new Error('Beam Family is running. Stop it first (node family/server.js stop), then restore, then start it again.');
+  const r = await restoreBackup(path.resolve(file), DATA_DIR, { force: flags.has('--force') });
+  console.log(`Restored ${r.files} files into ${DATA_DIR} from the backup of ${r.manifest.created}${r.aside ? `; what was there is in ${r.aside}` : ''}.`);
 }
 
 function commandStatus() {
@@ -285,10 +327,14 @@ const HELP = `Beam Family ${VERSION}
                                                  print an invite link
   node family/server.js invite --owner           the owner's link, when nobody owns the family space yet
   node family/server.js status                   how many people and messages
+  node family/server.js backup                   a backup now (it makes one every ${BACKUP.hours || '(off)'} h itself), into ${BACKUP.dir}
+  node family/server.js restore <backup> [--force]
+                                                 put a backup back, with the server stopped (--force moves the
+                                                 data that's there aside)
 
 Settings (environment or .env): BEAM_FAMILY_DATA (${DATA_DIR}), BEAM_FAMILY_HOST/PORT (${HOST}:${PORT}),
 BEAM_FAMILY_URL (the address people use), BEAM_FAMILY_NAME, BEAM_FAMILY_OWNER, BEAM_FAMILY_MAX_UPLOAD_MB,
-BEAM_FAMILY_MAX_STORAGE_GB.`;
+BEAM_FAMILY_MAX_STORAGE_GB, BEAM_FAMILY_BACKUP_DIR/HOURS/KEEP/FILES_MB.`;
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -296,11 +342,11 @@ async function main() {
   const options = {};
   for (let i = 0; i < argv.length; i++) if (/^--(uses|days)$/.test(argv[i])) options[argv[i].slice(2)] = argv[i + 1];
   const positional = argv.filter((a, i) => !a.startsWith('--') && !/^--(uses|days)$/.test(argv[i - 1] || ''));
-  const [command] = positional;
+  const [command, arg] = positional;
   if (flags.has('--help') || command === 'help') return console.log(HELP);
   if (flags.has('--supervise')) return supervise(argv.filter(a => a !== '--supervise'));
   if (!command) return serve();
-  const commands = { stop: commandStop, invite: () => commandInvite(flags, options), status: commandStatus };
+  const commands = { stop: commandStop, invite: () => commandInvite(flags, options), status: commandStatus, backup: commandBackup, restore: () => commandRestore(arg, flags) };
   if (!Object.hasOwn(commands, command)) {
     console.error(`Unknown command "${command}".\n\n${HELP}`);
     process.exitCode = 2;

@@ -243,6 +243,22 @@ export default function register(test) {
     await page.waitFor(`/\\?key=bp_/.test($('#pairLink').value) && /Works once/.test($('#pairLinkExpiry').textContent)`, 5000, 'single-use link with expiry');
   });
 
+  test('settings (1.8.1): Server → Backups (where, how often, the last one) and Back up now; Devices says when a PC’s settings were backed up', async ctx => {
+    const page = await ctx.signedIn();
+    const pc = dev(ctx, 'Desk PC', 'windows');
+    await pc.me();
+    const put = await fetch(`${ctx.srv.base}/api/devices/me/backup`, { method: 'PUT', headers: { ...pc.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ install: 'webtest-install-1', app: 'windows', version: '1.8.1', settings: { deviceName: 'Desk PC' } }) });
+    eq(put.status, 204, 'the PC’s app keeps its settings there');
+    await page.evaluate(`openSettings('server')`);
+    await page.waitFor(`/A backup of this Beam every 24 h/.test($('#set-server')?.textContent || '') && /None yet/.test($('#set-server').textContent)`, 8000, 'Backups: none yet');
+    await page.evaluate(`[...$$('#set-server button')].find(b => b.textContent === 'Back up now').click(); true`);
+    await page.waitFor(`/The last: just now \\(/.test($('#set-server').textContent)`, 15000, 'backed up now');
+    await page.evaluate(`openSettings('devices')`);
+    await page.waitFor(`/Settings backed up just now/.test([...$$('#set-devices .device-row')].find(r => /Desk PC/.test(r.textContent))?.textContent || '')`, 8000, 'Devices: the PC’s settings backed up');
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('settings: only the sections scroll, its title and × stay in view (devices listed, a small window); a click outside closes it', async ctx => {
     const page = await ctx.signedIn();
     await page.viewport(1000, 640);

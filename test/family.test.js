@@ -835,6 +835,40 @@ test('F-J: the CLI: an owner invite before anyone owns it; status; stop under th
   } finally { try { child.kill(); } catch {} }
 });
 
+test('F-M (1.8.1): backups: the database as a snapshot taken while it runs, its keys, the files; the newest kept; restored only with the server stopped (--force moves the data there aside), and it works again', async () => {
+  const bk = path.join(TMP, 'family-backups');
+  const env = { BEAM_FAMILY_BACKUP_DIR: bk, BEAM_FAMILY_BACKUP_KEEP: '2' };
+  let s = await start('backup', 8843, { env });
+  try {
+    const f = await family(s);
+    await post(s, f.owner, f.general, 'Before the backups');
+    const cli = (...args) => spawnSync(process.execPath, [SERVER, ...args], { env: s.env, encoding: 'utf8' });
+    let r = cli('backup');
+    assert.match(r.stdout, /Saved .*family-backup-\d{8}-\d{6}\.tar\.gz \(\d+ KB\)\. It holds the family's messages and keys: keep it private\./, r.stdout + r.stderr);
+    await waitFor(() => /Backed up Beam Family \(asked on this PC\): family-backup-/.test(s.out), 5000); // (spawnSync held this process: the output comes now)
+    await post(s, f.owner, f.general, 'Between them');
+    for (let i = 0; i < 2; i++) { await sleep(1100); assert.equal(cli('backup').status, 0); }
+    const names = fs.readdirSync(bk).filter(n => /^family-backup-/.test(n)).sort();
+    assert.equal(names.length, 2, `the newest two are kept: ${names}`);
+    await waitFor(() => /Removed 1 old backup \(the newest 2 are kept\)/.test(s.out), 5000);
+    assert.deepEqual(fs.readdirSync(bk).filter(n => !/^family-backup-\d{8}-\d{6}\.tar\.gz$/.test(n)), [], 'no snapshot or partial file left');
+    await post(s, f.owner, f.general, 'After the last one');
+    r = cli('restore', path.join(bk, names[1]));
+    assert.match(r.stderr, /Beam Family is running\. Stop it first/);
+    await s.stop();
+    r = cli('restore', path.join(bk, names[1]));
+    assert.match(r.stderr, /already holds Beam Family data\. Use --force/);
+    r = cli('restore', path.join(bk, names[1]), '--force');
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /Restored \d+ files into .* from the backup of .*; what was there is in .*replaced-/);
+    s = await start('backup', 8843, { env, keep: true });
+    const bodies = (await call(s, 'GET', `/api/channels/${f.general}/messages`, f.owner)).json.messages.map(m => m.body);
+    assert.ok(bodies.includes('Before the backups') && bodies.includes('Between them') && !bodies.includes('After the last one'), `as it was at that backup: ${bodies}`);
+    r = cli('restore', path.join(bk, 'nope.tar.gz'));
+    assert.notEqual(r.status, 0, 'a backup that isn’t there: nothing happens');
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

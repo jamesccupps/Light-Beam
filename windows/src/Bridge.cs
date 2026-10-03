@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings" };
 
         readonly App app;
         readonly WebWindow win;
@@ -195,6 +195,10 @@ namespace Beam
                     else if (err != null) Fail(id, "bad-request", err); else Reply(id, Obj("settings", app.SettingsObject()));
                     break;
                 }
+                case "restoreSettings": // Beam 1.8.1: the native choice of backups (SettingsBackups)
+                    app.Backups.ShowChoices();
+                    Reply(id, null);
+                    break;
                 case "openRemote": // Beam 1.6: "Control" opens a viewer window of its own
                 {
                     string err = app.OpenRemote(Json.Str(m, "device"));

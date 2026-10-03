@@ -141,6 +141,7 @@ every device.
 | `moved` | `movedTo` | (none) | See §2. |
 | `log` | `level`: `"info"` or `"error"`, `message` | (none) | Writes a line to beam.log. **Never include message text, file names or secrets.** |
 | `openRemote` | `device`: a device id | `{}`; `code: "bad-request"` for this PC or a device it doesn't know | Opens the **viewer window** for that PC (§11.3), or brings it to the front. Only if `features` has `remoteControl`; offer it ("Control") for devices with `can.remoteControl`. |
+| `restoreSettings` | (none) | `{}` | **(1.8.1)** The app's own choice of settings backups (this PC's earlier installs', and the newest of each other PC's): it puts the chosen one back; remote control comes back only through its own confirmation. Only if `features` has `restoreSettings` and the server's has `backups` (Settings → This PC → "Restore settings…"). |
 
 ## 5. Host → page events
 

@@ -16,7 +16,8 @@ namespace Beam
         readonly List<KeyValuePair<string, FlatCheck>> checks = new List<KeyValuePair<string, FlatCheck>>();
         readonly Panel body, footer;
 
-        public RcAllowForm(App app, bool turningOn) : base(turningOn ? "Allow remote control" : "Remote control devices", 560)
+        // ticked (1.8.1: a restored backup's list): the devices ticked at first when turning it on, instead of all.
+        public RcAllowForm(App app, bool turningOn, ICollection<string> ticked = null) : base(turningOn ? "Allow remote control" : "Remote control devices", 560)
         {
             this.app = app;
             this.turningOn = turningOn;
@@ -40,7 +41,7 @@ namespace Beam
             foreach (var d in devices)
             {
                 var entry = listed.FirstOrDefault(a => a.Id == d.Id);
-                bool tick = turningOn || entry != null;
+                bool tick = turningOn && ticked != null ? ticked.Contains(d.Id) : turningOn || entry != null;
                 string machine = entry != null && entry.Machine != null ? "on " + entry.Machine + " (pinned)" : d.TailscaleName != null ? "on " + d.TailscaleName : "no Tailscale address yet";
                 var c = AddCheck(d.Name, Platform(d.Platform) + " · " + machine, tick, 0, Ui.S(6));
                 checks.Add(new KeyValuePair<string, FlatCheck>(d.Id, c));
