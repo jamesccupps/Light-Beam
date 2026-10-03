@@ -8,6 +8,19 @@ It is a **separate server** (`family/server.js`) with its own process, data, por
 change. That separation is deliberate: Beam Family can be opened from the internet (the public link), and the
 internet must never be one bug away from the server that can control your PCs.
 
+### Big files from a phone (1.8.3)
+
+A message with files appears for everyone when its files are all there. Meanwhile the sender sees how far they are
+("Sending 210 MB of 1.9 GB (11%)") with Cancel. The app is a web page, and a phone pauses a page that isn't in front
+(another app, the screen locked), so the screen stays on while files are going and Beam Family should stay open
+until they're sent; a message that stopped while the page was paused carries on by itself (from where the server got
+to) when the app is back in front, and "Try again" does the same. A page that's gone (closed, reloaded, dropped by the
+phone) loses the message it showed, but the files stay on the server for a day: opened again, the app offers them
+("clip.mp4 stopped at 390 MB of 1.9 GB": pick it again and it goes on from there; one that's all there is attached at
+once; or Discard) (1.8.4). The same file can't be attached twice. Through the public link the files go via
+Tailscale's relay, which caps the speed (about 20 Mbit/s seen on 2026-10-03, even at home); a phone with Tailscale
+goes directly. The largest file is `BEAM_FAMILY_MAX_UPLOAD_MB` (2 GB unless set).
+
 ## Running it
 
 ```
@@ -87,7 +100,9 @@ iPad, notifications need the home-screen app (Share → Add to Home Screen). Bea
   opened at once; at most 20 per person; a stream that stops reading is dropped at 1 MB unread; 1,000 connections in
   all. A request body has 60 s to arrive (a piece of a file 15 min). (1.7.2)
 - Unsent uploads: 30 at a time per person (their declared sizes count against the storage until sent or swept);
-  expired sign-ins and invites are cleaned up daily. (1.7.2)
+  expired sign-ins and invites are cleaned up daily. (1.7.2) The sender can drop one at once (`DELETE
+  /api/uploads/:id`: the tray's ×, Cancel on a message still sending); otherwise one that stopped goes a day after its
+  last piece. (1.8.3)
 - Changes need the app's own pages: `Sec-Fetch-Site` same-origin (or a matching `Origin`) and JSON bodies; both ways
   in are ambient (cookies, Tailscale), so this is what stops another site from acting as you.
 - Who sees what is checked on every request: channels for the space's members, DMs and groups for theirs; files only
@@ -136,6 +151,8 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   `POST /api/channels/:id/read {id}`, `POST /api/channels/:id/typing`, `PUT /api/channels/:id/notify {level}`,
   `GET /api/search?q=&channel=`, `PUT /api/focus {client, channel, visible}`.
 - Files: `POST /api/uploads {name, size, mime}`, `PUT /api/uploads/:id?offset=`, `GET /api/uploads/:id`,
+  `DELETE /api/uploads/:id` (1.8.3, only one's own and only while unsent), `GET /api/uploads` (1.8.4: one's own unsent ones,
+  `{ uploads: [{ id, name, size, received, mime, created }] }`),
   `PUT /api/files/:id/thumb?w=&h=`, `GET /api/files/:id[?download]`, `GET /api/files/:id/thumb`,
   `GET /api/people/:id/avatar`.
 - Push: `GET /api/push` (VAPID key), `PUT /api/push {endpoint, keys}`, `DELETE /api/push {endpoint}`.

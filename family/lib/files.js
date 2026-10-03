@@ -115,6 +115,14 @@ function createFiles(ctx) {
     send(res, 201, { id, offset: 0, done: size === 0 });
   }
 
+  // GET /api/uploads: one's own files not sent yet, newest first (a page closed or reloaded on a phone left them), so the
+  // app can offer to go on with them (1.8.4): { uploads: [{ id, name, size, received, mime, created }] }.
+  function listUnsent(req, res) {
+    const user = people().requireUser(req);
+    const rows = db.all('SELECT * FROM attachments WHERE uploader_id = ? AND message_id IS NULL ORDER BY created_at DESC', user.id);
+    send(res, 200, { uploads: rows.map(a => ({ id: a.id, name: a.name, size: a.size, received: a.received, mime: a.mime, created: a.created_at })) });
+  }
+
   // GET /api/uploads/:id → { offset, size, done } (where to go on after a dropped connection)
   function uploadState(req, res, { id }) {
     const user = people().requireUser(req);
@@ -166,8 +174,25 @@ function createFiles(ctx) {
       await handle?.close().catch(() => {});
       writing.delete(id);
     }
+    // (1.8.3) cancelled while this piece came in: nothing of it stays
+    if (!db.get('SELECT id FROM attachments WHERE id = ?', id)) {
+      await fsp.rm(partPath(id), { force: true }).catch(() => {});
+      throw httpError(404, 'That upload was cancelled');
+    }
     if (received >= a.size) await fsp.rename(partPath(id), filePath(id));
     send(res, 200, { offset: received, done: received >= a.size });
+  }
+
+  // DELETE /api/uploads/:id: the sender stopped it (the ×, or Cancel on a message still sending): what came goes now
+  // rather than after a day (1.8.3). Only one's own, and only while it isn't in a message.
+  async function cancelUpload(req, res, { id }) {
+    const user = people().requireUser(req);
+    const a = isId(id) && db.get('SELECT * FROM attachments WHERE id = ? AND uploader_id = ?', id, user.id);
+    if (!a) throw httpError(404, 'No such upload');
+    if (a.message_id) throw httpError(409, 'That file was sent already: delete its message instead');
+    db.run('DELETE FROM attachments WHERE id = ?', id);
+    await removeStored(a).catch(() => {});
+    send(res, 204);
   }
 
   // PUT /api/files/:id/thumb?w=&h= (a JPEG or WebP preview from the sender's app; w×h: the original's size)
@@ -288,8 +313,10 @@ function createFiles(ctx) {
     attachmentJson, removeStored, storageUsed, sweepUnsent,
     routes: [
       ['POST', '/api/uploads', startUpload],
+      ['GET', '/api/uploads', listUnsent],
       ['GET', '/api/uploads/:id', uploadState],
       ['PUT', '/api/uploads/:id', putPiece],
+      ['DELETE', '/api/uploads/:id', cancelUpload],
       ['PUT', '/api/files/:id/thumb', putThumb],
       ['GET', '/api/files/:id', getFile],
       ['GET', '/api/files/:id/thumb', getThumb],

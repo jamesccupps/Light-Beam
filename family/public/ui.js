@@ -136,7 +136,10 @@ export function menu(anchor, items, { quick = null, onQuick = null, onClose = nu
   let el;
   let scrim = null;
   if (phone) {
-    scrim = h('div', { class: 'scrim', onclick: () => closeMenu() });
+    // (1.8.4) Only a tap that began on it closes it: lifting the finger of a press and hold (which opened the menu) lands
+    // on it too, and closed the menu at once, so a message's menu (Delete…) couldn't be used on a phone.
+    let pressed = false;
+    scrim = h('div', { class: 'scrim', onpointerdown: () => { pressed = true; }, onclick: () => { if (pressed) closeMenu(); } });
     el = h('div', { class: 'sheet', role: 'menu' }, h('div', { class: 'grab' }), quickRow, build('item-btn'));
     document.body.append(scrim, el);
   } else {

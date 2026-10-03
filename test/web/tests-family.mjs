@@ -147,6 +147,174 @@ Robin ${sent}`);
     await page.waitFor(`document.querySelector('form [name=password]') !== null || /turned off/.test(document.body.innerText)`, 15000, 'Bob is out');
   }, { timeout: 90000, allowErrors: true });
 
+  test('family: a big file still sending shows how far it is; Cancel stops it and the server drops it, and so does the ×  in the tray (1.8.3)', async ctx => {
+    const srv = await familyServer(ctx);
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'in #general');
+    // A slow connection up (1 MB/s), so the 24 MB file takes a while.
+    await robin.send('Network.enable', {});
+    await robin.send('Network.emulateNetworkConditions', { offline: false, latency: 20, downloadThroughput: 50 * 1024 * 1024, uploadThroughput: 1024 * 1024 });
+    const drop = name => robin.evaluate(`(() => {
+      const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array(24 * 1024 * 1024)], ${JSON.stringify(name)}, { type: 'application/octet-stream' }));
+      document.querySelector('section.main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    const parts = () => fs.readdirSync(path.join(srv.data, 'uploads')).filter(f => f.endsWith('.part'));
+    const until = async (what, ok) => { for (let i = 0; i < 100 && !ok(); i++) await sleep(100); assert(ok(), what); };
+    await drop('movie.bin');
+    await robin.waitFor(`document.querySelector('.tray-item') !== null`, 5000, 'in the tray');
+    await send(robin, 'A big one');
+    await robin.waitFor(`/Sending [0-9.]+ [KM]?B of 24 MB \\(\\d+%\\)/.test(document.querySelector('.msg.pending .sending')?.textContent || '')`, 15000, 'how far it is, on the message');
+    await until('its upload on the server', () => parts().length === 1);
+    await robin.evaluate(`[...document.querySelectorAll('.msg.pending .sending a')].find(a => a.textContent === 'Cancel').click(); true`);
+    await robin.waitFor(`document.querySelector('.msg.pending') === null`, 5000, 'the message is gone');
+    // (cancelled at once: before the app had heard the upload's id back, the race 1.8.3's first try lost)
+    await until('the server dropped what came', () => parts().length === 0);
+    // The tray's ×, before sending: the upload stops and goes too.
+    await drop('second.bin');
+    await until('uploading', () => parts().length === 1);
+    await robin.evaluate(`document.querySelector('.tray-item .x').click(); true`);
+    await until('the × dropped it on the server', () => parts().length === 0);
+    await sleep(500);
+    eq(await robin.evaluate(`[...document.querySelectorAll('.msg')].some(m => /A big one/.test(m.textContent))`), false, 'nothing was sent');
+  }, { timeout: 90000 });
+
+  test('family: a file whose sending stopped (no connection, or the phone paused the page) carries on by itself when the app is back in front, from where it got to (1.8.3)', async ctx => {
+    const srv = await familyServer(ctx);
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'in #general');
+    // The connection goes once the first 4 MB are there: every piece after it fails until it's back (the app tries again
+    // for about a minute, then gives up). Every piece sent is noted.
+    let away = true;
+    const pieces = [];
+    await robin.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/uploads/*', requestStage: 'Request' }] });
+    const paused = m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      const { requestId, request } = m.params;
+      const offset = request.method === 'PUT' ? Number(new URL(request.url).searchParams.get('offset')) : null;
+      if (offset !== null) pieces.push({ offset, away });
+      if (away && offset) robin.send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' }).catch(() => {});
+      else robin.send('Fetch.continueRequest', { requestId }).catch(() => {});
+    };
+    robin.on(paused);
+    ctx.defer(() => robin.off(paused));
+    await robin.evaluate(`(() => {
+      const bytes = new Uint8Array(8 * 1024 * 1024); for (let i = 0; i < bytes.length; i += 4096) bytes[i] = i % 251;
+      const dt = new DataTransfer(); dt.items.add(new File([bytes], 'clip.bin', { type: 'application/octet-stream' }));
+      document.querySelector('section.main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await robin.waitFor(`document.querySelector('.tray-item') !== null`, 5000, 'in the tray');
+    await send(robin, 'A clip');
+    await robin.waitFor(`/Sending 4 MB of 8 MB/.test(document.querySelector('.msg.pending .sending')?.textContent || '')`, 20000, 'half of it there, then stuck');
+    await robin.waitFor(`/Not sent/.test(document.querySelector('.msg.pending')?.textContent || '')`, 90000, 'it stopped: Not sent');
+    const part = fs.readdirSync(path.join(srv.data, 'uploads')).find(f => f.endsWith('.part'));
+    eq((await srv.call(owner, 'GET', `/api/uploads/${part.replace('.part', '')}`)).json.offset, 4 * 1024 * 1024, 'the server has the first half');
+    away = false;
+    await robin.evaluate(`document.dispatchEvent(new Event('visibilitychange')); true`); // back in front
+    await robin.waitFor(`[...document.querySelectorAll('.msg')].some(m => /A clip/.test(m.textContent) && !m.classList.contains('pending'))`, 20000, 'sent by itself');
+    eq(pieces.find(p => !p.away)?.offset, 4 * 1024 * 1024, 'it went on from where it got to, not from the start');
+    const files = fs.readdirSync(path.join(srv.data, 'files'));
+    eq(files.map(f => fs.statSync(path.join(srv.data, 'files', f)).size), [8 * 1024 * 1024], 'the whole file, once');
+  }, { timeout: 150000 });
+
+  test('family: on a phone a tap on a message opens its menu (and press and hold still does), Delete there removes it; the same file can’t be attached twice (1.8.4)', async ctx => {
+    const srv = await familyServer(ctx);
+    const page = await tailscalePage(ctx, OWNER, 'Robin', { width: 390, height: 844, mobile: true });
+    await page.goto(`${srv.base}/`);
+    await page.waitFor(`document.querySelector('.side-list .chan') !== null`, 10000, 'the list');
+    await page.evaluate(`document.querySelector('.side-list .chan').click(); true`);
+    await page.waitFor(`document.querySelector('.composer textarea') !== null`, 5000, 'a conversation');
+    await send(page, 'Oops, wrong chat');
+    await page.waitFor(`[...document.querySelectorAll('.msg')].some(m => /Oops, wrong chat/.test(m.textContent) && !m.classList.contains('pending'))`, 5000, 'sent');
+    const spot = await page.evaluate(`(() => { const r = [...document.querySelectorAll('.msg')].find(m => /Oops, wrong chat/.test(m.textContent)).querySelector('.msg-body').getBoundingClientRect(); return [r.left + 20, r.top + r.height / 2]; })()`);
+    const touch = async holdMs => {
+      await page.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: spot[0], y: spot[1] }] });
+      await sleep(holdMs);
+      await page.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+    // Press and hold: the menu, still there once the finger is up.
+    // (Lifting the finger lands a click on the scrim the menu put under it: that closed the menu at once before 1.8.4.)
+    await page.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: spot[0], y: spot[1] }] });
+    await sleep(700);
+    const during = await page.evaluate(`Boolean(document.querySelector('.sheet'))`);
+    await page.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await sleep(400);
+    eq([during, await page.evaluate(`/Delete/.test(document.querySelector('.sheet')?.textContent || '')`)], [true, true], 'press and hold: the menu opens and stays');
+    await page.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 195, y: 120 }] }); // a tap beside it
+    await page.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.waitFor(`document.querySelector('.sheet') === null`, 3000, 'a tap beside it closes it');
+    // A tap: the menu too, with Delete.
+    await touch(60);
+    await page.waitFor(`/Delete/.test(document.querySelector('.sheet')?.textContent || '')`, 3000, 'a tap: the menu, with Delete');
+    await page.evaluate(`[...document.querySelectorAll('.sheet button')].find(b => /Delete/.test(b.textContent)).click(); true`);
+    await page.waitFor(`document.querySelector('dialog.dlg[open] button.danger') !== null`, 3000, 'asked first');
+    await page.evaluate(`document.querySelector('dialog.dlg[open] button.danger').click(); true`);
+    await page.waitFor(`![...document.querySelectorAll('.msg')].some(m => /Oops, wrong chat/.test(m.textContent))`, 5000, 'gone');
+    // The same file twice: attached once.
+    const drop = `(() => {
+      const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array(1000)], 'twice.bin', { type: 'application/octet-stream', lastModified: 7 }));
+      document.querySelector('section.main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`;
+    await page.evaluate(drop);
+    await page.evaluate(drop);
+    await sleep(300);
+    eq(await page.evaluate(`document.querySelectorAll('.tray-item').length`), 1, 'one in the tray');
+    eq(await page.evaluate(`/attached already/.test(document.body.textContent)`), true, 'and it says so');
+  }, { timeout: 60000 });
+
+  test('family: a file a closed or reloaded page left half sent: the app offers it, picking it again goes on from where it got to, and Discard drops another (1.8.4)', async ctx => {
+    const srv = await familyServer(ctx);
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'in #general');
+    // Pieces after the first 4 MB don't get through until the page is opened again (the phone dropped it halfway).
+    let away = true;
+    const pieces = [];
+    await robin.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/uploads/*', requestStage: 'Request' }] });
+    const paused = m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      const { requestId, request } = m.params;
+      const offset = request.method === 'PUT' ? Number(new URL(request.url).searchParams.get('offset')) : null;
+      if (offset !== null) pieces.push({ offset, away });
+      if (away && offset) robin.send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' }).catch(() => {});
+      else robin.send('Fetch.continueRequest', { requestId }).catch(() => {});
+    };
+    robin.on(paused);
+    ctx.defer(() => robin.off(paused));
+    const dropClip = `(() => {
+      const bytes = new Uint8Array(8 * 1024 * 1024); for (let i = 0; i < bytes.length; i += 4096) bytes[i] = i % 251;
+      const dt = new DataTransfer(); dt.items.add(new File([bytes], 'clip.bin', { type: 'application/octet-stream', lastModified: 5 }));
+      document.querySelector('section.main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`;
+    await robin.evaluate(dropClip);
+    await robin.waitFor(`document.querySelector('.tray-item') !== null`, 5000, 'in the tray');
+    await send(robin, 'The clip');
+    await robin.waitFor(`/Sending 4 MB of 8 MB/.test(document.querySelector('.msg.pending .sending')?.textContent || '')`, 20000, 'half of it there');
+    await srv.call(owner, 'POST', '/api/uploads', { name: 'extra.bin', size: 10 }); // another one left behind
+    // The page goes and is opened again: the message it showed is gone, the files are offered.
+    away = false;
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`/clip\\.bin stopped at 4 MB of 8 MB/.test(document.querySelector('.unsent')?.textContent || '')`, 10000, 'offered: clip.bin, how far it got');
+    eq(await robin.evaluate(`document.querySelectorAll('.unsent-row').length`), 2, 'and the other one');
+    await robin.evaluate(`[...document.querySelectorAll('.unsent-row')].find(r => /extra\\.bin/.test(r.textContent)).querySelector('.ghost').click(); true`);
+    await robin.waitFor(`document.querySelectorAll('.unsent-row').length === 1`, 3000, 'Discard: that one goes');
+    // The same file again: it goes on from 4 MB, and is sent once.
+    const before = pieces.length;
+    await robin.evaluate(dropClip);
+    await robin.waitFor(`document.querySelector('.unsent').hidden`, 3000, 'no longer offered');
+    await send(robin, 'The clip, again');
+    await robin.waitFor(`[...document.querySelectorAll('.msg')].some(m => /The clip, again/.test(m.textContent) && !m.classList.contains('pending'))`, 20000, 'sent');
+    eq(pieces.slice(before)[0]?.offset, 4 * 1024 * 1024, 'it went on from where it got to');
+    const files = fs.readdirSync(path.join(srv.data, 'files'));
+    eq(files.map(f => fs.statSync(path.join(srv.data, 'files', f)).size), [8 * 1024 * 1024], 'the whole file, once');
+    eq((await srv.call(owner, 'GET', '/api/uploads')).json.uploads, [], 'nothing left unsent');
+  }, { timeout: 90000 });
+
   test('family: a photo dropped on a conversation is sent with its preview; the other person opens it in the viewer', async ctx => {
     const srv = await familyServer(ctx);
     const robin = await tailscalePage(ctx, OWNER, 'Robin');
