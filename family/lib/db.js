@@ -184,6 +184,21 @@ const MIGRATIONS = [
   `
   ALTER TABLE invites ADD COLUMN user_id TEXT REFERENCES users (id) ON DELETE CASCADE;
   `,
+  // v3 (1.9.0): fast links: a file for anyone who has the link, until it expires or is switched off. Only the hash of
+  // the link's secret is kept (the secret is in the link alone).
+  `
+  CREATE TABLE links (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    attachment_id TEXT NOT NULL REFERENCES attachments (id) ON DELETE CASCADE,
+    created_by TEXT REFERENCES users (id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    downloads INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX links_attachment ON links (attachment_id);
+  `,
 ];
 
 function openDb(file) {

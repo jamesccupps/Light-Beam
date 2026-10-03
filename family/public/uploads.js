@@ -1,7 +1,9 @@
 // Sending files: a preview made here for pictures and videos (turned the right way up), then the file in pieces of
-// 4 MB that pick up where they stopped after a dropped connection.
+// 4 MB that pick up where they stopped after a dropped connection; a big one over a direct connection when one comes
+// up (1.9.0).
 
 import { api, ApiError } from './api.js';
+import { DIRECT_MIN, directAvailable, directConnection, sendDirect } from './direct.js';
 
 const PIECE = 4 * 1024 * 1024;
 const THUMB = 480;
@@ -84,7 +86,8 @@ export const busy = new Set();
 // One's unsent uploads that no file here is sending: [{ id, name, size, received, mime }].
 export async function leftOver() {
   const r = await api('/api/uploads');
-  return (r?.uploads || []).filter(u => !busy.has(u.id));
+  // (one a fast link shares that's all there is meant to stay unsent: not offered; 1.9.0)
+  return (r?.uploads || []).filter(u => !busy.has(u.id) && !(u.linked && u.received >= u.size));
 }
 
 // Stops sending a file (the tray's ×, Cancel on a message still sending), and the server drops what it got (1.8.3).
@@ -106,14 +109,43 @@ export function discardUpload(id) {
 export async function upload(item, onChange, signal) {
   const { file } = item;
   if (!item.id) {
-    // (not cut short when cancelled: its id is what the server needs to drop it, 1.8.3)
-    const started = await api('/api/uploads', { method: 'POST', body: { name: file.name, size: file.size, mime: file.type } });
-    item.id = started.id;
+    // (not cut short when cancelled: its id is what the server needs to drop it, 1.8.3) Tried again like the pieces
+    // (1.8.5): one lost to a blip of the connection or a restart of the server failed the file at once.
+    for (let tries = 0; !item.id;) {
+      try {
+        const started = await api('/api/uploads', { method: 'POST', body: { name: file.name, size: file.size, mime: file.type } });
+        item.id = started.id;
+        item.offset = started.offset;
+      } catch (err) {
+        if (err instanceof ApiError && err.status && err.status < 500) throw err;
+        if (++tries > 6 || item.cancelled) throw err;
+        await new Promise(r => setTimeout(r, Math.min(15000, 1000 * 2 ** tries)));
+        // (its answer may be what got lost: the server has the upload then)
+        try {
+          const there = (await leftOver()).find(u => u.name === file.name && u.size === file.size && u.received === 0);
+          if (there) { item.id = there.id; item.offset = 0; }
+        } catch {}
+      }
+    }
     busy.add(item.id);
-    item.offset = started.offset;
     if (item.cancelled) {
       api(`/api/uploads/${item.id}`, { method: 'DELETE' }).catch(() => {});
       throw new DOMException('Cancelled', 'AbortError');
+    }
+  }
+  // (1.9.0) Straight to the server when a direct connection comes up (on the same network it stays inside it, elsewhere
+  // it skips the public link's relay); what doesn't get through that way goes over https from where the server got to.
+  if (item.offset < file.size && file.size >= DIRECT_MIN && directAvailable()) {
+    const c = await directConnection();
+    if (c) {
+      try {
+        item.via = 'direct';
+        await sendDirect(c, item, file, () => { item.progress = item.offset / file.size; onChange?.(item); }, signal);
+      } catch (err) {
+        if (err.name === 'AbortError') throw err;
+        item.via = 'https';
+        try { item.offset = (await api(`/api/uploads/${item.id}`, { signal })).offset; } catch {}
+      }
     }
   }
   let tries = 0;

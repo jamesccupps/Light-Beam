@@ -7,6 +7,7 @@ import { state, on, person, channel, title, isAdmin } from './store.js';
 import { renderBody } from './text.js';
 import { pushState, enablePush, disablePush, isIos } from './notify.js';
 import { nav } from './nav.js';
+import { fastLink } from './fastlinks.js';
 
 // ---------------------------------------------------------------- signing in and joining
 
@@ -422,7 +423,7 @@ export function openViewer(items, start = 0) {
   const name = h('span', { class: 'name' });
   const download = h('a', { class: 'icon-btn', title: 'Download', 'aria-label': 'Download' }, icon('download'));
   const el = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Picture' },
-    h('div', { class: 'viewer-head' }, name, download, iconBtn('x', 'Close', () => close())), stage);
+    h('div', { class: 'viewer-head' }, name, iconBtn('link', 'Fast link', () => fastLink(items[i])), download, iconBtn('x', 'Close', () => close())), stage);
   const show = () => {
     const f = items[i];
     name.textContent = `${f.name}${items.length > 1 ? ` · ${i + 1} of ${items.length}` : ''}`;

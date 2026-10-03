@@ -119,8 +119,10 @@ function createFiles(ctx) {
   // app can offer to go on with them (1.8.4): { uploads: [{ id, name, size, received, mime, created }] }.
   function listUnsent(req, res) {
     const user = people().requireUser(req);
-    const rows = db.all('SELECT * FROM attachments WHERE uploader_id = ? AND message_id IS NULL ORDER BY created_at DESC', user.id);
-    send(res, 200, { uploads: rows.map(a => ({ id: a.id, name: a.name, size: a.size, received: a.received, mime: a.mime, created: a.created_at })) });
+    const rows = db.all(`SELECT a.*, EXISTS (SELECT 1 FROM links WHERE attachment_id = a.id AND revoked_at IS NULL AND expires_at > ?) AS linked
+      FROM attachments a WHERE uploader_id = ? AND message_id IS NULL ORDER BY created_at DESC`, now(), user.id);
+    // (linked, 1.9.0: a fast link shares it, so it's meant to be unsent)
+    send(res, 200, { uploads: rows.map(a => ({ id: a.id, name: a.name, size: a.size, received: a.received, mime: a.mime, created: a.created_at, linked: Boolean(a.linked) })) });
   }
 
   // GET /api/uploads/:id → { offset, size, done } (where to go on after a dropped connection)
@@ -141,30 +143,78 @@ function createFiles(ctx) {
     // (the piece is read and dropped first, so the app gets this answer rather than a cut connection)
     if (offset !== a.received) { await drain(req); return send(res, 409, { error: 'Continue from the offset the server has', offset: a.received }); }
     if (writing.has(id)) { await drain(req); throw httpError(409, 'That upload is already being sent'); }
+    // A piece cut off on the way (the app goes on from the offset): not a server error (1.7.2)
+    const cut = err => !err.status && (req.aborted || err.code === 'ECONNRESET' || err.code === 'ERR_STREAM_PREMATURE_CLOSE');
+    const r = await receive(a, offset, req, Math.min(MAX_PIECE, a.size - a.received), { cut });
+    send(res, 200, { offset: r.received, done: r.done });
+  }
+
+  // The bytes of a file from `start` on as they're there: the finished file, or an upload still arriving, followed
+  // until it's all there (given up after `followMs` without a new byte). (1.9.0: direct downloads and fast links)
+  async function* readFollowing(a, start, { followMs = 60e3, chunk = 256 * 1024, isClosed = () => false } = {}) {
+    let pos = start;
+    let handle = null;
+    let onPart = false;
+    let stalled = now();
+    try {
+      while (pos < a.size) {
+        if (isClosed()) return;
+        const row = db.get('SELECT received, size FROM attachments WHERE id = ?', a.id);
+        if (!row) throw httpError(410, 'That file is gone');
+        const have = Math.min(row.received, row.size);
+        if (pos >= have) {
+          if (now() - stalled > followMs) throw httpError(504, 'Its upload stopped');
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+        const done = row.received >= row.size;
+        if (!handle || (onPart && done)) {
+          await handle?.close().catch(() => {});
+          handle = null;
+          for (const [file, part] of done ? [[filePath(a.id), false]] : [[partPath(a.id), true], [filePath(a.id), false]]) {
+            try { handle = await fsp.open(file, 'r'); onPart = part; break; } catch {}
+          }
+          if (!handle) throw httpError(410, 'That file is gone');
+        }
+        const buf = Buffer.allocUnsafe(Math.min(chunk, have - pos));
+        const { bytesRead } = await handle.read(buf, 0, buf.length, pos);
+        if (!bytesRead) { await new Promise(r => setTimeout(r, 200)); continue; }
+        pos += bytesRead;
+        stalled = now();
+        yield bytesRead === buf.length ? buf : buf.subarray(0, bytesRead);
+      }
+    } finally {
+      await handle?.close().catch(() => {});
+    }
+  }
+
+  // Writes an upload's bytes from `offset` on, from `source` (a request's body, or what a direct connection brings,
+  // 1.9.0): one writer at a time; at most `limit` bytes; kept every 2 MB on the way (`onKept` hears it) so a connection
+  // that drops goes on from there (1.7.3, audit O-10); moved into place when it's all there. → { received, done }.
+  async function receive(a, offset, source, limit, { cut = () => false, onKept = null } = {}) {
+    const id = a.id;
+    if (writing.has(id)) throw httpError(409, 'That upload is already being sent');
     writing.add(id);
     let received = a.received;
     let handle;
     try {
       handle = await fsp.open(partPath(id), 'r+');
-      const limit = Math.min(MAX_PIECE, a.size - a.received);
       let written = 0;
       let kept = 0;
       try {
-        for await (const chunk of req) {
+        for await (const chunk of source) {
           if (written + chunk.length > limit) throw httpError(413, 'That is more than the file’s size');
           await handle.write(chunk, 0, chunk.length, offset + written);
           written += chunk.length;
-          // Progress is kept every 2 MB on the way: a phone whose connection drops goes on from there, not from the
-          // start of the 16 MB piece (1.7.3, audit O-10).
           if (written - kept >= KEEP_EVERY && written < limit) {
             await handle.sync();
             kept = written;
             db.run('UPDATE attachments SET received = ? WHERE id = ?', offset + kept, id);
+            onKept?.(offset + kept);
           }
         }
       } catch (err) {
-        // A piece cut off on the way (the app goes on from the offset): not a server error (1.7.2)
-        if (!err.status && (req.aborted || err.code === 'ECONNRESET' || err.code === 'ERR_STREAM_PREMATURE_CLOSE')) throw httpError(400, 'The piece was cut off');
+        if (cut(err)) throw httpError(400, 'The piece was cut off');
         throw err;
       }
       await handle.sync();
@@ -180,7 +230,7 @@ function createFiles(ctx) {
       throw httpError(404, 'That upload was cancelled');
     }
     if (received >= a.size) await fsp.rename(partPath(id), filePath(id));
-    send(res, 200, { offset: received, done: received >= a.size });
+    return { received, done: received >= a.size };
   }
 
   // DELETE /api/uploads/:id: the sender stopped it (the ×, or Cancel on a message still sending): what came goes now
@@ -287,10 +337,11 @@ function createFiles(ctx) {
   }
 
   // Files uploaded but never sent go after a day, counted from the last piece that came (1.7.2: from the start, so a
-  // big upload paused overnight went mid-way).
+  // big upload paused overnight went mid-way); one a fast link still shares stays until the link is over (1.9.0).
   function sweepUnsent() {
     const cutoff = now() - UNSENT_HOURS * 3600e3;
-    const old = db.all('SELECT * FROM attachments WHERE message_id IS NULL AND created_at < ?', cutoff).filter(a => {
+    const old = db.all(`SELECT * FROM attachments WHERE message_id IS NULL AND created_at < ?
+      AND NOT EXISTS (SELECT 1 FROM links WHERE attachment_id = attachments.id AND revoked_at IS NULL AND expires_at > ?)`, cutoff, now()).filter(a => {
       try { return fs.statSync(a.received < a.size ? partPath(a.id) : filePath(a.id)).mtimeMs < cutoff; } catch { return true; }
     });
     for (const a of old) {
@@ -311,6 +362,8 @@ function createFiles(ctx) {
 
   return {
     attachmentJson, removeStored, storageUsed, sweepUnsent,
+    // (1.9.0, for direct connections and fast links)
+    visibleAttachment, receive, readFollowing, filePath, partPath, thumbPath, isWriting: id => writing.has(id),
     routes: [
       ['POST', '/api/uploads', startUpload],
       ['GET', '/api/uploads', listUnsent],

@@ -17,9 +17,35 @@ until they're sent; a message that stopped while the page was paused carries on 
 to) when the app is back in front, and "Try again" does the same. A page that's gone (closed, reloaded, dropped by the
 phone) loses the message it showed, but the files stay on the server for a day: opened again, the app offers them
 ("clip.mp4 stopped at 390 MB of 1.9 GB": pick it again and it goes on from there; one that's all there is attached at
-once; or Discard) (1.8.4). The same file can't be attached twice. Through the public link the files go via
+once; or Discard) (1.8.4). The same file can't be attached twice. Until it's sent, a message says "Sending…" where its time goes, with how far
+above its pictures (dimmed); it stays through a restart of the server (an update), and an open page reloads itself
+into a newer Beam Family once nothing is being sent from it (the live stream's `hello` carries the version) (1.8.5). Through the public link the files go via
 Tailscale's relay, which caps the speed (about 20 Mbit/s seen on 2026-10-03, even at home); a phone with Tailscale
 goes directly. The largest file is `BEAM_FAMILY_MAX_UPLOAD_MB` (2 GB unless set).
+
+### Fast links and direct connections (1.9)
+
+A **fast link** is a file for anyone who has the link, no account needed, until it runs out (1 hour to 30 days) or is
+switched off: "Fast link" on a file in the chat (its message's menu, the viewer), or "Make a fast link" (the paperclip)
+for a file on this device, which uploads it and makes the link at once (the link follows the upload as it comes). The
+link is `https://<address>:8443/f/<32 characters>`; only a hash of the secret is kept. Its page shows the file and
+who shared it: **Download** fetches it straight from this computer over a **direct connection** when one comes up
+(WebRTC; written to a file as it comes: a save dialog on a computer, the browser's downloads on a phone through the
+service worker), else over https; **Download in the background** is https, for the phone's own download manager (it
+goes on with the screen locked). 30 wrong links a minute from one address get a wait.
+
+Direct connections (`family/lib/direct.js`, node-datachannel) also carry the app's big uploads (8 MB and up; the rest
+over https from where the server got to if one drops). On the same network the connection stays inside it; elsewhere it
+skips Tailscale's relay (through the public link uploads ran ~1–2 MB/s). It needs a way in: an internet peer works
+because this end sends first, but a phone on the home network has to reach this computer itself, so on Windows add one
+firewall rule (in an administrator PowerShell; it covers only those ports, only from the home network):
+
+```powershell
+New-NetFirewallRule -DisplayName "Beam Family direct connections (home network)" -Direction Inbound -Action Allow -Protocol UDP -LocalPort 41700-41799 -Program "C:\Program Files\nodejs\node.exe" -Profile Private -RemoteAddress 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+```
+
+Without it (or when a network blocks direct connections) everything still works over https. The log says how each
+direct connection went ("came up on the same network / over the internet / didn't come up").
 
 ## Running it
 
@@ -43,6 +69,8 @@ Settings (environment or `.env`):
 | `BEAM_FAMILY_OWNER` | the machine's Tailscale user | whose first visit over Tailscale sets them up as the owner |
 | `BEAM_FAMILY_MAX_UPLOAD_MB` | `2048` | the largest file |
 | `BEAM_FAMILY_MAX_STORAGE_GB` | `100` | all files together; when full, uploads are refused (nothing is ever deleted to make room) |
+| `BEAM_FAMILY_STUN` | Google's and Cloudflare's | (1.9) STUN servers direct connections find their way with (they see addresses, never files); `local`: the same network only; `off`: no direct connections |
+| `BEAM_FAMILY_DIRECT_PORTS` | `41700-41799` | (1.9) the UDP ports direct connections use |
 | `BEAM_FAMILY_BACKUP_DIR` | `backups` next to the data folder | **(1.8.1)** where its backups go (another drive or a NAS keeps them safe from a failing disk) |
 | `BEAM_FAMILY_BACKUP_HOURS`, `…_KEEP`, `…_FILES_MB` | `24`, `14`, `1024` | a backup that often (`0`: none), the newest kept, files in it up to that size |
 
@@ -152,7 +180,15 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   `GET /api/search?q=&channel=`, `PUT /api/focus {client, channel, visible}`.
 - Files: `POST /api/uploads {name, size, mime}`, `PUT /api/uploads/:id?offset=`, `GET /api/uploads/:id`,
   `DELETE /api/uploads/:id` (1.8.3, only one's own and only while unsent), `GET /api/uploads` (1.8.4: one's own unsent ones,
-  `{ uploads: [{ id, name, size, received, mime, created }] }`),
+  `{ uploads: [{ id, name, size, received, mime, created, linked }] }`),
+- Direct connections (1.9): `POST /api/direct {sdp}` → `{sdp}` (the browser's offer with its candidates, the answer with
+  ours); then a data channel per transfer, labelled `{"op":"get","file","offset"}` (binary from the offset on, then
+  `{"done":true,"size"}`; a file still arriving is followed) or `{"op":"put","upload","offset"}` (binary in; `{"offset"}`
+  each 2 MB kept, then `{"done":true}`); `{"error"}` and closed when something's wrong.
+- Fast links (1.9): `POST /api/files/:id/links {hours}` → `{link: {id, url, expires}}` (the url only now),
+  `GET /api/files/:id/links`, `DELETE /api/links/:id`; for anyone with the link: `GET /f/:token` (the page),
+  `GET /api/links/:token` (name, size, mime, received, from, expires, preview, direct), `GET /api/links/:token/file`
+  (https, Range, follows an upload), `GET /api/links/:token/preview`, `POST /api/links/:token/direct {sdp}`.
   `PUT /api/files/:id/thumb?w=&h=`, `GET /api/files/:id[?download]`, `GET /api/files/:id/thumb`,
   `GET /api/people/:id/avatar`.
 - Push: `GET /api/push` (VAPID key), `PUT /api/push {endpoint, keys}`, `DELETE /api/push {endpoint}`.

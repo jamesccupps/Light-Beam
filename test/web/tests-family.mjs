@@ -11,26 +11,35 @@ import { assert, eq } from './harness.mjs';
 const PORT = 8828;
 const OWNER = 'owner@example.com';
 
-async function familyServer(ctx) {
+async function familyServer(ctx, extra = {}) {
   const data = path.join(TMP, `family-${Date.now()}`);
   fs.mkdirSync(data, { recursive: true });
   const base = `http://127.0.0.1:${PORT}`;
   const busy = await fetch(`${base}/api/hello`).then(() => true, () => false);
   if (busy) throw new Error(`port ${PORT} is already in use`);
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('BEAM_'))), BEAM_FAMILY_DATA: data, BEAM_FAMILY_PORT: String(PORT),
-    BEAM_FAMILY_HOST: '127.0.0.1', BEAM_TAILSCALE: 'off', BEAM_FAMILY_OWNER: OWNER, BEAM_FAMILY_POSTS_PER_10S: '200' };
+    BEAM_FAMILY_HOST: '127.0.0.1', BEAM_TAILSCALE: 'off', BEAM_FAMILY_OWNER: OWNER, BEAM_FAMILY_POSTS_PER_10S: '200',
+    // (1.9.0) no direct connections unless a test asks (then 'local': no STUN servers out there either)
+    BEAM_FAMILY_STUN: 'off' };
   const server = path.join(ctx.ROOT, 'family', 'server.js');
-  const child = spawn(process.execPath, [server], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let child = null;
   let log = '';
-  child.stdout.on('data', d => { log += d; });
-  child.stderr.on('data', d => { log += d; });
-  for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`${base}/api/hello`)).ok) break; } catch {}
-    await sleep(100);
-  }
+  const run = async (more = {}) => {
+    child = spawn(process.execPath, [server], { env: { ...env, ...more }, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', d => { log += d; });
+    child.stderr.on('data', d => { log += d; });
+    for (let i = 0; i < 100; i++) {
+      try { if ((await fetch(`${base}/api/hello`)).ok) break; } catch {}
+      await sleep(100);
+    }
+  };
+  await run(extra);
+  const stop = async () => { const c = child; c.kill(); await new Promise(r => { c.once('exit', r); setTimeout(r, 3000); }); };
   const srv = {
     base, data, get log() { return log; },
-    stop: async () => { child.kill(); await new Promise(r => { child.once('exit', r); setTimeout(r, 3000); }); },
+    stop,
+    // The same data, started again (with these settings too).
+    restart: async more => { await stop(); await run(more); },
     // The API as someone (Tailscale login or a cookie).
     call: async (who, method, p, body) => {
       const headers = { ...(who.login ? { 'Tailscale-User-Login': who.login, 'Tailscale-User-Name': who.name || '', 'X-Forwarded-For': '100.64.7.7' } : { Cookie: who.cookie }), ...(body ? { 'Content-Type': 'application/json' } : {}) };
@@ -314,6 +323,133 @@ Robin ${sent}`);
     eq(files.map(f => fs.statSync(path.join(srv.data, 'files', f)).size), [8 * 1024 * 1024], 'the whole file, once');
     eq((await srv.call(owner, 'GET', '/api/uploads')).json.uploads, [], 'nothing left unsent');
   }, { timeout: 90000 });
+
+  test('family: a message still sending says "Sending…" for its time, how far above its pictures (dimmed); a page meeting a newer Beam Family reloads itself, but only once nothing is being sent (1.8.5)', async ctx => {
+    const srv = await familyServer(ctx);
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'in #general');
+    // No piece gets through: it stays "sending".
+    let away = true;
+    let puts = 0;
+    await robin.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/uploads/*', requestStage: 'Request' }] });
+    const paused = m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      const { requestId, request } = m.params;
+      if (request.method === 'PUT') puts++;
+      if (away && request.method === 'PUT') robin.send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' }).catch(() => {});
+      else robin.send('Fetch.continueRequest', { requestId }).catch(() => {});
+    };
+    robin.on(paused);
+    ctx.defer(() => robin.off(paused));
+    await robin.evaluate(`(async () => {
+      const c = document.createElement('canvas'); c.width = 900; c.height = 1600;
+      const g = c.getContext('2d'); g.fillStyle = '#c96'; g.fillRect(0, 0, 900, 1600);
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
+      const dt = new DataTransfer(); dt.items.add(new File([blob], 'tall.jpg', { type: 'image/jpeg' }));
+      document.querySelector('section.main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await robin.waitFor(`document.querySelector('.tray-item img') !== null`, 5000, 'in the tray');
+    await send(robin, '');
+    await robin.waitFor(`document.querySelector('.msg.pending .sending-label')?.textContent === 'Sending…'`, 5000, '"Sending…" where its time goes');
+    eq(await robin.evaluate(`(() => { const m = document.querySelector('.msg.pending'); const s = m.querySelector('.sending'), f = m.querySelector('.files');
+      return [Boolean(s && f && (s.compareDocumentPosition(f) & Node.DOCUMENT_POSITION_FOLLOWING)), getComputedStyle(f).opacity]; })()`), [true, '0.5'], 'how far, above the picture, which is dimmed');
+    for (let i = 0; i < 150 && !puts; i++) await sleep(100);
+    assert(puts > 0, 'its pieces are going (and not getting through)');
+    // Beam Family is updated (the same data, a newer version): the page waits while something is being sent.
+    await robin.evaluate(`window.__before = 1; true`);
+    await srv.restart({ BEAM_FAMILY_VERSION: '9.9.9' });
+    await sleep(8000);
+    eq(await robin.evaluate(`window.__before === 1 && document.querySelector('.msg.pending') !== null`), true, 'not reloaded while sending');
+    // Nothing being sent any more: it reloads, into the newer app.
+    away = false;
+    await robin.evaluate(`[...document.querySelectorAll('.msg.pending .sending a')].find(a => a.textContent === 'Cancel').click(); true`);
+    await robin.waitFor(`typeof window.__before === 'undefined' && document.querySelector('.composer textarea') !== null`, 15000, 'reloaded by itself');
+    await robin.evaluate(`window.__after = 1; true`);
+    await sleep(5000);
+    eq(await robin.evaluate(`window.__after === 1`), true, 'once (it runs the newer app now)');
+  }, { timeout: 90000 });
+
+  test('family: a fast link made from a message’s menu; someone without an account opens it and downloads the file straight from the server (a direct connection), or over https (1.9.0)', async ctx => {
+    const srv = await familyServer(ctx, { BEAM_FAMILY_STUN: 'local' });
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'in #general');
+    await robin.evaluate(`(() => {
+      const bytes = new Uint8Array(3 * 1024 * 1024 + 7); for (let i = 0; i < bytes.length; i += 1000) bytes[i] = (i / 1000) % 251;
+      const dt = new DataTransfer(); dt.items.add(new File([bytes], 'trip.bin', { type: 'application/octet-stream' }));
+      document.querySelector('section.main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await robin.waitFor(`document.querySelector('.tray-item') !== null`, 5000, 'in the tray');
+    await send(robin, 'For Grandma');
+    await robin.waitFor(`[...document.querySelectorAll('.msg')].some(m => /For Grandma/.test(m.textContent) && !m.classList.contains('pending'))`, 10000, 'sent');
+    // Its menu: Fast link → a week → the link.
+    await robin.evaluate(`(() => { const m = [...document.querySelectorAll('.msg')].find(m => /For Grandma/.test(m.textContent)); m.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 })); return true; })()`);
+    await robin.waitFor(`[...document.querySelectorAll('.menu button, .sheet button')].some(b => /Fast link/.test(b.textContent))`, 3000, 'Fast link in its menu');
+    await robin.evaluate(`[...document.querySelectorAll('.menu button, .sheet button')].find(b => /Fast link/.test(b.textContent)).click(); true`);
+    await robin.waitFor(`document.querySelector('dialog.fastlink[open]') !== null`, 3000, 'the sheet');
+    await robin.evaluate(`document.querySelector('dialog.fastlink input[value="168"]').click(); document.querySelector('dialog.fastlink button[type=submit]').click(); true`);
+    await robin.waitFor(`/\\/f\\/[A-Za-z0-9_-]{32}$/.test(document.querySelector('dialog.fastlink .fl-url')?.value || '')`, 5000, 'the link');
+    const url = await robin.evaluate(`document.querySelector('dialog.fastlink .fl-url').value`);
+    const token = url.split('/f/')[1];
+    // Someone with no account: the page, the file straight from the server.
+    const visitor = await ctx.browser.newPage({});
+    const dir = path.join(srv.data, 'visitor-downloads');
+    fs.mkdirSync(dir, { recursive: true });
+    await visitor.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    await visitor.goto(`${srv.base}/f/${token}`);
+    await visitor.waitFor(`/trip\\.bin/.test(document.querySelector('.link-name')?.textContent || '') && /3 MB · from Robin/.test(document.body.textContent)`, 10000, 'the file, its size, who shared it');
+    // (as on a phone: no save dialog there, so the browser's downloads take it through the service worker; a headless
+    // browser has no dialog to show either)
+    await visitor.evaluate(`window.showSaveFilePicker = undefined; [...document.querySelectorAll('.link-actions button')].find(b => b.textContent === 'Download').click(); true`);
+    try {
+      await visitor.waitFor(`/^Done: .* straight from the sender/.test(document.querySelector('.link-progress .status')?.textContent || '')`, 30000, 'downloaded straight from the server');
+    } catch (err) {
+      throw new Error(`${err.message}; the page says: ${await visitor.evaluate(`document.querySelector('.link-progress .status')?.textContent || '(nothing)'`)}; errors: ${JSON.stringify(visitor.errors || [])}; downloads: ${fs.readdirSync(dir)}`);
+    }
+    const want = await robin.evaluate(`(() => { const b = new Uint8Array(3 * 1024 * 1024 + 7); for (let i = 0; i < b.length; i += 1000) b[i] = (i / 1000) % 251; return [b.length, [...b.subarray(0, 4)], b[2000], b[b.length - 7]]; })()`);
+    let saved = null;
+    for (let i = 0; i < 50 && !saved; i++) {
+      saved = fs.readdirSync(dir).find(f => f === 'trip.bin' && fs.statSync(path.join(dir, f)).size === want[0]);
+      if (!saved) await sleep(200);
+    }
+    assert(saved, `saved in the downloads: ${fs.readdirSync(dir)}`);
+    const got = fs.readFileSync(path.join(dir, saved));
+    eq([got.length, [...got.subarray(0, 4)], got[2000], got[got.length - 7]], want, 'the same bytes');
+    // Over https too (Download in the background), and nothing else of the family's.
+    eq(await visitor.evaluate(`fetch('/api/links/${token}/file').then(r => r.arrayBuffer()).then(b => b.byteLength)`), want[0], 'over https');
+    eq(await visitor.evaluate(`fetch('/api/bootstrap').then(r => r.status)`), 401, 'not signed in to anything');
+  }, { timeout: 90000 });
+
+  test('family: a big file goes up over a direct connection: no https pieces (1.9.0)', async ctx => {
+    const srv = await familyServer(ctx, { BEAM_FAMILY_STUN: 'local' });
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'in #general');
+    const pieces = [];
+    await robin.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/uploads/*', requestStage: 'Request' }] });
+    const paused = m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      if (m.params.request.method === 'PUT') pieces.push(m.params.request.url);
+      robin.send('Fetch.continueRequest', { requestId: m.params.requestId }).catch(() => {});
+    };
+    robin.on(paused);
+    ctx.defer(() => robin.off(paused));
+    await robin.evaluate(`(() => {
+      const bytes = new Uint8Array(12 * 1024 * 1024); for (let i = 0; i < bytes.length; i += 4096) bytes[i] = i % 253;
+      const dt = new DataTransfer(); dt.items.add(new File([bytes], 'movie.bin', { type: 'application/octet-stream' }));
+      document.querySelector('section.main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await robin.waitFor(`document.querySelector('.tray-item') !== null`, 5000, 'in the tray');
+    await send(robin, 'Big one');
+    await robin.waitFor(`[...document.querySelectorAll('.msg')].some(m => /Big one/.test(m.textContent) && !m.classList.contains('pending'))`, 30000, 'sent');
+    eq(pieces, [], 'no https pieces: it went over the direct connection');
+    const files = fs.readdirSync(path.join(srv.data, 'files'));
+    eq(files.map(f => fs.statSync(path.join(srv.data, 'files', f)).size), [12 * 1024 * 1024], 'all of it on the server');
+  }, { timeout: 60000 });
 
   test('family: a photo dropped on a conversation is sent with its preview; the other person opens it in the viewer', async ctx => {
     const srv = await familyServer(ctx);

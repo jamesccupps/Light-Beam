@@ -208,6 +208,8 @@ function createChat(ctx) {
         return j;
       }),
       limits: { body: MAX_BODY, upload: config.maxUpload, group: MAX_GROUP },
+      // (1.9.0) direct connections for big files, and the STUN servers they find their way with
+      direct: ctx.direct?.enabled ? { stun: config.stun || [] } : null,
       version: ctx.version,
       push: ctx.push ? ctx.push.publicKey() : null,
     };

@@ -198,7 +198,10 @@ a { color: var(--accent); }
 .unsent-row .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .unsent-row .btn { padding: 4px 10px; font-size: 13px; min-height: 0; flex: none; }
 /* (1.8.3) a message still sending: how far its files are, and Cancel */
-.sending { display: flex; align-items: center; gap: 10px; margin-top: 6px; max-width: 420px; }
+.sending { display: flex; align-items: center; gap: 10px; margin: 4px 0 6px; max-width: 420px; }
+/* (1.8.5) until it's sent: "Sending…" for its time, its pictures dimmed */
+.sending-label { color: var(--accent); font-size: 12px; font-weight: 600; }
+.msg.pending:not(.failed) .files { opacity: .5; }
 .sending .track { flex: 1; min-width: 60px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
 .sending .fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 .msg.failed .msg-body { color: var(--danger); }
@@ -399,3 +402,23 @@ dialog.dlg .actions { display: flex; justify-content: flex-end; gap: 8px; margin
   .shell .panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 20; box-shadow: var(--menu-shadow); }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* (1.9.0) The fast link sheet in the app */
+.fastlink .fl-file { margin: 0 0 8px; overflow-wrap: anywhere; }
+.fastlink .fl-hours { border: 0; padding: 0; margin: 10px 0; display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.fastlink .fl-hours legend { padding: 0; margin-bottom: 6px; color: var(--muted); }
+.fastlink .fl-url { width: 100%; margin: 6px 0; }
+.fastlink .fl-share { margin-top: 4px; }
+.fastlink .fl-other { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin: 4px 0; }
+.fastlink .fl-others-title { margin: 12px 0 4px; }
+/* (1.9.0) A fast link's page: the file and the ways to get it, for anyone with the link */
+body.link-page { overflow: auto; display: grid; place-items: start center; padding: 24px 16px; }
+.link-card { width: 100%; max-width: 520px; margin-top: 6vh; padding: 24px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface, var(--bg)); }
+.link-card h1 { font-size: 20px; margin: 0 0 6px; overflow-wrap: anywhere; }
+.link-preview { display: block; max-width: 100%; max-height: 320px; margin: 0 auto 16px; border-radius: 12px; }
+.link-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 12px; }
+.link-actions .btn { text-decoration: none; }
+.link-progress { margin: 6px 0 12px; }
+.link-progress .track { display: block; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.link-progress .fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+.link-progress .status { margin: 8px 0 0; }

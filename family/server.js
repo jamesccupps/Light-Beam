@@ -17,7 +17,8 @@ try { process.loadEnvFile(path.join(ROOT, '.env')); } catch {}
 const { createLogger } = require('../lib/log');
 const { makePrivate } = require('../lib/private-dir');
 const tailscale = require('../lib/tailscale');
-const { version: VERSION } = require('../package.json');
+// (BEAM_FAMILY_VERSION: what it says it runs, for tests of a page meeting a newer server)
+const VERSION = process.env.BEAM_FAMILY_VERSION || require('../package.json').version;
 const { openDb } = require('./lib/db');
 const { send, httpError, createRouter, createStatic } = require('./lib/http');
 const auth = require('./lib/auth');
@@ -26,6 +27,8 @@ const { createPeople } = require('./lib/people');
 const { createChat } = require('./lib/chat');
 const { createFiles } = require('./lib/files');
 const { createPush } = require('./lib/push');
+const { createDirect } = require('./lib/direct');
+const { createLinks } = require('./lib/links');
 const { createBackups, restoreBackup } = require('./lib/backup');
 
 const env = process.env;
@@ -45,6 +48,18 @@ const FILE = {
   stop: path.join(DATA_DIR, 'stop'),
 };
 const DIR = { logs: path.join(DATA_DIR, 'logs'), files: path.join(DATA_DIR, 'files'), uploads: path.join(DATA_DIR, 'uploads'), thumbs: path.join(DATA_DIR, 'thumbs'), avatars: path.join(DATA_DIR, 'avatars') };
+// "41700-41799" → [41700, 41799]; anything else (or "any"): null, any port.
+function portRange(value) {
+  const m = /^(\d{4,5})-(\d{4,5})$/.exec(String(value).trim());
+  const [a, b] = m ? [Number(m[1]), Number(m[2])] : [];
+  return m && a >= 1024 && b <= 65535 && a <= b ? [a, b] : null;
+}
+function stunServers(value) {
+  const v = String(value).trim();
+  if (v === 'off') return null;
+  if (v === 'local') return [];
+  return v.split(',').map(s => s.trim()).filter(s => /^stun:[\w.-]+(:\d+)?$/.test(s));
+}
 const config = {
   publicUrl: String(env.BEAM_FAMILY_URL || '').trim().replace(/\/+$/, ''),
   spaceName: env.BEAM_FAMILY_NAME || 'Family',
@@ -53,6 +68,11 @@ const config = {
   owner: String(env.BEAM_FAMILY_OWNER || '').trim().toLowerCase(),
   postsPer10s: num(env.BEAM_FAMILY_POSTS_PER_10S, 20), // (how fast one person may post; tests that post a lot raise it)
   tailscale: env.BEAM_TAILSCALE !== 'off',
+  // (1.9.0) Direct connections find their way with these STUN servers (they see addresses, never a file); "local":
+  // none (the same network only, as the tests use); "off": no direct connections.
+  stun: stunServers(env.BEAM_FAMILY_STUN ?? 'stun:stun.l.google.com:19302,stun:stun.cloudflare.com:3478'),
+  // (1.9.0) the UDP ports direct connections use here (a firewall rule can let the home network in on just these)
+  directPorts: portRange(env.BEAM_FAMILY_DIRECT_PORTS ?? '41700-41799'),
 };
 // (1.8.1) Backups (lib/backup.js): every BEAM_FAMILY_BACKUP_HOURS (0: none) into BEAM_FAMILY_BACKUP_DIR (default the
 // "backups" folder next to the data folder, as Beam's), the newest BEAM_FAMILY_BACKUP_KEEP kept.
@@ -106,6 +126,7 @@ function serve() {
   setInterval(refreshOwner, 10 * 60e3).unref();
 
   const hub = createHub({
+    version: VERSION,
     onPresence: (user, online) => hub.emit(null, 'presence', { person: user, online }),
     onDrop: user => log.warn(`Dropped a stalled live connection (${ctx.people?.getUser(user)?.name || 'someone'}): over 1 MB unread`),
   });
@@ -118,7 +139,9 @@ function serve() {
   ctx.chat = createChat(ctx);
   ctx.files = createFiles(ctx);
   ctx.push = createPush(ctx, { file: path.join(DATA_DIR, 'vapid.json'), contact: /^https:/.test(config.publicUrl) ? config.publicUrl : '' });
-  const router = createRouter([...ctx.people.routes, ...ctx.chat.routes, ...ctx.files.routes, ...ctx.push.routes]);
+  ctx.direct = createDirect(ctx);
+  ctx.links = createLinks(ctx);
+  const router = createRouter([...ctx.people.routes, ...ctx.chat.routes, ...ctx.files.routes, ...ctx.push.routes, ...ctx.direct.routes, ...ctx.links.routes]);
   const serveStatic = createStatic(path.join(__dirname, 'public'));
   const backups = backupsOf(db);
 
@@ -127,6 +150,7 @@ function serve() {
     log.info(`Stopping (${reason})`);
     backups.stop();
     hub.closeAll();
+    ctx.direct.closeAll();
     server.close();
     setTimeout(() => process.exit(0), 3000).unref();
     await new Promise(r => server.close(r));
@@ -163,6 +187,10 @@ function serve() {
         return await route.handler(req, res, route.params, url);
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, HEAD' });
+      // (1.9.0) A fast link's page, for anyone who has the link (it asks the API whether the link is any good).
+      if (/^\/f\/[A-Za-z0-9_-]{32}$/.test(p)) {
+        if (await serveStatic(req, res, 'link.html')) return;
+      }
       // The app's pages: its files, and index.html for its own routes (/c/…, /join/…, /settings…).
       const rel = p === '/' ? 'index.html' : p.slice(1);
       const appRoute = /^\/(c|join|dm|settings|admin)(\/|$)/.test(p);
@@ -334,7 +362,8 @@ const HELP = `Beam Family ${VERSION}
 
 Settings (environment or .env): BEAM_FAMILY_DATA (${DATA_DIR}), BEAM_FAMILY_HOST/PORT (${HOST}:${PORT}),
 BEAM_FAMILY_URL (the address people use), BEAM_FAMILY_NAME, BEAM_FAMILY_OWNER, BEAM_FAMILY_MAX_UPLOAD_MB,
-BEAM_FAMILY_MAX_STORAGE_GB, BEAM_FAMILY_BACKUP_DIR/HOURS/KEEP/FILES_MB.`;
+BEAM_FAMILY_MAX_STORAGE_GB, BEAM_FAMILY_BACKUP_DIR/HOURS/KEEP/FILES_MB, BEAM_FAMILY_STUN (direct connections: STUN
+servers, comma-separated, or "off").`;
 
 async function main() {
   const argv = process.argv.slice(2);
