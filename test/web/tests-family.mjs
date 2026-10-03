@@ -423,6 +423,49 @@ Robin ${sent}`);
     eq(await visitor.evaluate(`fetch('/api/bootstrap').then(r => r.status)`), 401, 'not signed in to anything');
   }, { timeout: 90000 });
 
+  test('family: a fast link’s page: Download turns into Stop while it runs and the other button waits; a second download is asked about first (1.9.1)', async ctx => {
+    const srv = await familyServer(ctx, { BEAM_FAMILY_STUN: 'local' });
+    const size = 96 * 1024 * 1024;
+    const headers = { 'Tailscale-User-Login': OWNER, 'Tailscale-User-Name': 'Robin', 'X-Forwarded-For': '100.64.7.7' };
+    const id = (await srv.call(owner, 'POST', '/api/uploads', { name: 'film.bin', size })).json.id;
+    const piece = Buffer.alloc(16 * 1024 * 1024, 7);
+    for (let o = 0; o < size; o += piece.length) {
+      await fetch(`${srv.base}/api/uploads/${id}?offset=${o}`, { method: 'PUT', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: piece.subarray(0, Math.min(piece.length, size - o)) });
+    }
+    const link = (await srv.call(owner, 'POST', `/api/files/${id}/links`, { hours: 1 })).json.link;
+    const visitor = await ctx.browser.newPage({});
+    const dir = path.join(srv.data, 'visitor-downloads');
+    fs.mkdirSync(dir, { recursive: true });
+    await visitor.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    await visitor.goto(`${srv.base}/f/${link.url.split('/f/')[1]}`);
+    await visitor.waitFor(`/film\\.bin/.test(document.querySelector('.link-name')?.textContent || '')`, 10000, 'the page');
+    const state = `(() => { const s = document.querySelector('.link-progress .status')?.textContent || ''; return { get: document.querySelector('#get').textContent, background: document.querySelector('#background').disabled, status: s }; })()`;
+    await visitor.evaluate(`window.showSaveFilePicker = undefined; document.querySelector('#get').click(); true`);
+    // (a quarter of it first: the log has a line only from 8 MB on)
+    await visitor.waitFor(`/Downloading straight from the sender/.test(document.querySelector('.link-progress .status')?.textContent || '') && parseFloat(document.querySelector('.link-progress .fill').style.width) >= 25`, 20000, 'downloading directly');
+    const during = await visitor.evaluate(state);
+    eq([during.get, during.background], ['Stop', true], 'Download is Stop now, and the other button waits');
+    await visitor.evaluate(`document.querySelector('#get').click(); true`);
+    await visitor.waitFor(`document.querySelector('.link-progress .status')?.textContent === 'Stopped.' || document.querySelector('.link-progress .status')?.textContent`, 5000, 'stopped').then(t => eq(t, true, 'Stopped.'), async err => { throw new Error(`${err.message}; the page says: ${await visitor.evaluate("document.querySelector('.link-progress .status')?.textContent")}`); });
+    const after = await visitor.evaluate(state);
+    eq([after.get, after.background], ['Download', false], 'both buttons back');
+    // In the background, then Download again: asked first; "Cancel" starts nothing.
+    await visitor.evaluate(`document.querySelector('#background').click(); true`);
+    await visitor.waitFor(`/Your browser is downloading it/.test(document.querySelector('.link-progress .status')?.textContent || '')`, 5000, 'in the browser’s downloads');
+    await visitor.evaluate(`document.querySelector('#get').click(); true`);
+    await visitor.waitFor(`/Download it again/.test(document.querySelector('dialog[open] h2')?.textContent || '')`, 3000, 'asked first');
+    await visitor.evaluate(`[...document.querySelectorAll('dialog[open] button')].find(b => b.textContent === 'Cancel').click(); true`);
+    await sleep(500);
+    eq(await visitor.evaluate(`[document.querySelector('dialog[open]') === null, document.querySelector('#get').textContent, /Your browser is downloading it/.test(document.querySelector('.link-progress .status').textContent)]`), [true, 'Download', true], 'nothing new started');
+    // (the server notices within a second or so)
+    let log = '';
+    for (let i = 0; i < 30 && !/stopped a direct download/.test(log); i++) {
+      log = fs.readFileSync(path.join(srv.data, 'logs', 'family.log'), 'utf8');
+      if (!/stopped a direct download/.test(log)) await sleep(200);
+    }
+    assert(/A fast link’s visitor stopped a direct download of film\.bin after \d+ MB in /.test(log), `the log says how far it got: ${log.split('\n').filter(l => /direct/.test(l)).join(' | ')}`);
+  }, { timeout: 90000 });
+
   test('family: a big file goes up over a direct connection: no https pieces (1.9.0)', async ctx => {
     const srv = await familyServer(ctx, { BEAM_FAMILY_STUN: 'local' });
     const robin = await tailscalePage(ctx, OWNER, 'Robin');

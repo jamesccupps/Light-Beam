@@ -32,7 +32,17 @@ link is `https://<address>:8443/f/<32 characters>`; only a hash of the secret is
 who shared it: **Download** fetches it straight from this computer over a **direct connection** when one comes up
 (WebRTC; written to a file as it comes: a save dialog on a computer, the browser's downloads on a phone through the
 service worker), else over https; **Download in the background** is https, for the phone's own download manager (it
-goes on with the screen locked). 30 wrong links a minute from one address get a wait.
+goes on with the screen locked). 30 wrong links a minute from one address get a wait. (1.9.1) While a direct download
+runs, Download turns into **Stop**, the screen stays on (Wake Lock), and the other button waits; a second download of
+the same file is asked about first ("Download it again?").
+
+**How fast:** a browser's WebRTC data channels top out around **6–7 MB/s** (~50 Mbit/s): measured on this PC with
+Chrome and Edge as the receiver (and Chrome to itself: 3.3 MB/s each way), the same with 1–8 connections, 1–4 channels,
+bigger messages, bigger SCTP buffers or packets, so it's the browser's limit, not this end's (node-datachannel to
+node-datachannel ran ~31–39 MB/s). A phone on the home Wi-Fi got ~5 MB/s. That's still well past the public link
+(Tailscale's Funnel relay: ~1–2 MB/s); a device with Tailscale gets the full speed over https anyway. Each direct
+transfer of 8 MB or more gets a line in the log: "… downloaded film.mp4 directly on the same network: 1.9 GB in 6 min
+40 s (5.1 MB/s, round trip 12 ms)" (or "stopped a direct download … after …").
 
 Direct connections (`family/lib/direct.js`, node-datachannel) also carry the app's big uploads (8 MB and up; the rest
 over https from where the server got to if one drops). On the same network the connection stays inside it; elsewhere it
