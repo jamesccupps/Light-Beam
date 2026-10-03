@@ -4246,6 +4246,76 @@ test('1.6 Remote control: signing out one sign-in ends only the sessions it take
   } finally { await t.stop(); }
 });
 
+test('1.8.1 Backups: each app keeps its settings here (one per install, the newest three; not for a session-only sign-in), a reinstalled app finds the old install’s; the server backs itself up (now, listed, the newest kept, big files left out) and a backup imports', async () => {
+  const dir = path.join(TMP, 'bk-dir');
+  fs.rmSync(dir, { recursive: true, force: true });
+  const env = { BEAM_BACKUP_DIR: dir, BEAM_BACKUP_KEEP: '2', BEAM_BACKUP_FILES_MB: '0' };
+  const t = await rcSetup('backups', { env });
+  try {
+    const { s, phone } = t;
+    const put = (h, body) => s.req('PUT', '/api/devices/me/backup', { headers: json(h), body: JSON.stringify(body) });
+    const get = (h, id = 'me') => s.req('GET', `/api/devices/${id}/backups`, { headers: h });
+    const base = { 'X-Beam-Device': 'Shop Desktop', 'X-Beam-Platform': 'windows', 'X-Beam-Profile': 'acacacacacacacac', 'X-Beam-App-Version': '1.8.1', ...from(RC_NET.shop.ip4) };
+    const pairOld = (await s.req('GET', '/api/pair', { headers: phone })).json.key;
+    const oldApp = { ...base, Authorization: `Bearer ${pairOld}`, 'X-Beam-Device-Id': 'bkold000001', 'X-Beam-Device-Key': deviceKey() };
+    assert.equal((await s.req('GET', '/api/me', { headers: oldApp })).status, 200);
+    const oldEv = await openEvents(s.port, oldApp);
+    await oldEv.wait('hello');
+    oldEv.close();
+    const settings = { deviceName: 'Shop Desktop', saveFolder: 'D:\\Beam', hotkeys: { picker: 'Ctrl+Alt+B' } };
+    assert.equal((await put(oldApp, { install: 'inst-old-0001', app: 'windows', version: '1.8.1', settings })).status, 204);
+    assert.equal((await put(oldApp, { install: 'x', app: 'windows', settings: {} })).status, 400, 'an install id that can’t be');
+    assert.equal((await put(oldApp, { install: 'inst-old-0001', app: 'ios', settings: {} })).status, 400, 'an app it doesn’t know');
+    assert.equal((await put(oldApp, { install: 'inst-old-0001', app: 'windows', settings: [1] })).status, 400, 'settings are an object');
+    assert.equal((await put(oldApp, { install: 'inst-old-0001', app: 'windows', settings: { big: 'x'.repeat(33 * 1024) } })).status, 413, 'at most 32 KB');
+    const listed = (await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(d => d.id === 'bkold000001');
+    assert.ok(listed.backup?.app === 'windows' && listed.backup.at > 0 && !('settings' in listed.backup), `the device list says when, not what: ${JSON.stringify(listed.backup)}`);
+    let b = (await get(phone, 'bkold000001')).json;
+    assert.deepEqual([b.name, b.backups.length, b.backups[0].install, b.backups[0].version, b.backups[0].settings], ['Shop Desktop', 1, 'inst-old-0001', '1.8.1', settings], 'another of the owner’s devices reads them');
+    assert.match(s.out, /Shop Desktop's Beam app keeps a backup of its settings here now/);
+    await post(s, '/api/password', { password: 'backup pass' }, phone);
+    const session = cookieValue(await post(s, '/api/login', { secret: 'backup pass', remember: false }, { ...sameOrigin, Cookie: 'beam_device_id=bksession01' }));
+    assert.equal((await s.req('GET', '/api/devices/bkold000001/backups', { headers: cookie(session, 'bksession01') })).status, 403, 'not for a session-only sign-in');
+    // A reinstall (a new id and key, the same machine and Windows account): linked to the old device, it finds the old
+    // install's backup, and keeps it next to its own; the newest three installs are kept.
+    const pairNew = (await s.req('GET', '/api/pair', { headers: phone })).json.key;
+    const newApp = { ...base, Authorization: `Bearer ${pairNew}`, 'X-Beam-Device-Id': 'bknew000001', 'X-Beam-Device-Key': deviceKey() };
+    assert.equal((await s.req('GET', '/api/me', { headers: newApp })).status, 200);
+    await waitFor(() => /Linked "Shop Desktop" to "Shop Desktop" \(reinstalled app\)/.test(s.out), 5000);
+    b = (await get(newApp)).json;
+    assert.deepEqual([b.device, b.backups.map(x => x.install)], ['bknew000001', ['inst-old-0001']], 'the new install finds the old install’s backup');
+    assert.equal((await put(newApp, { install: 'inst-new-0001', app: 'windows', settings: { deviceName: 'Shop Desktop' } })).status, 204);
+    assert.deepEqual((await get(newApp)).json.backups.map(x => x.install), ['inst-new-0001', 'inst-old-0001'], '...next to its own');
+    for (const i of [2, 3]) await put(newApp, { install: `inst-new-000${i}`, app: 'windows', settings: { n: i } });
+    assert.deepEqual((await get(newApp)).json.backups.map(x => x.install), ['inst-new-0003', 'inst-new-0002', 'inst-new-0001'], 'the newest three installs');
+    // The server's own backups: one now (a file item over BEAM_BACKUP_FILES_MB stays out), one with the command, one
+    // more; the newest two are kept.
+    await upload(s, phone, 'photo.jpg', Buffer.alloc(2048, 7));
+    let r = await s.req('POST', '/api/backups', { headers: phone });
+    assert.equal(r.status, 201, r.body);
+    assert.ok(/^beam-backup-\d{8}-\d{6}\.tar\.gz$/.test(r.json.last.name) && r.json.last.files === false && r.json.dir === dir, `a backup now, without the file: ${JSON.stringify(r.json.last)}`);
+    assert.match(s.out, /Backed up this Beam \(asked by Pixel\): beam-backup-.*, without its 2\.0 KB of files/);
+    await sleep(1100);
+    const cli = await runNode(['backup'], serverEnv(8791, s.dir, { ...t.env }));
+    assert.equal(cli.code, 0, cli.out);
+    assert.match(cli.out, /Saved .*beam-backup-.*\.tar\.gz \(.*\)\. It contains the Beam key: keep it private\./);
+    await sleep(1100);
+    r = await s.req('POST', '/api/backups', { headers: phone });
+    const list = (await s.req('GET', '/api/backups', { headers: phone })).json;
+    assert.deepEqual([list.keep, list.hours, list.backups.length, list.backups[0].name], [2, 24, 2, r.json.last.name], 'the newest two are kept');
+    assert.deepEqual(fs.readdirSync(dir).filter(n => !n.startsWith('.')).length, 2, '...and only they are in the folder');
+    assert.match(s.out, /Removed 1 old backup \(the newest 2 are kept\)/);
+    assert.equal((await s.req('GET', '/api/backups', { headers: cookie(session, 'bksession01') })).status, 403, 'not for a session-only sign-in');
+    // It imports (the existing import) into an empty data folder: the apps' settings backups come along.
+    const into = path.join(TMP, 'bk-restore');
+    fs.rmSync(into, { recursive: true, force: true });
+    const imp = await runNode(['import', path.join(dir, list.backups[0].name)], serverEnv(8792, into));
+    assert.equal(imp.code, 0, imp.out);
+    const restored = JSON.parse(fs.readFileSync(path.join(into, 'data', 'devices.json'), 'utf8'));
+    assert.deepEqual(restored.bknew000001.backups.map(x => x.install), ['inst-new-0003', 'inst-new-0002', 'inst-new-0001'], 'the apps’ backups are in it');
+  } finally { await t.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

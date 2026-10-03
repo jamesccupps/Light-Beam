@@ -16,6 +16,7 @@ const SECTIONS = [
 
 async function openSettings(section = 'device') {
   settingsSection = section;
+  backupState = null; // (1.8.1: the Server section asks again)
   const dlg = $('#settingsDlg');
   renderSettings();
   if (!dlg.open) dlg.showModal();
@@ -166,6 +167,12 @@ function sectionPc() {
     row(el('button', { class: 'btn small-btn', type: 'button', onclick: async () => { const r = await hostDo('checkForUpdates'); if (r?.update) { hostState.update = r.update; renderSettings(); } } }, 'Check now'),
       u.state === 'ready' && el('button', { class: 'btn small-btn primary', type: 'button', onclick: () => hostDo('installUpdate') }, 'Install now'),
       el('button', { class: 'btn small-btn ghost', type: 'button', onclick: () => hostDo('openFolder', { which: 'logs' }) }, 'Open logs folder')),
+    // (1.8.1) This PC's settings are kept on the server too; the app puts a backup back (its native choice).
+    hostHas('restoreSettings') && serverHas('backups') && el('h4', {}, 'Backup'),
+    hostHas('restoreSettings') && serverHas('backups') && note(deviceById(me.id)?.backup?.at
+      ? `This PC’s settings are kept on your Beam too (last ${timeAgo(deviceById(me.id).backup.at)}). After a reinstall, Beam offers to put them back.`
+      : 'This PC’s settings are kept on your Beam too, from the next change on. After a reinstall, Beam offers to put them back.'),
+    hostHas('restoreSettings') && serverHas('backups') && row(el('button', { class: 'btn small-btn', type: 'button', onclick: () => hostDo('restoreSettings') }, 'Restore settings…')),
     el('h4', {}, 'Server'),
     note(`${srv.url || location.origin}${srv.version ? ` · Beam ${srv.version}` : ''}${srv.storage ? ` · ${formatSize(srv.storage.used)} used, ${formatSize(srv.storage.free)} free` : ''}${srv.connected === false ? ' · not connected' : ''}`),
     row(el('button', { class: 'btn small-btn', type: 'button', onclick: () => hostDo('switchServer') }, 'Switch server…'),
@@ -187,6 +194,7 @@ function sectionDevices() {
       el('div', { class: 'dev-body' },
         el('strong', {}, d.name),
         el('span', { class: 'muted small facts-line' }, ...factNodes(deviceFacts(d))),
+        d.backup?.at && el('span', { class: 'muted small block' }, `Settings backed up ${timeAgo(d.backup.at)}`), // (1.8.1)
         el('div', { class: 'dev-actions' },
           ...deviceActions(d).map(a => el('button', { class: 'btn small-btn', type: 'button', disabled: Boolean(a.disabled), onclick: () => a.action() }, icon(a.icon), a.label)),
           el('button', { class: 'btn small-btn ghost', type: 'button', onclick: () => removeDevice(d) }, v3 ? 'Sign out…' : 'Forget…')),
@@ -361,7 +369,56 @@ function sectionServer() {
   if (serverHas('move')) buttons.push(el('button', { class: 'btn small-btn', type: 'button', onclick: moveServer }, 'Move Beam to a new address…'));
   buttons.push(el('button', { class: 'btn small-btn danger ghost', type: 'button', onclick: deleteEverything }, 'Delete every item…'));
   parts.push(row(...buttons));
+  if (serverHas('backups')) parts.push(...backupRows());
   return parts;
+}
+
+// ---------------------------------------------------------------- the server's backups (1.8.1)
+
+let backupState = null; // GET /api/backups, asked when the Server section is first drawn after opening Settings
+
+function backupRows() {
+  const head = el('h4', {}, 'Backups');
+  if (!backupState) { loadBackups(); return [head, note('Loading…')]; }
+  if (backupState.loading) return [head, note('Loading…')];
+  if (backupState.error) return [head, note(backupState.error)];
+  const b = backupState;
+  const last = b.last;
+  const every = b.hours ? `A backup of this Beam every ${b.hours} h, into ${b.dir}; the newest ${b.keep} are kept. ` : 'Automatic backups are off (BEAM_BACKUP_HOURS=0). ';
+  const lastText = last?.error ? `The last one failed: ${last.error}`
+    : last?.name ? `The last: ${timeAgo(last.at)} (${formatSize(last.bytes)}${last.files === false ? ', without the files sent' : ''}).` : 'None yet.';
+  const busy = b.running || b.busy;
+  return [
+    head,
+    note(every + lastText),
+    note('Each PC’s Beam app keeps a copy of its settings here too (Devices shows when), and offers it back after a reinstall. To bring this Beam back from a backup: stop it, then run “node server.js import <backup> --force” on the server.'),
+    row(el('button', { class: 'btn small-btn', type: 'button', disabled: Boolean(busy), onclick: backupNow }, busy ? 'Backing up…' : 'Back up now')),
+  ];
+}
+
+async function loadBackups() {
+  backupState = { loading: true };
+  try {
+    const res = await api('api/backups');
+    const body = await res.json().catch(() => ({}));
+    backupState = res.ok ? body : { error: body.error || `The backups couldn’t be read (${res.status}).` };
+  } catch { backupState = { error: 'The backups couldn’t be read: Beam isn’t answering.' }; }
+  renderSettings();
+}
+
+async function backupNow() {
+  backupState = { ...backupState, busy: true };
+  renderSettings();
+  try {
+    const res = await api('api/backups', { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    backupState = res.ok ? body : { ...backupState, busy: false };
+    toast(res.ok ? `Backed up (${formatSize(body.last?.bytes || 0)}).` : body.error || 'The backup failed.');
+  } catch {
+    backupState = { ...backupState, busy: false };
+    toast('The backup failed: Beam isn’t answering.');
+  }
+  renderSettings();
 }
 
 async function showLogs() {

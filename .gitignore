@@ -39,3 +39,5 @@ test/web/shots/
 *.tmp
 .DS_Store
 Thumbs.db
+# 1.8.1: the server backups default to a backups folder next to data/
+/backups/

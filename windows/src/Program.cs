@@ -43,6 +43,7 @@ namespace Beam
         public bool TestClickBalloon; // tests: what a click on the last balloon does
         public string TestEventName, TestEventData; // tests: an event as if it came on the stream
         public string TestRc;        // tests: remote control ("allow[:ids]", "off", "devices:ids", "repin:id", "lock:on|off", "kill", "stop", "probe")
+        public string TestBackups;   // tests (1.8.1): settings backups ("check", "send", "choices", "answer:restore|skip", "state")
         public string TestBridge;    // tests: a host bridge message as if the chat page sent it (the reply goes to beam.log)
         public string TestOpenRemote; // tests: the viewer window for that device, as the page's "Control" opens it
         public bool AddDevice;
@@ -88,6 +89,7 @@ namespace Beam
                 else if (lower == "--test-click-balloon") o.TestClickBalloon = true;
                 else if (lower == "--test-event" && i + 2 < args.Length) { o.TestEventName = args[++i]; o.TestEventData = args[++i]; }
                 else if (lower == "--test-rc" && more) o.TestRc = args[++i];
+                else if (lower == "--test-backups" && more) o.TestBackups = args[++i];
                 else if (lower == "--test-bridge" && more) o.TestBridge = args[++i];
                 else if (lower == "--test-open-remote" && more) o.TestOpenRemote = args[++i];
                 else if (lower == "--add-device") o.AddDevice = true;
@@ -143,6 +145,7 @@ namespace Beam
             if (TestClickBalloon) list.Add("--test-click-balloon");
             if (TestEventName != null) { list.Add("--test-event"); list.Add(TestEventName); list.Add(TestEventData ?? "{}"); }
             if (TestRc != null) { list.Add("--test-rc"); list.Add(TestRc); }
+            if (TestBackups != null) { list.Add("--test-backups"); list.Add(TestBackups); }
             if (TestBridge != null) { list.Add("--test-bridge"); list.Add(TestBridge); }
             if (TestOpenRemote != null) { list.Add("--test-open-remote"); list.Add(TestOpenRemote); }
             if (AddDevice) list.Add("--add-device");
@@ -252,7 +255,7 @@ namespace Beam
             if (!opts.Send && !opts.Quit && !opts.Background && !opts.Settings && !opts.Approve && !opts.AddDevice
                 && !opts.PickClipboard && !opts.Screenshot && !opts.CopyLatest && !opts.Hide && !opts.TestPoke && opts.TestMode == null && opts.Updated == null
                 && opts.TestTransfer == null && opts.TestPhone == null && !opts.TestClickBalloon && opts.TestEventName == null
-                && opts.TestRc == null && opts.TestBridge == null && opts.TestOpenRemote == null) opts.Show = true;
+                && opts.TestRc == null && opts.TestBackups == null && opts.TestBridge == null && opts.TestOpenRemote == null) opts.Show = true;
             for (int i = 0; i < 6; i++)
             {
                 if (IpcServer.Send(PipeName(), opts.ToArgs(), 1000)) return 0;

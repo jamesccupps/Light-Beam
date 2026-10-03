@@ -15,7 +15,7 @@ if (!STAGING) throw new Error('Give the staging folder: --staging <dir> (or BEAM
 // Paths (relative, forward slashes) that are never compared, copied or deleted.
 const SKIP = [
   /^\.git(\/|$)/, /^\.gitignore$/, /^\.gitattributes$/, // the project's git repository (the staging copy has none)
-  /^data(\/|$)/, /^dist(\/|$)/, /^node_modules(\/|$)/, /^\.env$/,
+  /^data(\/|$)/, /^backups(\/|$)/, /^dist(\/|$)/, /^node_modules(\/|$)/, /^\.env$/, // (backups: 1.8.1's default next to data/)
   /^CLAUDE\.md$/, /^README\.md$/, /^docs\/IDEAS\.md$/, /^PROGRESS-[a-z]+\.md$/,
   /^android\/keystore(\/|$)/, /^android\/keystore\.properties$/, /^android\/local\.properties$/,
   /(^|\/)build(\/|$)/, /^android\/\.gradle(\/|$)/, /^android\/\.kotlin(\/|$)/, /^android\/\.idea(\/|$)/,

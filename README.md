@@ -424,6 +424,20 @@ the new server first; `--force` skips the check and `--clear` undoes it. Everyth
 identity is kept in `data/tailscale`. Moving the whole data folder to new hardware keeps the address
 `https://beam.<tailnet>.ts.net`, so clients don't even notice. Stop the old container first.
 
+## Backups
+
+- **The server** saves a backup of itself every day: an export (the key, sign-ins, devices, settings, items, and the
+  files while they add up to at most 1 GB) into a `backups` folder next to its data folder, the newest 14 kept.
+  `BEAM_BACKUP_DIR` puts them elsewhere; another drive or a NAS share keeps them safe from a failing disk too.
+  Settings → Server shows the last one and has **Back up now**; `node server.js backup` does the same. To restore one:
+  stop Beam, then `node server.js import <backup> --force` (what was in the data folder moves aside, nothing is
+  deleted). Beam Family backs itself up the same way (see [docs/FAMILY.md](docs/FAMILY.md)).
+- **Each PC's Beam app** keeps a copy of its settings on your Beam, sent whenever they change: its name, where files
+  are saved, hotkeys, Send to, the outbox, notification choices and which devices may control it. Never its sign-in or
+  device key. After a reinstall or a reset, Beam offers once to put them back. Turning remote control back on still asks
+  at the PC, with the same devices ticked. Settings → This PC → **Restore settings…** does it any time, also from
+  another PC's backup.
+
 ## Docker and NAS
 
 > Not tested yet: the files are written to work, but nobody has run them. Reports welcome.
@@ -487,6 +501,8 @@ environment variable wins and locks the setting.
 | `BEAM_MAX_ITEMS` | `500` | Keep at most this many items |
 | `BEAM_MAX_UPLOAD_MB` | `4096` | Largest file |
 | `BEAM_MAX_STORAGE_GB` | `0` | Cap on everything stored (`0` = only the disk limits it) |
+| `BEAM_BACKUP_DIR` | `backups` next to the data folder | Where the server's backups go (see [Backups](#backups)) |
+| `BEAM_BACKUP_HOURS`, `BEAM_BACKUP_KEEP`, `BEAM_BACKUP_FILES_MB` | `24`, `14`, `1024` | A backup that often (`0` = none), the newest kept, files in each up to that size |
 | `BEAM_WOL_TARGETS` | (all local networks) | Where Wake-on-LAN packets are sent, as `address[:port]`, comma-separated |
 | `BEAM_TAILSCALE_OWNERS` | (learned) | Tailscale accounts whose devices sign in by themselves |
 | `BEAM_TAILSCALE_SIGNIN` | on | `0` turns automatic Tailscale sign-in off |

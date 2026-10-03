@@ -551,8 +551,51 @@ async function notifyOpen(r) {
   r.check(!!nav && nav.endsWith(`navigate to ${r.peerId} at ${c}`), `a picture's own balloon opens it in Beam (${nav ? nav.replace(/.*navigate to /, '') : 'nothing'})`);
 }
 
+// 1.8.1: the app keeps its settings on the server (after looking for an earlier install's: none), sends a change 10 s
+// later; a reinstall (a new install with its own config, id and key, on this PC and Windows account) is offered the old
+// install's settings once, and gets them back.
+async function backups(r) {
+  await r.setup({ autoCopy: false, hotkeys: { picker: 'Ctrl+Alt+P' } });
+  const get = async () => { const x = await r.api('GET', `/api/devices/${r.appId}/backups`); return x.status === 200 ? x.data.backups || [] : []; };
+  let list = [];
+  r.check(await r.waitFor(async () => (list = await get()).length > 0, 30000), 'the app keeps its settings on the server');
+  const first = r.readConfig();
+  const b = list[0] || {};
+  r.check(b.app === 'windows' && b.install === first.installId && b.settings && b.settings.autoCopy === false && b.settings.hotkeys && b.settings.hotkeys.picker === 'Ctrl+Alt+P',
+    `...this install's, as they are (${JSON.stringify(b.settings || {}).slice(0, 120)}…)`);
+  r.check(!/"(key|keyProtected|server|deviceId)"/.test(JSON.stringify(b.settings || {})), '...without the sign-in, the server or the device id');
+  r.check(first.restoreChecked === true && !!(await r.waitLog(/Settings: this PC's are kept on the server too/, 0, 5000)), '...after looking for an earlier install\'s (there was none)');
+  r.forward(['--test-bridge', JSON.stringify({ type: 'setSettings', id: 'test-set', settings: { openLinks: false } })]);
+  r.check(await r.waitFor(async () => ((await get())[0] || {}).settings?.openLinks === false, 25000), 'a change goes up (10 s later)');
+  await r.quitApp();
+  // The reinstall: a fresh config in the same place (a test instance's "Windows account" goes by its config path), so a
+  // new device id, install id and device key, and the default settings.
+  const oldInstall = first.installId;
+  r.appId = 'regresspc' + crypto.randomBytes(8).toString('hex');
+  for (const f of ['device.key', 'state.json', 'handled.json']) fs.rmSync(path.join(r.dir, 'cfg', f), { force: true });
+  const reinstalled = r.logLines().length;
+  r.writeConfig({});
+  r.startApp();
+  const offered = await r.waitLog(/Settings: an earlier install of Beam on this PC kept its settings on the server .*; offering them/, reinstalled, 45000);
+  r.check(!!offered, 'the reinstall is offered the earlier install\'s settings');
+  let from = r.logLines().length;
+  r.forward(['--test-backups', 'state']);
+  const state = await r.waitLog(/Settings: \(test\) /, from, 10000);
+  r.check(!!state && state.includes(`[x] this PC ${oldInstall}`) && /checked False/.test(state), `...one offer, that install's (${state ? state.replace(/.*\(test\) /, '') : 'none'})`);
+  from = r.logLines().length;
+  r.forward(['--test-backups', 'answer:restore']);
+  r.check(!!(await r.waitLog(/Settings: put back this PC's settings from an earlier install's backup of /, from, 10000)), 'Restore: put back');
+  const now = r.readConfig();
+  r.check(now.autoCopy === false && now.openLinks === false && now.hotkeys && now.hotkeys.picker === 'Ctrl+Alt+P' && now.restoreChecked === true && now.installId !== oldInstall,
+    `...the earlier install's settings, in this install's config (autoCopy ${now.autoCopy}, openLinks ${now.openLinks}, picker ${now.hotkeys && now.hotkeys.picker})`);
+  r.check(await r.waitFor(async () => { const l = await get(); return l.length === 2 && l[0].install === now.installId && l[1].install === oldInstall; }, 25000), '...and this install\'s own backup goes up next to the earlier one');
+  from = r.logLines().length;
+  r.forward(['--test-backups', 'state']);
+  r.check(/no restore offer open; checked True/.test((await r.waitLog(/Settings: \(test\) /, from, 10000)) || ''), 'offered once');
+}
+
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
-  'pause-full': pauseFull, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'notify-open': notifyOpen };
+  'pause-full': pauseFull, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'notify-open': notifyOpen, backups };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

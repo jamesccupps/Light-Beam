@@ -30,9 +30,18 @@ Settings (environment or `.env`):
 | `BEAM_FAMILY_OWNER` | the machine's Tailscale user | whose first visit over Tailscale sets them up as the owner |
 | `BEAM_FAMILY_MAX_UPLOAD_MB` | `2048` | the largest file |
 | `BEAM_FAMILY_MAX_STORAGE_GB` | `100` | all files together; when full, uploads are refused (nothing is ever deleted to make room) |
+| `BEAM_FAMILY_BACKUP_DIR` | `backups` next to the data folder | **(1.8.1)** where its backups go (another drive or a NAS keeps them safe from a failing disk) |
+| `BEAM_FAMILY_BACKUP_HOURS`, `…_KEEP`, `…_FILES_MB` | `24`, `14`, `1024` | a backup that often (`0`: none), the newest kept, files in it up to that size |
 
 It needs Node 22.13 or later (it uses the built-in `node:sqlite`). No other dependencies besides Beam's own
 (`qrcode`, for invite QR codes).
+
+**Backups (1.8.1).** Every day (`BEAM_FAMILY_BACKUP_HOURS`) Beam Family saves `family-backup-<UTC time>.tar.gz`: its
+database as a snapshot taken while it runs (SQLite's `VACUUM INTO`, never a copy of the live file), `control.key`,
+`vapid.json` (the phones' push subscriptions belong to it), the avatars, and the files and their previews while they
+add up to at most `BEAM_FAMILY_BACKUP_FILES_MB`. The newest 14 are kept. `node family/server.js backup` makes one now.
+To restore one: `node family/server.js stop`, then `node family/server.js restore <backup> --force` (the data that was
+there moves to a `replaced-…` folder in the data folder, nothing is deleted), then start it again.
 
 ## How people get in
 

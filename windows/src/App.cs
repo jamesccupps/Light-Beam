@@ -78,6 +78,7 @@ namespace Beam
         readonly StatusReporter status;
         readonly Ringer ringer;
         public RemoteControl Rc;          // Beam 1.6: this PC being controlled from another device
+        public SettingsBackups Backups;   // Beam 1.8.1: this PC's settings kept on the server too, and put back
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
         readonly HashSet<string> alertsShown = new HashSet<string>();
         readonly Timer uiTimer, resyncTimer, integrationTimer, rediscoverTimer, updateTimer, updateRetryTimer, healthTimer;
@@ -148,6 +149,7 @@ namespace Beam
             status = new StatusReporter(this);
             ringer = new Ringer(this);
             Rc = new RemoteControl(this);
+            Backups = new SettingsBackups(this);
 
             up = new Uploader(() => Api, j => { var s = j.State; Post(() => OnUploadChanged(j, s)); }, j => { });
             down = new Downloader(() => Api, j => { var s = j.State; Post(() => OnDownloadChanged(j, s)); }, OnDownloadProgress);
@@ -317,6 +319,15 @@ namespace Beam
             hotkeys.Set("lastTarget", Cfg.Hotkeys["lastTarget"], SendClipboardToLast);
             hotkeys.Set("copyLatest", Cfg.Hotkeys["copyLatest"], CopyLatestText);
             hotkeys.Set("screenshot", Cfg.Hotkeys["screenshot"], ScreenshotAndSend);
+        }
+
+        // Beam 1.8.1: hotkeys put back from a backup take effect at once.
+        public void HotkeysChanged()
+        {
+            Cfg.Save();
+            RegisterHotkeys();
+            if (SettingsChanged != null) SettingsChanged();
+            MarkChanged();
         }
 
         public bool HotkeyRegistered(string name) { return hotkeys.IsRegistered(name); }
@@ -523,6 +534,7 @@ namespace Beam
                 BecameHealthy();
                 if (!updateChecked) { updateChecked = true; CheckForUpdates(false, null); }
                 RenewSignIn(); // once, for a sign-in that was ever kept in clear
+                Backups.Check(); // (1.8.1) an earlier install's settings offered once; then this one's go up
             }
             catch (Exception ex) { Log.Error("Catch-up", ex); }
             finally
@@ -2396,6 +2408,7 @@ namespace Beam
             if (phoneOn.HasValue) SetPhoneNotifications(phoneOn.Value, "settings");
             if (rcOff && Cfg.AllowRemoteControl) Rc.SetOff("settings");
             if (SettingsChanged != null) SettingsChanged();
+            if (Backups != null) Backups.Changed();
             MarkChanged();
             return null;
         }
@@ -2407,6 +2420,7 @@ namespace Beam
         {
             if (what != null) status.Now("remote control " + what);
             if (SettingsChanged != null) SettingsChanged();
+            if (Backups != null) Backups.Changed();
             MarkChanged();
         }
 
@@ -2434,11 +2448,12 @@ namespace Beam
         }
 
         // The native confirmation (turning it on) or the device list (when it's on). owner: a window to center on.
-        public void ShowRcAllow(Form owner)
+        // ticked (1.8.1, a restored backup): the devices ticked at first, instead of all of them.
+        public void ShowRcAllow(Form owner, ICollection<string> ticked = null)
         {
             if (!ServerHas("remote-control") || RcBlocks("changing who may control it")) return;
             if (rcForm != null && !rcForm.IsDisposed) { rcForm.Activate(); return; }
-            rcForm = new RcAllowForm(this, !Cfg.AllowRemoteControl);
+            rcForm = new RcAllowForm(this, !Cfg.AllowRemoteControl, ticked);
             Ui.PlaceForTest(rcForm);
             rcForm.FormClosed += (s2, e2) => rcForm = null;
             if (owner != null) rcForm.Show(owner); else rcForm.Show();
@@ -2549,6 +2564,7 @@ namespace Beam
             if (o.TestClickBalloon && Cfg.CustomPath) notifier.ClickLastForTest();
             if (o.TestEventName != null && Cfg.CustomPath) OnEvent(o.TestEventName, o.TestEventData ?? "{}");
             if (o.TestRc != null && Cfg.CustomPath) Rc.TestCommand(o.TestRc);
+            if (o.TestBackups != null && Cfg.CustomPath) Backups.TestCommand(o.TestBackups);
             if (o.TestBridge != null && Cfg.CustomPath) TestBridge(o.TestBridge);
             if (o.TestOpenRemote != null && Cfg.CustomPath) { string err = OpenRemote(o.TestOpenRemote); if (err != null) Log.Write("Remote control: (test) " + err); }
         }
