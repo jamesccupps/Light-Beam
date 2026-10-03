@@ -299,6 +299,11 @@ tailscale funnel --bg --https=8443 http://127.0.0.1:8766    # optional: a public
   on your own Wi-Fi it stays inside the house; elsewhere it skips the public link's relay), else over https. Big
   uploads from the app go the same direct way. On Windows, devices on your own network need one firewall rule to
   connect directly (see [docs/FAMILY.md](docs/FAMILY.md)).
+- **Videos that play everywhere** (1.10): a phone's HDR video can refuse to play on another phone (an iPhone, say). Like
+  Google Photos, Beam Family keeps the original and makes a copy every phone and browser plays (H.264, standard
+  color), with ffmpeg on your computer (the graphics card's encoder when it has one). The chat plays that copy, and so
+  does a fast link's page, which also offers it as "Download for any phone". Set `BEAM_FAMILY_FFMPEG` to where
+  ffmpeg is (see [docs/FAMILY.md](docs/FAMILY.md)); without it, videos play as they are.
 
 Details, settings and the security model: [docs/FAMILY.md](docs/FAMILY.md).
 

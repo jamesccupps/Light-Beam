@@ -8,6 +8,10 @@
 //   through the public link it's slower).
 // One download at a time here (1.9.1: two at once made two copies); a second one is asked about first.
 // A file still being uploaded at the other end is followed as it arrives.
+// (1.10.0) A video plays right here, in its version that plays everywhere (H.264, standard color; made by the server
+// with ffmpeg), which can also be downloaded ("for any phone"); while it's being made, the page says how far it got.
+// On an iPhone or iPad, Download is Safari's own download: an iPhone couldn't open what the service worker's stream
+// saved (even a plain H.264 video), and Safari had bugs there (fixed only in iOS 26).
 import { h, fill, formatSize, confirmDialog } from './ui.js';
 
 const token = location.pathname.split('/')[2] || '';
@@ -16,6 +20,7 @@ const fileUrl = `/api/links/${token}/file`;
 let info = null;
 let running = null;   // the direct download going on: { stop() }
 let already = '';     // 'background' once the browser's downloads have it, 'done' once a direct download finished
+const iOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 function toast(text) {
   const el = document.getElementById('toast');
@@ -33,6 +38,53 @@ async function load() {
   info = data;
   render();
   if (info.received < info.size && !running) setTimeout(refresh, 3000);
+  if (info.play === 'working') setTimeout(watchPlay, 5000);
+}
+
+// (1.10.0) While the version that plays everywhere is being made: how far, then the player once it's there.
+async function watchPlay() {
+  try {
+    const res = await fetch(`/api/links/${token}`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const next = await res.json();
+    Object.assign(info, { play: next.play, playUrl: next.playUrl, playSize: next.playSize, playProgress: next.playProgress });
+    if (next.play === 'working') {
+      const p = card.querySelector('.preparing');
+      if (p) p.textContent = preparingText();
+      return setTimeout(watchPlay, 5000);
+    }
+    const box = card.querySelector('.link-media');
+    if (box) fill(box, mediaEl());
+    const other = card.querySelector('#playable');
+    if (!other && info.play === 'ready') card.querySelector('.link-actions')?.append(playableButton());
+  } catch { setTimeout(watchPlay, 15000); }
+}
+
+const preparingText = () => `Getting it ready to play on any phone or browser${info.playProgress ? `: ${Math.round(info.playProgress * 100)}%` : '…'}`;
+
+// A video: the player (its version that plays everywhere, or the original when that already does); else the preview.
+function mediaEl() {
+  const preview = info.preview ? `/api/links/${token}/preview` : null;
+  if (info.video && info.playUrl) return h('video', { class: 'link-video', src: info.playUrl, controls: true, playsinline: true, preload: 'metadata', poster: preview });
+  const pic = preview ? h('img', { class: 'link-preview', src: preview, alt: '' }) : null;
+  if (info.video && info.play === 'working') return [pic, h('p', { class: 'small muted preparing' }, preparingText())];
+  return pic;
+}
+
+// The version that plays everywhere, to keep (Safari's or the browser's own download).
+function playableButton() {
+  return h('button', { class: 'btn', type: 'button', id: 'playable', onclick: onPlayable }, `Download for any phone (${formatSize(info.playSize)})`);
+}
+
+async function onPlayable() {
+  if (running) return;
+  if (already && !(await again())) return;
+  const a = h('a', { href: `${info.playUrl}?download`, download: '', hidden: true });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  already = 'background';
+  setStatus('Your browser is downloading the version that plays on any phone: see its downloads (on a phone: pull down the notifications, or Safari’s or Chrome’s downloads).');
 }
 
 async function refresh() {
@@ -56,13 +108,14 @@ function problem(text) {
 function render() {
   const expires = new Date(info.expires).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
   fill(card,
-    info.preview ? h('img', { class: 'link-preview', src: `/api/links/${token}/preview`, alt: '' }) : null,
+    h('div', { class: 'link-media' }, mediaEl()),
     h('h1', { class: 'link-name' }, info.name),
     h('p', { class: 'muted' }, `${formatSize(info.size)} · from ${info.from} · until ${expires}`),
     h('p', { class: 'muted small arriving' }, arrivingText()),
     h('div', { class: 'link-actions' },
       h('button', { class: 'btn primary', type: 'button', id: 'get', onclick: onDownload }, 'Download'),
-      h('button', { class: 'btn', type: 'button', id: 'background', onclick: onBackground }, 'Download in the background')),
+      h('button', { class: 'btn', type: 'button', id: 'background', onclick: onBackground }, 'Download in the background'),
+      info.play === 'ready' ? playableButton() : null),
     h('div', { class: 'link-progress', hidden: true }, h('span', { class: 'track' }, h('span', { class: 'fill' })), h('p', { class: 'small status' })),
     h('p', { class: 'muted small' }, 'Download goes straight to the sender’s computer when it can: fast, and the screen stays on until it’s done (keep this page open). Download in the background uses your browser’s own downloads, which carry on with the screen locked, but through the public link it can be much slower.'));
 }
@@ -75,6 +128,8 @@ function buttons(downloading) {
   get.textContent = downloading ? 'Stop' : 'Download';
   get.classList.toggle('primary', !downloading);
   background.disabled = downloading;
+  const playable = card.querySelector('#playable');
+  if (playable) playable.disabled = downloading;
 }
 
 // A second download of the same file is asked about first (it would be a second copy).
@@ -223,6 +278,7 @@ async function connect() {
 
 async function fastDownload() {
   if (!info.direct || !window.RTCPeerConnection) return plainDownload();
+  if (iOS) return plainDownload('On an iPhone or iPad this is Safari’s own download (the fast way saves broken files there). ');
   const stopping = new AbortController();
   running = { stop: () => stopping.abort() };
   buttons(true);

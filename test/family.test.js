@@ -20,6 +20,12 @@ const SERVER = path.join(ROOT, 'family', 'server.js');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'beam-family-test-'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const OWNER = 'owner@example.com';
+// (1.10.0) ffmpeg for F-R: BEAM_TEST_FFMPEG, else ffmpeg on the PATH; without one F-R says so and passes.
+const FFMPEG = (() => {
+  if (process.env.BEAM_TEST_FFMPEG) return fs.existsSync(process.env.BEAM_TEST_FFMPEG) ? process.env.BEAM_TEST_FFMPEG : null;
+  return spawnSync('ffmpeg', ['-hide_banner', '-version'], { windowsHide: true }).status === 0 ? 'ffmpeg' : null;
+})();
+const FFPROBE = FFMPEG && path.join(path.dirname(FFMPEG), path.basename(FFMPEG).replace(/ffmpeg/i, 'ffprobe'));
 
 // ---------------------------------------------------------------- harness
 
@@ -30,7 +36,8 @@ function familyEnv(port, dir, env = {}) {
   const out = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('BEAM_')) out[k] = v;
   return { ...out, BEAM_FAMILY_DATA: path.join(dir, 'data'), BEAM_FAMILY_PORT: String(port), BEAM_FAMILY_HOST: '127.0.0.1', BEAM_TAILSCALE: 'off',
-    BEAM_FAMILY_OWNER: OWNER, BEAM_FAMILY_TEST_PUSH: '1', BEAM_FAMILY_STUN: 'off', ...env }; // (direct connections: only where a test asks)
+    BEAM_FAMILY_OWNER: OWNER, BEAM_FAMILY_TEST_PUSH: '1', BEAM_FAMILY_STUN: 'off', BEAM_FAMILY_FFMPEG: 'off', ...env }; // (direct connections and
+  // ffmpeg: only where a test asks)
 }
 
 async function start(name, port, { env = {}, keep = false, args = [] } = {}) {
@@ -1082,6 +1089,74 @@ test('F-Q (1.9.0): fast links: anyone with the link gets the file, no sign-in, o
     for (const c of conns) c.close?.();
     await s.stop();
   }
+});
+
+test('F-R (1.10.0): videos that play everywhere: a phone\'s HDR video gets an H.264 copy in standard color, played in the chat and from a fast link (and kept with ?download); an ordinary one plays as it is; deleting the message deletes the copy', async () => {
+  if (!FFMPEG) { console.log('    (no ffmpeg here: set BEAM_TEST_FFMPEG to run F-R)'); return; }
+  const s = await start('media', 8846, { env: { BEAM_FAMILY_FFMPEG: FFMPEG } });
+  try {
+    const f = await family(s);
+    // A phone's HDR video (10-bit HEVC, HLG, BT.2020; H.264 10-bit where this ffmpeg has no x265) and an ordinary one.
+    const x265 = spawnSync(FFMPEG, ['-hide_banner', '-encoders'], { encoding: 'utf8', windowsHide: true }).stdout.includes('libx265');
+    const make = (file, args) => {
+      const r = spawnSync(FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=360x640:r=30:d=2', '-f', 'lavfi', '-i', 'sine=d=2', ...args, '-c:a', 'aac', '-shortest', file], { encoding: 'utf8', windowsHide: true });
+      assert.equal(r.status, 0, r.stderr);
+      return fs.readFileSync(file);
+    };
+    // (the encoders' own settings: ffmpeg's -color_trc didn't reach x265's stream)
+    const tags = 'colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc';
+    const hdr = make(path.join(s.dir, 'hdr.mp4'), [...(x265 ? ['-c:v', 'libx265', '-tag:v', 'hvc1', '-x265-params', `log-level=error:${tags}`] : ['-c:v', 'libx264', '-x264-params', tags]), '-pix_fmt', 'yuv420p10le']);
+    const plain = make(path.join(s.dir, 'plain.mp4'), ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-b:v', '400k', '-movflags', '+faststart']);
+    const upload = async (name, data) => {
+      const id = (await call(s, 'POST', '/api/uploads', f.owner, { name, size: data.length, mime: 'video/mp4' })).json.id;
+      const r = await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(f.owner), 'Content-Type': 'application/octet-stream' }, body: data });
+      assert.ok(r.status < 300, r.body);
+      return id;
+    };
+    const hdrId = await upload('Birthday.mp4', hdr);
+    const plainId = await upload('plain.mp4', plain);
+    const m = await post(s, f.owner, f.general, 'Videos', { files: [hdrId, plainId] });
+    // Both settle (the HDR one is made in a moment; the ordinary one already plays everywhere).
+    let files = [];
+    for (let i = 0; i < 300; i++) {
+      const list = (await call(s, 'GET', `/api/channels/${f.general}/messages`, f.owner)).json.messages;
+      files = list.find(x => x.id === m.id).files;
+      if (files.every(x => x.play && x.play !== 'working')) break;
+      await sleep(200);
+    }
+    const [h, p] = [files.find(x => x.id === hdrId), files.find(x => x.id === plainId)];
+    assert.deepEqual([h.play, h.playUrl, p.play, p.playUrl], ['ready', `/api/files/${hdrId}/play`, 'original', `/api/files/${plainId}/play`], s.out);
+    assert.ok(h.playSize > 0);
+    // The copy: H.264, 8-bit, standard color (BT.709), with sound; inline, seekable; only for who sees the message.
+    let r = await s.req('GET', h.playUrl, { headers: as(f.owner), raw: true });
+    assert.equal(r.status, 200);
+    assert.equal(r.headers['content-type'], 'video/mp4');
+    assert.match(r.headers['content-disposition'], /^inline;/);
+    const copy = path.join(s.dir, 'copy.mp4');
+    fs.writeFileSync(copy, r.body);
+    const probe = JSON.parse(spawnSync(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', copy], { encoding: 'utf8', windowsHide: true }).stdout).streams;
+    const v = probe.find(x => x.codec_type === 'video');
+    assert.deepEqual([v.codec_name, v.pix_fmt, v.color_transfer, v.width, v.height, probe.find(x => x.codec_type === 'audio')?.codec_name], ['h264', 'yuv420p', 'bt709', 360, 640, 'aac'], JSON.stringify([v.codec_name, v.pix_fmt, v.color_transfer, v.width, v.height]));
+    r = await s.req('GET', h.playUrl, { headers: { ...as(f.owner), Range: 'bytes=0-99' }, raw: true });
+    assert.deepEqual([r.status, r.body.length], [206, 100]);
+    r = await s.req('GET', p.playUrl, { headers: as(f.owner), raw: true });
+    assert.ok(r.body.equals(plain), 'the ordinary one as it is');
+    assert.equal((await s.req('GET', h.playUrl)).status, 401, 'not without a sign-in');
+    assert.match(s.out + fs.readFileSync(path.join(s.data, 'logs', 'family.log'), 'utf8'), /Made a version of Birthday\.mp4 that plays everywhere/);
+    // A fast link to it: the page can play it and keep it.
+    const token = (await call(s, 'POST', `/api/files/${hdrId}/links`, f.owner, { hours: 1 })).json.link.url.split('/f/')[1];
+    r = await s.req('GET', `/api/links/${token}`);
+    assert.deepEqual([r.json.video, r.json.play, r.json.playUrl, r.json.playSize], [true, 'ready', `/api/links/${token}/play`, h.playSize]);
+    r = await s.req('GET', `/api/links/${token}/play?download`, { raw: true });
+    assert.equal(r.status, 200);
+    assert.ok(r.body.equals(fs.readFileSync(copy)), 'the same copy');
+    assert.match(r.headers['content-disposition'], /^attachment;.*Birthday \(plays everywhere\)\.mp4/);
+    // The message deleted: the copy goes too.
+    assert.ok(fs.existsSync(path.join(s.data, 'play', `${hdrId}.mp4`)));
+    assert.equal((await call(s, 'DELETE', `/api/messages/${m.id}`, f.owner)).status, 204);
+    for (let i = 0; i < 20 && fs.existsSync(path.join(s.data, 'play', `${hdrId}.mp4`)); i++) await sleep(100);
+    assert.ok(!fs.existsSync(path.join(s.data, 'play', `${hdrId}.mp4`)), 'the copy is gone');
+  } finally { await s.stop(); }
 });
 
 // ---------------------------------------------------------------- runner

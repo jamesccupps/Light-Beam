@@ -58,6 +58,28 @@ New-NetFirewallRule -DisplayName "Beam Family direct connections (home network)"
 Without it (or when a network blocks direct connections) everything still works over https. The log says how each
 direct connection went ("came up on the same network / over the internet / didn't come up").
 
+### Videos that play everywhere (1.10)
+
+A phone's HDR video (the Pixel records HEVC 10-bit HLG, BT.2020) didn't open on an iPhone, not even in VLC. So, the
+way Google Photos does it, the original is kept and the server makes a copy that every phone and browser plays
+(`family/lib/media.js`, with ffmpeg): H.264 High, standard color (HDR tone-mapped to BT.709, 8-bit), at most 1080 on
+the short side, ~5 Mbit/s (it streams smoothly even through the public link), AAC stereo, the index first, no
+metadata (no location). A video that already plays everywhere (H.264, 8-bit, SDR, MP4, ≤ 8 Mbit/s) is played as it is.
+The chat's viewer plays the copy (the original meanwhile, with a note); a fast link's page plays it too, says how far
+it got while it's being made, and offers it as **Download for any phone**. On an iPhone or iPad the viewer's download is
+the copy, and a fast link's **Download** is Safari's own download: what the service worker's stream saved there didn't
+open (even a plain H.264 video), and Safari had bugs with such downloads until iOS 26.
+
+One video at a time, at below-normal priority: the graphics card's H.264 encoder (NVENC) when it works on this machine
+(a test at start), else x264, else OpenH264. On Desktop (RTX 3060, Ryzen 5 5600G) an HDR video takes about a third of
+its length (the tone mapping runs on the CPU), an ordinary one about a seventh. The copies live in `play/` in the data
+folder, aren't backed up (they can be made again), and go with their file. Videos from before are done once at start,
+newest first. The log: "Made a version of X that plays everywhere: 2.0 GB → 1.2 GB in 8 min".
+
+ffmpeg isn't bundled: `BEAM_FAMILY_FFMPEG` says where it is (ffprobe next to it), else `ffmpeg` on the PATH; without
+one, videos play as they are. On Windows a full build from ffmpeg.org's links works (Desktop: BtbN's
+`ffmpeg-n8.1-latest-win64-gpl-8.1.zip`, unpacked outside AppData so the scheduled task sees it).
+
 ## Running it
 
 ```
@@ -82,6 +104,7 @@ Settings (environment or `.env`):
 | `BEAM_FAMILY_MAX_STORAGE_GB` | `100` | all files together; when full, uploads are refused (nothing is ever deleted to make room) |
 | `BEAM_FAMILY_STUN` | Google's and Cloudflare's | (1.9) STUN servers direct connections find their way with (they see addresses, never files); `local`: the same network only; `off`: no direct connections |
 | `BEAM_FAMILY_DIRECT_PORTS` | `41700-41799` | (1.9) the UDP ports direct connections use |
+| `BEAM_FAMILY_FFMPEG` | `ffmpeg` on the PATH | (1.10) ffmpeg for videos that play everywhere (ffprobe next to it); `off`: videos play as they are |
 | `BEAM_FAMILY_BACKUP_DIR` | `backups` next to the data folder | **(1.8.1)** where its backups go (another drive or a NAS keeps them safe from a failing disk) |
 | `BEAM_FAMILY_BACKUP_HOURS`, `…_KEEP`, `…_FILES_MB` | `24`, `14`, `1024` | a backup that often (`0`: none), the newest kept, files in it up to that size |
 
@@ -200,6 +223,10 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   `GET /api/files/:id/links`, `DELETE /api/links/:id`; for anyone with the link: `GET /f/:token` (the page),
   `GET /api/links/:token` (name, size, mime, received, from, expires, preview, direct), `GET /api/links/:token/file`
   (https, Range, follows an upload), `GET /api/links/:token/preview`, `POST /api/links/:token/direct {sdp}`.
+- Videos that play everywhere (1.10): a video's attachment says `play` (`working`, `ready`, `original`: it plays as it
+  is, `failed`), `playUrl`, `playSize`, `playProgress` (0–1 while it's made); so does a fast link's info (with `video`).
+  `GET /api/files/:id/play[?download]` and `GET /api/links/:token/play[?download]`: the copy (or the original), Range,
+  inline (`?download`: "<name> (plays everywhere).mp4"). A copy made or failed sends `msg-edit` for its message.
   `PUT /api/files/:id/thumb?w=&h=`, `GET /api/files/:id[?download]`, `GET /api/files/:id/thumb`,
   `GET /api/people/:id/avatar`.
 - Push: `GET /api/push` (VAPID key), `PUT /api/push {endpoint, keys}`, `DELETE /api/push {endpoint}`.

@@ -29,6 +29,7 @@ const { createFiles } = require('./lib/files');
 const { createPush } = require('./lib/push');
 const { createDirect } = require('./lib/direct');
 const { createLinks } = require('./lib/links');
+const { createMedia } = require('./lib/media');
 const { createBackups, restoreBackup } = require('./lib/backup');
 
 const env = process.env;
@@ -47,7 +48,7 @@ const FILE = {
   control: path.join(DATA_DIR, 'control.key'),
   stop: path.join(DATA_DIR, 'stop'),
 };
-const DIR = { logs: path.join(DATA_DIR, 'logs'), files: path.join(DATA_DIR, 'files'), uploads: path.join(DATA_DIR, 'uploads'), thumbs: path.join(DATA_DIR, 'thumbs'), avatars: path.join(DATA_DIR, 'avatars') };
+const DIR = { logs: path.join(DATA_DIR, 'logs'), files: path.join(DATA_DIR, 'files'), uploads: path.join(DATA_DIR, 'uploads'), thumbs: path.join(DATA_DIR, 'thumbs'), avatars: path.join(DATA_DIR, 'avatars'), play: path.join(DATA_DIR, 'play') };
 // "41700-41799" → [41700, 41799]; anything else (or "any"): null, any port.
 function portRange(value) {
   const m = /^(\d{4,5})-(\d{4,5})$/.exec(String(value).trim());
@@ -73,6 +74,9 @@ const config = {
   stun: stunServers(env.BEAM_FAMILY_STUN ?? 'stun:stun.l.google.com:19302,stun:stun.cloudflare.com:3478'),
   // (1.9.0) the UDP ports direct connections use here (a firewall rule can let the home network in on just these)
   directPorts: portRange(env.BEAM_FAMILY_DIRECT_PORTS ?? '41700-41799'),
+  // (1.10.0) videos that play everywhere (lib/media.js): ffmpeg's path (ffprobe next to it), or "off"; unset: ffmpeg on
+  // the PATH
+  ffmpeg: String(env.BEAM_FAMILY_FFMPEG || '').trim(),
 };
 // (1.8.1) Backups (lib/backup.js): every BEAM_FAMILY_BACKUP_HOURS (0: none) into BEAM_FAMILY_BACKUP_DIR (default the
 // "backups" folder next to the data folder, as Beam's), the newest BEAM_FAMILY_BACKUP_KEEP kept.
@@ -141,7 +145,8 @@ function serve() {
   ctx.push = createPush(ctx, { file: path.join(DATA_DIR, 'vapid.json'), contact: /^https:/.test(config.publicUrl) ? config.publicUrl : '' });
   ctx.direct = createDirect(ctx);
   ctx.links = createLinks(ctx);
-  const router = createRouter([...ctx.people.routes, ...ctx.chat.routes, ...ctx.files.routes, ...ctx.push.routes, ...ctx.direct.routes, ...ctx.links.routes]);
+  ctx.media = createMedia(ctx);
+  const router = createRouter([...ctx.people.routes, ...ctx.chat.routes, ...ctx.files.routes, ...ctx.push.routes, ...ctx.direct.routes, ...ctx.links.routes, ...ctx.media.routes]);
   const serveStatic = createStatic(path.join(__dirname, 'public'));
   const backups = backupsOf(db);
 
@@ -151,6 +156,7 @@ function serve() {
     backups.stop();
     hub.closeAll();
     ctx.direct.closeAll();
+    ctx.media.stop();
     server.close();
     setTimeout(() => process.exit(0), 3000).unref();
     await new Promise(r => server.close(r));
@@ -223,6 +229,7 @@ function serve() {
   setTimeout(purge, 5 * 60e3).unref();
   setInterval(purge, 24 * 3600e3).unref();
   server.listen(PORT, HOST, () => {
+    ctx.media.start().catch(err => log.warn(`Videos that play everywhere: ${err.message}`));
     log.info(`Beam Family ${VERSION} is running on ${HOST}:${PORT}; data in ${DATA_DIR}${config.publicUrl ? `; address ${config.publicUrl}` : ''}`);
     backups.schedule().catch(err => log.warn(`Backups couldn't be planned: ${err.message}`));
     process.send?.({ ready: true });
@@ -363,7 +370,8 @@ const HELP = `Beam Family ${VERSION}
 Settings (environment or .env): BEAM_FAMILY_DATA (${DATA_DIR}), BEAM_FAMILY_HOST/PORT (${HOST}:${PORT}),
 BEAM_FAMILY_URL (the address people use), BEAM_FAMILY_NAME, BEAM_FAMILY_OWNER, BEAM_FAMILY_MAX_UPLOAD_MB,
 BEAM_FAMILY_MAX_STORAGE_GB, BEAM_FAMILY_BACKUP_DIR/HOURS/KEEP/FILES_MB, BEAM_FAMILY_STUN (direct connections: STUN
-servers, comma-separated, or "off").`;
+servers, comma-separated, or "off"), BEAM_FAMILY_FFMPEG (videos that play everywhere: ffmpeg's path, or
+"off").`;
 
 async function main() {
   const argv = process.argv.slice(2);
