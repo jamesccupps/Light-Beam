@@ -8,6 +8,7 @@ import { sidebarView } from './sidebar.js';
 import { conversationView } from './chat.js';
 import { signInPage, joinPage, settingsView, adminView, panelView, openViewer, newConversation, setTheme } from './pages.js';
 import { refreshPush } from './notify.js';
+import { busy } from './uploads.js';
 import { nav } from './nav.js';
 
 const app = document.getElementById('app');
@@ -153,6 +154,7 @@ function connect() {
   events = new EventSource('/api/events');
   events.addEventListener('hello', e => {
     const d = JSON.parse(e.data);
+    if (d.version && state.pageVersion && d.version !== state.pageVersion) reloadWhenIdle();
     state.client = d.client;
     state.connected = true;
     clearTimeout(offlineTimer);
@@ -172,6 +174,20 @@ function connect() {
     // A refused stream (signed out, turned off) doesn't come back by itself.
     if (events.readyState === EventSource.CLOSED) setTimeout(checkSession, 2000);
   };
+}
+
+// (1.8.5) Beam Family was updated: this page runs the app it loaded, so it reloads, once nothing is being sent from it
+// (a file in the tray or a message on its way) and nobody is typing (a draft is kept anyway).
+let reloading = false;
+function reloadWhenIdle() {
+  if (reloading) return;
+  reloading = true;
+  const now = () => {
+    const typing = document.activeElement?.matches?.('textarea, input') && document.activeElement.value;
+    if (!busy.size && !document.querySelector('.msg.pending') && !typing) location.reload();
+    else setTimeout(now, 5000);
+  };
+  now();
 }
 
 // Everything again (the server restarted, or too much was missed): conversations, counts, the one on screen.

@@ -21,7 +21,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 ## Next
 - **Several at once:** select several messages or pictures to copy, drag into another program, save or forward them
   together, and a gallery of everything a device sent.
-- **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server.
+- **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;
+  several separate families on one server, each its own site, and guests who see only the channels they're given.
 - **Remote control, further:** a Lowest delay mode (measured end to end), capture straight into the hardware encoder,
   decoding on the phone with WebCodecs, the cursor drawn on the viewing device, full-colour text, sound.
 - **A shared mouse and keyboard** between computers (KVM).
@@ -32,9 +33,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Everyday:** an optional automatic clipboard, photo backup, fetching a file from another device, folder sync, the
   phone as a remote, quick actions, reminders.
 - **More platforms:** iPhone, Mac and Linux apps; the Android app on the Play Store as a client for anyone's own Beam.
-- **Sharing:** share links for people without Beam; a browser extension.
-- **Security and server:** end-to-end encryption, a code-signed Windows app, a server dashboard, the phone's
-  settings backed up like the PCs'.
+- **Sharing:** a browser extension (links for people without an account: ✅ Beam Family's fast links, 1.9).
+- **Security and server:** end-to-end encryption, a code-signed Windows app, a server dashboard.
 - **Integrations:** Home Assistant, webhooks.
 - **Off-grid:** devices on one network carrying on when the server is down, and maybe messaging over mesh radios
   (Meshtastic / Reticulum).

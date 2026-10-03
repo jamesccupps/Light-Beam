@@ -12,7 +12,7 @@ const HEARTBEAT_MS = 25_000;
 const MAX_QUEUED = 1024 * 1024; // a stream that doesn't read this much of what it was sent is dropped (it reconnects)
 const MAX_PER_PERSON = 20;      // open streams per person; a new one ends their oldest
 
-function createHub({ onPresence = () => {}, onDrop = () => {} } = {}) {
+function createHub({ version = '', onPresence = () => {}, onDrop = () => {} } = {}) {
   const boot = crypto.randomBytes(4).toString('hex');
   let seq = 0;
   const recent = []; // { seq, to: Set|null, type, frame }
@@ -79,7 +79,8 @@ function createHub({ onPresence = () => {}, onDrop = () => {} } = {}) {
         for (const event of recent) if (event.seq > from && (!event.to || event.to.has(user.id))) write(client, event);
       }
     }
-    res.write(`event: hello\ndata: ${JSON.stringify({ client: id, boot })}\n\n`);
+    // (1.8.5) with the version: a page that loaded another reloads itself once it's idle
+    res.write(`event: hello\ndata: ${JSON.stringify({ client: id, boot, version })}\n\n`);
     const beat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, HEARTBEAT_MS);
     const done = () => {
       clearInterval(beat);

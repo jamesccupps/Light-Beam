@@ -30,7 +30,7 @@ function familyEnv(port, dir, env = {}) {
   const out = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('BEAM_')) out[k] = v;
   return { ...out, BEAM_FAMILY_DATA: path.join(dir, 'data'), BEAM_FAMILY_PORT: String(port), BEAM_FAMILY_HOST: '127.0.0.1', BEAM_TAILSCALE: 'off',
-    BEAM_FAMILY_OWNER: OWNER, BEAM_FAMILY_TEST_PUSH: '1', ...env };
+    BEAM_FAMILY_OWNER: OWNER, BEAM_FAMILY_TEST_PUSH: '1', BEAM_FAMILY_STUN: 'off', ...env }; // (direct connections: only where a test asks)
 }
 
 async function start(name, port, { env = {}, keep = false, args = [] } = {}) {
@@ -917,6 +917,171 @@ test('F-O (1.8.4): a page opened again finds the files it left unsent (only oneâ
       [[half, 'clip.mp4', piece.length * 2, piece.length], [whole, 'note.txt', 3, 3]]);
     assert.equal((await s.req('GET', '/api/uploads')).status, 401);
   } finally { await s.stop(); }
+});
+
+// (1.9.0) A direct connection the way a browser makes one (node-datachannel standing in for it): the offer with its
+// candidates to POST /api/direct, the answer back, then a data channel per transfer.
+async function directConnect(srv, who, route = '/api/direct') {
+  const ndc = require('node-datachannel');
+  const pc = new ndc.PeerConnection('test', { iceServers: [] });
+  const keep = new Set(); // (an unreferenced channel is closed when it's garbage-collected)
+  const ctl = pc.createDataChannel('beam');
+  keep.add(ctl);
+  await new Promise(r => { pc.onGatheringStateChange(st => { if (st === 'complete') r(); }); setTimeout(r, 3000); });
+  const r = await call(srv, 'POST', route, who, { sdp: pc.localDescription().sdp });
+  if (r.status !== 200) { pc.close(); return { status: r.status, error: r.json?.error }; }
+  pc.setRemoteDescription(r.json.sdp, 'answer');
+  await new Promise((res, rej) => { if (ctl.isOpen()) res(); ctl.onOpen(res); setTimeout(() => rej(new Error('no direct connection came up')), 10000); });
+  const channel = label => { const dc = pc.createDataChannel(JSON.stringify(label)); keep.add(dc); return dc; };
+  const answerOf = (dc, onBinary) => new Promise((res, rej) => {
+    dc.onMessage(m => {
+      if (typeof m !== 'string') return onBinary?.(Buffer.from(m));
+      const j = JSON.parse(m);
+      if (j.error) { rej(Object.assign(new Error(j.error), { answer: j })); dc.close(); } else if (j.done || j.offset !== undefined) { res(j); if (j.done) dc.close(); }
+    });
+  });
+  return {
+    status: 200, pc, answer: r.json.sdp,
+    get: async (file, offset = 0) => {
+      const parts = [];
+      const dc = channel({ op: 'get', file, offset });
+      await answerOf(dc, b => parts.push(b));
+      return Buffer.concat(parts);
+    },
+    put: (upload, offset, data) => {
+      const dc = channel({ op: 'put', upload, offset });
+      const answered = answerOf(dc);
+      dc.onOpen(() => { for (let i = 0; i < data.length; i += 65536) dc.sendMessageBinary(data.subarray(i, i + 65536)); });
+      // (an {offset} on the way is progress, and the answer we want is the last one)
+      return new Promise((res, rej) => {
+        dc.onMessage(m => {
+          if (typeof m !== 'string') return;
+          const j = JSON.parse(m);
+          if (j.error) rej(new Error(j.error)); else if (j.done) { res(j); dc.close(); } else if (j.offset !== undefined && !data.length) res(j);
+        });
+        answered.catch(rej);
+      });
+    },
+    close: () => { for (const dc of keep) { try { dc.close(); } catch {} } pc.close(); },
+  };
+}
+
+test('F-P (1.9.0): direct connections: a file comes over a data channel (from any offset), an upload goes up one; only what the person may see; none without a sign-in', async () => {
+  const s = await start('direct', 8846, { env: { BEAM_FAMILY_STUN: 'local' } });
+  const conns = [];
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const data = crypto.randomBytes(3 * 1024 * 1024 + 123);
+    const id = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'clip.bin', size: data.length })).json.id;
+    for (let o = 0; o < data.length; o += 1024 * 1024) {
+      await s.req('PUT', `/api/uploads/${id}?offset=${o}`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: data.subarray(o, o + 1024 * 1024) });
+    }
+    await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { files: [id] });
+    const conn = await directConnect(s, f.owner);
+    conns.push(conn);
+    assert.equal(conn.status, 200, conn.error);
+    assert.ok((await conn.get(id)).equals(data), 'the whole file');
+    assert.ok((await conn.get(id, 1_000_000)).equals(data.subarray(1_000_000)), 'from an offset');
+    // An upload over the connection: the same writer as https pieces.
+    const big = crypto.randomBytes(5 * 1024 * 1024 + 7);
+    const up = (await call(s, 'POST', '/api/uploads', f.owner, { name: 'up.bin', size: big.length })).json.id;
+    assert.deepEqual(await conn.put(up, 0, big), { done: true });
+    const back = await s.req('GET', `/api/files/${up}`, { headers: as(f.owner), raw: true });
+    assert.ok(back.body.equals(big), 'what went up is the file');
+    // Only what this person may see; another's unsent upload is nobody else's.
+    const hers = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'x.bin', size: 10 })).json.id;
+    await assert.rejects(conn.get(hers), /Not found/);
+    await assert.rejects(conn.put(hers, 0, Buffer.alloc(10)), /No such upload/);
+    // No direct connection without a sign-in.
+    assert.equal((await call(s, 'POST', '/api/direct', {}, { sdp: conn.answer })).status, 401);
+  } finally {
+    for (const c of conns) c.close?.();
+    await s.stop();
+  }
+});
+
+test('F-Q (1.9.0): fast links: anyone with the link gets the file, no sign-in, over https or a direct connection, also while it still uploads; only that file; switched off: gone; guessing is slowed', async () => {
+  const s = await start('links', 8845, { env: { BEAM_FAMILY_STUN: 'local', BEAM_FAMILY_URL: 'https://family.example.ts.net:8443' } });
+  const conns = [];
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const putAll = async (id, data, from = 0, piece = 1024 * 1024) => {
+      for (let o = from; o < data.length; o += piece) {
+        await s.req('PUT', `/api/uploads/${id}?offset=${o}`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: data.subarray(o, o + piece) });
+      }
+    };
+    const data = crypto.randomBytes(2 * 1024 * 1024 + 99);
+    const id = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'holiday.mp4', size: data.length, mime: 'video/mp4' })).json.id;
+    await putAll(id, data);
+    await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { files: [id] });
+    // A file already in the chat: anyone in the conversation may link it.
+    assert.equal((await call(s, 'POST', `/api/files/${id}/links`, mary.who, { hours: 0 })).status, 400, 'at least an hour');
+    let r = await call(s, 'POST', `/api/files/${id}/links`, f.owner, { hours: 24 });
+    assert.equal(r.status, 201, r.body);
+    const link = r.json.link;
+    assert.match(link.url, /^https:\/\/family\.example\.ts\.net:8443\/f\/[A-Za-z0-9_-]{32}$/);
+    const token = link.url.split('/f/')[1];
+    assert.ok(!fs.readFileSync(path.join(s.data, 'family.db')).includes(token), 'only its hash is kept');
+    // The page and what it shows, without a sign-in.
+    const page = await s.req('GET', `/f/${token}`);
+    assert.equal(page.status, 200);
+    assert.match(page.body, /<title>A file for you/);
+    r = await s.req('GET', `/api/links/${token}`);
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual([r.json.name, r.json.size, r.json.received, r.json.from, r.json.direct], ['holiday.mp4', data.length, data.length, 'Robin', { stun: [] }]);
+    // Over https: an attachment, sandboxed; a part of it too.
+    r = await s.req('GET', `/api/links/${token}/file`, { raw: true });
+    assert.ok(r.body.equals(data), 'the file over https');
+    assert.match(r.headers['content-disposition'], /^attachment;/);
+    assert.match(r.headers['content-security-policy'], /sandbox/);
+    r = await s.req('GET', `/api/links/${token}/file`, { headers: { Range: 'bytes=1000-' }, raw: true });
+    assert.equal(r.status, 206);
+    assert.ok(r.body.equals(data.subarray(1000)));
+    // Over a direct connection: that file only, and nothing goes up.
+    const conn = await directConnect(s, {}, `/api/links/${token}/direct`);
+    conns.push(conn);
+    assert.equal(conn.status, 200, conn.error);
+    assert.ok((await conn.get(null)).equals(data), 'the file over a direct connection');
+    const other = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'other.txt', size: 3 })).json.id;
+    await putAll(other, Buffer.from('abc'));
+    await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { files: [other] });
+    await assert.rejects(conn.get(other), /Not found/);
+    await assert.rejects(conn.put(other, 0, Buffer.from('abc')), /Not a request/);
+    // A file still on its way: linked at once by the one uploading it, and the link follows it as it comes.
+    const later = crypto.randomBytes(3 * 1024 * 1024 + 5);
+    const up = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'big.mov', size: later.length })).json.id;
+    await putAll(up, later.subarray(0, 1024 * 1024));
+    assert.equal((await call(s, 'POST', `/api/files/${up}/links`, f.owner, { hours: 1 })).status, 404, 'not someone elseâ€™s upload');
+    r = await call(s, 'POST', `/api/files/${up}/links`, mary.who, { hours: 1 });
+    const token2 = r.json.link.url.split('/f/')[1];
+    assert.equal((await s.req('GET', `/api/links/${token2}`)).json.received, 1024 * 1024);
+    const following = s.req('GET', `/api/links/${token2}/file`, { raw: true });
+    const viaDirect = conn.get; // (the visitor's connection is bound to the first link: the second gets its own)
+    const conn2 = await directConnect(s, {}, `/api/links/${token2}/direct`);
+    conns.push(conn2);
+    const followingDirect = conn2.get(null);
+    await new Promise(r2 => setTimeout(r2, 400));
+    await putAll(up, later, 1024 * 1024, 512 * 1024);
+    assert.ok((await following).body.equals(later), 'https followed the upload to its end');
+    assert.ok((await followingDirect).equals(later), 'so did the direct connection');
+    assert.ok(viaDirect);
+    // The list, and switching it off: gone for the page, the file and new connections.
+    r = await call(s, 'GET', `/api/files/${id}/links`, f.owner);
+    assert.deepEqual(r.json.links.map(l => [l.id, l.downloads >= 2]), [[link.id, true]]);
+    assert.equal((await call(s, 'DELETE', `/api/links/${link.id}`, mary.who)).status, 404, 'only whoever made it (or an admin)');
+    assert.equal((await call(s, 'DELETE', `/api/links/${link.id}`, f.owner)).status, 204);
+    for (const p of [`/api/links/${token}`, `/api/links/${token}/file`]) assert.equal((await s.req('GET', p)).status, 404, p);
+    assert.equal((await call(s, 'POST', `/api/links/${token}/direct`, {}, { sdp: conn.answer })).status, 404);
+    // Guessing at links: slowed after 30 wrong ones a minute.
+    let last = 0;
+    for (let i = 0; i < 32; i++) last = (await s.req('GET', `/api/links/${crypto.randomBytes(24).toString('base64url')}`)).status;
+    assert.equal(last, 429);
+  } finally {
+    for (const c of conns) c.close?.();
+    await s.stop();
+  }
 });
 
 // ---------------------------------------------------------------- runner

@@ -293,6 +293,12 @@ tailscale funnel --bg --https=8443 http://127.0.0.1:8766    # optional: a public
   link they choose a name and a password; they don't need Tailscale.
 - It works in any browser and installs as an app on phones and computers (on an iPhone: Share → Add to Home Screen,
   which notifications need there). Set `BEAM_FAMILY_URL` in `.env` and Beam's own apps get a "Beam Family" link.
+- **Fast links** (1.9): "Fast link" on any file in the chat, or "Make a fast link" (the paperclip) for a file on your
+  phone, gives a link anyone can download it with, no account needed, until it runs out (an hour, a day, a week) or
+  you switch it off. Its page fetches the file straight from your computer when it can (a direct WebRTC connection:
+  on your own Wi-Fi it stays inside the house; elsewhere it skips the public link's relay), else over https. Big
+  uploads from the app go the same direct way. On Windows, devices on your own network need one firewall rule to
+  connect directly (see [docs/FAMILY.md](docs/FAMILY.md)).
 
 Details, settings and the security model: [docs/FAMILY.md](docs/FAMILY.md).
 

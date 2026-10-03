@@ -7,6 +7,7 @@ import { renderBody, isJumbo, plainText, snippet, toWire } from './text.js';
 import { pickEmoji, QUICK, noteUsed } from './emoji.js';
 import { makeThumb, upload, cancelUpload, sendingFiles, busy, leftOver, discardUpload } from './uploads.js';
 import { nav } from './nav.js';
+import { fastLink, makeFastLink } from './fastlinks.js';
 
 const GROUP_MS = 7 * 60e3;
 const SYSTEM = { joined: 'joined the family space', left: 'left the group', renamed: 'renamed the group' };
@@ -155,7 +156,9 @@ export function conversationView(channelId, { jump = null } = {}) {
       dataset: { id: m.id },
     });
     if (cont) el.append(h('span', { class: 'side-time', title: fullTime(m.created) }, timeShort(m.created)));
-    else el.append(avatar(author), h('div', { class: 'msg-head' }, h('strong', {}, author.name), h('time', { datetime: new Date(m.created).toISOString(), title: fullTime(m.created) }, timeShort(m.created))));
+    else el.append(avatar(author), h('div', { class: 'msg-head' }, h('strong', {}, author.name), m.pending && !m.failed
+      ? h('span', { class: 'sending-label' }, 'Sending…') // (1.8.5: until it's sent; it looked sent)
+      : h('time', { datetime: new Date(m.created).toISOString(), title: fullTime(m.created) }, timeShort(m.created))));
     if (m.reply) {
       el.append(h('button', { class: 'reply-to', type: 'button', onclick: () => jumpTo(m.reply.id) }, icon('reply', 'i small'),
         m.reply.deleted ? h('span', { class: 'snip' }, 'The original message was deleted')
@@ -166,8 +169,9 @@ export function conversationView(channelId, { jump = null } = {}) {
       if (m.edited) body.append(h('span', { class: 'edited', title: `Edited ${fullTime(m.edited)}` }, '(edited)'));
       el.append(body);
     }
-    if (m.files?.length) el.append(filesEl(m));
+    // (1.8.5: how far, above the pictures: under a tall video it was out of sight)
     if (m.pending && !m.failed && m.request?.items?.length) el.append(sendingEl(m));
+    if (m.files?.length) el.append(filesEl(m));
     if (m.reactions?.length) el.append(reactionsEl(m));
     if (m.failed) {
       el.append(h('div', { class: 'msg-body small' }, 'Not sent. ', h('a', { href: '#', onclick: e => { e.preventDefault(); retry(m); } }, 'Try again'), ' · ',
@@ -291,6 +295,8 @@ export function conversationView(channelId, { jump = null } = {}) {
       mine ? { label: 'Edit', icon: 'edit', onclick: () => startEdit(m) } : null,
       m.body ? { label: 'Copy text', icon: 'copy', onclick: () => copyText(plainText(m.body)) } : null,
       { label: 'Copy link', icon: 'link', onclick: () => copyText(`${location.origin}/c/${channelId}?m=${m.id}`, 'Link copied') },
+      // (1.9.0) a link anyone can download its file with, no sign-in
+      m.files?.length ? { label: 'Fast link', icon: 'link', onclick: () => (m.files.length === 1 ? fastLink(m.files[0]) : menu(anchor, m.files.map(f => ({ label: f.name, icon: 'file', onclick: () => fastLink(f) })))) } : null,
       { label: m.pinned ? 'Unpin' : 'Pin', icon: 'pin', onclick: () => api(`/api/messages/${m.id}/pin`, { method: m.pinned ? 'DELETE' : 'PUT' }).catch(err => toast(err.message, { error: true })) },
       mine || isAdmin() ? 'hr' : null,
       mine || isAdmin() ? { label: 'Delete', icon: 'trash', danger: true, onclick: () => deleteMessage(m) } : null,
@@ -518,7 +524,11 @@ export function conversationView(channelId, { jump = null } = {}) {
   const composer = readonly ? h('div', { class: 'readonly' }, 'This channel is archived: its messages are kept, but nobody can post.')
     : h('div', { class: 'composer' }, suggest, h('div', { class: 'compose-box' }, replyBar, unsentEl, trayEl,
       h('div', { class: 'compose-row' },
-        iconBtn('attach', 'Attach files', () => fileInput.click()),
+        // (1.9.0) files here, or a fast link for one on this device
+        iconBtn('attach', 'Attach files', e => menu(e.currentTarget, [
+          { label: 'Send files here', icon: 'attach', onclick: () => fileInput.click() },
+          { label: 'Make a fast link', icon: 'link', onclick: () => makeFastLink() },
+        ])),
         composerInput,
         iconBtn('smile', 'Emoji', e => pickEmoji(e.currentTarget, insertEmoji)),
         sendBtn)), fileInput);

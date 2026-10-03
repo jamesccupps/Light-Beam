@@ -41,8 +41,10 @@ export function applyBootstrap(b) {
   state.spaces = b.spaces;
   state.channels = new Map(b.channels.map(c => [c.id, c]));
   state.limits = b.limits;
+  state.direct = b.direct || null; // (1.9.0)
   state.pushKey = b.push;
   state.version = b.version;
+  state.pageVersion ??= b.version; // (the app this page loaded, 1.8.5)
   // Messages loaded before are kept only for conversations still there (a resync may have changed anything).
   for (const id of [...state.messages.keys()]) if (!state.channels.has(id)) state.messages.delete(id);
   emit('people');
@@ -97,7 +99,14 @@ function sortList(cache) {
 // A page from the server, merged in (older or newer than what's there, or around a message).
 export function mergePage(channelId, messages, { more, latest = false, reset = false }) {
   const cache = cacheOf(channelId);
-  if (reset) { cache.list = []; cache.byId = new Map(); cache.latest = false; }
+  if (reset) {
+    // (1.8.5) Messages still being sent from here stay: after a restart of the server (an update) this page loads the
+    // conversation again, and a message whose file was still on its way vanished from it while it went on sending.
+    const pending = cache.list.filter(m => m.pending);
+    cache.list = pending;
+    cache.byId = new Map(pending.map(m => [m.id, m]));
+    cache.latest = false;
+  }
   for (const m of messages) {
     if (cache.byId.has(m.id)) Object.assign(cache.byId.get(m.id), m);
     else { cache.byId.set(m.id, m); cache.list.push(m); }
