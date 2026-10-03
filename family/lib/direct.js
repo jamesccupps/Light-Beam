@@ -34,8 +34,9 @@ const MAX_QUEUED = 64 * 1024 * 1024;   // an upload's bytes waiting for the disk
 const LOGGED = 8 * 1024 * 1024;        // transfers from this size on get a line in the log (how fast they went)
 const TAILNET = /^(100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|fd7a:115c:a1e0:)/i;
 
-// "1.9 GB in 6 min 40 s (5.1 MB/s, round trip 12 ms)": how a direct transfer went, for the log (1.9.1). A browser's
-// WebRTC tops out around 6–7 MB/s, whatever this end does: measured with Chrome and Edge, any number of connections.
+// "1.9 GB in 6 min 40 s (5.1 MB/s, round trip 12 ms)": how a direct transfer went, for the log (1.9.1). The speed
+// depends on the other end: headless Chrome/Edge on this PC stopped at ~6–7 MB/s whatever this end did (any number of
+// connections), a phone on Wi-Fi got ~5 MB/s, a visitor over the internet 21.7 MB/s.
 function howItWent(bytes, since, pc) {
   const s = Math.max((Date.now() - since) / 1000, 0.001);
   const size = bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
