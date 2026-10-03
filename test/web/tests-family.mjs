@@ -449,7 +449,9 @@ Robin ${sent}`);
     await visitor.waitFor(`document.querySelector('.link-progress .status')?.textContent === 'Stopped.' || document.querySelector('.link-progress .status')?.textContent`, 5000, 'stopped').then(t => eq(t, true, 'Stopped.'), async err => { throw new Error(`${err.message}; the page says: ${await visitor.evaluate("document.querySelector('.link-progress .status')?.textContent")}`); });
     const after = await visitor.evaluate(state);
     eq([after.get, after.background], ['Download', false], 'both buttons back');
-    // In the background, then Download again: asked first; "Cancel" starts nothing.
+    // In the background, then Download again: asked first; "Cancel" starts nothing. (The browser drops that download at
+    // once: a headless browser closed with a download still going died and took the next tests with it.)
+    await visitor.send('Page.setDownloadBehavior', { behavior: 'deny' });
     await visitor.evaluate(`document.querySelector('#background').click(); true`);
     await visitor.waitFor(`/Your browser is downloading it/.test(document.querySelector('.link-progress .status')?.textContent || '')`, 5000, 'in the browser’s downloads');
     await visitor.evaluate(`document.querySelector('#get').click(); true`);
