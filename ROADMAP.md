@@ -23,6 +23,11 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   together, and a gallery of everything a device sent.
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;
   several separate families on one server, each its own site, and guests who see only the channels they're given.
+- **Servers that talk to each other** (with several families): other people's family servers and Beams, linked only
+  when both owners allow it: a channel shared between two families, files sent to another person's devices like
+  AirDrop, or one of your devices shared with someone (they can send files to it, or control it remotely, as you
+  choose), each side keeping its own data. Over Tailscale (sharing just the server's machine) or the public link
+  (servers signing their requests), big files going direct.
 - **Remote control, further:** a Lowest delay mode (measured end to end), capture straight into the hardware encoder,
   decoding on the phone with WebCodecs, the cursor drawn on the viewing device, full-colour text, sound.
 - **A shared mouse and keyboard** between computers (KVM).
