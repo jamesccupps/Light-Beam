@@ -15,8 +15,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Beam Family**: the family's own chat, reachable over Tailscale or a public link.
 - Two security audits worked through, including signed Windows updates (the apps install only builds signed with
   your own key).
-- **Backups:** the server and Beam Family back themselves up every day (a restore puts one back), and each PC's Beam
-  app keeps its settings on your Beam, offered back after a reinstall.
+- **Backups:** the server and Beam Family back themselves up every day (a restore puts one back), and each PC's and
+  phone's Beam app keeps its settings on your Beam, offered back after a reinstall.
 
 ## Next
 - **Several at once:** select several messages or pictures to copy, drag into another program, save or forward them

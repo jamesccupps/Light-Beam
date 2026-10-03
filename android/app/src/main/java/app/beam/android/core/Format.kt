@@ -67,6 +67,9 @@ object Format {
 
     fun dayKey(ts: Long): Long = Instant.ofEpochMilli(ts).atZone(zone()).toLocalDate().toEpochDay()
 
+    /** When something happened, in a sentence: "Oct 3, 08:23" (with the year when it isn't this one). */
+    fun at(ts: Long, now: Long = System.currentTimeMillis()): String = date(ts, now) + ", " + time(ts)
+
     /** "Online", "Last seen 5 min ago", "Last seen yesterday", "Last seen Sep 28". */
     /**
      * A device's last report: "85% battery · 120 GB free" (+ " · Android 16 · Pixel 9 Pro XL" with [withOs]).

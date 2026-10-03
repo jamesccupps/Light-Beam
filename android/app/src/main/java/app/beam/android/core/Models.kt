@@ -20,6 +20,8 @@ data class Device(
     val appVersion: String? = null,
     /** It shows the phone's notifications (server 1.5 `phone-notifications`; `settings.phoneNotifications`). */
     val phoneNotifications: Boolean = false,
+    /** When its Beam app last backed up its settings there (server 1.8.1 `backups`), or null. */
+    val backupAt: Long? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("platform", platform)
         .put("online", online).put("lastSeen", lastSeen)
@@ -29,6 +31,7 @@ data class Device(
             tailscaleDns?.let { put("tailscale", JSONObject().put("dns", it)) }
             appVersion?.let { put("appVersion", it) }
             if (phoneNotifications) put("settings", JSONObject().put("phoneNotifications", true))
+            backupAt?.let { put("backup", JSONObject().put("at", it)) }
         }
 
     companion object {
@@ -44,6 +47,7 @@ data class Device(
             tailscaleDns = o.optJSONObject("tailscale")?.let { t -> t.str("dns") ?: t.str("ip") }?.trim()?.trimEnd('.')?.takeIf { it.isNotEmpty() },
             appVersion = o.str("appVersion") ?: o.str("version"),
             phoneNotifications = o.optJSONObject("settings")?.optBoolean("phoneNotifications") == true,
+            backupAt = o.optJSONObject("backup")?.optLong("at")?.takeIf { it > 0 },
         )
 
         fun parseList(a: JSONArray?): List<Device> =

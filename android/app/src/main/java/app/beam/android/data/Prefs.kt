@@ -313,6 +313,35 @@ class Prefs(context: Context, private val box: SecretBox = KeystoreBox()) {
         get() = sp.getBoolean("askedNotifications", false)
         set(v) = sp.edit { putBoolean("askedNotifications", v) }
 
+    // ---------------------------------------------------------------- the settings' backup on the server (1.8.2)
+
+    /** This install of Beam (made up once; a reinstall gets a new one): which backup on the server is this one's. */
+    val installId: String
+        @Synchronized get() = sp.getString(K_INSTALL_ID, null) ?: UUID.randomUUID().toString().replace("-", "").also {
+            sp.edit(commit = true) { putString(K_INSTALL_ID, it) }
+        }
+
+    /** The offer to put back an earlier install's settings was answered (or there was none): this one's go up now. */
+    var restoreChecked: Boolean
+        get() = sp.getBoolean(K_RESTORE_CHECKED, false)
+        set(v) = sp.edit(commit = true) { putBoolean(K_RESTORE_CHECKED, v) }
+
+    /** What the server took last ("<server> <sha-256 of the settings>"), so unchanged settings aren't sent again. */
+    var backupSent: String?
+        get() = sp.getString(K_BACKUP_SENT, null)
+        set(v) = sp.edit { if (v == null) remove(K_BACKUP_SENT) else putString(K_BACKUP_SENT, v) }
+
+    // (Android keeps only a weak reference to it.)
+    private var settingsWatcher: SharedPreferences.OnSharedPreferenceChangeListener? = null
+
+    /** [onChange] runs (on the main thread) whenever a setting that a backup holds changes, from anywhere. */
+    fun watchSettings(onChange: () -> Unit) {
+        settingsWatcher?.let(sp::unregisterOnSharedPreferenceChangeListener)
+        val watcher = SharedPreferences.OnSharedPreferenceChangeListener { _, key -> if (key in BACKED_UP) onChange() }
+        settingsWatcher = watcher
+        sp.registerOnSharedPreferenceChangeListener(watcher)
+    }
+
     /** The last status report the server accepted, so an unchanged phone doesn't report again after a restart. */
     var lastStatus: DeviceStatus?
         get() = sp.getString(K_LAST_STATUS, null)?.let { runCatching { DeviceStatus.parse(JSONObject(it)) }.getOrNull() }
@@ -491,8 +520,17 @@ class Prefs(context: Context, private val box: SecretBox = KeystoreBox()) {
         private const val K_ALERTS_SHOWN = "alertsShown"
         private const val K_LAST_STATUS = "lastStatus"
         private const val K_SIGNED_OUT_FROM = "signedOutFrom"
+        private const val K_INSTALL_ID = "installId"
+        private const val K_RESTORE_CHECKED = "restoreChecked"
+        private const val K_BACKUP_SENT = "backupSent"
         const val K_OUTBOX = "outbox"
         const val K_TRANSFERS = "transfers"
+
+        /** The settings a backup holds ([SettingsBackups]): never the sign-in, the ids or what's only this phone's. */
+        val BACKED_UP = setOf(
+            K_NAME, "stayConnected", "autoCopy", "autoDownload", "wifiOnlyDownloads", "maxDownloadMb", "tileTarget",
+            "mutedDevices", "autoCopyDevices", "shareNotifications", "sharedApps",
+        )
 
         fun defaultDeviceName(ctx: Context): String {
             val name = try {

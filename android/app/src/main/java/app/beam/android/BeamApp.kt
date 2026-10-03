@@ -22,6 +22,7 @@ import app.beam.android.data.Prefs
 import app.beam.android.data.ReadMarkers
 import app.beam.android.data.Repository
 import app.beam.android.data.ServerMoves
+import app.beam.android.data.SettingsBackups
 import app.beam.android.data.SignIns
 import app.beam.android.data.StatusReporter
 import app.beam.android.data.TransferManager
@@ -81,6 +82,8 @@ class BeamApp : Application() {
         private set
     lateinit var remote: RemoteControl
         private set
+    lateinit var backups: SettingsBackups
+        private set
 
     /** Lives as long as the process. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -129,6 +132,7 @@ class BeamApp : Application() {
         alerts = Alerts(this)
         phone = PhoneNotifications(this)
         remote = RemoteControl(this)
+        backups = SettingsBackups(this).also { it.start() }
         publishShortcuts()
         // Folders a sign-out moved aside, if the process ended before they were deleted.
         scope.launch(Dispatchers.IO) { cacheDir.listFiles { f -> f.name.contains(GONE) }?.forEach { it.deleteRecursively() } }
@@ -237,6 +241,7 @@ class BeamApp : Application() {
             alerts.catchUp()
             phone.onConnected()
             remote.onConnected()
+            backups.onConnected()
         }
         updates.checkSoon()
     }
@@ -286,6 +291,7 @@ class BeamApp : Application() {
         status.forget() // a new (or restored) server gets this phone's status
         phone.onPaired() // sharing waits for the "Show on" setup on a server where it wasn't confirmed
         remote.forget() // a page sign-in left for the old server is revoked there; the viewer's WebView starts afresh
+        backups.forget()
         Notifier.cancelSignedOut(this)
         connection.restart()
         ensureBackgroundService()
@@ -322,6 +328,7 @@ class BeamApp : Application() {
         status.forget()
         phone.forget()
         remote.forget() // a viewer page's sign-in left there is revoked (with its own cookie)
+        backups.forget()
         Thumbs.forgetAll(this)
         for (dir in listOf("outgoing", "camera")) discard(File(cacheDir, dir)) // copies waiting to be sent
         Notifier.cancelAll(this)

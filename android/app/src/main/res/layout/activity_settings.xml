@@ -76,6 +76,22 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <LinearLayout
+                android:id="@+id/rowRestore"
+                style="@style/SettingsRow">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/backup_restore" />
+
+                    <TextView
+                        android:id="@+id/restoreValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
             <!-- Receiving -->
             <TextView
                 style="@style/SettingsHeader"

@@ -12,6 +12,7 @@ import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.Lifecycle
@@ -53,6 +54,8 @@ class MainActivity : BaseActivity() {
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { updateBanner() }
 
     private val scanner = registerForActivityResult(ScanContract()) { result -> result.contents?.let(::handleScanned) }
+
+    private var restoreOffer: AlertDialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -133,6 +136,15 @@ class MainActivity : BaseActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) { combine(app.updates.state, app.updates.problem) { _, _ -> }.collect { updateBanner() } }
         }
+        // (1.8.2) After a reinstall, once: the settings an earlier install of Beam on this phone kept on the server.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.backups.offer.collect { c ->
+                    if (c == null) restoreOffer?.dismiss()
+                    else if (restoreOffer?.isShowing != true) restoreOffer = RestoreSettings.offer(this@MainActivity, c)
+                }
+            }
+        }
         // Instant on a cold start: the saved copy shows right away; only a first-ever start waits.
         if (!app.repo.state.value.loaded) b.refresh.isRefreshing = true
         maybeAskForNotifications()
@@ -141,6 +153,11 @@ class MainActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         if (::b.isInitialized) updateBanner()
+    }
+
+    override fun onDestroy() {
+        restoreOffer?.dismiss() // (not an answer: a turned phone's new screen offers it again)
+        super.onDestroy()
     }
 
     private var manualRefresh = false
