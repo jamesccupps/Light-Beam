@@ -2,17 +2,20 @@
 // secret is the key).
 // - Download: straight from the sharing machine when a direct connection comes up (WebRTC; on the same network it
 //   stays inside it), written to a file as it comes (a save dialog on a computer; on a phone the browser's downloads,
-//   through this site's service worker); this page stays open meanwhile. Without one: over https.
+//   through this site's service worker); this page stays open meanwhile (1.9.1: with the screen kept on, and a Stop
+//   button). Without one: over https.
 // - Download in the background: https, for the phone's own download manager (it goes on with the screen locked;
 //   through the public link it's slower).
+// One download at a time here (1.9.1: two at once made two copies); a second one is asked about first.
 // A file still being uploaded at the other end is followed as it arrives.
-import { h, fill, formatSize } from './ui.js';
+import { h, fill, formatSize, confirmDialog } from './ui.js';
 
 const token = location.pathname.split('/')[2] || '';
 const card = document.getElementById('card');
 const fileUrl = `/api/links/${token}/file`;
 let info = null;
-let busy = false;
+let running = null;   // the direct download going on: { stop() }
+let already = '';     // 'background' once the browser's downloads have it, 'done' once a direct download finished
 
 function toast(text) {
   const el = document.getElementById('toast');
@@ -29,11 +32,11 @@ async function load() {
   if (!res.ok) return problem(data.error || 'This link doesn’t work any more.');
   info = data;
   render();
-  if (info.received < info.size && !busy) setTimeout(refresh, 3000);
+  if (info.received < info.size && !running) setTimeout(refresh, 3000);
 }
 
 async function refresh() {
-  if (busy) return;
+  if (running) return;
   try {
     const res = await fetch(`/api/links/${token}`, { cache: 'no-store' });
     if (!res.ok) return load();
@@ -58,11 +61,58 @@ function render() {
     h('p', { class: 'muted' }, `${formatSize(info.size)} · from ${info.from} · until ${expires}`),
     h('p', { class: 'muted small arriving' }, arrivingText()),
     h('div', { class: 'link-actions' },
-      h('button', { class: 'btn primary', type: 'button', onclick: fastDownload }, 'Download'),
-      h('a', { class: 'btn', href: fileUrl, download: info.name, onclick: () => setStatus('Your browser has it: see its downloads. It goes on in the background.') }, 'Download in the background')),
+      h('button', { class: 'btn primary', type: 'button', id: 'get', onclick: onDownload }, 'Download'),
+      h('button', { class: 'btn', type: 'button', id: 'background', onclick: onBackground }, 'Download in the background')),
     h('div', { class: 'link-progress', hidden: true }, h('span', { class: 'track' }, h('span', { class: 'fill' })), h('p', { class: 'small status' })),
-    h('p', { class: 'muted small' }, 'Download goes straight to the sender’s computer when it can (fast; keep this page open until it’s done). Download in the background uses your browser’s downloads, which carry on with the screen locked, but it can be slower.'));
+    h('p', { class: 'muted small' }, 'Download goes straight to the sender’s computer when it can: fast, and the screen stays on until it’s done (keep this page open). Download in the background uses your browser’s own downloads, which carry on with the screen locked, but through the public link it can be much slower.'));
 }
+
+// While a direct download runs: Download becomes Stop, and the other button waits.
+function buttons(downloading) {
+  const get = card.querySelector('#get');
+  const background = card.querySelector('#background');
+  if (!get || !background) return;
+  get.textContent = downloading ? 'Stop' : 'Download';
+  get.classList.toggle('primary', !downloading);
+  background.disabled = downloading;
+}
+
+// A second download of the same file is asked about first (it would be a second copy).
+const again = () => confirmDialog({
+  title: 'Download it again?',
+  text: already === 'done' ? 'It’s already downloaded: see your downloads.' : 'It’s already downloading in your browser’s downloads (on a phone: pull down the notifications, or Chrome’s ⋮ menu → Downloads).',
+  ok: 'Download again',
+});
+
+async function onDownload() {
+  if (running) return running.stop();
+  if (already && !(await again())) return;
+  fastDownload();
+}
+
+async function onBackground() {
+  if (running) return;
+  if (already && !(await again())) return;
+  plainDownload();
+}
+
+// The screen stays on while a download comes straight from the sender (a phone that locks pauses this page).
+const awake = {
+  lock: null,
+  async on() {
+    let lock = null;
+    try { lock = (await navigator.wakeLock?.request('screen')) || null; } catch {}
+    // (a download that ended meanwhile lets go of it at once)
+    if (running) this.lock = lock; else lock?.release().catch(() => {});
+  },
+  off() {
+    this.lock?.release().catch(() => {});
+    this.lock = null;
+  },
+};
+document.addEventListener('visibilitychange', () => {
+  if (running && document.visibilityState === 'visible' && (!awake.lock || awake.lock.released)) awake.on();
+});
 
 function setStatus(text, fraction = null) {
   const box = card.querySelector('.link-progress');
@@ -79,7 +129,8 @@ function plainDownload(note = '') {
   document.body.append(a);
   a.click();
   a.remove();
-  setStatus(`${note}Your browser has it: see its downloads.`);
+  already = 'background';
+  setStatus(`${note}Your browser is downloading it: see its downloads (on a phone: pull down the notifications, or Chrome’s ⋮ menu → Downloads). It carries on with the screen locked.`);
 }
 
 // ---------------------------------------------------------------- where the bytes go
@@ -138,7 +189,8 @@ async function workerSink() {
     document.body.append(frame);
     return {
       kind: 'worker',
-      write: b => { if (cancelled) throw new Error('The download was cancelled'); port1.postMessage(b, [b.buffer]); },
+      // (cancelled in the browser's downloads)
+      write: b => { if (cancelled) throw new Error('cancelled'); port1.postMessage(b, [b.buffer]); },
       close: () => { port1.postMessage('end'); clearInterval(ping); setTimeout(() => frame.remove(), 60e3); },
       abort: () => { port1.postMessage({ error: 'stopped' }); clearInterval(ping); frame.remove(); },
     };
@@ -170,9 +222,10 @@ async function connect() {
 }
 
 async function fastDownload() {
-  if (busy) return;
   if (!info.direct || !window.RTCPeerConnection) return plainDownload();
-  busy = true;
+  const stopping = new AbortController();
+  running = { stop: () => stopping.abort() };
+  buttons(true);
   let sink = null;
   let conn = null;
   try {
@@ -185,22 +238,33 @@ async function fastDownload() {
     } catch {
       sink.abort();
       sink = null;
+      if (stopping.signal.aborted) return setStatus('Stopped.');
       return plainDownload('No direct connection could be made, so it goes through the public link. ');
     }
-    await receive(conn, sink);
+    if (stopping.signal.aborted) throw new Error('stopped');
+    awake.on();
+    await receive(conn, sink, stopping.signal);
+    already = 'done';
   } catch (err) {
     sink?.abort();
-    setStatus(`It stopped: ${err.message}. Try again, or use Download in the background.`);
+    if (stopping.signal.aborted) setStatus('Stopped.');
+    else if (err.message === 'cancelled') setStatus('The download was cancelled.');
+    else setStatus(`It stopped: ${err.message}. Try again, or use Download in the background.`);
   } finally {
-    busy = false;
+    running = null;
+    buttons(false);
+    awake.off();
     conn?.pc.close();
   }
 }
 
-function receive(conn, sink) {
+function receive(conn, sink, signal) {
   return new Promise((resolve, reject) => {
     const dc = conn.pc.createDataChannel(JSON.stringify({ op: 'get', offset: 0 }));
     dc.binaryType = 'arraybuffer';
+    // (what's already on its way after this is ignored: it would put the progress back over "Stopped.")
+    const fail = err => { dc.onmessage = null; dc.onclose = null; try { dc.close(); } catch {} reject(err); };
+    signal.addEventListener('abort', () => fail(new Error('stopped')), { once: true });
     const started = Date.now();
     let got = 0;
     let shown = 0;
@@ -226,7 +290,8 @@ function receive(conn, sink) {
           dc.close();
           flush().then(() => sink.close()).then(() => {
             const s = (Date.now() - started) / 1000;
-            setStatus(`Done: ${formatSize(got)} in ${s < 10 ? s.toFixed(1) : Math.round(s)} s, straight from the sender (${formatSize(got / Math.max(s, 0.1))}/s).${sink.kind === 'worker' ? ' It’s in your downloads.' : ''}`, 1);
+            const took = s < 10 ? `${s.toFixed(1)} s` : s < 60 ? `${Math.round(s)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
+            setStatus(`Done: ${formatSize(got)} in ${took}, straight from the sender (${formatSize(got / Math.max(s, 0.1))}/s).${sink.kind === 'worker' ? ' It’s in your downloads.' : ''}`, 1);
             resolve();
           }, reject);
         }
@@ -236,7 +301,7 @@ function receive(conn, sink) {
       batch.push(b);
       batched += b.byteLength;
       got += b.byteLength;
-      if (batched >= 2 * 1024 * 1024) flush().catch(reject);
+      if (batched >= 2 * 1024 * 1024) flush().catch(fail);
       const now = Date.now();
       if (now - shown > 250) {
         shown = now;

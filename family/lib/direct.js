@@ -31,7 +31,19 @@ const MAX_PEERS = 32;
 const MAX_PER_WHO = 4;
 const MAX_CHANNELS = 8;
 const MAX_QUEUED = 64 * 1024 * 1024;   // an upload's bytes waiting for the disk
+const LOGGED = 8 * 1024 * 1024;        // transfers from this size on get a line in the log (how fast they went)
 const TAILNET = /^(100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|fd7a:115c:a1e0:)/i;
+
+// "1.9 GB in 6 min 40 s (5.1 MB/s, round trip 12 ms)": how a direct transfer went, for the log (1.9.1). A browser's
+// WebRTC tops out around 6–7 MB/s, whatever this end does: measured with Chrome and Edge, any number of connections.
+function howItWent(bytes, since, pc) {
+  const s = Math.max((Date.now() - since) / 1000, 0.001);
+  const size = bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
+  const time = s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
+  let rtt = null;
+  try { rtt = pc.rtt(); } catch {}
+  return `${size} in ${time} (${(bytes / 1024 ** 2 / s).toFixed(1)} MB/s${rtt > 0 ? `, round trip ${Math.round(rtt)} ms` : ''})`;
+}
 
 // How a connection's chosen pair of addresses goes: on the same network, over Tailscale, or over the internet.
 function pathOf(pc) {
@@ -147,17 +159,25 @@ function createDirect(ctx) {
     dc.setBufferedAmountLowThreshold(LOW);
     dc.onBufferedAmountLow(() => { const d = drained; drained = null; d?.(); });
     const gone = () => !dc.isOpen() || peer.closed;
+    const started = Date.now();
+    let sent = 0;
     // (a file still on its way here is followed as it arrives)
     for await (const piece of ctx.files.readFollowing(a, pos, { chunk: CHUNK, followMs: FOLLOW_MS, isClosed: gone })) {
-      if (gone()) return;
+      if (gone()) break;
       dc.sendMessageBinary(piece);
+      sent += piece.length;
       peer.last = Date.now();
       // (and looked at again each second: a channel that closes meanwhile says nothing)
       while (dc.bufferedAmount() > HIGH && !gone()) await new Promise(r => { drained = r; setTimeout(r, 1000); });
     }
-    if (gone()) return;
+    const who = peer.link ? 'A fast link’s visitor' : peer.user.name;
+    if (gone()) {
+      if (sent >= LOGGED) log.info(`${who} stopped a direct download of ${a.name} after ${howItWent(sent, started, peer.pc)}`);
+      return;
+    }
     dc.sendMessage(JSON.stringify({ done: true, size: a.size })); // (the other end closes the channel once it has it all)
     if (!pos) ctx.links?.counted(peer.link);
+    if (sent >= LOGGED) log.info(`${who} downloaded ${a.name} directly ${pathOf(peer.pc)}: ${howItWent(sent, started, peer.pc)}`);
   }
 
   // An upload of the person's from the other end, from `offset` on (the same writer as https pieces).
@@ -199,10 +219,12 @@ function createDirect(ctx) {
         await new Promise(r => { wake = r; });
       }
     })();
+    const started = Date.now();
     const r = await ctx.files.receive(a, a.received, source, want, {
       onKept: kept => { peer.last = Date.now(); try { dc.sendMessage(JSON.stringify({ offset: kept })); } catch {} },
     });
     try { dc.sendMessage(JSON.stringify(r.done ? { done: true } : { offset: r.received })); } catch {}
+    if (got >= LOGGED) log.info(`${peer.user.name} ${r.done ? 'sent' : 'sent part of'} ${a.name} directly ${pathOf(peer.pc)}: ${howItWent(got, started, peer.pc)}`);
   }
 
   // POST /api/direct { sdp } → { sdp }: a direct connection for the person signed in.
