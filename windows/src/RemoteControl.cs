@@ -52,6 +52,12 @@ namespace Beam
         public int Pings;
         public string LastState;         // the last { locked, secure, elevated } sent
         public string Codec;             // what the page reported (beam.log once)
+        public RcFitWish Fit;            // Beam 1.8: the viewer wants this screen to suit its own (null: as it was)
+        public string FitDone;           // ...the wish last carried out ("" = as it was)
+        public bool Fitting;             // ...one is being carried out
+        public string FitNote;           // why the last one couldn't be
+        public Dictionary<string, object> Settings; // the viewer's picture settings (for the capture page, also a new one)
+        public bool VideoOff;            // the viewer is hidden: no frames
 
         public string Label
         {
@@ -61,6 +67,14 @@ namespace Beam
                 return Machine != null ? who + " (" + Machine + " · " + CheckedIp + ")" : who;
             }
         }
+    }
+
+    // The viewer's picture area in physical pixels, and its own scaling.
+    class RcFitWish
+    {
+        public int W, H;
+        public double Dpr;
+        public string Key { get { return W + "x" + H + "@" + Dpr.ToString("0.###", CultureInfo.InvariantCulture); } }
     }
 
     class RemoteControl
@@ -83,11 +97,16 @@ namespace Beam
         uint clipSeen;
         readonly TailnetQuery tailnet;
         readonly Stopwatch clock = Stopwatch.StartNew();
+        readonly RcDisplay display;
+        readonly SemaphoreSlim displayGate = new SemaphoreSlim(1, 1); // one display change at a time, in order
 
         public RemoteControl(App app)
         {
             this.app = app;
             tailnet = new TailnetQuery(app.Cfg);
+            IDisplayBackend screens = app.Cfg.CustomPath ? (IDisplayBackend)new FakeDisplay() : new Win32Display(); // tests: nothing real changes
+            display = new RcDisplay(screens, line => Log.Write("Remote control: the shared screen " + line));
+            app.Post(RestoreLeftoverDisplay);
             window = new RcWindow(this);
             tick = new Timer();
             tick.Interval = 1000;
@@ -534,6 +553,8 @@ namespace Beam
             c["peer"] = peer;
             c["mode"] = s.Mode;
             c["battery"] = OnBattery();
+            if (s.Settings != null) c["settings"] = s.Settings; // (a new capture page after a switch of screens: as before)
+            c["video"] = !s.VideoOff;
             return c;
         }
 
@@ -622,19 +643,10 @@ namespace Beam
             hello["role"] = "host";
             hello["name"] = app.Cfg.DeviceName;
             var layout = DesktopLayout.Current();
-            var screens = new List<object>();
-            foreach (var x in layout.Screens)
-            {
-                var o = new Dictionary<string, object>();
-                o["id"] = x.Id;
-                o["name"] = layout.SourceName(x.Id);
-                o["x"] = x.X; o["y"] = x.Y; o["w"] = x.W; o["h"] = x.H;
-                o["primary"] = x.Primary;
-                o["scale"] = Math.Round(x.Scale, 2);
-                screens.Add(o);
-            }
-            hello["monitors"] = screens.ToArray();
+            hello["monitors"] = MonitorList(layout);
             hello["monitor"] = s.Screen;
+            hello["caps"] = new object[] { "fit", "settings", "video" }; // Beam 1.8: what this PC does besides 1.6's
+            hello["fitted"] = display.Fitted;
             // Where this PC's cursor is, when it's on the shared screen: a phone's trackpad pointer starts there (1.6.1).
             var cursor = CursorOn(layout, s.Screen);
             if (cursor != null) hello["cursor"] = cursor;
@@ -653,6 +665,22 @@ namespace Beam
             }
             else Log.Write("Remote control: connected again (screen " + (s.Screen + 1) + ")");
             app.MarkChanged();
+        }
+
+        static object[] MonitorList(DesktopLayout layout)
+        {
+            var screens = new List<object>();
+            foreach (var x in layout.Screens)
+            {
+                var o = new Dictionary<string, object>();
+                o["id"] = x.Id;
+                o["name"] = layout.SourceName(x.Id);
+                o["x"] = x.X; o["y"] = x.Y; o["w"] = x.W; o["h"] = x.H;
+                o["primary"] = x.Primary;
+                o["scale"] = Math.Round(x.Scale, 2);
+                screens.Add(o);
+            }
+            return screens.ToArray();
         }
 
         // Where the cursor is on screen `screen`, in its own physical pixels (Beam is per-monitor DPI aware); null when
@@ -700,7 +728,27 @@ namespace Beam
                     if (injector != null) injector.ReleaseAll("another screen");
                     s.Screen = id;
                     if (old != null) { var closing2 = old.End("monitor"); }
+                    // A fitted screen goes back; the viewer asks again for the new one (after its hello).
+                    s.FitDone = null;
+                    if (display.Fitted) RestoreDisplay("the viewer switched to another screen");
                     StartHost(s, layout);
+                    break;
+                }
+                case "fit":
+                    OnFit(s, m);
+                    break;
+                case "settings":
+                    OnSettings(s, m);
+                    break;
+                case "video":
+                {
+                    object on;
+                    if (!m.TryGetValue("on", out on) || !(on is bool) || s.VideoOff == !(bool)on) break;
+                    s.VideoOff = !(bool)on;
+                    var vm = new Dictionary<string, object>();
+                    vm["t"] = "video";
+                    vm["on"] = !s.VideoOff;
+                    if (s.Host != null) s.Host.Post(vm);
                     break;
                 }
                 case "clip":
@@ -725,6 +773,158 @@ namespace Beam
             d["ch"] = "ctl";
             d["m"] = msg;
             s.Host.Post(d);
+        }
+
+        // ------------------------------------------------------------------ the viewer's screen and picture (Beam 1.8)
+
+        // The viewer asks for this screen to suit its own (`on`: its picture area w×h in physical pixels, its scaling
+        // dpr) or to be as it was. The latest wish wins; one change at a time (FitNow).
+        void OnFit(RcSession s, Dictionary<string, object> m)
+        {
+            if (!Json.Bool(m, "on", false)) s.Fit = null;
+            else
+            {
+                long w = Json.Long(m, "w", 0), h = Json.Long(m, "h", 0);
+                double dpr = Json.Double(m, "dpr", 1);
+                if (w < 200 || h < 200 || w > 16384 || h > 16384 || !(dpr >= 0.5 && dpr <= 8)) return;
+                var wish = new RcFitWish();
+                wish.W = (int)w;
+                wish.H = (int)h;
+                wish.Dpr = dpr;
+                s.Fit = wish;
+            }
+            FitNow(s);
+        }
+
+        async void FitNow(RcSession s)
+        {
+            if (s.Fitting) return; // the loop takes the latest wish
+            s.Fitting = true;
+            try
+            {
+                for (int round = 0; round < 10 && current == s && s.State != RcState.Ended; round++)
+                {
+                    var wish = s.Fit;
+                    string key = wish != null ? wish.Key + "#" + s.Screen : "";
+                    if (key == (s.FitDone ?? "")) break;
+                    s.FitDone = key;
+                    s.FitNote = null;
+                    await displayGate.WaitAsync();
+                    try
+                    {
+                        if (current != s || s.State == RcState.Ended) break;
+                        if (wish == null) await UndoDisplay("the viewer turned Fit off");
+                        else await ApplyFit(s, wish);
+                    }
+                    catch (Exception ex) { Log.Error("Remote control: fitting the screen", ex); s.FitNote = "Beam couldn't change this screen"; }
+                    finally { displayGate.Release(); }
+                    if (current == s) SendDisplay(s);
+                }
+            }
+            finally { s.Fitting = false; }
+        }
+
+        // (inside displayGate) A screen fitted before goes back first; the original is written down before anything
+        // changes, so a Beam that is ended meanwhile puts it back at its next start.
+        async Task ApplyFit(RcSession s, RcFitWish wish)
+        {
+            var sc = DesktopLayout.Current().Screen(s.Screen);
+            if (sc == null) { s.FitNote = "Beam can't find this screen"; return; }
+            if (display.Fitted && !string.Equals(display.Original.Device, sc.Device, StringComparison.OrdinalIgnoreCase)) await UndoDisplay("another screen is shared now");
+            var plan = display.Plan(sc.Device, wish.W, wish.H, wish.Dpr);
+            if (plan == null) { s.FitNote = "Windows didn't say which sizes this screen can have"; return; }
+            if (!display.Fitted)
+            {
+                var left = SavedDisplay.Parse(app.Cfg.RcDisplayRestore); // (not put back yet: that one is the real original)
+                if (left != null && string.Equals(left.Device, plan.Device, StringComparison.OrdinalIgnoreCase)) plan.Original = left;
+                app.Cfg.RcDisplayRestore = plan.Original.ToString();
+                app.Cfg.Save();
+            }
+            display.Begin(plan);
+            s.FitNote = await Task.Run(() => display.Apply(plan));
+            if (s.FitNote != null) Log.Write("Remote control: " + s.FitNote);
+            await Task.Delay(300); // Windows tells every window first; then the new size is read
+            if (injector != null) injector.LayoutChanged();
+        }
+
+        // (inside displayGate) The fitted screen as it was. If Windows refuses, the config keeps it for the next start.
+        async Task UndoDisplay(string why)
+        {
+            var saved = display.Original;
+            if (saved == null) return;
+            bool ok = await Task.Run(() => display.Undo(saved, why));
+            display.End();
+            if (ok) { app.Cfg.RcDisplayRestore = null; app.Cfg.Save(); }
+            if (injector != null) injector.LayoutChanged();
+        }
+
+        async void RestoreDisplay(string why)
+        {
+            await displayGate.WaitAsync();
+            try { await UndoDisplay(why); }
+            catch (Exception ex) { Log.Error("Remote control: putting the screen back", ex); }
+            finally { displayGate.Release(); }
+        }
+
+        // A screen still fitted when Beam last closed (ended by force, or Windows shut down first): the resolution went
+        // back by itself; its scaling goes back now.
+        async void RestoreLeftoverDisplay()
+        {
+            if (string.IsNullOrEmpty(app.Cfg.RcDisplayRestore)) return;
+            var left = SavedDisplay.Parse(app.Cfg.RcDisplayRestore);
+            if (left == null) { app.Cfg.RcDisplayRestore = null; app.Cfg.Save(); return; }
+            await displayGate.WaitAsync();
+            try
+            {
+                if (display.Fitted) return; // (a session fitted it again meanwhile, and keeps this original)
+                bool ok = await Task.Run(() => display.Undo(left, "Beam closed before it could"));
+                if (ok && !display.Fitted) { app.Cfg.RcDisplayRestore = null; app.Cfg.Save(); }
+            }
+            catch (Exception ex) { Log.Error("Remote control: putting the screen back", ex); }
+            finally { displayGate.Release(); }
+        }
+
+        // After a fit or a restore: the screens' sizes now (input maps to them), and whether this one is fitted.
+        void SendDisplay(RcSession s)
+        {
+            var d = new Dictionary<string, object>();
+            d["t"] = "display";
+            d["monitors"] = MonitorList(DesktopLayout.Current());
+            d["monitor"] = s.Screen;
+            d["fitted"] = display.Fitted;
+            if (s.FitNote != null) d["note"] = s.FitNote;
+            SendCtl(s, d);
+        }
+
+        static readonly string[] PictureModes = { "auto", "text", "motion", "saver" };
+        static readonly string[] PictureSizes = { "auto", "full", "1080", "720", "window" };
+        static readonly string[] PictureCodecs = { "auto", "av1", "h264", "vp9" };
+        static string OneOf(string v, string[] allowed) { return v != null && Array.IndexOf(allowed, v) >= 0 ? v : allowed[0]; }
+
+        // The viewer's picture settings, checked, for the capture page (and for a new one after a switch of screens).
+        void OnSettings(RcSession s, Dictionary<string, object> m)
+        {
+            var c = new Dictionary<string, object>();
+            c["t"] = "settings";
+            c["mode"] = OneOf(Json.Str(m, "mode"), PictureModes);
+            c["size"] = OneOf(Json.Str(m, "size"), PictureSizes);
+            c["vw"] = Math.Max(0L, Math.Min(16384L, Json.Long(m, "vw", 0)));
+            c["vh"] = Math.Max(0L, Math.Min(16384L, Json.Long(m, "vh", 0)));
+            long fps = Json.Long(m, "fps", 0), kbps = Json.Long(m, "kbps", 0);
+            c["fps"] = fps == 15 || fps == 30 || fps == 60 ? fps : 0L;
+            c["kbps"] = kbps >= 500 && kbps <= 100000 ? kbps : 0L;
+            c["codec"] = OneOf(Json.Str(m, "codec"), PictureCodecs);
+            c["net"] = Json.Str(m, "net") == "cellular" ? "cellular" : "";
+            if (s.Settings == null || PictureText(s.Settings) != PictureText(c)) Log.Write("Remote control: the viewer's picture settings: " + PictureText(c));
+            s.Settings = c;
+            if (s.Host != null) s.Host.Post(c);
+        }
+
+        static string PictureText(Dictionary<string, object> c)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "{0}, size {1}, {2} fps, {3} kbps, codec {4}{5}", c["mode"], c["size"],
+                Convert.ToInt64(c["fps"], CultureInfo.InvariantCulture) == 0 ? "auto" : c["fps"], Convert.ToInt64(c["kbps"], CultureInfo.InvariantCulture) == 0 ? "auto" : c["kbps"],
+                c["codec"], (string)c["net"] == "cellular" ? ", on mobile data" : "");
         }
 
         // ------------------------------------------------------------------ every second while a session lasts
@@ -798,6 +998,7 @@ namespace Beam
             }
             if (s.Banner != null) { s.Banner.CloseBanner(); s.Banner = null; }
             ClipWatch(false);
+            if (display.Fitted && !closing) RestoreDisplay("the session ended"); // (quitting: Quit puts it back itself)
             if (current == null)
             {
                 KeepAwake(false);
@@ -847,6 +1048,14 @@ namespace Beam
                 var body = new Dictionary<string, object>();
                 body["reason"] = "stopped";
                 if (api != null) Pending.Add(Task.Run(async () => { try { await api.Call(HttpMethod.Post, "/api/rc/sessions/" + id + "/end", body, 3, CancellationToken.None); } catch { } }));
+            }
+            // A fitted screen goes back now, on this thread (no other is waiting on it). Should this fail, the
+            // resolution goes back as Beam exits, and the scaling at its next start.
+            if (display.Fitted)
+            {
+                try { if (display.Undo(display.Original, "Beam quit")) { app.Cfg.RcDisplayRestore = null; app.Cfg.Save(); } }
+                catch (Exception ex) { Log.Error("Remote control: putting the screen back", ex); }
+                display.End();
             }
             SystemEvents.PowerModeChanged -= OnPower;
             RcHost.CloseAll();
@@ -1062,6 +1271,12 @@ namespace Beam
                     else Log.Write("Remote control: (test) no banner to click");
                     break;
                 case "probe": Probe(); break;
+                case "display": // the made-up screen's state and the calls it got (FakeDisplay)
+                {
+                    var fake = display.Backend as FakeDisplay;
+                    Log.Write("Remote control: (test) display " + (fake != null ? fake.State : display.Backend.Name) + (display.Fitted ? " (fitted)" : ""));
+                    break;
+                }
                 case "guard": testClickOnShow = true; break;
                 case "banner": // banner[:info|drag:x,y|jump:x,y|hover:on|off|top] (RcBanner.TestCommand)
                     if (current != null && current.Banner != null) current.Banner.TestCommand(arg);

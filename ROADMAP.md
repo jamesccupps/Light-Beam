@@ -9,7 +9,9 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - Device status (battery, storage, version), ringing a lost device, Wake-on-LAN, alerts.
 - A speed and battery audit, with speed budgets the tests enforce.
 - Phone notifications on your PCs, with replies and actions.
-- Remote control of a Windows PC's screen from another PC, a browser or a phone.
+- Remote control of a Windows PC's screen from another PC, a browser or a phone; the PC's resolution and scaling
+  fitted to the screen you view it on (put back after), and a Picture panel that applies at once: Auto, Sharp text,
+  Smooth motion or Data saver, picture size, frame rate, data limit, codec and details.
 - **Beam Family**: the family's own chat, reachable over Tailscale or a public link.
 - Two security audits worked through, including signed Windows updates (the apps install only builds signed with
   your own key).
@@ -18,10 +20,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Several at once:** select several messages or pictures to copy, drag into another program, save or forward them
   together, and a gallery of everything a device sent.
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server.
-- **Remote control: faster, lighter, sharper:** an Auto mode next to Sharp text and Smooth motion, a Data saver for
-  phones on mobile data, lower delay (measured end to end), sending only the size the viewer can show, a details
-  panel, the PC's resolution and scaling matched to the screen you view it on, and settings you can change while
-  connected (frame rate, data cap, codec, cursor, keys).
+- **Remote control, further:** a Lowest delay mode (measured end to end), capture straight into the hardware encoder,
+  decoding on the phone with WebCodecs, the cursor drawn on the viewing device, full-colour text, sound.
 - **A shared mouse and keyboard** between computers (KVM).
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
 - **Builds and releases** with GitHub Actions.

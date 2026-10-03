@@ -216,9 +216,11 @@ address, so the browser becomes part of that device instead of a separate entry.
   desktop, unlocked.
   **Ctrl+Alt+Shift+F12** on the PC ends every session at once. You can also end a session, or turn remote control off
   for a PC, from any of your devices (Settings → Devices). Nothing but the PC itself can turn it on.
-- **In the viewer:** Sharp text or Smooth motion, choose a screen, full screen, a Keys menu (Win, Alt+Tab, Lock this
-  PC…), and clipboard sync, which is off until you turn it on for that session. A phone asks "Still there?" after
-  10 minutes without a touch.
+- **In the viewer:** the Picture panel (fit the PC to this screen: its resolution and display scaling change to suit
+  the screen you view it on and go back when you disconnect, on by default except on phones; Auto, Sharp text, Smooth
+  motion or Data saver; picture size, frame rate, data limit, codec and details, kept per PC), choose a screen, full
+  screen, a Keys menu (Win, Alt+Tab, Lock this PC…), and clipboard sync, which is off until you turn it on for that
+  session. A phone asks "Still there?" after 10 minutes without a touch.
 - **Limits:** a locked or signed-out PC, administrator windows and Ctrl+Alt+Del need Remote Desktop (the existing
   button). Only Beam apps, or a browser where you signed in with a pairing link, approval or password, can start a
   session.

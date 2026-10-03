@@ -8,15 +8,29 @@
 // - gives ICE the PC's candidates only as its attested Tailscale addresses (the strict rewrite), and shows nothing
 //   and sends nothing until the connection is seen to go to one of them (the peer check); otherwise it hangs up;
 // - sends input once the PC has said hello too (it does after its own check), on three data channels: `ctl`
-//   (hello, quality, monitor, clip, lock, ping), `in` (buttons, wheel, keys, text, release: ordered and reliable)
-//   and `mv` (pointer moves: unordered, no retries, the latest once per frame);
-// - keeps nothing of a session: no frames, nothing in IndexedDB or web storage. The chat app's scripts are loaded,
-//   but none of them start in this mode (no history, no cache, no outbox).
+//   (hello, quality, monitor, clip, lock, ping; from 1.8 fit, settings, video), `in` (buttons, wheel, keys, text,
+//   release: ordered and reliable) and `mv` (pointer moves: unordered, no retries, the latest once per frame);
+// - (1.8, a PC that says it can) has the PC fit its screen to this one, and sends the picture's settings (quality
+//   mode, size, frame rate, data limit, codec) and whether this page is visible; they apply at once;
+// - keeps nothing of a session: no frames, nothing in IndexedDB or web storage (only choices of this page's: the
+//   touch mode, and per PC the picture's settings). The chat app's scripts are loaded, but none of them start in
+//   this mode (no history, no cache, no outbox).
 // The chat app's side (Control, Settings → Devices, Settings → This PC) is at the end.
 
 const RC_ID = (/^#remote=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
 
 const RC_MODES = ['text', 'motion'];  // Sharp text (30 fps, 8 Mbps) / Smooth motion (60 fps, 16 Mbps): the PC applies them
+// The picture's settings (1.8), per PC: [value, label, more]. Auto: sharp while the screen is still, smooth while it
+// moves, light on mobile data; the PC decides from what it sends.
+const RC_PIC = {
+  mode: [['auto', 'Auto', 'Sharp while the screen is still, smooth while it moves, light on mobile data'], ['text', 'Sharp text', '30 fps, for reading and writing'],
+    ['motion', 'Smooth motion', '60 fps, for video and anything that moves'], ['saver', 'Data saver', '15 fps at up to 720p, for mobile data']],
+  size: [['auto', 'Auto: what this screen shows'], ['full', 'The PC’s full size'], ['1080', 'Up to 1080p'], ['720', 'Up to 720p']],
+  fps: [[0, 'Auto'], [60, '60 fps'], [30, '30 fps'], [15, '15 fps']],
+  kbps: [[0, 'Auto'], [20000, '20 Mbps'], [10000, '10 Mbps'], [5000, '5 Mbps'], [2000, '2 Mbps']],
+  codec: [['auto', 'Auto'], ['av1', 'AV1'], ['h264', 'H.264'], ['vp9', 'VP9']],
+};
+const RC_FIT_MS = 6000;        // a fit of the PC's screen: answered within this long (input waits meanwhile)
 const RC_OFFER_MS = 20000;     // the PC has this long to share its screen and offer
 const RC_ICE_MS = 15000;       // …and the connection this long to come up after the answer
 const RC_RESTART_MS = 3000;    // disconnected this long: ask the PC for an ICE restart
@@ -61,6 +75,17 @@ const rc = {
   sub: { locked: false, secure: false, elevated: false }, // what the PC reports while live
   quality: 'text',
   qualityInfo: null,   // { fps, kbps }: what the PC applied
+  // the picture's settings and the PC's screen (1.8)
+  pic: rcLoadPic(),    // { mode, size, fps, kbps, codec, fitPc, details }: remembered per PC (a choice of this page's)
+  caps: [],            // what the PC does besides 1.6 (its hello): fit, settings, video
+  profile: '',         // what the PC applies now (Auto's pick included): text | motion | saver
+  fitted: false,       // the PC's screen is fitted to this one (it says)
+  fitting: false,      // a fit asked for and not answered yet: input waits (RC_FIT_MS at most)
+  fitSent: '',         // the last fit asked for (w×h@dpr)
+  picSent: null,       // the last settings sent
+  host: null,          // the PC's own numbers (its stats): screen size, scale-down, limits, network, loss, delay
+  videoOff: false,     // the PC was told this page is hidden
+  decoder: '',         // this side's decoder (details)
   fit: 'fit',          // fit | 1:1
   clip: false,         // clipboard sync (off by default, per session)
   clipN: 0,
@@ -117,8 +142,10 @@ function startRemote() {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) rcRelease();
     else { rcWakeLock(); rcRunStats(); }
+    rcVideo(!document.hidden); // (1.8: no frames while nobody can see them)
     rcHook();
   });
+  navigator.connection?.addEventListener?.('change', () => rcSendPic()); // (Wi-Fi ↔ mobile data: Auto adjusts)
   document.addEventListener('fullscreenchange', rcOnFullscreen);
   rc.winW = innerWidth;
   rc.winH = innerHeight;
@@ -181,6 +208,7 @@ function rcBuild() {
   const card = el('div', { class: 'rc-card', role: 'status', 'aria-live': 'polite' });
   const overlay = el('div', { class: 'rc-overlay' }, card);
   const help = el('div', { class: 'rc-help', hidden: true });
+  const details = el('div', { class: 'rc-details', hidden: true, 'aria-label': 'Picture details' }); // (1.8: Show details)
   // (phone keyboards: no autocorrect, suggestions or learning from what's typed to the PC, where they honour it)
   const sink = el('textarea', { class: 'rc-sink', rows: '1', autocomplete: 'off', autocorrect: 'off', autocapitalize: 'off', spellcheck: 'false', inputmode: 'text', enterkeyhint: 'enter',
     'aria-autocomplete': 'none', 'data-gramm': 'false', 'aria-label': 'Keyboard input for the remote PC' });
@@ -189,9 +217,9 @@ function rcBuild() {
   const tools = el('div', { class: 'rc-tools' });
   const bar = el('header', { class: 'rc-bar' }, el('span', { class: 'rc-title' }, icon('monitor'), name), chip, tools);
   const keys = el('div', { class: 'rc-keys', hidden: true });
-  const root = el('div', { id: 'remote', class: 'rc' }, bar, el('div', { class: 'rc-body' }, stage, fx, cursor, notice, overlay, help), keys, sink);
+  const root = el('div', { id: 'remote', class: 'rc' }, bar, el('div', { class: 'rc-body' }, stage, fx, cursor, details, notice, overlay, help), keys, sink);
   document.body.prepend(root);
-  Object.assign(rcUi, { root, bar, name, chip, tools, stage, video, cursor, fx, notice, overlay, help, card, sink, keys });
+  Object.assign(rcUi, { root, bar, name, chip, tools, stage, video, cursor, fx, notice, overlay, help, card, sink, keys, details });
   rcBindInput();
   rcBuildKeyStrip();
   rcRender();
@@ -547,6 +575,10 @@ function rcCreatePeer() {
   const mine = () => rc.pc === pc;
   pc.ontrack = e => {
     if (!mine()) return;
+    // (1.8) Frames are shown as they come, with no buffer held back for smoothness: what the Windows app's viewer does
+    // with its playout-delay setting, for browsers and the phone too.
+    try { e.receiver.jitterBufferTarget = 0; } catch {}
+    try { if ('playoutDelayHint' in e.receiver) e.receiver.playoutDelayHint = 0; } catch {}
     const v = rcUi.video;
     v.srcObject = e.streams[0] || new MediaStream([e.track]);
     v.play().catch(() => {});
@@ -908,8 +940,11 @@ async function rcStats() {
   rc.stats = {
     fps, kbps, codec: codec ? String(codec.mimeType || '').replace(/^video\//i, '') : '',
     w: inbound.frameWidth || rcUi.video.videoWidth || 0, h: inbound.frameHeight || rcUi.video.videoHeight || 0,
+    jitterMs: Number.isFinite(inbound.jitterBufferDelay) && inbound.jitterBufferEmittedCount > 0 ? Math.round(inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount * 1000) : null,
   };
+  if (typeof inbound.decoderImplementation === 'string') rc.decoder = rcClean(inbound.decoderImplementation, 80) + (inbound.powerEfficientDecoder === true ? ' (hardware)' : '');
   rcRenderChip();
+  rcRenderDetails();
 }
 
 // ---------------------------------------------------------------- the data channels
@@ -926,6 +961,7 @@ function rcOnCtlOpen() {
   rc.helloSent = true;
   const app = HOST ? 'windows' : /; wv\)/.test(navigator.userAgent) ? 'android' : 'web';
   rcSend('ctl', { t: 'hello', v: 1, role: 'viewer', app, caps: ['clip', 'text'] });
+  rc.quality = rc.pic.mode === 'motion' ? 'motion' : 'text'; // (a 1.6 PC's two; a 1.8 one gets the settings after its hello)
   rcSend('ctl', { t: 'quality', mode: rc.quality });
   if (rc.clip) rcSend('ctl', { t: 'clip', on: true });
   rcTimer('ping', () => rcSend('ctl', { t: 'ping', n: ++rc.pingN, at: Date.now() }), 2000, true);
@@ -951,21 +987,45 @@ function rcOnCtl(data) {
       rcClearTimer('switch');
       rcClearTimer('hello');
       rc.pointer = rcHostCursor(m.cursor); // (the trackpad's pointer starts where the PC's cursor is, from 1.6.1)
+      // (1.8) What it does besides 1.6's: then the picture's settings, the fit, and whether this page is visible.
+      rc.caps = Array.isArray(m.caps) ? m.caps.filter(x => typeof x === 'string').slice(0, 16) : [];
+      rc.fitted = m.fitted === true;
+      rc.fitting = false;
+      rc.fitSent = '';
+      rc.picSent = null;
+      rc.videoOff = null; // (unknown: said once, whatever it is)
       rcLayout();
       rcRender();
       rcHook();
       rcMaybeHelp();
+      rcSendPic();
+      rcSendFit();
+      rcVideo(!document.hidden);
       break;
     case 'stats':
       rcHostStats(m);
       rcRenderChip();
+      rcRenderDetails();
       break;
     case 'quality':
       if (RC_MODES.includes(m.mode)) {
         rc.quality = m.mode;
         rc.qualityInfo = { fps: Number(m.maxFps) || null, kbps: Number(m.maxKbps) || null };
+        if (['text', 'motion', 'saver'].includes(m.profile)) rc.profile = m.profile;
         rcRenderBar();
+        rcRenderDetails();
       }
+      break;
+    case 'display': // (1.8) after a fit or a restore: the screens' sizes now (input maps to them)
+      rc.monitors = rcMonitors(m.monitors);
+      if (Number.isInteger(m.monitor) && rc.monitors.some(x => x.id === m.monitor)) rc.monitor = m.monitor;
+      rc.fitted = m.fitted === true;
+      rc.fitting = false;
+      rcClearTimer('fit');
+      if (typeof m.note === 'string' && m.note) toast(rcClean(m.note, 160));
+      rcLayout();
+      rcRender();
+      rcRenderDetails();
       break;
     case 'state':
       rc.sub = { locked: m.locked === true, secure: m.secure === true, elevated: m.elevated === true };
@@ -1009,11 +1069,20 @@ function rcMonitors(list) {
   }));
 }
 
-// The PC's own numbers (only it sees its encoder): codec, encoder, what limits it.
+// The PC's own numbers (only it sees its encoder): codec, encoder, what limits it; from 1.8 also its screen's size, how
+// much smaller it sends it, the profile and its limits, the network's estimate, loss and delay (for the details).
 function rcHostStats(m) {
   if (typeof m.encoder === 'string') rc.encoder = rcClean(m.encoder, 120);
   if (typeof m.codec === 'string') rc.hostCodec = rcClean(m.codec, 40);
   if (typeof m.qlr === 'string') rc.qlr = rcClean(m.qlr, 20);
+  if (m.t !== 'stats' || !Number.isFinite(m.srcW)) return;
+  const num = (v, max) => (Number.isFinite(v) && v >= 0 ? Math.min(v, max) : null);
+  rc.host = {
+    srcW: num(m.srcW, 16384), srcH: num(m.srcH, 16384), w: num(m.w, 16384), h: num(m.h, 16384), down: num(m.down, 64),
+    fps: num(m.fps, 1000), kbps: num(m.kbps, 1e7), maxFps: num(m.maxFps, 1000), maxKbps: num(m.maxKbps, 1e7),
+    avail: num(m.avail, 1e7), lost: num(m.lost, 100), rtt: num(m.rtt, 1e5), auto: m.auto === true, video: m.video !== false,
+  };
+  if (['text', 'motion', 'saver'].includes(m.profile)) rc.profile = m.profile;
 }
 
 // Text from the PC for the bar: one line, no control or bidi characters, cut short.
@@ -1044,8 +1113,9 @@ function rcPoint(clientX, clientY) {
   };
 }
 
-// Input goes once both checks passed: ours, and the PC's (it says hello after its own, and drops input until then).
-const rcLive = () => rc.state === 'live' && rc.verified && !rc.resolving && Boolean(rc.hostHello) && !rc.switching && !rc.sub.locked && !rc.sub.secure;
+// Input goes once both checks passed: ours, and the PC's (it says hello after its own, and drops input until then);
+// not while the PC's screen changes size for a fit (1.8: its sizes come right after).
+const rcLive = () => rc.state === 'live' && rc.verified && !rc.resolving && Boolean(rc.hostHello) && !rc.switching && !rc.sub.locked && !rc.sub.secure && !rc.fitting;
 
 // Moves: the latest one goes once per animation frame on `mv` (unordered, no retries); a full channel waits.
 function rcMove(p) {
@@ -1921,7 +1991,9 @@ function rcApplyView() {
   const v = rcV;
   if (!v.base) return;
   rcUi.video.style.transform = `translate(${v.ox}px, ${v.oy}px) scale(${v.s / v.base})`;
-  rc.zoom = v.s / v.base;
+  const zoom = v.s / v.base;
+  if (Math.abs(zoom - rc.zoom) > 0.01) rcPicSoon(); // (zoomed in, the PC sends more of its pixels: 1.8)
+  rc.zoom = zoom;
   rcDrawPointer();
 }
 
@@ -2023,10 +2095,12 @@ function rcRenderChip() {
   if (codec) parts.push(codec);
   const rtt = rc.rtt ?? rc.pair?.rtt;
   if (rtt != null) parts.push(`${rtt} ms`);
+  if (rc.fitting) parts.splice(0, parts.length, 'Fitting the PC to this screen…');
   rcUi.chip.hidden = !live || !parts.length;
   rcUi.chip.textContent = parts.join(' · ');
   rcUi.chip.title = [
     s?.w && s?.h ? `${s.w}×${s.h}` : '',
+    rc.profile && `${rcPicLabel('mode', rc.pic.mode)}${rc.pic.mode === 'auto' ? ` (${rcPicLabel('mode', rc.profile).toLowerCase()} now)` : ''}`,
     rc.encoder && `Encoder: ${rc.encoder}`,
     rc.qlr && rc.qlr !== 'none' && `Limited by ${rc.qlr === 'cpu' ? 'the PC’s processor' : rc.qlr === 'bandwidth' ? 'the network' : rc.qlr}`,
     rc.qualityInfo?.fps && `Up to ${rc.qualityInfo.fps} fps${rc.qualityInfo.kbps ? `, ${Math.round(rc.qualityInfo.kbps / 1000)} Mbps` : ''}`,
@@ -2039,7 +2113,7 @@ function rcRenderTools() {
   const live = rc.state === 'live' || rc.state === 'reconnecting';
   const phone = rcPhone();
   const kb = document.activeElement === rcUi.sink && rcTouchUi();
-  const sig = JSON.stringify([rc.state, phone, live && [rc.monitors.map(x => x.name), rc.monitor, rc.fit, rc.quality, rc.clip, rc.clipPending && Boolean(rc.lastClip),
+  const sig = JSON.stringify([rc.state, phone, live && [rc.monitors.map(x => x.name), rc.monitor, rc.fit, rc.quality, rc.pic.mode, rc.caps.includes('settings'), rc.clip, rc.clipPending && Boolean(rc.lastClip),
     rc.touchMode, rcTouchUi(), kb, Boolean(document.fullscreenElement), document.fullscreenEnabled]]);
   rcRenderKeyStrip();
   if (sig === rcUi.toolsSig) return;
@@ -2061,10 +2135,11 @@ function rcRenderTools() {
   } else if (live) {
     const mon = rc.monitors.find(x => x.id === rc.monitor);
     if (rc.monitors.length > 1) tools.push(btn(mon?.name || 'Screen', 'monitor', e => rcMonitorMenu(e.currentTarget), { title: 'Choose a screen' }));
-    tools.push(btn(rc.fit === 'fit' ? 'Fit' : '1:1', rc.fit === 'fit' ? 'zoom-out' : 'zoom-in', () => { rc.fit = rc.fit === 'fit' ? '1:1' : 'fit'; rcLayout(); rcRenderBar(); },
+    tools.push(btn(rc.fit === 'fit' ? 'Fit' : '1:1', rc.fit === 'fit' ? 'zoom-out' : 'zoom-in', () => { rc.fit = rc.fit === 'fit' ? '1:1' : 'fit'; rcLayout(); rcRenderBar(); rcSendPic(); },
       { title: rc.fit === 'fit' ? 'Fit to the window (click for 1:1)' : 'One to one (click to fit)' }));
-    tools.push(btn(rc.quality === 'text' ? 'Sharp text' : 'Smooth motion', rc.quality === 'text' ? 'edit' : 'play', () => rcSetQuality(rc.quality === 'text' ? 'motion' : 'text'),
-      { title: rc.quality === 'text' ? 'Sharp text, 30 fps (click for smooth motion, 60 fps)' : 'Smooth motion, 60 fps (click for sharp text, 30 fps)' }));
+    // (1.8) The picture's settings: the mode on the button, everything else (fit, size, frame rate…) behind it.
+    const shown = rc.caps.includes('settings') ? rc.pic.mode : rc.quality;
+    tools.push(btn(rcPicLabel('mode', shown), 'gear', () => rcShowSettings(), { title: 'Picture settings: quality, fitting the PC to this screen, size, frame rate, data limit, codec, details' }));
     tools.push(btn('Keys', 'keyboard', e => rcKeysMenu(e.currentTarget), { title: 'Send keys (Windows key, Alt+Tab, F-keys…)' }));
     tools.push(btn('Clipboard', 'clip', () => rcSetClip(!rc.clip), { pressed: rc.clip, cls: rc.clipPending ? 'attn' : '', title: rc.clip ? 'Clipboard sync is on (click to turn it off)' : 'Clipboard sync is off (click to share the clipboard both ways)' }));
     if (rc.clip && rc.clipPending && rc.lastClip) tools.push(btn('Copy', 'copy', rcCopyFromPc, { title: 'Copy what was copied on the PC' }));
@@ -2093,8 +2168,7 @@ function rcMoreMenu(anchor) {
     'sep',
     ...(rc.monitors.length > 1 ? rc.monitors.map(mon => ({ label: `${mon.name}${mon.primary ? ' (main)' : ''}`, icon: mon.id === rc.monitor ? 'check' : 'monitor', action: () => rcSwitchMonitor(mon) })) : []),
     rc.monitors.length > 1 && 'sep',
-    { label: 'Sharp text (30 fps)', icon: rc.quality === 'text' ? 'check' : 'edit', action: () => rcSetQuality('text') },
-    { label: 'Smooth motion (60 fps)', icon: rc.quality === 'motion' ? 'check' : 'play', action: () => rcSetQuality('motion') },
+    { label: `Picture: ${rcPicLabel('mode', rc.caps.includes('settings') ? rc.pic.mode : rc.quality)}…`, icon: 'gear', action: () => rcShowSettings() },
     'sep',
     { label: 'Send keys (Windows key, Alt+Tab, F-keys…)', icon: 'keyboard', action: () => rcKeysMenu(anchor) },
     { label: rc.clip ? 'Clipboard sync is on' : 'Clipboard sync is off', icon: rc.clip ? 'check' : 'clip', action: () => rcSetClip(!rc.clip) },
@@ -2114,11 +2188,146 @@ function rcSetTouchMode(mode) {
   if (!rcMaybeHelp()) toast(mode === 'trackpad' ? 'Trackpad: one finger moves the pointer, tap to click.' : 'Touch: tap where you want to click, one finger scrolls.');
 }
 
-function rcSetQuality(q) {
-  rc.quality = q;
-  rc.qualityInfo = null;
-  rcSend('ctl', { t: 'quality', mode: q });
+// ---------------------------------------------------------------- the picture's settings and the PC's screen (1.8)
+
+// Remembered per PC here (a choice of this page's, nothing of a session). fitPc null: the default (on, but not on a
+// phone or tablet, where a PC's desktop squeezed to fit would be tiny anyway).
+function rcLoadPic() {
+  const p = store.json(`beam.rc.pic.${RC_ID}`, null);
+  const q = p && typeof p === 'object' ? p : {};
+  const one = key => (RC_PIC[key].some(([v]) => v === q[key]) ? q[key] : RC_PIC[key][0][0]);
+  return { mode: one('mode'), size: one('size'), fps: one('fps'), kbps: one('kbps'), codec: one('codec'), fitPc: typeof q.fitPc === 'boolean' ? q.fitPc : null, details: q.details === true };
+}
+const rcPicLabel = (key, v) => RC_PIC[key].find(([x]) => x === v)?.[1] || String(v);
+const rcFitOn = () => rc.pic.fitPc ?? !rcPhone();
+
+function rcSetPic(key, value) {
+  rc.pic[key] = value;
+  store.setJson(`beam.rc.pic.${RC_ID}`, rc.pic);
+  if (key === 'fitPc') rcSendFit();
+  else if (key !== 'details') rcSendPic();
   rcRenderBar();
+  rcRenderDetails();
+}
+
+// (the old toggle's name, for a PC before 1.8: its two modes)
+function rcSetQuality(q) { rcSetPic('mode', q); }
+
+// The picture area here in physical pixels, zoom included (zoomed in, more of the PC's pixels are worth sending).
+function rcArea(zoomed) {
+  const st = rcUi.stage;
+  const d = window.devicePixelRatio || 1;
+  if (!st || st.clientWidth < 1 || st.clientHeight < 1) return null;
+  const z = zoomed ? Math.max(1, rc.zoom || 1) : 1;
+  return { w: Math.round(st.clientWidth * d * z), h: Math.round(st.clientHeight * d * z), dpr: Math.round(d * 1000) / 1000 };
+}
+
+// The settings to the PC: all of them to a 1.8 one, Sharp text or Smooth motion to an older one. A new picture area
+// goes only when it changed by over 15% (resizing and zooming would send one a frame).
+function rcSendPic() {
+  if (!rc.verified || !rc.hostHello) return;
+  if (!rc.caps.includes('settings')) {
+    const q = rc.pic.mode === 'motion' ? 'motion' : 'text';
+    if (q !== rc.quality && rcSend('ctl', { t: 'quality', mode: q })) { rc.quality = q; rc.qualityInfo = null; rcRenderBar(); }
+    return;
+  }
+  const a = rc.fit === '1:1' && !rcPhone() ? null : rcArea(true); // (1:1: the PC's full size is shown anyway)
+  const net = navigator.connection?.type === 'cellular' ? 'cellular' : '';
+  const m = { t: 'settings', mode: rc.pic.mode, size: rc.pic.size, vw: a ? Math.min(16384, a.w) : 0, vh: a ? Math.min(16384, a.h) : 0, fps: rc.pic.fps, kbps: rc.pic.kbps, codec: rc.pic.codec, net };
+  const was = rc.picSent;
+  const near = (x, y) => (!x && !y) || (x > 0 && y > 0 && Math.abs(x - y) / y < 0.15);
+  if (was && ['mode', 'size', 'fps', 'kbps', 'codec', 'net'].every(k => was[k] === m[k]) && near(m.vw, was.vw) && near(m.vh, was.vh)) return;
+  if (rcSend('ctl', m)) rc.picSent = m;
+}
+
+// After resizing, full screen or zooming has settled: the fit and the picture's size again.
+function rcPicSoon() {
+  rcTimer('pic', () => { rcSendFit(); rcSendPic(); }, 1200);
+}
+
+// Fit the PC to this screen: it takes the size its monitor has that suits this picture area best, and the scaling that
+// shows its interface at the size of this device's own; both go back when the session ends or Fit is turned off.
+function rcSendFit() {
+  if (!rc.verified || !rc.hostHello || !rc.caps.includes('fit')) return;
+  if (!rcFitOn()) {
+    if ((rc.fitSent || rc.fitted) && rcSend('ctl', { t: 'fit', on: false })) rc.fitSent = '';
+    return;
+  }
+  const a = rcArea(false);
+  if (!a || a.w < 200 || a.h < 200) return;
+  const key = `${a.w}x${a.h}@${a.dpr}`;
+  if (key === rc.fitSent || !rcSend('ctl', { t: 'fit', on: true, w: a.w, h: a.h, dpr: a.dpr })) return;
+  rc.fitSent = key;
+  rc.fitting = true; // (input waits for the PC's new sizes)
+  rcRelease();
+  rcRender();
+  rcTimer('fit', () => { rc.fitting = false; rcRender(); }, RC_FIT_MS);
+}
+
+// Whether this page can be seen: a hidden one gets no frames (the PC encodes and sends nothing meanwhile).
+function rcVideo(on) {
+  if (!rc.verified || !rc.caps.includes('video') || rc.videoOff === !on) return;
+  if (rcSend('ctl', { t: 'video', on })) rc.videoOff = !on;
+}
+
+function rcShowSettings() {
+  const n = rc.name || 'the PC';
+  const full = rc.caps.includes('settings');
+  const pick = (key, label, list, value) => {
+    const box = el('select', { 'aria-label': label, onchange: () => rcSetPic(key, typeof list[0][0] === 'number' ? Number(box.value) : box.value) },
+      ...list.map(([v, text]) => el('option', { value: String(v), selected: v === value }, text)));
+    return field(label, box);
+  };
+  const modes = full ? RC_PIC.mode : RC_PIC.mode.filter(([v]) => RC_MODES.includes(v));
+  const radios = el('div', { class: 'rc-modes', role: 'radiogroup', 'aria-label': 'Quality' }, ...modes.map(([v, label, more]) => {
+    const input = el('input', { type: 'radio', name: 'rc-mode', value: v, checked: v === (full ? rc.pic.mode : rc.quality) });
+    input.addEventListener('change', () => { if (input.checked) rcSetPic('mode', v); });
+    return el('label', { class: 'check' }, input, el('span', {}, label, el('small', { class: 'muted block' }, more)));
+  }));
+  const body = [
+    rc.caps.includes('fit')
+      ? toggle(`Fit ${n} to this screen`, rcFitOn(), v => rcSetPic('fitPc', v),
+        { hint: `${n}’s resolution and display scaling change to suit this screen, and go back when you disconnect. Its own monitor shows the change too.` })
+      : note(`Fitting ${n} to this screen needs Beam 1.8 or later on it.`),
+    field('Quality', radios),
+    full && pick('size', 'Picture size', RC_PIC.size, rc.pic.size),
+    full && pick('fps', 'Frame rate', RC_PIC.fps, rc.pic.fps),
+    full && pick('kbps', 'Data limit', RC_PIC.kbps, rc.pic.kbps),
+    full && pick('codec', 'Codec', RC_PIC.codec, rc.pic.codec),
+    !full && note(`More settings (picture size, frame rate, data limit, codec) need Beam 1.8 or later on ${n}.`),
+    toggle('Show details', rc.pic.details, v => rcSetPic('details', v), { hint: 'Picture size, frames, data rate, codec, delay and losses, over the picture.' }),
+    note(`Kept for ${n} on this device. They apply at once.`),
+  ];
+  const done = el('button', { class: 'btn primary', type: 'button', onclick: () => $('#genDlg').close('ok') }, 'Done');
+  rcRelease();
+  openDialog({ title: 'Picture', body, buttons: [done], className: 'rc-settings', onClose: () => { if (!rcTouchUi()) rcFocusSink(); } });
+}
+
+// The details over the picture (Show details): what is sent and received, and what limits it.
+function rcRenderDetails() {
+  const box = rcUi.details;
+  if (!box) return;
+  const live = rc.state === 'live' || rc.state === 'reconnecting';
+  box.hidden = !rc.pic.details || !live;
+  if (box.hidden) return;
+  const s = rc.stats || {};
+  const h = rc.host;
+  const rate = k => (k == null ? '' : k >= 1000 ? `${(k / 1000).toFixed(1)} Mbps` : `${Math.round(k)} kbps`);
+  const mon = rc.monitors.find(x => x.id === rc.monitor);
+  const rtt = rc.rtt ?? rc.pair?.rtt;
+  const hw = v => (/MediaFoundation|Accelerat|Hardware|NVENC|QuickSync|AMF|D3D/i.test(v) ? ' (hardware)' : '');
+  const rows = [
+    ['Mode', rc.caps.includes('settings') ? `${rcPicLabel('mode', rc.pic.mode)}${rc.pic.mode === 'auto' && rc.profile ? ` · ${rcPicLabel('mode', rc.profile).toLowerCase()} now` : ''}` : rcPicLabel('mode', rc.quality)],
+    ['Screen', mon ? `${mon.w}×${mon.h} at ${Math.round(mon.scale * 100)}%${rc.fitted ? ', fitted to this one' : ''}` : ''],
+    ['Picture', s.w && s.h ? `${s.w}×${s.h}${h?.down > 1.01 ? ` (sent at 1/${h.down.toFixed(2).replace(/\.?0+$/, '')})` : ''}` : ''],
+    ['Frames', s.fps != null ? `${s.fps} fps${h?.maxFps ? `, up to ${h.maxFps}` : ''}` : ''],
+    ['Data', s.kbps != null ? `${rate(s.kbps)}${h?.maxKbps ? `, limit ${rate(h.maxKbps)}` : ''}${h?.avail ? `, network about ${rate(h.avail)}` : ''}` : ''],
+    ['Codec', [s.codec || rc.hostCodec, rc.encoder && `encoder ${rc.encoder}${hw(rc.encoder)}`, rc.decoder && `decoder ${rc.decoder}`].filter(Boolean).join(' · ')],
+    ['Delay', [rtt != null && `${rtt} ms round trip`, s.jitterMs != null && `${s.jitterMs} ms buffered here`, h?.lost != null && `${h.lost}% lost`].filter(Boolean).join(' · ')],
+    ['Limited by', rc.qlr && rc.qlr !== 'none' ? (rc.qlr === 'cpu' ? 'the PC’s processor' : rc.qlr === 'bandwidth' ? 'the network' : rc.qlr) : 'nothing'],
+    ['Path', rc.pair?.remote ? `direct to ${rc.pair.remote}` : ''],
+  ].filter(([, v]) => v);
+  box.replaceChildren(...rows.map(([k, v]) => el('div', {}, el('b', {}, k), el('span', {}, v))));
 }
 
 function rcSetClip(on) {
@@ -2235,10 +2444,13 @@ function rcOnResize() {
   const h = innerHeight;
   const was = rc.winH;
   rc.winH = h;
+  // (a touch keyboard coming or going changes only the height: the PC's fit and picture stay as they are)
+  const keyboard = rcTouchUi() && document.activeElement === rcUi.sink && innerWidth === rc.winW;
   if (rcPhone() && document.activeElement === rcUi.sink && h > was + 100 && innerWidth === rc.winW) rcUi.sink.blur();
   rc.winW = innerWidth;
   rcLayout();
   rcRenderBar();
+  if (!keyboard) rcPicSoon();
 }
 
 // ---------------------------------------------------------------- how to control (a phone or a tablet)
@@ -2320,6 +2532,7 @@ function rcOnFullscreen() {
   rcUi.root.classList.toggle('full', Boolean(document.fullscreenElement));
   setTimeout(rcLayout, 50);
   rcRenderBar();
+  rcPicSoon(); // (full screen: a bigger area to fit the PC to)
 }
 
 function rcWakeRelease() {

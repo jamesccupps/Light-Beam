@@ -607,6 +607,16 @@ html.remote-mode .rc {
   position: absolute; left: 50%; top: 10px; max-width: calc(100% - 24px); transform: translateX(-50%); padding: 6px 12px; border-radius: 8px;
   background: rgba(22, 24, 29, .94); color: #ffd28a; font-size: 13px; pointer-events: none;
 }
+/* 1.8: Show details, over the picture's top left corner; the picture settings dialog */
+.rc-details {
+  position: absolute; left: 8px; top: 8px; z-index: 2; max-width: min(460px, calc(100% - 16px)); padding: 7px 10px; border-radius: 8px;
+  background: rgba(16, 18, 22, .86); color: #e7e9ee; font-size: 12px; line-height: 1.45; font-variant-numeric: tabular-nums; pointer-events: none;
+}
+.rc-details div { display: flex; gap: 8px; }
+.rc-details b { flex: none; width: 76px; color: #9aa1ad; font-weight: 600; }
+.rc-details span { min-width: 0; overflow-wrap: anywhere; }
+.rc-settings .field select { width: 100%; }
+.rc-modes .check { margin: 6px 0; }
 .rc-overlay { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; background: rgba(11, 12, 15, .76); }
 .rc[data-state="ended"] .rc-overlay, .rc[data-state="connecting"] .rc-overlay { background: var(--rc-bg); }
 .rc-card { display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 460px; text-align: center; }
