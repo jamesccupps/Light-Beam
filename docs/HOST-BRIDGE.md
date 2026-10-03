@@ -385,7 +385,20 @@ retransmits).
 - **Clipboard:** `{ t: "clip", on }` from the viewer turns it on or off. While on, `{ t: "clip", n, text }` goes both
   ways.
 - **Quality:** `{ t: "quality", mode: "text" | "motion" }` gives 30 fps / 8 Mbps or 60 fps / 16 Mbps. The PC answers
-  with the limits it applied.
+  with the limits it applied (from 1.8 also `profile`: what it applies now, Auto's pick included).
+- **1.8, when the PC's hello has `caps` (`fit`, `settings`, `video`) and `fitted`:**
+  - `{ t: "settings", mode: "auto" | "text" | "motion" | "saver", size: "auto" | "full" | "1080" | "720" | "window",
+    vw, vh, fps: 0 | 15 | 30 | 60, kbps: 0 | 500…100000, codec: "auto" | "av1" | "h264" | "vp9", net: "" | "cellular" }`
+    applies at once, on the same connection (a codec change re-offers with the same `o=` id). 0 and `auto` leave it to
+    the PC. `vw` × `vh` is the viewer's picture area in physical pixels, zoom included: the picture is sent no
+    larger. Auto: sharp text while the screen is still, smooth motion while it's busy, Data saver on mobile data.
+  - `{ t: "fit", on: true, w, h, dpr }` fits the PC's screen to the viewer's picture area (physical pixels) and
+    scaling: the monitor's best mode, and the display scaling to match; `{ t: "fit", on: false }` puts it back, as
+    does the session's end. The PC answers `{ t: "display", monitors, monitor, fitted, note? }` with the new sizes
+    (input maps to them; the viewer holds input until it comes, 6 s at most).
+  - `{ t: "video", on }`: the viewer can or can't be seen; no frames while it can't.
+  - The PC's `stats` add `srcW`, `srcH` (its screen), `down` (how much smaller it's sent), `profile`, `auto`, `maxFps`,
+    `maxKbps`, `avail` (the network's estimate, kbps), `lost` (%), `rtt` (ms) and `video`.
 - **Screens:** `{ t: "monitor", id }` restarts the capture as a new connection. The new `offer` has a different SDP
   `o=` session id, so the viewer answers it with a fresh RTCPeerConnection. An offer with the same `o=` id is a
   renegotiation on the same connection: an ICE restart (after `restart`, or 3 s of `disconnected`), or a switch to

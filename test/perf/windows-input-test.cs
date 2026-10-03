@@ -601,6 +601,82 @@ namespace Beam
             }
             Section("remote-control banner: dragged anywhere, never off a screen, remembered (1.7.4)", b0);
 
+            // ---------------------------------------------------------------- fitting the PC to the viewer (1.8)
+            b0 = failures;
+            {
+                // A 4K monitor's modes (16:9 and the usual others), at 60 Hz, 2560×1440 at 144 Hz too.
+                var modes = new List<DisplayMode>();
+                foreach (var s in new[] { "3840x2160", "3200x1800", "2560x1440", "2048x1152", "1920x1080", "1680x1050", "1600x900", "1440x900", "1366x768", "1280x1024", "1280x720", "1024x768", "800x600" })
+                {
+                    var p = s.Split('x');
+                    modes.Add(new DisplayMode(int.Parse(p[0]), int.Parse(p[1]), 60));
+                }
+                modes.Add(new DisplayMode(2560, 1440, 144));
+                var at4k = new DisplayMode(3840, 2160, 60);
+                Func<int, int, string> pick = (w, h) => { var m = DisplayFit.Pick(modes, at4k, w, h); return m.HasValue ? m.Value + "@" + m.Value.Hz : "none"; };
+                Check(pick(1920, 1080) == "1920×1080@60", "a full HD screen: full HD (" + pick(1920, 1080) + ")");
+                Check(pick(1920, 1200) == "1920×1080@60", "a 16:10 laptop (1920×1200): 1920×1080 pixel for pixel, not 1680×1050 stretched (" + pick(1920, 1200) + ")");
+                Check(pick(3840, 2160) == "3840×2160@60", "a 4K screen: 4K");
+                Check(pick(2340, 1080) == "1920×1080@60", "a phone held sideways (2340×1080): 1920×1080, its height pixel for pixel (" + pick(2340, 1080) + ")");
+                Check(pick(1080, 2340) == "1024×768@60", "a phone held upright: the mode that fills its width best (" + pick(1080, 2340) + ")");
+                Check(pick(1500, 950) == "1440×900@60", "a window of 1500×950: 1440×900 (" + pick(1500, 950) + ")");
+                Check(pick(800, 600) == "1024×768@60", "a small window: never below 1024×720 (" + pick(800, 600) + ")");
+                Check(pick(100, 100) == "none" && pick(20000, 1000) == "none", "a viewer size that can't be: nothing");
+                var at144 = new DisplayMode(2560, 1440, 144);
+                Check(DisplayFit.Pick(modes, at144, 2560, 1440).Value.Hz == 144 && DisplayFit.Pick(modes, at144, 1920, 1080).Value.Hz == 60, "the current refresh rate where the size has it, else the size's own");
+                Check(DisplayFit.Pick(new List<DisplayMode>(), at4k, 1920, 1080).Value.W == 3840, "no modes read: the current one");
+
+                Check(DisplayFit.Scale(new DisplayMode(1920, 1080, 60), 1920, 1200, 1.25, 175) == 125, "a laptop at 125%: 125%");
+                Check(DisplayFit.Scale(new DisplayMode(1920, 1080, 60), 2340, 1080, 2.75, 175) == 175, "a phone (275%): as large as Windows allows at 1920×1080 (175%)");
+                Check(DisplayFit.Scale(new DisplayMode(3840, 2160, 60), 3840, 2160, 1.5, 300) == 150, "a 4K screen at 150%: 150%");
+                Check(DisplayFit.Scale(new DisplayMode(1440, 900, 60), 1500, 950, 1.0, 175) == 100, "a window at 100%: 100%");
+                Check(DisplayFit.Scale(new DisplayMode(1920, 1080, 60), 1920, 1080, 1.125, 200) == 100, "halfway between two steps: the lower one");
+                Check(DisplayFit.Scale(new DisplayMode(1920, 1080, 60), 3840, 2160, 1.0, 175) == 100, "shown twice as large: 100% (Windows' least)");
+                Check(DisplayFit.Scale(new DisplayMode(1920, 1080, 60), 1920, 1080, double.NaN, 175) == 100, "a scaling that can't be: 100%");
+
+                var saved = new SavedDisplay();
+                saved.Device = @"\\.\DISPLAY1";
+                saved.Mode = new DisplayMode(3840, 2160, 60);
+                saved.Percent = 150;
+                Check(SavedDisplay.Parse(saved.ToString()) != null && SavedDisplay.Parse(saved.ToString()).ToString() == @"\\.\DISPLAY1|3840|2160|60|150", "the original, written down and read back (" + saved + ")");
+                Check(new[] { null, "", "x", "a|b|c|d|e", @"\\.\D|100|100|60|150", @"\\.\D|3840|2160|60", @"\\.\D|-3840|2160|60|150" }.All(s => SavedDisplay.Parse(s) == null), "...one that can't be read: none");
+
+                // A fit and its undo, on the made-up screen (2560×1440 at 150%).
+                var fake = new FakeDisplay();
+                var lines = new List<string>();
+                var d = new RcDisplay(fake, lines.Add);
+                var plan = d.Plan("DISPLAY1", 1920, 1200, 1.25);
+                Check(plan != null && plan.Mode.W == 1920 && plan.Mode.H == 1200 && plan.Original.Mode.W == 2560 && plan.Original.Percent == 150, "the plan: 1920×1200 (this screen has it: the exact size), the original (2560×1440 at 150%) noted first");
+                d.Begin(plan);
+                Check(d.Apply(plan) == null && fake.Now.W == 1920 && fake.Now.H == 1200 && fake.Percent == 125, "applied: 1920×1200 at 125% (" + fake.State + ")");
+                var again = d.Plan("DISPLAY1", 2340, 1080, 2.75);
+                Check(again != null && again.Original == plan.Original, "a second fit in the session keeps the first original");
+                Check(d.Fitted && d.Undo(d.Original, "test") && fake.Now.W == 2560 && fake.Now.H == 1440 && fake.Percent == 150, "undone: 2560×1440 at 150% again (" + fake.State + ")");
+                d.End();
+                Check(!d.Fitted && lines.Count == 2 && lines[0].StartsWith("fitted to the viewer: 1920×1200 at 125%") && lines[1].StartsWith("back to 2560×1440 at 150%"), "the log: " + string.Join(" / ", lines));
+
+                var phone = new FakeDisplay();
+                var dp = new RcDisplay(phone, null);
+                var pp = dp.Plan("DISPLAY1", 2340, 1080, 2.75);
+                dp.Begin(pp);
+                dp.Apply(pp);
+                Check(phone.Now.W == 1920 && phone.Percent == 175, "a phone: 1920×1080 at 175%, the most Windows allows there (" + phone.State + ")");
+                var same = new FakeDisplay();
+                var ds = new RcDisplay(same, null);
+                var ps = ds.Plan("DISPLAY1", 2560, 1440, 1.5);
+                ds.Begin(ps);
+                ds.Apply(ps);
+                Check(same.Calls.Count == 0, "already the right size and scaling: nothing changes (" + same.State + ")");
+                var moved = new FakeDisplay();
+                moved.Saved = new DisplayMode(1920, 1080, 60); // (Windows' saved mode isn't what was on screen)
+                var dm = new RcDisplay(moved, null);
+                var pm = dm.Plan("DISPLAY1", 1280, 720, 1.0);
+                dm.Begin(pm);
+                dm.Apply(pm);
+                Check(dm.Undo(dm.Original, "test") && moved.Now.W == 2560 && moved.Now.H == 1440, "Windows' saved mode was another: back to the original size all the same (" + moved.State + ")");
+            }
+            Section("fitting the PC to the viewer: its size and scaling, noted and put back (1.8)", b0);
+
             Console.WriteLine();
             Console.WriteLine(failures == 0 ? "All " + passed + " checks passed." : failures + " of " + (passed + failures) + " checks FAILED.");
             return failures == 0 ? 0 : 1;

@@ -528,6 +528,7 @@ try {
   check(!!verifiedLine, 'connected, and the peer passed the check (its address is the attested one, its node the pinned one)');
   const hello = await waitCtl('hello', t0, 10000);
   check(!!hello && hello.role === 'host' && Array.isArray(hello.monitors) && hello.monitors.length > 0, `the viewer got the host's hello (${hello ? hello.monitors.length + ' screen(s)' : 'none'})`);
+  check(!!hello && JSON.stringify(hello.caps) === '["fit","settings","video"]' && hello.fitted === false, `...saying what 1.8 adds (${hello ? JSON.stringify(hello.caps) : '-'})`);
   {
     // 1.6.1: where the cursor is, when it's on the shared screen (this machine's real cursor: wherever it happens to be).
     const hm = hello && (hello.monitors.find(m => m.id === hello.monitor) || hello.monitors[0]);
@@ -624,6 +625,36 @@ try {
   await send('ctl', { t: 'quality', mode: 'motion' });
   const q = await waitCtl('quality', t1, 4000);
   check(!!q && q.mode === 'motion' && q.maxFps === 60 && q.maxKbps === 16000, 'Smooth motion: 60 fps / 16 Mbps');
+  // 1.8: the picture's settings apply at once (here Data saver); the fit changes this test instance's made-up screen
+  // (FakeDisplay: never a real one), noted in config.json first, and answers with the new sizes; Fit off puts it back;
+  // a hidden viewer gets no frames.
+  t1 = Date.now();
+  await send('ctl', { t: 'settings', mode: 'saver', size: 'auto', vw: 0, vh: 0, fps: 0, kbps: 0, codec: 'auto', net: '' });
+  const qs = await waitCtl('quality', t1, 4000);
+  check(!!qs && qs.profile === 'saver' && qs.maxFps === 15 && qs.maxKbps === 1500, `Data saver: 15 fps / 1.5 Mbps (${qs ? qs.profile + ' ' + qs.maxFps + '/' + qs.maxKbps : 'no answer'})`);
+  check(!!(await waitLog(/the viewer's picture settings: saver, size auto, auto fps, auto kbps, codec auto$/, from, 2000)), '...in beam.log');
+  const st18 = await waitCtl('stats', Date.now(), 5000, m => m.profile === 'saver');
+  check(!!st18 && st18.srcW > 0 && st18.down >= 1 && st18.maxFps === 15, `the stats say so, with the screen's size and how much smaller it goes (${st18 ? st18.srcW + '×' + st18.srcH + ', 1/' + st18.down + ', ' + st18.w + '×' + st18.h : 'none'})`);
+  t1 = Date.now();
+  await send('ctl', { t: 'fit', on: true, w: 1920, h: 1200, dpr: 1.25 });
+  const disp = await waitCtl('display', t1, 6000);
+  check(!!disp && disp.fitted === true && Array.isArray(disp.monitors), `Fit: the PC answers with its screens (${disp ? 'fitted ' + disp.fitted : 'no answer'})`);
+  check(!!(await waitLog(/the shared screen fitted to the viewer: 1920×1200 at 125%; it was 2560×1440 at 150%$/, from, 3000)), '...its made-up screen went to 1920×1200 at 125% (from 2560×1440 at 150%)');
+  check(String(readConfig().rcDisplayRestore || '').endsWith('|2560|1440|60|150'), `...the original noted in config.json (${readConfig().rcDisplayRestore})`);
+  t1 = Date.now();
+  await send('ctl', { t: 'fit', on: false });
+  const back = await waitCtl('display', t1, 6000);
+  check(!!back && back.fitted === false && !!(await waitLog(/the shared screen back to 2560×1440 at 150% \(the viewer turned Fit off\)$/, from, 3000)), 'Fit off: back to 2560×1440 at 150%');
+  check(!readConfig().rcDisplayRestore, '...and nothing left to put back');
+  await send('ctl', { t: 'video', on: false });
+  await sleep(4500);
+  const hidden = ctlSince('stats', Date.now() - 2500);
+  check(hidden.length > 0 && hidden.every(m => m.video === false && m.kbps < 50), `the viewer hidden: no frames (${hidden.map(m => m.kbps + ' kbps').join(', ') || 'no stats'})`);
+  await send('ctl', { t: 'video', on: true });
+  check(!!(await waitCtl('stats', Date.now(), 5000, m => m.video === true)), '...seen again: frames again');
+  await send('ctl', { t: 'settings', mode: 'text', size: 'auto', vw: 0, vh: 0, fps: 0, kbps: 0, codec: 'auto', net: '' });
+  await send('ctl', { t: 'fit', on: true, w: 1280, h: 720, dpr: 1 }); // (left fitted: the session's end puts it back)
+  check(!!(await waitLog(/the shared screen fitted to the viewer: 1280×720 at 100%/, from, 6000)), 'fitted again (to 1280×720 at 100%), for the end of the session to put back');
   await send('ctl', { t: 'lock' });
   check(!!(await waitLog(/Test Phone locks this PC/, from, 4000)) && !!(await waitLog(/a test instance doesn't really lock/, from, 1000)), 'the viewer\'s Lock action (a test instance doesn\'t lock)');
   // While it's being controlled, nothing on this PC widens access to Beam (the viewer could click it): turning it on,
@@ -706,6 +737,7 @@ try {
   check(!!stopped && stopped.reason === 'stopped', 'the banner\'s Stop ends it: the viewer hears rc-end stopped');
   check(!!(await waitCtl('bye', t1, 3000)), '...and a bye on ctl first');
   check(!!(await waitLog(/Test Phone stopped controlling this PC after \d+ s \(the banner's Stop\)/, from, 5000)), 'beam.log: who, how long, how it ended');
+  check(!!(await waitLog(/the shared screen back to 2560×1440 at 150% \(the session ended\)$/, from, 5000)) && !readConfig().rcDisplayRestore, 'the fitted screen is put back when the session ends (1.8)');
   check(!!(await waitLog(/capture stopped \(its host is kept 2 minutes for a reconnect\)/, from, 5000)), 'the capture stopped at once (its host is kept 2 minutes for a reconnect)');
   await endViewer();
   console.log(`  that session ran ${Math.round((Date.now() - t0) / 1000)} s`);

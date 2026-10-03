@@ -146,6 +146,15 @@ namespace Beam
             catch { return fallback; }
         }
 
+        // A JSON number (JavaScriptSerializer reads fractions as decimal), not a string or a bool.
+        public static double Double(IDictionary<string, object> d, string key, double fallback)
+        {
+            object v = Get(d, key);
+            if (!(v is int || v is long || v is decimal || v is double)) return fallback;
+            try { return Convert.ToDouble(v, CultureInfo.InvariantCulture); }
+            catch { return fallback; }
+        }
+
         public static bool Bool(IDictionary<string, object> d, string key, bool fallback)
         {
             object v = Get(d, key);

@@ -196,7 +196,9 @@ function fakePcMain(cfg) {
     else pcs.ch.ctl.addEventListener('open', ready, { once: true });
   };
   pcs.cursor = null; // (1.6.1: where its cursor is, in its hello)
-  pcs.sendHello = () => pcs.send('ctl', { t: 'hello', v: 1, role: 'host', name: cfg.name, monitors: pcs.monitors, monitor: pcs.monitor, codec: 'VP8', encoder: 'libvpx', ...(pcs.cursor && { cursor: pcs.cursor }) });
+  // (1.8: a PC that fits its screen to the viewer and takes the picture's settings says so)
+  pcs.sendHello = () => pcs.send('ctl', { t: 'hello', v: 1, role: 'host', name: cfg.name, monitors: pcs.monitors, monitor: pcs.monitor, codec: 'VP8', encoder: 'libvpx', ...(pcs.cursor && { cursor: pcs.cursor }),
+    ...(cfg.caps && { caps: cfg.caps, fitted: false }) });
 
   pcs.onSignal = async d => {
     const pc = pcs.pc;
@@ -223,17 +225,23 @@ function fakePcMain(cfg) {
   pcs.onCtl = m => {
     if (m.t === 'ping') pcs.send('ctl', { t: 'pong', n: m.n, at: m.at });
     else if (m.t === 'quality') pcs.send('ctl', { t: 'quality', mode: m.mode, maxFps: m.mode === 'motion' ? 60 : 30, maxKbps: m.mode === 'motion' ? 16000 : 8000 });
+    else if (m.t === 'settings') pcs.send('ctl', { t: 'quality', mode: m.mode === 'motion' ? 'motion' : 'text', profile: m.mode === 'auto' ? 'text' : m.mode, auto: m.mode === 'auto', maxFps: m.fps || 30, maxKbps: m.kbps || 15000 });
+    else if (m.t === 'fit') {
+      // (1.8) Its screen becomes 1920×1080 at 125% while fitted, and is as it was after.
+      pcs.monitors = m.on ? cfg.monitors.map(x => (x.id === pcs.monitor ? { ...x, w: 1920, h: 1080, scale: 1.25 } : x)) : cfg.monitors;
+      pcs.send('ctl', { t: 'display', monitors: pcs.monitors, monitor: pcs.monitor, fitted: m.on === true });
+    }
     else if (m.t === 'monitor' && pcs.monitors.some(x => x.id === m.id)) { pcs.monitor = m.id; pcs.connect(); }
     else if (m.t === 'lock') pcs.end('locked');
   };
 }
 
 // A PC (Beam 1.6 for Windows, remote control on) on its own "machine"; `online`: its app's stream is open.
-async function fakePc(ctx, { name = `Desk ${ctx.uid()}`, ip = ctx.nextIp(), status = { remoteControl: true, locked: false }, online = true, version = '1.6.0', viewerIp = TS4, monitors = MONITORS, scene = '' } = {}) {
+async function fakePc(ctx, { name = `Desk ${ctx.uid()}`, ip = ctx.nextIp(), status = { remoteControl: true, locked: false }, online = true, version = '1.6.0', viewerIp = TS4, monitors = MONITORS, scene = '', caps = null } = {}) {
   const id = `pc${ctx.uid()}${ctx.uid()}`.slice(0, 18);
   const page = await ctx.browser.newPage({ xff: ip });
   await page.goto(`${ctx.srv.base}/manifest.webmanifest`);
-  await page.evaluate(`(${fakePcMain})(${JSON.stringify({ id, name, key: ctx.srv.key, version, viewerIp, monitors, scene })}); true`);
+  await page.evaluate(`(${fakePcMain})(${JSON.stringify({ id, name, key: ctx.srv.key, version, viewerIp, monitors, scene, caps })}); true`);
   await page.evaluate(`fetch('/api/me', { headers: fakePc.headers }).then(r => r.status)`);
   if (status) eq(await page.evaluate(`fakePc.status(${JSON.stringify(status)})`), 204, 'the PC reports its switch');
   if (online) eq(await page.evaluate('fakePc.open()'), 200, 'the PC’s app stream');
@@ -504,9 +512,13 @@ export default function register(test) {
     await pc.page.waitFor(`fakePc.rec.in.filter(m => m.t === 'release').length > ${releases}`, 5000, 'release when hidden');
     await ctx.setHidden(page, false);
     eq((await rec(pc, 'in')).filter(m => m.t === 'key' && m.c === 'ShiftLeft').map(m => m.d), [true], 'a key let go of while away isn’t sent up again');
-    // Smooth motion: asked for, and the PC says what it applied.
-    await page.evaluate(`document.querySelector('.rc-tool[data-tool="edit"]').click(); true`);
+    // Smooth motion (a PC before 1.8: Picture offers its two modes, and nothing else goes): asked for, and the PC says
+    // what it applied.
+    await page.evaluate(`document.querySelector('.rc-tool[data-tool="gear"]').click(); true`);
+    await page.waitFor(`$('#genDlg').open && document.querySelectorAll('#genBody input[name="rc-mode"]').length === 2 && !document.querySelector('#genBody select')`, 3000, 'Picture: the two modes only');
+    await page.evaluate(`document.querySelector('#genBody input[value="motion"]').click(); $('#genDlg').close(); true`);
     await page.waitFor(`rc.quality === 'motion' && rc.qualityInfo?.fps === 60`, 5000, 'Smooth motion');
+    assert(!(await rec(pc, 'ctl')).some(m => ['settings', 'fit', 'video'].includes(m.t)), 'nothing of 1.8 to a PC that didn’t say it does it');
     eq((await rec(pc, 'ctl')).filter(m => m.t === 'quality').map(m => Object.keys(m).filter(k => k !== 'seq').sort().join(',') + ':' + m.mode), ['mode,t:text', 'mode,t:motion'], '{ t: "quality", mode } only');
     // Pings both ways.
     await page.waitFor(`rc.rtt !== null`, 5000, 'our ping answered');
@@ -526,6 +538,66 @@ export default function register(test) {
     await page.waitFor(`Boolean(rcUi.pop)`, 3000, 'the Keys menu again');
     await page.evaluate(`rcUi.pop.querySelector('[data-key="lock"]').click(); true`);
     await page.waitFor(`rc.state === 'ended' && rc.end.reason === 'locked'`, 8000, 'locked: ended');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: FEATURE, timeout: 90000 });
+
+  test('remote control 1.8: the picture’s settings (applied at once, kept per PC), fitting the PC to this screen (input waits, then maps to its new size; off puts it back), no frames while hidden, frames shown as they come', async ctx => {
+    const pc = await fakePc(ctx, { caps: ['fit', 'settings', 'video'] });
+    const page = await viewer(ctx, pc.id);
+    await live(page, pc);
+    // Right after the PC's hello: the settings (Auto), the fit (a desktop: on unless turned off) and visible.
+    try {
+      await pc.page.waitFor(`['settings', 'fit', 'video'].every(t => fakePc.rec.ctl.some(m => m.t === t))`, 5000, 'settings, fit, video');
+    } catch (err) {
+      const got = await pc.js(`JSON.stringify(fakePc.rec.ctl.map(m => m.t))`);
+      const v = await page.evaluate(`JSON.stringify({ caps: rc.caps, hello: rc.hostHello, verified: rc.verified, fitSent: rc.fitSent, picSent: rc.picSent, videoOff: rc.videoOff, hidden: document.hidden, stage: [rcUi.stage.clientWidth, rcUi.stage.clientHeight], fitOn: rcFitOn() })`);
+      throw new Error(`${err.message}\n pc got: ${got}\n viewer: ${v}`);
+    }
+    const ctl = await rec(pc, 'ctl');
+    const area = await page.evaluate(`[Math.round(rcUi.stage.clientWidth * devicePixelRatio), Math.round(rcUi.stage.clientHeight * devicePixelRatio), Math.round(devicePixelRatio * 1000) / 1000]`);
+    const s = ctl.find(m => m.t === 'settings');
+    eq([s.mode, s.size, s.fps, s.kbps, s.codec, s.net, s.vw, s.vh], ['auto', 'auto', 0, 0, 'auto', '', area[0], area[1]], 'the settings: Auto, with the picture area in physical pixels');
+    const fit = ctl.find(m => m.t === 'fit');
+    eq([fit.on, fit.w, fit.h, fit.dpr], [true, ...area], 'Fit the PC to this screen: this area and scaling');
+    eq(ctl.find(m => m.t === 'video').on, true, 'visible');
+    // The PC's new sizes: input maps to them.
+    await page.waitFor(`rc.fitted && !rc.fitting && rc.monitors[0].w === 1920 && rc.monitors[0].h === 1080`, 5000, 'fitted: 1920×1080');
+    const p = await at(page, 0.25, 0.5);
+    await mouse(page, 'mouseMoved', p);
+    await pc.page.waitFor(`fakePc.rec.mv.length >= 1`, 5000, 'a move');
+    const mv = (await rec(pc, 'mv')).at(-1);
+    eq([mv.x, mv.y], [480, 540], 'a move in the fitted screen’s pixels');
+    eq(await page.evaluate(`rc.pc.getReceivers().find(r => r.track?.kind === 'video')?.jitterBufferTarget`), 0, 'frames shown as they come (no jitter buffer target)');
+    // Picture: four modes and the rest; each change goes at once.
+    await page.evaluate(`document.querySelector('.rc-tool[data-tool="gear"]').click(); true`);
+    await page.waitFor(`$('#genDlg').open && document.querySelectorAll('#genBody input[name="rc-mode"]').length === 4 && document.querySelectorAll('#genBody select').length === 4`, 3000, 'Picture: four modes, four lists');
+    await page.evaluate(`(() => {
+      document.querySelector('#genBody input[value="motion"]').click();
+      const set = (label, v) => { const s = [...document.querySelectorAll('#genBody select')].find(x => x.getAttribute('aria-label') === label); s.value = v; s.dispatchEvent(new Event('change')); };
+      set('Frame rate', '30'); set('Data limit', '10000'); set('Codec', 'h264');
+      [...document.querySelectorAll('#genBody label.check')].find(l => /Show details/.test(l.textContent)).querySelector('input').click();
+      return true; })()`);
+    await pc.page.waitFor(`fakePc.rec.ctl.filter(m => m.t === 'settings').at(-1)?.codec === 'h264'`, 5000, 'the last change');
+    const last = (await rec(pc, 'ctl')).filter(m => m.t === 'settings').at(-1);
+    eq([last.mode, last.fps, last.kbps, last.codec], ['motion', 30, 10000, 'h264'], 'the settings, as chosen');
+    await page.waitFor(`!rcUi.details.hidden && /Mode/.test(rcUi.details.textContent) && /1920×1080/.test(rcUi.details.textContent)`, 5000, 'the details (the fitted screen in them)');
+    // Fit off: asked for, and the PC's own sizes come back.
+    await page.evaluate(`[...document.querySelectorAll('#genBody label.check')].find(l => /^Fit /.test(l.textContent)).querySelector('input').click(); $('#genDlg').close(); true`);
+    await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'fit' && m.on === false)`, 5000, 'fit off');
+    await page.waitFor(`!rc.fitted && rc.monitors[0].w === 2560`, 5000, 'back to 2560×1440');
+    // Hidden: no frames; seen again: frames.
+    await ctx.setHidden(page, true);
+    await pc.page.waitFor(`fakePc.rec.ctl.filter(m => m.t === 'video').at(-1)?.on === false`, 5000, 'video off while hidden');
+    await ctx.setHidden(page, false);
+    await pc.page.waitFor(`fakePc.rec.ctl.filter(m => m.t === 'video').at(-1)?.on === true`, 5000, 'video on again');
+    // Kept for this PC on this device: the next session starts with them.
+    eq(await page.evaluate(`JSON.parse(localStorage.getItem('beam.rc.pic.${pc.id}'))`), { mode: 'motion', size: 'auto', fps: 30, kbps: 10000, codec: 'h264', fitPc: false, details: true }, 'kept for this PC');
+    const n0 = (await rec(pc, 'ctl')).length;
+    await page.evaluate('location.reload(); true');
+    await live(page, pc);
+    await pc.page.waitFor(`fakePc.rec.ctl.slice(${n0}).some(m => m.t === 'settings')`, 5000, 'the settings again');
+    const next = (await rec(pc, 'ctl')).slice(n0);
+    eq([next.find(m => m.t === 'settings').mode, next.find(m => m.t === 'settings').codec, next.some(m => m.t === 'fit')], ['motion', 'h264', false], 'a new session starts with them (and no fit)');
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 90000 });
 
@@ -955,7 +1027,7 @@ export default function register(test) {
     // More: zoom to fit, how to control, the other things.
     await page.evaluate(`rcUi.sink.blur(); document.querySelector('.rc-tool[data-tool="more"]').click(); true`);
     const items = await page.evaluate(`[...document.querySelectorAll('#menu .menu-item span')].map(s => s.textContent)`);
-    for (const want of ['How to control', 'Zoom to fit', 'Sharp text (30 fps)', 'Smooth motion (60 fps)', 'Clipboard sync is off']) assert(items.includes(want), `More has ${want}: ${items}`);
+    for (const want of ['How to control', 'Zoom to fit', 'Picture: Sharp text…', 'Clipboard sync is off']) assert(items.includes(want), `More has ${want}: ${items}`);
     await page.evaluate(`[...document.querySelectorAll('#menu .menu-item')].find(b => /Zoom to fit/.test(b.textContent)).click(); true`);
     eq(await page.evaluate('[rc.zoom, rcV.fit]'), [1, true], 'zoomed to fit');
     eq(page.errors, [], 'no page errors');
