@@ -5,7 +5,7 @@ import { api, ApiError } from './api.js';
 import { state, on, emit, person, channel, title, otherPerson, isAdmin, cacheOf, mergePage, addPending, dropPending, applyEvent, mentionsMe } from './store.js';
 import { renderBody, isJumbo, plainText, snippet, toWire } from './text.js';
 import { pickEmoji, QUICK, noteUsed } from './emoji.js';
-import { makeThumb, upload } from './uploads.js';
+import { makeThumb, upload, cancelUpload, sendingFiles, busy, leftOver, discardUpload } from './uploads.js';
 import { nav } from './nav.js';
 
 const GROUP_MS = 7 * 60e3;
@@ -167,10 +167,11 @@ export function conversationView(channelId, { jump = null } = {}) {
       el.append(body);
     }
     if (m.files?.length) el.append(filesEl(m));
+    if (m.pending && !m.failed && m.request?.items?.length) el.append(sendingEl(m));
     if (m.reactions?.length) el.append(reactionsEl(m));
     if (m.failed) {
       el.append(h('div', { class: 'msg-body small' }, 'Not sent. ', h('a', { href: '#', onclick: e => { e.preventDefault(); retry(m); } }, 'Try again'), ' · ',
-        h('a', { href: '#', onclick: e => { e.preventDefault(); dropPending(channelId, m.id); } }, 'Remove')));
+        h('a', { href: '#', onclick: e => { e.preventDefault(); cancelSending(m); } }, 'Remove')));
     }
     if (!m.pending) {
       el.append(h('div', { class: 'tools' },
@@ -178,6 +179,11 @@ export function conversationView(channelId, { jump = null } = {}) {
         iconBtn('reply', 'Reply', () => startReply(m)),
         iconBtn('more', 'More', e => { e.stopPropagation(); messageMenu(m, e.currentTarget, el); })));
       longPress(el, point => messageMenu(m, point, el));
+      // (1.8.4) On a phone a tap opens it too: press and hold isn't something people find.
+      el.addEventListener('click', e => {
+        if (!(e.pointerType === 'touch' || isTouch()) || e.target.closest('a, button, img, video, audio, textarea, input') || String(window.getSelection() || '')) return;
+        messageMenu(m, { x: e.clientX, y: e.clientY }, el);
+      });
       el.addEventListener('contextmenu', e => {
         if (e.target.closest('a, img, video')) return;
         e.preventDefault();
@@ -186,6 +192,36 @@ export function conversationView(channelId, { jump = null } = {}) {
       el.addEventListener('dblclick', e => { if (!isTouch() && m.author === state.me.id && !e.target.closest('a, button, img, video')) startEdit(m); });
     }
     return el;
+  }
+
+  // (1.8.3) A message whose files are still on their way: how far they are, and a way to stop it.
+  function sendingEl(m) {
+    const fill = h('span', { class: 'fill' });
+    const text = h('span', { class: 'muted small' });
+    const stop = h('a', { href: '#', class: 'small', onclick: e => { e.preventDefault(); cancelSending(m); } }, 'Cancel');
+    m.progressEl = { fill, text, stop };
+    showProgress(m);
+    return h('div', { class: 'sending' }, h('span', { class: 'track' }, fill), text, stop);
+  }
+
+  function showProgress(m) {
+    const p = m.progressEl;
+    if (!p || !m.request) return;
+    const items = m.request.items;
+    const total = items.reduce((n, i) => n + i.file.size, 0);
+    const sent = items.reduce((n, i) => n + (i.done ? i.file.size : Math.min(i.offset || 0, i.file.size)), 0);
+    const all = items.every(i => i.done);
+    const pct = total ? Math.floor(sent / total * 100) : 100;
+    p.fill.style.width = `${pct}%`;
+    p.text.textContent = all ? 'Sending…' : `Sending ${formatSize(sent)} of ${formatSize(total)} (${pct}%) · keep Beam Family open`;
+    p.stop.hidden = all;
+  }
+
+  // Cancel (or Remove, after it failed): its files stop and the server drops what it got; the message goes.
+  function cancelSending(m) {
+    m.cancelled = true;
+    for (const i of m.request?.items || []) cancelUpload(i);
+    dropPending(channelId, m.id);
   }
 
   function filesEl(m) {
@@ -477,9 +513,10 @@ export function conversationView(channelId, { jump = null } = {}) {
   const sendBtn = h('button', { class: 'icon-btn send-btn', type: 'button', title: 'Send', 'aria-label': 'Send', onclick: () => send() }, icon('send'));
   const replyBar = h('div', { class: 'compose-bar', hidden: true });
   const trayEl = h('div', { class: 'tray', hidden: true });
+  const unsentEl = h('div', { class: 'unsent', hidden: true });
   const suggest = h('div', { class: 'suggest', role: 'listbox', hidden: true });
   const composer = readonly ? h('div', { class: 'readonly' }, 'This channel is archived: its messages are kept, but nobody can post.')
-    : h('div', { class: 'composer' }, suggest, h('div', { class: 'compose-box' }, replyBar, trayEl,
+    : h('div', { class: 'composer' }, suggest, h('div', { class: 'compose-box' }, replyBar, unsentEl, trayEl,
       h('div', { class: 'compose-row' },
         iconBtn('attach', 'Attach files', () => fileInput.click()),
         composerInput,
@@ -516,27 +553,85 @@ export function conversationView(channelId, { jump = null } = {}) {
     if (readonly) return;
     for (const file of files) {
       if (state.limits.upload && file.size > state.limits.upload) { toast(`${file.name} is too big (at most ${formatSize(state.limits.upload)})`, { error: true }); continue; }
+      if (tray.some(i => !i.failed && i.file.name === file.name && i.file.size === file.size && i.file.lastModified === file.lastModified)) {
+        toast(`${file.name} is attached already`);
+        continue;
+      }
       const item = { key: Math.random().toString(36).slice(2), file, progress: 0, local: file.type.startsWith('image/') ? URL.createObjectURL(file) : null };
+      // (1.8.4) the same file as one a gone page left unsent: it goes on from where the server got to
+      const left = unsent.find(u => u.name === file.name && u.size === file.size && !busy.has(u.id));
+      if (left) {
+        item.id = left.id;
+        item.offset = left.received;
+        busy.add(left.id);
+        unsent = unsent.filter(u => u !== left);
+        renderUnsent();
+      }
       tray.push(item);
-      item.ready = (async () => {
-        item.thumb = await makeThumb(file);
-        if (!item.local && item.thumb) item.local = URL.createObjectURL(item.thumb.blob);
-        renderTray();
-        await uploadSlot();
-        try {
-          return await upload(item, renderTray);
-        } catch (err) {
-          item.failed = true;
-          item.error = err.message;
-          renderTray();
-          throw err;
-        } finally {
-          releaseSlot();
-        }
-      })();
-      item.ready.catch(() => {});
+      startUpload(item);
     }
     renderTray();
+  }
+
+  // (1.8.4) Files a page that's gone (closed, reloaded, a phone that dropped it) left unsent: go on with them (pick the
+  // same file again; one that's all there is attached at once) or discard them.
+  let unsent = [];
+  function renderUnsent() {
+    unsentEl.hidden = !unsent.length || readonly;
+    fill(unsentEl, ...unsent.slice(0, 3).map(u => {
+      const whole = u.received >= u.size;
+      return h('div', { class: 'unsent-row' },
+        icon('file'),
+        h('span', { class: 'what' }, h('strong', {}, u.name), ' ', whole ? 'is uploaded but wasn’t sent' : `stopped at ${formatSize(u.received)} of ${formatSize(u.size)}`),
+        h('button', { type: 'button', class: 'btn small', onclick: () => (whole ? attachLeftOver(u) : fileInput.click()) }, whole ? 'Attach' : 'Pick it again'),
+        h('button', { type: 'button', class: 'btn small ghost', onclick: () => { discardUpload(u.id); unsent = unsent.filter(x => x !== u); renderUnsent(); } }, 'Discard'));
+    }));
+  }
+  function attachLeftOver(u) {
+    const item = { key: Math.random().toString(36).slice(2), file: { name: u.name, size: u.size, type: u.mime }, id: u.id, offset: u.size, progress: 1, done: true, thumbTried: true, local: null };
+    item.ready = Promise.resolve(u.id);
+    busy.add(u.id);
+    unsent = unsent.filter(x => x !== u);
+    tray.push(item);
+    renderUnsent();
+    renderTray();
+  }
+  if (!readonly) leftOver().then(list => { if (!destroyed) { unsent = list; renderUnsent(); } }).catch(() => {});
+
+  // Sends a file of the tray, or again after it failed (from where the server got to). item.abort stops it (1.8.3).
+  function startUpload(item) {
+    item.failed = false;
+    item.error = null;
+    const abort = item.abort = new AbortController();
+    item.ready = (async () => {
+      if (!item.thumbTried) {
+        item.thumbTried = true;
+        item.thumb = await makeThumb(item.file);
+        if (!item.local && item.thumb) item.local = URL.createObjectURL(item.thumb.blob);
+        renderTray();
+      }
+      await uploadSlot();
+      sendingFiles(1);
+      try {
+        if (item.cancelled) throw new DOMException('Cancelled', 'AbortError'); // (while it waited for its turn)
+        return await upload(item, progressed, abort.signal);
+      } catch (err) {
+        item.failed = true;
+        item.error = err.message;
+        renderTray();
+        throw err;
+      } finally {
+        sendingFiles(-1);
+        releaseSlot();
+      }
+    })();
+    item.ready.catch(() => {});
+  }
+
+  // A piece more of a file went: the tray, and the message it's in once sent.
+  function progressed(item) {
+    if (tray.includes(item)) renderTray();
+    if (item.message) showProgress(item.message);
   }
 
   let active = 0;
@@ -549,7 +644,7 @@ export function conversationView(channelId, { jump = null } = {}) {
     fill(trayEl, ...tray.map(item => h('div', { class: `tray-item${item.failed ? ' failed' : ''}`, title: item.error || item.file.name },
       item.local ? h('img', { src: item.local, alt: '' }) : h('span', {}, icon('file'), h('br'), item.file.name),
       h('span', { class: 'bar', style: { width: `${Math.round((item.progress || 0) * 100)}%` } }),
-      h('button', { class: 'x', type: 'button', 'aria-label': `Remove ${item.file.name}`, onclick: () => { tray = tray.filter(x => x !== item); renderTray(); } }, '×'))));
+      h('button', { class: 'x', type: 'button', 'aria-label': `Remove ${item.file.name}`, onclick: () => { cancelUpload(item); tray = tray.filter(x => x !== item); renderTray(); } }, '×'))));
   }
 
   // @mentions: who's in this conversation, as you type.
@@ -628,6 +723,7 @@ export function conversationView(channelId, { jump = null } = {}) {
       files: items.map(i => ({ id: i.key, name: i.file.name, mime: i.file.type || 'application/octet-stream', size: i.file.size, local: i.local, width: i.thumb?.width, height: i.thumb?.height })),
     };
     pending.request = { body: text, reply: reply?.id, items };
+    for (const i of items) i.message = pending;
     composerInput.value = '';
     saveDraft(channelId, '');
     autoGrow(composerInput);
@@ -645,10 +741,14 @@ export function conversationView(channelId, { jump = null } = {}) {
     try {
       const ids = await Promise.all(pending.request.items.map(i => i.ready));
       const r = await api(`/api/channels/${channelId}/messages`, { method: 'POST', body: { body: pending.request.body, reply: pending.request.reply, files: ids, nonce: pending.nonce } });
+      for (const id of ids) busy.delete(id);
       applyEvent('msg', { message: r.message, nonce: pending.nonce });
     } catch (err) {
+      if (pending.cancelled) return;
       pending.failed = true;
       pending.error = err.message;
+      // (no connection, or the page was paused: worth going on by itself when the app is back in front)
+      pending.resumable = !(err instanceof ApiError && err.status && err.status < 500);
       emit(`messages:${channelId}`, { op: 'edit', id: pending.id });
       toast(err instanceof ApiError && err.status ? err.message : 'Not sent: check your connection and try again', { error: true });
     }
@@ -656,6 +756,7 @@ export function conversationView(channelId, { jump = null } = {}) {
 
   function retry(m) {
     m.failed = false;
+    for (const i of m.request.items) if (i.failed) startUpload(i);
     emit(`messages:${channelId}`, { op: 'edit', id: m.id });
     deliver(m);
   }
@@ -695,7 +796,13 @@ export function conversationView(channelId, { jump = null } = {}) {
     }
   })();
 
-  const onVisible = () => markRead();
+  // Back in front: read marks, and (1.8.3) a message whose files stopped while the page was paused (a phone does that in
+  // the background) carries on by itself, from where the server got to.
+  const onVisible = () => {
+    markRead();
+    if (destroyed || document.visibilityState !== 'visible') return;
+    for (const m of cache.list.filter(m => m.pending && m.failed && m.resumable && !m.cancelled && m.request)) retry(m);
+  };
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener('focus', onVisible);
 

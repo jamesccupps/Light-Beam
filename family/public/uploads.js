@@ -52,13 +52,69 @@ function videoThumb(file) {
   });
 }
 
+// (1.8.3) While files are being sent the screen stays on: a phone that locks (or another app) pauses the page, and
+// the upload with it. Released when the last one ends; asked again when the page is back in front.
+let sendingNow = 0;
+let wake = null;
+let asking = false;
+async function syncWake() {
+  try {
+    if (sendingNow && !wake && !asking && document.visibilityState === 'visible' && navigator.wakeLock) {
+      asking = true;
+      try { wake = await navigator.wakeLock.request('screen'); } finally { asking = false; }
+      wake.addEventListener('release', () => { wake = null; });
+      if (!sendingNow) wake?.release();
+    } else if (!sendingNow && wake) {
+      const w = wake;
+      wake = null;
+      await w.release();
+    }
+  } catch { wake = null; }
+}
+export function sendingFiles(delta) {
+  sendingNow = Math.max(0, sendingNow + delta);
+  syncWake();
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncWake(); });
+
+// (1.8.4) The uploads this page is sending (in the tray or a message on its way): the rest of one's unsent uploads on the
+// server were left by a page that's gone (closed, reloaded, a phone that dropped it).
+export const busy = new Set();
+
+// One's unsent uploads that no file here is sending: [{ id, name, size, received, mime }].
+export async function leftOver() {
+  const r = await api('/api/uploads');
+  return (r?.uploads || []).filter(u => !busy.has(u.id));
+}
+
+// Stops sending a file (the tray's ×, Cancel on a message still sending), and the server drops what it got (1.8.3).
+export function cancelUpload(item) {
+  item.cancelled = true;
+  item.abort?.abort();
+  if (item.id) {
+    busy.delete(item.id);
+    api(`/api/uploads/${item.id}`, { method: 'DELETE' }).catch(() => {});
+  }
+}
+
+// Drops an upload a page that's gone left behind (1.8.4).
+export function discardUpload(id) {
+  return api(`/api/uploads/${id}`, { method: 'DELETE' }).catch(() => {});
+}
+
 // Uploads one file: the item gets id, progress (0–1); onChange is called as it goes. Resolves with the id.
 export async function upload(item, onChange, signal) {
   const { file } = item;
   if (!item.id) {
-    const started = await api('/api/uploads', { method: 'POST', body: { name: file.name, size: file.size, mime: file.type }, signal });
+    // (not cut short when cancelled: its id is what the server needs to drop it, 1.8.3)
+    const started = await api('/api/uploads', { method: 'POST', body: { name: file.name, size: file.size, mime: file.type } });
     item.id = started.id;
+    busy.add(item.id);
     item.offset = started.offset;
+    if (item.cancelled) {
+      api(`/api/uploads/${item.id}`, { method: 'DELETE' }).catch(() => {});
+      throw new DOMException('Cancelled', 'AbortError');
+    }
   }
   let tries = 0;
   while (item.offset < file.size) {

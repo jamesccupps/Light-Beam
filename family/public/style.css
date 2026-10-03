@@ -192,6 +192,15 @@ a { color: var(--accent); }
 .msg-body.jumbo { font-size: 40px; line-height: 1.2; }
 .msg-body .edited { font-size: 11px; color: var(--faint); margin-left: 4px; white-space: nowrap; }
 .msg.pending .msg-body { opacity: .55; }
+/* (1.8.4) files a page that's gone left unsent */
+.unsent { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
+.unsent-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.unsent-row .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.unsent-row .btn { padding: 4px 10px; font-size: 13px; min-height: 0; flex: none; }
+/* (1.8.3) a message still sending: how far its files are, and Cancel */
+.sending { display: flex; align-items: center; gap: 10px; margin-top: 6px; max-width: 420px; }
+.sending .track { flex: 1; min-width: 60px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.sending .fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 .msg.failed .msg-body { color: var(--danger); }
 .msg-body code { font: 13px/1.4 ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
 .msg-body pre { font: 13px/1.45 ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--surface-2); padding: 10px 12px; border-radius: 8px; overflow-x: auto; white-space: pre; margin: 4px 0; }

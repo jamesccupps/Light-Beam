@@ -869,6 +869,56 @@ test('F-M (1.8.1): backups: the database as a snapshot taken while it runs, its 
   } finally { await s.stop(); }
 });
 
+test('F-N (1.8.3): the sender can drop an upload at once (the ×, Cancel on a message still sending): only their own, only while it isn’t sent; what came goes with it', async () => {
+  const s = await start('cancel', 8847);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const piece = crypto.randomBytes(200_000);
+    const id = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'movie.mp4', size: piece.length * 3, mime: 'video/mp4' })).json.id;
+    let r = await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: piece });
+    assert.deepEqual(r.json, { offset: piece.length, done: false });
+    const part = path.join(s.data, 'uploads', `${id}.part`);
+    assert.ok(fs.existsSync(part));
+    assert.equal((await call(s, 'DELETE', `/api/uploads/${id}`, f.owner)).status, 404, 'not someone else’s');
+    assert.equal((await call(s, 'DELETE', `/api/uploads/${id}`, mary.who)).status, 204);
+    assert.equal((await call(s, 'GET', `/api/uploads/${id}`, mary.who)).status, 404);
+    // (a small piece: the 404 comes before a big body is read, and the connection may be cut instead)
+    r = await s.req('PUT', `/api/uploads/${id}?offset=${piece.length}`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: piece.subarray(0, 16) });
+    assert.equal(r.status, 404, 'nothing more goes to it');
+    await waitFor(() => !fs.existsSync(part));
+    assert.equal((await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { files: [id] })).status, 400, 'and it can’t be sent');
+    // A file already sent: its message is deleted instead.
+    const sent = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'note.txt', size: 3 })).json.id;
+    await s.req('PUT', `/api/uploads/${sent}?offset=0`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: 'abc' });
+    assert.equal((await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { files: [sent] })).status, 201);
+    assert.equal((await call(s, 'DELETE', `/api/uploads/${sent}`, mary.who)).status, 409);
+    assert.equal((await call(s, 'GET', `/api/files/${sent}`, f.owner)).status, 200, 'still there');
+  } finally { await s.stop(); }
+});
+
+test('F-O (1.8.4): a page opened again finds the files it left unsent (only one’s own, only unsent, how far each got)', async () => {
+  const s = await start('unsent', 8847);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const piece = crypto.randomBytes(100_000);
+    const half = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'clip.mp4', size: piece.length * 2, mime: 'video/mp4' })).json.id;
+    await s.req('PUT', `/api/uploads/${half}?offset=0`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: piece });
+    const whole = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'note.txt', size: 3 })).json.id;
+    await s.req('PUT', `/api/uploads/${whole}?offset=0`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: 'abc' });
+    const sent = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'sent.txt', size: 3 })).json.id;
+    await s.req('PUT', `/api/uploads/${sent}?offset=0`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: 'xyz' });
+    await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { files: [sent] });
+    await call(s, 'POST', '/api/uploads', f.owner, { name: 'owners.bin', size: 10 });
+    const r = await call(s, 'GET', '/api/uploads', mary.who);
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json.uploads.map(u => [u.id, u.name, u.size, u.received]).sort((a, b) => a[1].localeCompare(b[1])),
+      [[half, 'clip.mp4', piece.length * 2, piece.length], [whole, 'note.txt', 3, 3]]);
+    assert.equal((await s.req('GET', '/api/uploads')).status, 401);
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {
