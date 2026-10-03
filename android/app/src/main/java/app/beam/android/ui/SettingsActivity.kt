@@ -36,6 +36,7 @@ import app.beam.android.core.ServerInfo
 import app.beam.android.data.AppUpdater
 import app.beam.android.data.Prefs
 import app.beam.android.data.Repository
+import app.beam.android.data.SettingsBackups
 import app.beam.android.databinding.ActivitySettingsBinding
 import app.beam.android.notify.Notifier
 import app.beam.android.service.ClipboardTileService
@@ -98,6 +99,13 @@ class SettingsActivity : BaseActivity() {
         b.rowPairAnother.setOnClickListener { PairQr.show(this) }
         b.rowUpdates.setOnClickListener { checkForUpdates() }
         b.rowPhoneNotifications.setOnClickListener { startActivity(Intent(this, PhoneNotificationsActivity::class.java)) }
+        b.rowRestore.setOnClickListener {
+            if (app.repo.state.value.info?.lists(SettingsBackups.FEATURE) == false) toast(getString(R.string.backup_needs_server))
+            else RestoreSettings.choose(this) {
+                bind()
+                bindDevices(app.repo.state.value.devices)
+            }
+        }
         b.unpair.setOnClickListener {
             MaterialAlertDialogBuilder(this)
                 .setMessage(R.string.settings_unpair_confirm)
@@ -124,6 +132,7 @@ class SettingsActivity : BaseActivity() {
                     )
                     bindInfo(info)
                     bindDevices(devices)
+                    bindRestore()
                 }
             }
         }
@@ -185,6 +194,15 @@ class SettingsActivity : BaseActivity() {
                 null -> R.string.settings_open_links_unknown
             },
         )
+    }
+
+    /** (1.8.2) "Kept on your Beam too (Oct 3, 08:23)", or what it needs. */
+    private fun bindRestore() {
+        val s = app.repo.state.value
+        b.restoreValue.text = when {
+            s.info?.lists(SettingsBackups.FEATURE) == false -> getString(R.string.backup_needs_server)
+            else -> s.devicesById[s.me]?.backupAt?.let { getString(R.string.backup_summary_at, Format.at(it)) } ?: getString(R.string.backup_summary)
+        }
     }
 
     /** "Off", "On · 3 apps · Desk, Laptop", or what's missing. */

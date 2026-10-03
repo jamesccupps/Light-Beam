@@ -435,4 +435,22 @@
         <item quantity="one">keeps items %d day</item>
         <item quantity="other">keeps items %d days</item>
     </plurals>
+
+    <!-- This phone's settings kept on the server (1.8.2) -->
+    <string name="backup_restore">Restore settings</string>
+    <string name="backup_summary">Put back settings kept on your Beam</string>
+    <string name="backup_summary_at">Kept on your Beam too (%1$s)</string>
+    <string name="backup_needs_server">Needs Beam server 1.8.1 or later</string>
+    <string name="backup_offer_title">Restore this phone\'s settings?</string>
+    <string name="backup_offer_body">Beam was set up on this phone before, and its settings from %1$s are kept on your Beam. Put them back? Its name, downloads, muted devices and the rest.</string>
+    <string name="backup_restore_button">Restore</string>
+    <string name="backup_not_now">Not now</string>
+    <string name="backup_choose_title">Restore settings from</string>
+    <string name="backup_choice_here">This phone, an earlier install · %1$s</string>
+    <string name="backup_choice_other">%1$s · %2$s</string>
+    <string name="backup_none">No backup of a phone\'s settings is kept on your Beam yet.</string>
+    <string name="backup_failed">Couldn\'t get the backups: %1$s</string>
+    <string name="backup_restored">The settings from %1$s are back.</string>
+    <string name="backup_sharing_body">They were on in that backup. Turning them on again needs Android\'s notification access, on the next screen.</string>
+    <string name="backup_sharing_ok">Set up</string>
 </resources>

@@ -353,6 +353,17 @@ class BeamApi(
         execute(request(url("/api/phone/requests/$rid")).post(body).build()).close()
     }
 
+    // ---------------------------------------------------------------- server 1.8.1 `backups`: the apps' settings
+
+    /** `PUT /api/devices/me/backup { install, app: "android", version, settings }`: this install's settings (≤ 32 KB). */
+    fun putBackup(install: String, version: String, settings: JSONObject) {
+        val body = JSONObject().put("install", install).put("app", "android").put("version", version).put("settings", settings)
+        execute(request(url("/api/devices/me/backup")).put(body.toString().toRequestBody(JSON)).build()).close()
+    }
+
+    /** `GET /api/devices/{id|me}/backups` → `{ device, name, backups: [{ install, app, version, at, settings }] }`, newest first. */
+    fun backups(device: String = "me"): JSONObject = json(request(url("/api/devices/$device/backups")).get().build())
+
     // ---------------------------------------------------------------- remote control (server 1.6 `remote-control`)
 
     /** `GET /api/rc/sessions`: who controls which PC right now. */

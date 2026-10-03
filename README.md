@@ -437,6 +437,11 @@ identity is kept in `data/tailscale`. Moving the whole data folder to new hardwa
   device key. After a reinstall or a reset, Beam offers once to put them back. Turning remote control back on still asks
   at the PC, with the same devices ticked. Settings → This PC → **Restore settings…** does it any time, also from
   another PC's backup.
+- **The phone's Beam app** (1.8.2) keeps its settings there too: its name, what it receives and downloads, the Quick
+  Settings tile's device, muted and auto-copy devices, and which apps' notifications go to your PCs. After a reinstall
+  it offers once to put them back; sharing notifications with your PCs is switched on again on its own screen (Android
+  asks for notification access again). Settings → **Restore settings** does it any time, also from another phone's
+  backup.
 
 ## Docker and NAS
 
