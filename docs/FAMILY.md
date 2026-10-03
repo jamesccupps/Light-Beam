@@ -36,11 +36,12 @@ goes on with the screen locked). 30 wrong links a minute from one address get a 
 runs, Download turns into **Stop**, the screen stays on (Wake Lock), and the other button waits; a second download of
 the same file is asked about first ("Download it again?").
 
-**How fast:** a browser's WebRTC data channels top out around **6–7 MB/s** (~50 Mbit/s): measured on this PC with
-Chrome and Edge as the receiver (and Chrome to itself: 3.3 MB/s each way), the same with 1–8 connections, 1–4 channels,
-bigger messages, bigger SCTP buffers or packets, so it's the browser's limit, not this end's (node-datachannel to
-node-datachannel ran ~31–39 MB/s). A phone on the home Wi-Fi got ~5 MB/s. That's still well past the public link
-(Tailscale's Funnel relay: ~1–2 MB/s); a device with Tailscale gets the full speed over https anyway. Each direct
+**How fast:** it depends on the browser and device at the other end, not on this end. Headless Chrome and Edge on this
+PC topped out around **6–7 MB/s** (~50 Mbit/s; Chrome to itself: 3.3 MB/s each way), the same with 1–8 connections,
+1–4 channels, bigger messages, bigger SCTP buffers or packets (node-datachannel to node-datachannel ran ~31–39 MB/s).
+A phone on the home Wi-Fi got ~5 MB/s, but a visitor over the internet got **21.7 MB/s** (2 GB in 1 min 34 s,
+2026-10-03), so that ceiling isn't every browser's. All of it is well past the public link (Tailscale's Funnel relay:
+~1–2 MB/s); a device with Tailscale gets the full speed over https anyway. Each direct
 transfer of 8 MB or more gets a line in the log: "… downloaded film.mp4 directly on the same network: 1.9 GB in 6 min
 40 s (5.1 MB/s, round trip 12 ms)" (or "stopped a direct download … after …").
 
