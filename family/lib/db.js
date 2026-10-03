@@ -199,6 +199,12 @@ const MIGRATIONS = [
   );
   CREATE INDEX links_attachment ON links (attachment_id);
   `,
+  // v4 (1.10.0): videos that play everywhere (lib/media.js): how a video's copy is doing (null, working, ready,
+  // original: it plays as it is, failed) and the copy's size.
+  `
+  ALTER TABLE attachments ADD COLUMN play TEXT;
+  ALTER TABLE attachments ADD COLUMN play_size INTEGER;
+  `,
 ];
 
 function openDb(file) {

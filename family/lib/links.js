@@ -106,7 +106,17 @@ function createLinks(ctx) {
       name: a.name, size: a.size, mime: a.mime, received: Math.min(a.received, a.size), from: nameOf(l.created_by),
       // (how the page finds a direct way: the same STUN servers as this end; none when direct connections are off)
       expires: l.expires_at, preview: Boolean(a.thumb), direct: ctx.direct?.enabled ? { stun: config.stun || [] } : null,
+      // (1.10.0) a video: its version that plays everywhere (play, playUrl, playSize, playProgress)
+      video: Boolean(ctx.media?.isVideo(a)), ...ctx.media?.stateOf(a, `/api/links/${token}`),
     }, { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+  }
+
+  // GET /api/links/:token/play[?download]: a video's version that plays everywhere, to watch in the page or to keep
+  // (1.10.0).
+  async function play(req, res, { token }, url) {
+    const { l, a } = open(req, token);
+    if (url.searchParams.has('download') && (!req.headers.range || /^bytes=0-/.test(String(req.headers.range)))) counted(l);
+    await ctx.media.sendPlay(req, res, a, url, { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
   }
 
   // GET /api/links/:token/file: the file over https (the phone's download manager can take it and go on in the
@@ -172,6 +182,7 @@ function createLinks(ctx) {
       ['GET', '/api/links/:token', info],
       ['GET', '/api/links/:token/file', file],
       ['GET', '/api/links/:token/preview', preview],
+      ['GET', '/api/links/:token/play', play],
       ['POST', '/api/links/:token/direct', direct],
     ],
   };

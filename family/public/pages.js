@@ -417,6 +417,16 @@ function mark(root, query) {
 
 // ---------------------------------------------------------------- the picture viewer
 
+const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// (1.10.0) A video plays in its version that plays everywhere (H.264, standard color: the server makes it with ffmpeg);
+// while that's being made, the original, with a note in case it doesn't play on this device.
+function videoEl(f) {
+  const video = h('video', { src: f.playUrl || f.url, controls: true, autoplay: true, playsinline: true });
+  if (f.playUrl || f.play !== 'working') return video;
+  return [video, h('p', { class: 'viewer-note' }, 'A version that plays on every phone is being made: if this one doesn’t play here, try again in a few minutes.')];
+}
+
 export function openViewer(items, start = 0) {
   let i = start;
   const stage = h('div', { class: 'viewer-stage' });
@@ -427,9 +437,13 @@ export function openViewer(items, start = 0) {
   const show = () => {
     const f = items[i];
     name.textContent = `${f.name}${items.length > 1 ? ` · ${i + 1} of ${items.length}` : ''}`;
-    download.href = `${f.url}?download`;
+    // (1.10.0) on an iPhone or iPad a video's download is its version that plays everywhere (the original may not play
+    // there: a Pixel's HDR video didn't, not even in VLC)
+    const playable = IOS && f.play === 'ready';
+    download.href = playable ? `${f.playUrl}?download` : `${f.url}?download`;
     download.setAttribute('download', f.name);
-    const media = f.mime.startsWith('video/') ? h('video', { src: f.url, controls: true, autoplay: true, playsinline: true }) : h('img', { src: f.url, alt: f.name });
+    download.title = playable ? 'Download (the version that plays on any phone)' : 'Download';
+    const media = f.mime.startsWith('video/') ? videoEl(f) : h('img', { src: f.url, alt: f.name });
     fill(stage, media,
       i > 0 ? h('button', { class: 'nav prev', type: 'button', 'aria-label': 'Previous', onclick: () => step(-1) }, icon('back')) : null,
       i < items.length - 1 ? h('button', { class: 'nav next', type: 'button', 'aria-label': 'Next', onclick: () => step(1) }, icon('next')) : null);

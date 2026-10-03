@@ -1,7 +1,7 @@
 // Beam Family's web app (family/public), against its own scratch server (family/server.js on 127.0.0.1:8828, data in
 // a temp folder, Tailscale off). Tailscale's identity is sent the way tailscale serve sends it (an extra header, from
 // this machine); the public link's people join with an invite and a password.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sleep } from './cdp.mjs';
@@ -20,7 +20,9 @@ async function familyServer(ctx, extra = {}) {
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('BEAM_'))), BEAM_FAMILY_DATA: data, BEAM_FAMILY_PORT: String(PORT),
     BEAM_FAMILY_HOST: '127.0.0.1', BEAM_TAILSCALE: 'off', BEAM_FAMILY_OWNER: OWNER, BEAM_FAMILY_POSTS_PER_10S: '200',
     // (1.9.0) no direct connections unless a test asks (then 'local': no STUN servers out there either)
-    BEAM_FAMILY_STUN: 'off' };
+    BEAM_FAMILY_STUN: 'off',
+    // (1.10.0) no ffmpeg unless a test asks
+    BEAM_FAMILY_FFMPEG: 'off' };
   const server = path.join(ctx.ROOT, 'family', 'server.js');
   let child = null;
   let log = '';
@@ -55,6 +57,12 @@ async function familyServer(ctx, extra = {}) {
 }
 
 const owner = { login: OWNER, name: 'Robin' };
+
+// (1.10.0) ffmpeg for the "plays everywhere" test: BEAM_TEST_FFMPEG, else ffmpeg on the PATH; without one it says so.
+const FFMPEG = (() => {
+  if (process.env.BEAM_TEST_FFMPEG) return fs.existsSync(process.env.BEAM_TEST_FFMPEG) ? process.env.BEAM_TEST_FFMPEG : null;
+  return spawnSync('ffmpeg', ['-hide_banner', '-version'], { windowsHide: true }).status === 0 ? 'ffmpeg' : null;
+})();
 
 // A page signed in by Tailscale (the headers tailscale serve adds: the identity, and the caller's Tailscale address).
 async function tailscalePage(ctx, login, name, opts = {}) {
@@ -466,6 +474,57 @@ Robin ${sent}`);
       if (!/stopped a direct download/.test(log)) await sleep(200);
     }
     assert(/A fast link’s visitor stopped a direct download of film\.bin after \d+ MB in /.test(log), `the log says how far it got: ${log.split('\n').filter(l => /direct/.test(l)).join(' | ')}`);
+  }, { timeout: 90000 });
+
+  test('family: a phone’s HDR video plays everywhere: the chat’s viewer and a fast link’s page play its H.264 copy, which can be downloaded too; on an iPhone Download is Safari’s own (1.10.0)', async ctx => {
+    if (!FFMPEG) { console.log('    (no ffmpeg here: set BEAM_TEST_FFMPEG to run this one)'); return; }
+    const srv = await familyServer(ctx, { BEAM_FAMILY_FFMPEG: FFMPEG, BEAM_FAMILY_STUN: 'local' });
+    // A phone's HDR video (10-bit, HLG, BT.2020) and its preview.
+    const dir = path.join(srv.data, 'made');
+    fs.mkdirSync(dir, { recursive: true });
+    const x265 = spawnSync(FFMPEG, ['-hide_banner', '-encoders'], { encoding: 'utf8', windowsHide: true }).stdout.includes('libx265');
+    const tags = 'colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc';
+    let r = spawnSync(FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=360x640:r=30:d=3', '-f', 'lavfi', '-i', 'sine=d=3',
+      ...(x265 ? ['-c:v', 'libx265', '-tag:v', 'hvc1', '-x265-params', `log-level=error:${tags}`] : ['-c:v', 'libx264', '-x264-params', tags]), '-pix_fmt', 'yuv420p10le',
+      '-c:a', 'aac', '-shortest', path.join(dir, 'party.mp4')], { encoding: 'utf8', windowsHide: true });
+    assert(r.status === 0, r.stderr);
+    r = spawnSync(FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=360x640', '-frames:v', '1', path.join(dir, 'party.jpg')], { encoding: 'utf8', windowsHide: true });
+    assert(r.status === 0, r.stderr);
+    const video = fs.readFileSync(path.join(dir, 'party.mp4'));
+    const headers = { 'Tailscale-User-Login': OWNER, 'Tailscale-User-Name': 'Robin', 'X-Forwarded-For': '100.64.7.7' };
+    const id = (await srv.call(owner, 'POST', '/api/uploads', { name: 'Party.mp4', size: video.length, mime: 'video/mp4' })).json.id;
+    await fetch(`${srv.base}/api/uploads/${id}?offset=0`, { method: 'PUT', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: video });
+    await fetch(`${srv.base}/api/files/${id}/thumb?w=360&h=640`, { method: 'PUT', headers: { ...headers, 'Content-Type': 'image/jpeg' }, body: fs.readFileSync(path.join(dir, 'party.jpg')) });
+    const general = (await srv.call(owner, 'GET', '/api/bootstrap')).json.channels.find(c => c.name === 'general').id;
+    await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body: 'Party', files: [id] });
+    let file = null;
+    for (let i = 0; i < 150 && file?.play !== 'ready'; i++) {
+      file = (await srv.call(owner, 'GET', `/api/channels/${general}/messages`)).json.messages.find(m => m.body === 'Party')?.files[0];
+      if (file?.play !== 'ready') await sleep(200);
+    }
+    eq(file?.play, 'ready', 'its copy is made');
+    // In the chat: the viewer plays the copy.
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.shot') !== null`, 10000, 'the video in the chat');
+    await robin.evaluate(`document.querySelector('.shot').click(); true`);
+    await robin.waitFor(`/\\/api\\/files\\/${id}\\/play$/.test(document.querySelector('.viewer video')?.getAttribute('src') || '')`, 5000, 'the viewer plays the copy');
+    await robin.waitFor(`document.querySelector('.viewer video').readyState >= 1 && Math.round(document.querySelector('.viewer video').duration) === 3`, 10000, 'it loads in the viewer');
+    // A fast link: its page plays it, and offers it to keep.
+    const link = (await srv.call(owner, 'POST', `/api/files/${id}/links`, { hours: 1 })).json.link;
+    const page = `${srv.base}/f/${link.url.split('/f/')[1]}`;
+    const visitor = await ctx.browser.newPage({});
+    await visitor.goto(page);
+    await visitor.waitFor(`document.querySelector('video.link-video')?.readyState >= 1`, 10000, 'the player on the link’s page');
+    eq(await visitor.evaluate(`[Math.round(document.querySelector('video.link-video').duration), /^Download for any phone \\(/.test(document.querySelector('#playable')?.textContent || '')]`), [3, true], 'it plays there, and the copy can be downloaded');
+    // On an iPhone, Download is Safari's own download (the service worker's stream broke files there).
+    const iphone = await ctx.browser.newPage({ mobile: true, width: 390, height: 844 });
+    await iphone.send('Emulation.setUserAgentOverride', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1', platform: 'iPhone' });
+    await iphone.send('Page.setDownloadBehavior', { behavior: 'deny' });
+    await iphone.goto(page);
+    await iphone.waitFor(`document.querySelector('#get') !== null`, 10000, 'the page on an iPhone');
+    await iphone.evaluate(`document.querySelector('#get').click(); true`);
+    await iphone.waitFor(`/Safari’s own download/.test(document.querySelector('.link-progress .status')?.textContent || '')`, 5000, 'Safari’s own download on an iPhone');
   }, { timeout: 90000 });
 
   test('family: a big file goes up over a direct connection: no https pieces (1.9.0)', async ctx => {

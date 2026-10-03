@@ -73,7 +73,8 @@ function createFiles(ctx) {
     const out = { id: a.id, name: a.name, mime: a.mime, size: a.size, url: `/api/files/${a.id}` };
     if (a.width && a.height) { out.width = a.width; out.height = a.height; }
     if (a.thumb) out.thumb = `/api/files/${a.id}/thumb`;
-    return out;
+    // (1.10.0) a video's version that plays everywhere: play, playUrl, playSize, playProgress
+    return Object.assign(out, ctx.media?.stateOf(a, out.url));
   }
 
   const storageUsed = () => db.get('SELECT coalesce(sum(size), 0) n FROM attachments').n;
@@ -229,7 +230,11 @@ function createFiles(ctx) {
       await fsp.rm(partPath(id), { force: true }).catch(() => {});
       throw httpError(404, 'That upload was cancelled');
     }
-    if (received >= a.size) await fsp.rename(partPath(id), filePath(id));
+    if (received >= a.size) {
+      await fsp.rename(partPath(id), filePath(id));
+      // (1.10.0) a video gets its version that plays everywhere
+      ctx.media?.add(db.get('SELECT * FROM attachments WHERE id = ?', id));
+    }
     return { received, done: received >= a.size };
   }
 
@@ -333,7 +338,7 @@ function createFiles(ctx) {
   }
 
   async function removeStored(a) {
-    await Promise.all([filePath(a.id), partPath(a.id), thumbPath(a.id)].map(f => fsp.rm(f, { force: true })));
+    await Promise.all([filePath(a.id), partPath(a.id), thumbPath(a.id)].map(f => fsp.rm(f, { force: true })).concat(ctx.media?.forget(a.id) || []));
   }
 
   // Files uploaded but never sent go after a day, counted from the last piece that came (1.7.2: from the start, so a
