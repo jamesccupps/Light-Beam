@@ -1199,6 +1199,53 @@ test('F-S (1.11.0): a conversation\'s photos, videos and files for the gallery: 
   } finally { await s.stop(); }
 });
 
+// (1.12.1) Straight against the library, no server: moments a running server only meets by chance.
+test('F-T (1.12.1): a download following an upload goes on when the upload is complete but not yet moved into place; a backup holds the files that fit, the smallest first (not none)', async () => {
+  const { openDb } = require(path.join(ROOT, 'family', 'lib', 'db.js'));
+  const { createFiles } = require(path.join(ROOT, 'family', 'lib', 'files.js'));
+  const { createBackups } = require(path.join(ROOT, 'family', 'lib', 'backup.js'));
+  const tar = require(path.join(ROOT, 'lib', 'tar.js'));
+  const quiet = { info() {}, warn() {}, error() {} };
+  const root = path.join(TMP, 'unit');
+  const dirs = { files: path.join(root, 'files'), uploads: path.join(root, 'uploads'), thumbs: path.join(root, 'thumbs'), avatars: path.join(root, 'avatars') };
+  for (const d of Object.values(dirs)) fs.mkdirSync(d, { recursive: true });
+  const db = openDb(path.join(root, 'family.db'));
+  try {
+    // The writer marks the upload complete, then renames its part file: a reader looking in between goes on (it used
+    // to stop with "That file is gone").
+    const files = createFiles({ db, hub: null, log: quiet, config: {}, dirs });
+    const data = crypto.randomBytes(4096);
+    const id = 'a'.repeat(22);
+    db.run('INSERT INTO attachments (id, name, mime, size, received, created_at) VALUES (?, ?, ?, ?, ?, ?)', id, 'x.bin', 'application/octet-stream', data.length, 2048, Date.now());
+    fs.writeFileSync(files.partPath(id), data);
+    const reader = files.readFollowing(db.get('SELECT * FROM attachments WHERE id = ?', id), 0, { chunk: 1024, followMs: 2000 });
+    const parts = [(await reader.next()).value];
+    db.run('UPDATE attachments SET received = ? WHERE id = ?', data.length, id);
+    parts.push((await reader.next()).value);
+    fs.renameSync(files.partPath(id), files.filePath(id));
+    for await (const p of reader) parts.push(p);
+    assert.ok(Buffer.concat(parts).equals(data), 'the whole file, across the rename');
+    // Backups with room for 1 MB of files: the previews and photos go in, the big video doesn't (it was all or none).
+    const write = (sub, name, size) => fs.writeFileSync(path.join(root, sub, name), crypto.randomBytes(size));
+    write('thumbs', 'p1', 20_000);
+    write('files', 'p1', 300_000);
+    write('files', 'p2', 400_000);
+    write('files', 'video', 2_000_000);
+    const logged = [];
+    const bk = path.join(TMP, 'unit-backups');
+    const backups = createBackups({ db, dataDir: root, backupDir: bk, hours: 0, keep: 2, filesMB: 1, version: 'test', log: { info: m => logged.push(m), warn: m => logged.push(m) } });
+    const last = await backups.now('test');
+    const names = [];
+    for await (const e of tar.entries(fs.createReadStream(path.join(bk, last.name)))) {
+      names.push(e.name);
+      for await (const _ of e.content()) { /* read through */ }
+    }
+    assert.deepEqual(names.filter(n => /^(files|thumbs)\//.test(n)).sort(), [`files/${id}`, 'files/p1', 'files/p2', 'thumbs/p1']);
+    assert.match(logged.join('\n'), /without 1 of its 4 files \(1\.9 MB: backups hold 1\.0 MB of files, the smallest first/);
+    assert.equal(last.filesLeftOut, 1);
+  } finally { db.close(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

@@ -155,7 +155,6 @@ function createFiles(ctx) {
   async function* readFollowing(a, start, { followMs = 60e3, chunk = 256 * 1024, isClosed = () => false } = {}) {
     let pos = start;
     let handle = null;
-    let onPart = false;
     let stalled = now();
     try {
       while (pos < a.size) {
@@ -168,12 +167,13 @@ function createFiles(ctx) {
           await new Promise(r => setTimeout(r, 500));
           continue;
         }
-        const done = row.received >= row.size;
-        if (!handle || (onPart && done)) {
-          await handle?.close().catch(() => {});
-          handle = null;
-          for (const [file, part] of done ? [[filePath(a.id), false]] : [[partPath(a.id), true], [filePath(a.id), false]]) {
-            try { handle = await fsp.open(file, 'r'); onPart = part; break; } catch {}
+        if (!handle) {
+          // A finished upload is marked complete a moment before its part file is renamed into place (1.12.1: a reader
+          // looking in between found neither and stopped): either name will do, and a handle stays good across the
+          // rename, so one open file serves the whole download.
+          const done = row.received >= row.size;
+          for (const file of done ? [filePath(a.id), partPath(a.id)] : [partPath(a.id), filePath(a.id)]) {
+            try { handle = await fsp.open(file, 'r'); break; } catch {}
           }
           if (!handle) throw httpError(410, 'That file is gone');
         }

@@ -80,6 +80,9 @@ function createMedia(ctx) {
     encoder ||= has(encoders, 'libx264') ? 'libx264' : has(encoders, 'libopenh264') ? 'libopenh264' : null;
     if (!encoder || !has(encoders, 'aac')) { log.info('Videos play as they are: this ffmpeg has no H.264 or AAC encoder'); return null; }
     const found = { ffmpeg, ffprobe, encoder, zscale: has(filters, 'zscale') && has(filters, 'tonemap'), colorspace: has(filters, 'colorspace') };
+    // (1.12.1) the graphics card can still fail on a video (busy, a driver reset, wider than 4096): that one is made
+    // again on the processor
+    if (encoder === 'h264_nvenc') found.fallback = has(encoders, 'libx264') ? 'libx264' : has(encoders, 'libopenh264') ? 'libopenh264' : null;
     log.info(`Videos that play everywhere: on (${encoder === 'h264_nvenc' ? 'the graphics card’s H.264 encoder' : encoder}${found.zscale ? '' : found.colorspace ? ', HDR without tone mapping' : ', HDR as it is'})`);
     return found;
   }
@@ -110,9 +113,9 @@ function createMedia(ctx) {
     return { vf: `${fit},format=yuv420p`, sdr: false };
   }
 
-  function encoderArgs() {
-    if (tools.encoder === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', '23', '-b:v', '5M', '-maxrate', '7M', '-bufsize', '10M', '-profile:v', 'high'];
-    if (tools.encoder === 'libx264') return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '7M', '-bufsize', '10M', '-profile:v', 'high'];
+  function encoderArgs(encoder) {
+    if (encoder === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', '23', '-b:v', '5M', '-maxrate', '7M', '-bufsize', '10M', '-profile:v', 'high'];
+    if (encoder === 'libx264') return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '7M', '-bufsize', '10M', '-profile:v', 'high'];
     return ['-c:v', 'libopenh264', '-profile:v', 'high', '-coder', 'cabac', '-rc_mode', 'bitrate', '-b:v', '5M', '-maxrate', '7M', '-threads', '6', '-slices', '6'];
   }
 
@@ -131,9 +134,9 @@ function createMedia(ctx) {
     announce(id);
   }
 
-  async function convert(a) {
+  async function convert(a, encoder = tools.encoder, known = null) {
     const src = ctx.files.filePath(a.id);
-    const info = await probe(src);
+    const info = known || await probe(src);
     if (!info.v) return settle(a.id, 'original'); // (no picture: nothing to make)
     if (playsEverywhere(info)) return settle(a.id, 'original');
     const duration = Number(info.format.duration) || Number(info.v.duration) || 0;
@@ -141,7 +144,7 @@ function createMedia(ctx) {
     const tmp = `${playPath(a.id)}.tmp`;
     const args = ['-hide_banner', '-nostdin', '-y', '-v', 'error', '-progress', 'pipe:1', '-nostats', '-i', src,
       '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn', '-map_metadata', '-1', '-map_chapters', '-1',
-      '-vf', vf, '-fpsmax', '60', ...encoderArgs(),
+      '-vf', vf, '-fpsmax', '60', ...encoderArgs(encoder),
       ...(sdr ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'] : []),
       '-c:a', 'aac', '-b:a', '160k', '-ac', '2', '-movflags', '+faststart', '-f', 'mp4', tmp];
     const started = Date.now();
@@ -166,6 +169,10 @@ function createMedia(ctx) {
     if (job.cancelled) { await fsp.rm(tmp, { force: true }).catch(() => {}); return; }
     if (code !== 0) {
       await fsp.rm(tmp, { force: true }).catch(() => {});
+      if (encoder === 'h264_nvenc' && tools.fallback && !stopped && db.get('SELECT id FROM attachments WHERE id = ?', a.id)) {
+        log.info(`The graphics card couldn’t make a version of ${a.name} that plays everywhere (${lastLine(errors) || `ffmpeg stopped (${code})`}): making it on the processor`);
+        return convert(a, tools.fallback, info);
+      }
       log.warn(`Couldn’t make a version of ${a.name} that plays everywhere: ${lastLine(errors) || `ffmpeg stopped (${code})`}`);
       return settle(a.id, 'failed');
     }
