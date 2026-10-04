@@ -16,6 +16,8 @@ function bindUI() {
   $('#folderInput').addEventListener('change', e => { onFolderPicked(e.target.files); e.target.value = ''; });
   $('#pasteBtn').hidden = HOST ? !hostHas('clipboard') : !(navigator.clipboard && (navigator.clipboard.read || navigator.clipboard.readText));
   $('#pasteBtn').addEventListener('click', pasteAndSend);
+  // (Windows app 1.10) The ♥: Beam Family in a window of the app's own rather than the browser.
+  $('#familyLink').addEventListener('click', e => { if (hostHas('family')) { e.preventDefault(); hostDo('openFamily'); } });
 
   const thread = $('#thread');
   thread.addEventListener('scroll', onThreadScroll, { passive: true });

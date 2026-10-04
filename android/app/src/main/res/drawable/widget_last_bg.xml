@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- (1.12) The widget's "last received" area: a ripple when it's tapped. -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android" android:color="@color/border">
+    <item android:id="@android:id/mask">
+        <shape android:shape="rectangle">
+            <corners android:radius="14dp" />
+            <solid android:color="@android:color/white" />
+        </shape>
+    </item>
+</ripple>

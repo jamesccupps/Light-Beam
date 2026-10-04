@@ -32,6 +32,7 @@ namespace Beam
         public string NewVersion;
         public string OldVersion;
         public bool Show;
+        public bool Family; // (1.10) Beam Family's window was open: the new version opens it again
     }
 
     static class Health
@@ -379,7 +380,7 @@ namespace Beam
             string nonce = Api.NewNonce();
             using (var ev = new EventWaitHandle(false, EventResetMode.ManualReset, Health.EventName(nonce)))
             {
-                string mode = h.Show ? " --show" : " --background";
+                string mode = (h.Show ? " --show" : " --background") + (h.Family ? " --family" : "");
                 try
                 {
                     var p = Start(h.Exe, "--updated " + h.NewVersion + " --update-from " + h.OldVersion + " --health " + nonce + mode + ConfigArg(cfg));

@@ -31,6 +31,10 @@
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
         </intent>
+        <!-- (1.12) Beam Family in a Custom Tab: which browsers can show one. -->
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
         <!-- "Open Tailscale" in the offline banner. -->
         <package android:name="com.tailscale.ipn" />
         <!-- The composer's camera button. -->
@@ -146,7 +150,8 @@
 
         <!--
             The clipboard tile and the app's own "Send clipboard": SendActivity reads the clipboard and may send it
-            without asking only when started through this alias, which no other app can start.
+            without asking only when started through this alias, which no other app can start. (1.12) The widget's
+            "Send a photo" comes through it too.
         -->
         <activity-alias
             android:name=".ui.ClipboardSendActivity"
@@ -266,6 +271,19 @@
                 android:name="android.service.quicksettings.TOGGLEABLE_TILE"
                 android:value="true" />
         </service>
+
+        <!-- (1.12) The home-screen widget: the newest thing received, Send clipboard, Send a photo. -->
+        <receiver
+            android:name=".ui.BeamWidget"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/beam_widget_info" />
+        </receiver>
 
         <receiver
             android:name=".service.BootReceiver"

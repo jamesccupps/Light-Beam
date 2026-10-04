@@ -174,8 +174,12 @@ Funnel is per port: Beam's own server stays on 443, tailnet-only.
 ## The app
 
 `family/public/` (no build step): the browser, and as an installed app (PWA) on phones and computers. On an iPhone or
-iPad, notifications need the home-screen app (Share → Add to Home Screen). Beam's own apps link to it: the web app's
-♥ button and the Android app's menu open it in the browser, where notifications work.
+iPad, notifications need the home-screen app (Share → Add to Home Screen). Beam's own apps open it: the web app's ♥ in
+a new tab; the Windows app (1.10) in a window of its own (the ♥, the tray's "Beam Family", `Beam.exe --family`), with a
+WebView2 profile of its own so Beam's sign-in cookie never reaches Family, and the page told it's there
+(`beamHost.window = "family"`: it then offers no notifications, which that window can't get; they stay with the
+browser); the Android app (1.12) in a Chrome Custom Tab, the browser's engine, so Family's sign-in and notifications
+are the browser's (the browser itself when it can't show one).
 
 ## Security model
 

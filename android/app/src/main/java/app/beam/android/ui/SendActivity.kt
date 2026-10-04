@@ -10,6 +10,8 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.IntentCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.view.isVisible
@@ -52,6 +54,23 @@ class SendActivity : BaseActivity() {
     /** Loading the device list failed (no saved copy either): offer what's possible anyway. */
     private var refreshFailed = false
 
+    /** (1.12) The widget's "Send a photo": Android's photo picker, then where to (nothing picked: nothing happens). */
+    private val photos = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { picked ->
+        if (picked.isEmpty()) {
+            finish()
+            return@registerForActivityResult
+        }
+        for (uri in picked) {
+            // Lets the upload resume (or be retried) after this screen is gone, even after a restart.
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: Exception) {
+            }
+        }
+        uris += picked.filter { it.scheme == ContentResolver.SCHEME_CONTENT }
+        proceed()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (!app.prefs.paired) {
@@ -84,6 +103,15 @@ class SendActivity : BaseActivity() {
                 }
                 waitingForClipboard = true
                 if (intent.getBooleanExtra(EXTRA_FROM_TILE, false)) directTarget = app.prefs.tileTarget?.takeIf { known(it) }
+            }
+            ACTION_SEND_PHOTOS -> {
+                // (1.12) The widget's "Send a photo", through the same alias as the clipboard.
+                if (intent.component?.className != CLIPBOARD_ALIAS) {
+                    finish()
+                    return
+                }
+                if (savedInstanceState == null) photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                return // (the picker's answer goes on: photos)
             }
         }
         if (!waitingForClipboard && uris.isEmpty()) {
@@ -265,6 +293,11 @@ class SendActivity : BaseActivity() {
 
         /** "Send the clipboard", for Beam's own tile and menu. */
         fun clipboardIntent(ctx: Context): Intent = Intent().setClassName(ctx, CLIPBOARD_ALIAS).setAction(ACTION_SEND_CLIPBOARD)
+
+        /** (1.12) "Send a photo" (the home-screen widget): the photo picker, then where to. */
+        const val ACTION_SEND_PHOTOS = "app.beam.android.action.SEND_PHOTOS"
+
+        fun photosIntent(ctx: Context): Intent = Intent().setClassName(ctx, CLIPBOARD_ALIAS).setAction(ACTION_SEND_PHOTOS)
 
         /** The Quick Settings tile: use its default device (Settings › Quick Settings tile) if one is set. */
         const val EXTRA_FROM_TILE = "fromTile"

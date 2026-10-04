@@ -29,7 +29,7 @@ The host injects `window.beamHost` before any page script runs (on every documen
 | `deviceName` | `"Desktop"` | This device's name. The app owns it; rename through `setSettings`. |
 | `platform` | `"windows"` | Send it as `X-Beam-Platform` and `platform=` (see §2). |
 | `server` | `"https://beam.tail1234.ts.net"` | The origin the host trusts. The bridge only works on this origin. |
-| `features` | `["transfers","localFiles","settings","clipboard","pickFiles","pickFolder","dragOut","dragOutDone","openPanel","remoteDesktop","phoneNotifications","remoteControl","restoreSettings","copyFiles","dragOutMany"]` | What this host supports (`remoteDesktop` since Beam for Windows 1.3.0, `phoneNotifications` since 1.5.0: see §10, `remoteControl` since 1.6.0: see §11, `dragOutDone` since 1.7.1: §5, `restoreSettings` since 1.8.1, `copyFiles` and `dragOutMany` since 1.9.0: §4). |
+| `features` | `["transfers","localFiles","settings","clipboard","pickFiles","pickFolder","dragOut","dragOutDone","openPanel","remoteDesktop","phoneNotifications","remoteControl","restoreSettings","copyFiles","dragOutMany","family"]` | What this host supports (`remoteDesktop` since Beam for Windows 1.3.0, `phoneNotifications` since 1.5.0: see §10, `remoteControl` since 1.6.0: see §11, `dragOutDone` since 1.7.1: §5, `restoreSettings` since 1.8.1, `copyFiles` and `dragOutMany` since 1.9.0: §4, `family` since 1.10.0: §4 `openFamily`, §12). |
 | `debug` | `false` | `true` when Beam.exe runs with `--devtools` (DevTools and extra logging on). |
 
 `beamHost` is informational. Never treat it as a security boundary; the host re-checks everything it is asked to do.
@@ -143,6 +143,7 @@ every device.
 | `log` | `level`: `"info"` or `"error"`, `message` | (none) | Writes a line to beam.log. **Never include message text, file names or secrets.** |
 | `openRemote` | `device`: a device id | `{}`; `code: "bad-request"` for this PC or a device it doesn't know | Opens the **viewer window** for that PC (§11.3), or brings it to the front. Only if `features` has `remoteControl`; offer it ("Control") for devices with `can.remoteControl`. |
 | `restoreSettings` | (none) | `{}` | **(1.8.1)** The app's own choice of settings backups (this PC's earlier installs', and the newest of each other PC's): it puts the chosen one back; remote control comes back only through its own confirmation. Only if `features` has `restoreSettings` and the server's has `backups` (Settings → This PC → "Restore settings…"). |
+| `openFamily` | (none) | `{}`; `code: "unavailable"` when the server names no Beam Family (its `/api/info` has no `family`) | **(1.10.0)** The header's ♥: Beam Family in a window of the app's own (§12), or brought to the front. The address is the one the server's `/api/info` gives the app, never one from the page. Only if `features` has `family`; otherwise the ♥ stays a link (the window hands it to the browser). |
 
 ## 5. Host → page events
 
@@ -431,3 +432,20 @@ retransmits).
 | `openLink { url }`, `log`, `unauthorized` | | As in §4. |
 
 Host → page: `{ type: "remoteKey", code, down }`, a `KeyboardEvent.code`.
+
+## 12. Beam Family's window (Beam for Windows 1.10.0; `features` has `family`)
+
+The header's ♥ (`openFamily`), the tray's "Beam Family" and `Beam.exe --family` open Beam Family (the address the
+server's `/api/info` gives as `family`) in a window of its own, with a WebView2 profile of its own
+(`WebView2\Family`): Beam's sign-in cookie never reaches Family (Family is often on Beam's own machine name, on another
+port, and cookies don't keep to a port), and Family signs people in itself (Tailscale on the tailnet). The page there
+gets no bridge (`chrome.webview` messages go nowhere) and no Beam identity, only
+`beamHost = { app: "windows", window: "family", version }` on Family's own origin: Family's page then offers no
+notifications, which WebView2 can't get (it has no push service); they stay with the browser and the phone.
+
+- Minimized, the page is hidden (`document.visibilityState`), so Family pushes to the person's other devices and marks
+  nothing read meanwhile; restored, it's visible again. Closing the window lets it go; it's made again when opened.
+- Links to other sites, and anything opening a window of its own, go to the default browser; downloads are WebView2's
+  own (the Downloads folder). Pasting and saving several files are allowed; other permissions are refused.
+- An update reopens it (without the focus) when it was open; signing out of Beam, or the sign-in revoked, closes it and
+  deletes its profile (the Family sign-in made in it).

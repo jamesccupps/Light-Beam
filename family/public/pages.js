@@ -143,6 +143,7 @@ export function settingsView() {
       blocked: [h('p', {}, 'Notifications are blocked for this site. Allow them in the browser’s site settings, then come back.')],
       install: [h('p', {}, isIos() ? 'On an iPhone or iPad, notifications work in the home-screen app: tap Share, then “Add to Home Screen”, and open Family from there.' : 'Install the app to get notifications.')],
       unsupported: [h('p', {}, 'This browser can’t show notifications from Beam Family.')],
+      app: [h('p', {}, 'The Beam app’s Family window can’t show notifications: they come through your browser instead. Open Beam Family there to turn them on.')],
     }[push];
     let theme = 'system';
     try { theme = localStorage.getItem('family.theme') || 'system'; } catch {}

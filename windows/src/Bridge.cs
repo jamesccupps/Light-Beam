@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -208,6 +208,12 @@ namespace Beam
                     app.Backups.ShowChoices();
                     Reply(id, null);
                     break;
+                case "openFamily": // (1.10) the ♥: Beam Family in a window of its own (its address from the server's /api/info)
+                {
+                    string err = app.OpenFamily(false);
+                    if (err != null) Fail(id, "unavailable", err); else Reply(id, null);
+                    break;
+                }
                 case "openRemote": // Beam 1.6: "Control" opens a viewer window of its own
                 {
                     string err = app.OpenRemote(Json.Str(m, "device"));

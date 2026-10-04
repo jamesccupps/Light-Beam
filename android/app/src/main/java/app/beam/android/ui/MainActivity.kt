@@ -83,8 +83,9 @@ class MainActivity : BaseActivity() {
                 )
                 R.id.action_pair -> PairQr.show(this)
                 R.id.action_settings -> startActivity(Intent(this, SettingsActivity::class.java))
-                // In the browser: that's where its notifications work (Web Push), and where it can be installed.
-                R.id.action_family -> app.repo.state.value.info?.family?.let { FileActions.openLink(this, it) }
+                // (1.12) Inside Beam, in a Custom Tab: the browser's engine, so its sign-in and notifications (Web Push)
+                // work as in the browser; the browser itself when it can't show one.
+                R.id.action_family -> app.repo.state.value.info?.family?.let { FileActions.openInApp(this, it) }
             }
             true
         }

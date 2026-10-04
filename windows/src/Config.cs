@@ -49,6 +49,8 @@ namespace Beam
         public List<string> LastTargets = new List<string>();
         public int WinX, WinY, WinW, WinH;
         public bool WinMax;
+        public int FamX, FamY, FamW, FamH;     // (1.10) Beam Family's window
+        public bool FamMax;
         public double Zoom = 1.0;
         public int HeartbeatSec = 70;
         public bool Quiet;                     // tests: no tray icon and no notifications
@@ -244,6 +246,15 @@ namespace Beam
                     c.WinH = (int)Json.Long(w, "h", 0);
                     c.WinMax = Json.Bool(w, "max", false);
                 }
+                var fw = Json.Obj(Json.Get(d, "familyWindow"));
+                if (fw != null)
+                {
+                    c.FamX = (int)Json.Long(fw, "x", 0);
+                    c.FamY = (int)Json.Long(fw, "y", 0);
+                    c.FamW = (int)Json.Long(fw, "w", 0);
+                    c.FamH = (int)Json.Long(fw, "h", 0);
+                    c.FamMax = Json.Bool(fw, "max", false);
+                }
             }
             bool dirty = false;
             if (string.IsNullOrEmpty(c.DeviceId) || !ValidId(c.DeviceId))
@@ -357,6 +368,12 @@ namespace Beam
                     var w = new Dictionary<string, object>();
                     w["x"] = WinX; w["y"] = WinY; w["w"] = WinW; w["h"] = WinH; w["max"] = WinMax;
                     d["window"] = w;
+                }
+                if (FamW > 0)
+                {
+                    var fw = new Dictionary<string, object>();
+                    fw["x"] = FamX; fw["y"] = FamY; fw["w"] = FamW; fw["h"] = FamH; fw["max"] = FamMax;
+                    d["familyWindow"] = fw;
                 }
                 raw = d;
                 AtomicWrite(FilePath, Json.Pretty(d));
