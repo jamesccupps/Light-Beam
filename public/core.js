@@ -1,6 +1,7 @@
 'use strict';
 // Beam web app. Plain scripts loaded in order (core, cache, model, host, thread, send, live, signin, settings,
-// devices, phone, extras, gallery, remote, app); they share one global scope and app.js starts everything. See docs/API.md for the protocol and
+// devices, phone, extras, gallery, app; remote.js only on the remote control viewer's page, added by app.js); they
+// share one global scope and app.js starts everything. See docs/API.md for the protocol and
 // docs/HOST-BRIDGE.md for "host mode" (the page running inside the Windows app).
 
 const $ = sel => document.querySelector(sel);

@@ -2,12 +2,12 @@
 // share target, and notification clicks. Paths are relative to where Beam lives, so it also works under /beam/.
 'use strict';
 
-const SHELL_CACHE = 'beam-shell-v5';
+const SHELL_CACHE = 'beam-shell-v6'; // (v6, 1.12.2: without remote.js)
 const SHARE_CACHE = 'beam-share';
 const SCOPE = self.registration.scope;
 const ROOT = new URL('./', SCOPE).href;
 const SHELL = ['./', 'style.css', 'core.js', 'cache.js', 'model.js', 'host.js', 'thread.js', 'send.js', 'live.js', 'signin.js',
-  'settings.js', 'devices.js', 'phone.js', 'extras.js', 'gallery.js', 'remote.js', 'app.js', 'icon.svg', 'icon-180.png', 'icon-192.png', 'manifest.webmanifest'].map(p => new URL(p, SCOPE).href);
+  'settings.js', 'devices.js', 'phone.js', 'extras.js', 'gallery.js', 'app.js', 'icon.svg', 'icon-180.png', 'icon-192.png', 'manifest.webmanifest'].map(p => new URL(p, SCOPE).href);
 const EXTRA = ['icon-192.png'].map(p => new URL(p, SCOPE).href); // not named by the page, but needed offline (notifications)
 const TIMEOUT_MS = 3000;
 const isShell = u => SHELL.includes(u.split(/[?#]/)[0]);

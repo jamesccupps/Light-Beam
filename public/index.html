@@ -31,8 +31,9 @@
   <script src="phone.js" defer></script>
   <script src="extras.js" defer></script>
   <script src="gallery.js" defer></script>
-  <script src="remote.js" defer></script>
   <script src="app.js" defer></script>
+  <!-- The remote control viewer: app.js loads it only for #remote=<PC id> (inert here: named for its version) -->
+  <template id="viewerScript"><script src="remote.js"></script></template>
 </head>
 <body>
   <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">

@@ -229,9 +229,27 @@ function offerNotifications() {
 
 // ---------------------------------------------------------------- start
 
+// index.html#remote=<PC id>: this page is the remote control viewer (remote.js).
+const RC_ID = (/^#remote=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
+
+// The viewer's script, only on its own page (1.12.2: the chat app never needs its ~130 KB, a quarter of what it
+// loaded). index.html names it inside a <template> (inert: nothing loads), so the server gives it its version.
+function loadViewer() {
+  document.documentElement.classList.add('remote-mode'); // (the chat app's screens stay hidden meanwhile)
+  const script = document.createElement('script');
+  script.src = $('#viewerScript')?.content.querySelector('script')?.getAttribute('src') || 'remote.js';
+  script.onload = () => startRemote();
+  script.onerror = () => document.body.append(el('div', { id: 'remote', class: 'rc', 'data-state': 'ended' },
+    el('div', { class: 'rc-body' }, el('div', { class: 'rc-overlay' }, el('div', { class: 'rc-card', role: 'alert' },
+      el('strong', {}, 'The remote screen didn’t open'),
+      el('p', {}, 'Beam couldn’t load it. Check the connection, then try again.'),
+      el('button', { class: 'btn primary', type: 'button', onclick: () => location.reload() }, 'Try again'))))));
+  document.head.append(script);
+}
+
 async function init() {
   // index.html#remote=<PC id>: the remote control viewer, and nothing of the chat app (remote.js).
-  if (RC_ID) return startRemote();
+  if (RC_ID) return loadViewer();
   document.documentElement.classList.toggle('host', Boolean(HOST));
   const params = new URLSearchParams(location.search);
   const handoff = takeHandoff();
