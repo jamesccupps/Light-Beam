@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.AttributeSet
@@ -176,6 +177,42 @@ object FileActions {
         } catch (_: Exception) {
             Toast.makeText(ctx, R.string.signin_no_browser, Toast.LENGTH_LONG).show()
         }
+    }
+
+    /**
+     * (1.12) A web page inside Beam: a Custom Tab of the browser (its engine, its sign-ins and its notifications, shown
+     * over Beam with a close button back to it), or the browser itself when none can show one. Beam Family opens here.
+     */
+    fun openInApp(ctx: Context, url: String) {
+        val browser = customTabsBrowser(ctx) ?: return openLink(ctx, url)
+        val tab = Intent(Intent.ACTION_VIEW, url.toUri())
+            .setPackage(browser)
+            .putExtras(Bundle().apply { putBinder(CT_SESSION, null) }) // (a Custom Tab without a session of its own)
+            .putExtra(CT_TOOLBAR_COLOR, ctx.getColor(R.color.surface))
+            .putExtra(CT_COLOR_SCHEME, 0) // the system's light or dark
+            .putExtra(CT_TITLE, 1) // the page's title over its address
+            .putExtra(Intent.EXTRA_REFERRER, "android-app://${ctx.packageName}".toUri())
+        try {
+            ctx.startActivity(tab)
+        } catch (_: ActivityNotFoundException) {
+            openLink(ctx, url)
+        }
+    }
+
+    const val CT_SERVICE = "android.support.customtabs.action.CustomTabsService"
+    const val CT_SESSION = "android.support.customtabs.extra.SESSION"
+    private const val CT_TOOLBAR_COLOR = "android.support.customtabs.extra.TOOLBAR_COLOR"
+    private const val CT_COLOR_SCHEME = "androidx.browser.customtabs.extra.COLOR_SCHEME"
+    private const val CT_TITLE = "android.support.customtabs.extra.TITLE_VISIBILITY"
+
+    /** The browser that shows Custom Tabs: the default one if it can, else the first that can; null when none can. */
+    fun customTabsBrowser(ctx: Context): String? {
+        val pm = ctx.packageManager
+        val web = Intent(Intent.ACTION_VIEW, "https://example.com/".toUri()).addCategory(Intent.CATEGORY_BROWSABLE)
+        val tabs = { pkg: String -> pkg != ctx.packageName && pm.resolveService(Intent(CT_SERVICE).setPackage(pkg), 0) != null }
+        val default = pm.resolveActivity(web, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
+        if (default != null && default != "android" && tabs(default)) return default
+        return pm.queryIntentActivities(web, PackageManager.MATCH_ALL).map { it.activityInfo.packageName }.distinct().firstOrNull(tabs)
     }
 
     /** Opens the Tailscale app (or its store page if it isn't installed). */

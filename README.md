@@ -245,6 +245,8 @@ address, so the browser becomes part of that device instead of a separate entry.
 
 - It lives in the system tray; click the icon to show or hide the chat window. Run a downloaded `Beam.exe` once and it
   installs itself, with a Start menu entry, and starts with Windows.
+- **Beam Family** (Windows app 1.10, with `BEAM_FAMILY_URL` set): the chat's ♥, the tray's **Beam Family** or
+  `Beam.exe --family` open it in a window of its own, signed in by Tailscale and kept apart from Beam's own sign-in.
 - **Hotkeys:**
   - **Ctrl+Alt+B** opens "Send clipboard to…", which remembers your last device.
   - **Ctrl+Alt+Shift+B** sends the clipboard straight to that device.
@@ -283,6 +285,8 @@ address, so the browser becomes part of that device instead of a separate entry.
   notification.
 - **Shortcuts and tools:**
   - A **Quick Settings tile**, "Send clipboard", with a default device.
+  - A **home-screen widget** (Android app 1.12): the last thing you received (tap to open it, **Copy** for a text),
+    with **Send clipboard** and **Send a photo**.
   - Launcher shortcuts.
   - Camera and photo picker in the composer.
   - Search.
@@ -314,7 +318,9 @@ tailscale funnel --bg --https=8443 http://127.0.0.1:8766    # optional: a public
 - On Tailscale (your tailnet, or the machine shared with them) people are signed in by Tailscale. Through the public
   link they choose a name and a password; they don't need Tailscale.
 - It works in any browser and installs as an app on phones and computers (on an iPhone: Share → Add to Home Screen,
-  which notifications need there). Set `BEAM_FAMILY_URL` in `.env` and Beam's own apps get a "Beam Family" link.
+  which notifications need there). Set `BEAM_FAMILY_URL` in `.env` and Beam's own apps open it: the Windows app in a
+  window of its own (the ♥, the tray's **Beam Family**), the Android app in a Chrome tab inside it (the menu's **Beam
+  Family**), the web app in a new tab. Notifications come through the browser and the phone.
 - **Fast links** (1.9): "Fast link" on any file in the chat, or "Make a fast link" (the paperclip) for a file on your
   phone, gives a link anyone can download it with, no account needed, until it runs out (an hour, a day, a week) or
   you switch it off. Its page fetches the file straight from your computer when it can (a direct WebRTC connection:

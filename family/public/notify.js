@@ -7,9 +7,13 @@ import { state } from './store.js';
 export const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 export const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 export const supported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+// (Windows app 1.10) In the Beam app's own window for Family (WebView2): it has no push service, so notifications come
+// through the browser instead.
+export const inBeamWindow = () => window.beamHost?.window === 'family';
 
-// 'on' | 'off' | 'blocked' | 'install' (iPhone, not added to the home screen yet) | 'unsupported'
+// 'on' | 'off' | 'blocked' | 'install' (iPhone, not added to the home screen yet) | 'unsupported' | 'app' (Beam's window)
 export async function pushState() {
+  if (inBeamWindow()) return 'app';
   if (isIos() && !isStandalone()) return 'install';
   if (!supported() || !state.pushKey) return 'unsupported';
   if (Notification.permission === 'denied') return 'blocked';
@@ -20,6 +24,7 @@ export async function pushState() {
 
 // Asks (this must come from a tap) and subscribes; the server is told where to send.
 export async function enablePush() {
+  if (inBeamWindow()) throw new Error('This window can’t show notifications: turn them on in Beam Family in your browser');
   if (!supported()) throw new Error('This browser can’t show notifications from Beam Family');
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') throw new Error(permission === 'denied' ? 'Notifications are blocked for this site in the browser’s settings' : 'Notifications weren’t allowed');
@@ -48,7 +53,7 @@ export async function disablePush() {
 // After signing in again on a device that already had notifications on: the server learns the subscription again.
 export async function refreshPush() {
   try {
-    if (!supported() || Notification.permission !== 'granted' || !state.pushKey) return;
+    if (inBeamWindow() || !supported() || Notification.permission !== 'granted' || !state.pushKey) return;
     const reg = await navigator.serviceWorker.getRegistration();
     const sub = await reg?.pushManager.getSubscription();
     if (sub) await api('/api/push', { method: 'PUT', body: sub.toJSON() });

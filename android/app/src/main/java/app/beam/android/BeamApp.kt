@@ -33,6 +33,7 @@ import app.beam.android.remote.RemoteControl
 import app.beam.android.service.ConnectionService
 import app.beam.android.service.Ringer
 import app.beam.android.ui.PairActivity
+import app.beam.android.ui.BeamWidget
 import app.beam.android.ui.Thumbs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +41,7 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -134,6 +136,7 @@ class BeamApp : Application() {
         remote = RemoteControl(this)
         backups = SettingsBackups(this).also { it.start() }
         publishShortcuts()
+        publishWidget()
         // Folders a sign-out moved aside, if the process ended before they were deleted.
         scope.launch(Dispatchers.IO) { cacheDir.listFiles { f -> f.name.contains(GONE) }?.forEach { it.deleteRecursively() } }
 
@@ -272,6 +275,15 @@ class BeamApp : Application() {
                     val s = repo.state.value
                     Shortcuts.publish(this@BeamApp, Conversations.summaries(s.me, s.devices, s.items, emptyMap()))
                 }
+        }
+    }
+
+    /** (1.12) The home-screen widget follows the newest thing received (drawn only when one is on a home screen). */
+    private fun publishWidget() {
+        scope.launch {
+            combine(repo.state, prefs.localFiles) { s, locals -> BeamWidget.Shown.of(this@BeamApp, s, locals) }
+                .distinctUntilChanged()
+                .collect { BeamWidget.render(this@BeamApp, it) }
         }
     }
 

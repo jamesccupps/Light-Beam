@@ -7,6 +7,7 @@ import path from 'node:path';
 import { sleep } from './cdp.mjs';
 import { TMP } from './harness.mjs';
 import { dev } from './tests-core.mjs';
+import { hostPage } from './tests-host.mjs';
 import { assert, eq } from './harness.mjs';
 
 const PORT = 8828;
@@ -81,6 +82,24 @@ const send = (page, text) => page.evaluate(`(async () => {
 })()`);
 
 export default function register(test) {
+  test('family: in the Beam app’s Family window (beamHost.window = "family") the page offers no notifications: no banner, Settings says they come through the browser (Windows app 1.10)', async ctx => {
+    const srv = await familyServer(ctx);
+    const inApp = await tailscalePage(ctx, OWNER, 'Robin', { init: [`window.beamHost = Object.freeze({ app: 'windows', window: 'family', version: '1.10.0' })`] });
+    await inApp.goto(`${srv.base}/`);
+    await inApp.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'the owner in #general');
+    eq(await inApp.evaluate(`import('/notify.js').then(m => m.pushState())`), 'app', 'notifications here: "app"');
+    await sleep(600);
+    eq(await inApp.evaluate(`document.body.textContent.includes('Get notified about new messages')`), false, 'no "Get notified" banner');
+    await inApp.evaluate(`history.pushState({}, '', '/settings'); dispatchEvent(new PopStateEvent('popstate')); true`);
+    await inApp.waitFor(`document.body.textContent.includes('Notifications on this device')`, 5000, 'Settings');
+    assert(await inApp.evaluate(`document.body.textContent.includes('they come through your browser')`), 'Settings: they come through the browser');
+    eq(await inApp.evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Turn on')`), false, 'no Turn on');
+    const plain = await tailscalePage(ctx, OWNER, 'Robin');
+    await plain.goto(`${srv.base}/`);
+    await plain.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'the same person in a browser');
+    assert(await plain.evaluate(`import('/notify.js').then(m => m.pushState()).then(s => s !== 'app')`), 'a browser isn’t "app"');
+  }, { timeout: 60000 });
+
   test('family: the owner by Tailscale, someone joining by invite + password; messages, mentions, unread, replies and reactions arrive live', async ctx => {
     const srv = await familyServer(ctx);
     const robin = await tailscalePage(ctx, OWNER, 'Robin');
@@ -753,6 +772,23 @@ export function registerLink(test) {
     const plain = await ctx.signedIn();
     await plain.waitFor(`typeof server !== 'undefined' && Boolean(server.info)`, 10000, 'info loaded');
     eq(await plain.evaluate(`document.getElementById('familyLink').hidden`), true, 'no link without the setting');
+  }, { timeout: 60000 });
+
+  test('family: in the Windows app’s chat window the ♥ asks the app to open Beam Family in a window of its own (openFamily); an app without one gets the link as before (Windows app 1.10)', async ctx => {
+    const beam = await ctx.startServer(8823, { BEAM_FAMILY_URL: 'https://desk.example.ts.net:8443/' });
+    ctx.defer(() => beam.stop());
+    const features = ['transfers', 'localFiles', 'settings', 'clipboard', 'pickFiles', 'pickFolder', 'dragOut', 'openPanel'];
+    // A click on the ♥: whether the page kept it from opening the link (read after the page's own listener; never followed).
+    const click = `(() => { let kept = null; const look = e => { kept = e.defaultPrevented; e.preventDefault(); }; window.addEventListener('click', look);
+      document.getElementById('familyLink').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); window.removeEventListener('click', look); return kept; })()`;
+    const { page } = await hostPage(ctx, { server: beam, features: [...features, 'family'] });
+    await page.waitFor(`hostState.ready && !document.getElementById('familyLink').hidden`, 10000, 'the ♥ in the app’s window');
+    eq(await page.evaluate(click), true, 'the link isn’t opened');
+    await page.waitFor(`__host.log.some(m => m.type === 'openFamily')`, 3000, 'the app asked to open Beam Family');
+    const older = await hostPage(ctx, { server: beam, features });
+    await older.page.waitFor(`hostState.ready && !document.getElementById('familyLink').hidden`, 10000, 'the ♥ in an older app’s window');
+    eq(await older.page.evaluate(click), false, 'an older app: the link opens (its window hands it to the browser)');
+    eq(await older.page.evaluate(`__host.log.filter(m => m.type === 'openFamily').length`), 0, 'no openFamily');
   }, { timeout: 60000 });
 
   test('family: Beam’s own chat makes a fast link for a file: its menu → Fast link… → a week → the link, made by Beam Family on the same machine from the file itself; anyone downloads it; a text has none, nor a Beam without Family (1.13.0)', async ctx => {

@@ -80,6 +80,8 @@ namespace Beam
         public RemoteControl Rc;          // Beam 1.6: this PC being controlled from another device
         public SettingsBackups Backups;   // Beam 1.8.1: this PC's settings kept on the server too, and put back
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
+        FamilyWindow family;                     // (1.10) Beam Family in a window of its own
+        bool familyPending, familyPendingQuiet;  // asked for (--family, an update) before the server said where Family is
         readonly HashSet<string> alertsShown = new HashSet<string>();
         readonly Timer uiTimer, resyncTimer, integrationTimer, rediscoverTimer, updateTimer, updateRetryTimer, healthTimer;
         readonly Dictionary<string, ApproveForm> approvals = new Dictionary<string, ApproveForm>();
@@ -220,7 +222,7 @@ namespace Beam
                 var o = pending;
                 pending = null;
                 if (!o.Send && !o.Background && !o.Quit && !o.Settings && !o.Approve && !o.AddDevice && !o.PickClipboard
-                    && !o.Screenshot && !o.CopyLatest && o.Updated == null && o.UpdateFailed == null) o.Show = true;
+                    && !o.Screenshot && !o.CopyLatest && !o.Family && o.Updated == null && o.UpdateFailed == null) o.Show = true;
                 HandleCommand(o);
             }));
         }
@@ -367,6 +369,7 @@ namespace Beam
             foreach (var f in approvals.Values.ToList()) f.Close();
             Rc.Reset("signed out");
             CloseRemoteViews();
+            CloseFamily();
             foreach (var j in Uploads.ToList()) up.Cancel(j);
             foreach (var j in Downloads.Values.ToList()) down.Cancel(j);
             if (outbox != null) { outbox.Dispose(); outbox = null; }
@@ -1169,6 +1172,7 @@ namespace Beam
                     // server leaves them out of /api/hello, which answers anyone
                     var urls = Json.StrList(ServerInfo, "urls").Select(Api.NormalizeBase).Where(x => x != null).Distinct().ToList();
                     if (urls.Count > 0 && !urls.SequenceEqual(Cfg.KnownUrls)) { Cfg.KnownUrls = urls; Cfg.Save(); }
+                    FamilyInfoArrived();
                 }
                 if (SettingsChanged != null) SettingsChanged();
             }
@@ -1450,6 +1454,7 @@ namespace Beam
                 h.NewVersion = u.Version;
                 h.OldVersion = AppVersion.Text;
                 h.Show = main != null && main.Visible && main.WindowState != FormWindowState.Minimized;
+                h.Family = FamilyOpen; // (1.10) the new version opens it again
                 Program.Handoff = h;
                 Quit(false);
             }
@@ -2505,6 +2510,74 @@ namespace Beam
             RemoteViewWindow.ForgetProfile(Cfg);
         }
 
+        // (1.10) Beam Family's address, from the server's /api/info (its BEAM_FAMILY_URL), or null.
+        public string FamilyUrl
+        {
+            get
+            {
+                string u = ServerInfo != null ? Json.Str(ServerInfo, "family") : null;
+                Uri parsed;
+                return u != null && Uri.TryCreate(u, UriKind.Absolute, out parsed) && (parsed.Scheme == Uri.UriSchemeHttps || parsed.Scheme == Uri.UriSchemeHttp) ? u : null;
+            }
+        }
+
+        public bool FamilyOpen { get { return family != null && !family.IsDisposed && family.Visible; } }
+
+        // (1.10) Beam Family in a window of its own (FamilyWindow): the chat's ♥ (bridge openFamily), the tray,
+        // `Beam.exe --family`. quiet: shown without taking the focus (reopened after an update). Null, or what's wrong.
+        public string OpenFamily(bool quiet)
+        {
+            string url = FamilyUrl;
+            if (url == null) return ServerInfo == null ? "Beam's server hasn't said where Beam Family is yet" : "Beam Family isn't set up on this Beam server";
+            if (WebHost.RuntimeVersion(Cfg) == null) { FileUtil.OpenUrl(url); return null; } // (no WebView2 on this PC: the browser)
+            if (family == null || family.IsDisposed)
+            {
+                var w = new FamilyWindow(this, url);
+                w.FormClosed += (s, e) => { if (family == w) { family = null; Log.Write("Beam Family: its window closed"); } };
+                family = w;
+                Log.Write("Beam Family: opened its window");
+            }
+            else family.UrlChanged(url);
+            family.ShowAndActivate(!quiet);
+            return null;
+        }
+
+        // `--family` (an update's reopening too): now if the server has said where Family is, else once it has.
+        void OpenFamilyWhenKnown(bool quiet)
+        {
+            if (ServerInfo == null) { familyPending = true; familyPendingQuiet = quiet; return; }
+            string err = OpenFamily(quiet);
+            if (err != null) Log.Write("Beam Family: " + err);
+        }
+
+        // /api/info arrived: a waiting --family opens; an open window follows a new address.
+        void FamilyInfoArrived()
+        {
+            if (familyPending) { familyPending = false; OpenFamilyWhenKnown(familyPendingQuiet); return; }
+            string url = FamilyUrl;
+            if (url != null && family != null && !family.IsDisposed) family.UrlChanged(url);
+        }
+
+        // Signed out or revoked: the Family window closes and its profile (the Family sign-in made in it) goes.
+        void CloseFamily()
+        {
+            familyPending = false;
+            if (family != null && !family.IsDisposed) { try { family.CloseForGood(); } catch { } }
+            family = null;
+            FamilyWindow.ForgetProfile(Cfg);
+        }
+
+        // Tests: the Family window minimized, restored or closed, as the user would.
+        void FamilyTest(string cmd)
+        {
+            if (family == null || family.IsDisposed) { Log.Write("Beam Family: (test) no window"); return; }
+            if (cmd == "minimize") family.WindowState = FormWindowState.Minimized;
+            else if (cmd == "restore") family.WindowState = FormWindowState.Normal;
+            else if (cmd == "close") family.Close();
+            else return;
+            Log.Write("Beam Family: (test) " + cmd);
+        }
+
         // ------------------------------------------------------------------ commands, windows, tray
 
         void HandleCommand(Options o)
@@ -2567,6 +2640,8 @@ namespace Beam
             if (o.TestBackups != null && Cfg.CustomPath) Backups.TestCommand(o.TestBackups);
             if (o.TestBridge != null && Cfg.CustomPath) TestBridge(o.TestBridge);
             if (o.TestOpenRemote != null && Cfg.CustomPath) { string err = OpenRemote(o.TestOpenRemote); if (err != null) Log.Write("Remote control: (test) " + err); }
+            if (o.Family) OpenFamilyWhenKnown(o.Updated != null || o.UpdateFailed != null); // (after an update: without the focus)
+            if (o.TestFamily != null && Cfg.CustomPath) FamilyTest(o.TestFamily);
         }
 
         // Tests: a message as if the chat page sent it; the reply goes to beam.log.
@@ -2886,6 +2961,7 @@ namespace Beam
             var open = new ToolStripMenuItem("Open Beam", null, (s, e) => ShowMain(null, null));
             open.Font = Ui.Bold;
             menu.Items.Add(open);
+            if (FamilyUrl != null) menu.Items.Add("Beam Family", null, (s, e) => { string err = OpenFamily(false); if (err != null) notifier.Show("Beam Family", err, null, "family"); });
             var clip = new ToolStripMenuItem("Send clipboard to");
             var last = LastTargets();
             clip.DropDownItems.Add(new ToolStripMenuItem("All devices", MenuRenderer.Dot(Theme.Accent), (s, e) => SendClipboardTo(new List<string>())));

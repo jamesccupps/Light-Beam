@@ -24,7 +24,7 @@ namespace Beam
 {
     // Beam.exe [--config <path>] [--background] [--show] [--hide] [--settings] [--add-device] [--approve] [--quit]
     //          [--send [--to <id|name|all>[,…]] <file|folder>...] [--pick-clipboard] [--screenshot] [--copy-latest]
-    //          [--portable] [--install] [--devtools]
+    //          [--portable] [--install] [--devtools] [--family]
     // Internal: --finish-update <exe> <pid> (1.1.0's updater), --updated <v>, --update-from <v>, --update-failed <v>,
     //           --health <nonce>, --installed, --test-capture <png>, --test-offscreen, --test-path </page> (custom --config only)
     class Options
@@ -36,6 +36,7 @@ namespace Beam
         public bool Background;
         public bool Show;
         public bool Hide;
+        public bool Family;     // (1.10) Beam Family's window
         public bool TestPoke;   // tests: check the event stream as after waking up
         public string TestMode; // tests: switch the stream to "foreground" or "background" (as the tray menu does)
         public string TestTransfer; // tests: "<action>:<transfer id>", as the page's transfer buttons (retry, cancel…)
@@ -46,6 +47,7 @@ namespace Beam
         public string TestBackups;   // tests (1.8.1): settings backups ("check", "send", "choices", "answer:restore|skip", "state")
         public string TestBridge;    // tests: a host bridge message as if the chat page sent it (the reply goes to beam.log)
         public string TestOpenRemote; // tests: the viewer window for that device, as the page's "Control" opens it
+        public string TestFamily;    // tests (1.10): the Family window "minimize", "restore" or "close", as the user would
         public bool AddDevice;
         public bool Settings;
         public bool Approve;
@@ -82,6 +84,7 @@ namespace Beam
                 else if (lower == "--background" || lower == "--hidden") o.Background = true;
                 else if (lower == "--show") o.Show = true;
                 else if (lower == "--hide") o.Hide = true;
+                else if (lower == "--family") o.Family = true;
                 else if (lower == "--test-poke") o.TestPoke = true;
                 else if (lower == "--test-mode" && more) o.TestMode = args[++i];
                 else if (lower == "--test-transfer" && more) o.TestTransfer = args[++i];
@@ -92,6 +95,7 @@ namespace Beam
                 else if (lower == "--test-backups" && more) o.TestBackups = args[++i];
                 else if (lower == "--test-bridge" && more) o.TestBridge = args[++i];
                 else if (lower == "--test-open-remote" && more) o.TestOpenRemote = args[++i];
+                else if (lower == "--test-family" && more) o.TestFamily = args[++i];
                 else if (lower == "--add-device") o.AddDevice = true;
                 else if (lower == "--settings") o.Settings = true;
                 else if (lower == "--approve") o.Approve = true;
@@ -138,6 +142,7 @@ namespace Beam
             var list = new List<string>();
             if (Show) list.Add("--show");
             if (Hide) list.Add("--hide");
+            if (Family) list.Add("--family");
             if (TestPoke) list.Add("--test-poke");
             if (TestMode != null) { list.Add("--test-mode"); list.Add(TestMode); }
             if (TestTransfer != null) { list.Add("--test-transfer"); list.Add(TestTransfer); }
@@ -148,6 +153,7 @@ namespace Beam
             if (TestBackups != null) { list.Add("--test-backups"); list.Add(TestBackups); }
             if (TestBridge != null) { list.Add("--test-bridge"); list.Add(TestBridge); }
             if (TestOpenRemote != null) { list.Add("--test-open-remote"); list.Add(TestOpenRemote); }
+            if (TestFamily != null) { list.Add("--test-family"); list.Add(TestFamily); }
             if (AddDevice) list.Add("--add-device");
             if (Settings) list.Add("--settings");
             if (Approve) list.Add("--approve");
