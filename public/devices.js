@@ -234,3 +234,100 @@ function sectionAlerts() {
   }
   return parts;
 }
+
+// ---------------------------------------------------------------- remote control, the chat app's side: Control, Settings
+// (1.6; here since 1.12.2: the viewer itself, remote.js, loads only on its own page)
+
+let rcSessionList = null;       // the sessions going on (GET /api/rc/sessions, `rc-sessions`), for Settings
+const rcTurningOff = new Set(); // PCs asked to turn remote control off, until their switch says so
+const rcFeature = () => serverHas('remote-control');
+
+// Control (next to Remote Desktop) for a PC this device can control. A locked one says what to use instead.
+function rcActions(d) {
+  if (!rcFeature() || !d || d.id === me.id) return [];
+  if (d.can?.remoteControl && (!HOST || hostHas('remoteControl'))) return [{ label: 'Control', icon: 'pointer', action: () => openRemote(d) }];
+  if (d.status?.remoteControl === true && d.status?.locked === true && !rcTurningOff.has(d.id) && (!HOST || hostHas('remoteControl'))) {
+    return [{ label: `${d.name} is locked: use Remote Desktop`, icon: 'lock', disabled: true, action: () => {} }];
+  }
+  return [];
+}
+
+// The viewer: the Windows app's own window, else a new tab.
+function openRemote(d) {
+  if (HOST) {
+    hostCall('openRemote', { device: d.id }).catch(err => toast(err.message || 'The Beam app couldn’t open the remote screen.', { error: true }));
+    return;
+  }
+  window.open(`${BASE.href}#remote=${encodeURIComponent(d.id)}`, '_blank', 'noopener');
+}
+
+function onRcSessions(d) {
+  rcSessionList = Array.isArray(d?.sessions) ? d.sessions.filter(s => s && typeof s.id === 'string') : [];
+  if ($('#settingsDlg')?.open) renderSettings();
+}
+
+async function loadRcSessions() {
+  if (!rcFeature()) return;
+  try { onRcSessions(await apiJson('api/rc/sessions')); } catch {}
+}
+
+// Settings → Devices, under a PC: who controls it (End), and turning remote control off. Never on: that's only at
+// the PC itself.
+function rcDeviceRows(d) {
+  if (!rcFeature() || !d) return [];
+  if (rcTurningOff.has(d.id) && d.status?.remoteControl !== true) rcTurningOff.delete(d.id);
+  const out = (rcSessionList || []).filter(x => x.host === d.id).map(s => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'),
+    el('span', {}, s.state === 'live' ? `Being controlled from ${nameOf(s.viewer)}` : `${nameOf(s.viewer)} is connecting to control it`), ' · ',
+    el('button', { class: 'linkish', type: 'button', onclick: () => endRcFromHere(s, d) }, 'End')));
+  if (d.status?.remoteControl === true) {
+    out.push(rcTurningOff.has(d.id) ? el('p', { class: 'muted small' }, `Turning off remote control on ${d.name}…`)
+      : el('div', { class: 'dev-actions' }, el('button', { class: 'btn small-btn ghost', type: 'button', onclick: () => disableRemote(d) }, icon('power'), 'Turn off remote control')));
+  }
+  return out;
+}
+
+async function endRcFromHere(s, d) {
+  try {
+    await api(`api/rc/sessions/${encodeURIComponent(s.id)}/end`, jsonBody({}));
+    toast(`Ended the session on ${d?.name || 'the PC'}`);
+    rcSessionList = (rcSessionList || []).filter(x => x.id !== s.id);
+    if ($('#settingsDlg')?.open) renderSettings();
+  } catch (err) { toast(friendlyError(err), { error: true }); }
+}
+
+async function disableRemote(d) {
+  const ok = await confirmDialog({
+    title: `Turn off remote control on ${d.name}?`,
+    text: `A session going on ends at once, and nobody can control ${d.name} until someone turns “Allow remote control” on again at that PC.`,
+    confirm: 'Turn off', danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api('api/rc/disable', jsonBody({ device: d.id }));
+    rcTurningOff.add(d.id);
+    toast(`Turning off remote control on ${d.name}`);
+  } catch (err) { toast(friendlyError(err), { error: true }); }
+  if ($('#settingsDlg')?.open) renderSettings();
+}
+
+// Settings → This PC (the Windows app): its own switch, which the page can only turn off (`native-only` for on), and
+// who may control it (read-only here: the list is changed in the app's own settings).
+function rcPcRows(s) {
+  if (typeof s?.allowRemoteControl !== 'boolean') return [];
+  const mine = (rcSessionList || []).filter(x => x.host === me.id);
+  const allowed = Array.isArray(s.remoteControlDevices) ? s.remoteControlDevices.filter(x => x && typeof x.id === 'string') : null;
+  return [
+    el('h4', {}, 'Remote control'),
+    s.allowRemoteControl
+      ? el('div', { class: 'field rc-pc' }, el('p', { class: 'small' }, 'On: your devices can see and control this PC. It shows a banner while they do, with Stop (or press Ctrl+Alt+Shift+F12).'),
+        el('div', { class: 'dev-actions' }, el('button', { class: 'btn small-btn ghost', type: 'button', onclick: async () => {
+          const r = await hostDo('setSettings', { settings: { allowRemoteControl: false } });
+          if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
+        } }, icon('power'), 'Turn off remote control')))
+      : note('Off. To let your devices control this PC, turn on “Allow remote control” in Beam’s menu in the taskbar corner (it asks you to confirm).'),
+    allowed && field('Can be controlled from', el('p', { class: 'small rc-allowed' }, allowed.length ? allowed.map(x => cleanName(x.name) || nameOf(x.id)).join(', ') : 'No device yet'),
+      note('The list is changed in Beam’s own settings on this PC: tray → Remote control devices…')),
+    ...mine.map(x => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'), el('span', {}, `Being controlled from ${nameOf(x.viewer)}`), ' · ',
+      el('button', { class: 'linkish', type: 'button', onclick: () => endRcFromHere(x, { name: 'this PC' }) }, 'End'))),
+  ].filter(Boolean);
+}
