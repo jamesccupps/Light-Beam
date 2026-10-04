@@ -235,6 +235,10 @@ address, so the browser becomes part of that device instead of a separate entry.
   motion or Data saver; picture size, frame rate, data limit, codec and details, kept per PC), choose a screen, full
   screen, a Keys menu (Win, Alt+Tab, Lock this PC…), and clipboard sync, which is off until you turn it on for that
   session. A phone asks "Still there?" after 10 minutes without a touch.
+- **Lag** (Windows app 1.11): the PC asks every viewer, the phone included, to show each frame the moment it arrives.
+  The chip over the picture shows the lag (from your touch to the PC's answer on your screen, measured), and
+  "relayed" while Tailscale relays the connection through its servers, which is slower; Show details has the
+  breakdown and Tailscale's path (direct on the same network, direct over the internet, or which relay).
 - **Limits:** a locked or signed-out PC, administrator windows and Ctrl+Alt+Del need Remote Desktop (the existing
   button). Only Beam apps, or a browser where you signed in with a pairing link, approval or password, can start a
   session.

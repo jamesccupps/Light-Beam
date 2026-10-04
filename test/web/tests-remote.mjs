@@ -541,6 +541,28 @@ export default function register(test) {
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 90000 });
 
+  test('remote control 1.14.2: the picture’s delay from the PC’s screen to this one, measured per frame, and the lag in the chip and details; the PC says how Tailscale reaches this viewer (direct, or through a relay)', async ctx => {
+    const pc = await fakePc(ctx, { caps: ['fit', 'settings', 'video'] });
+    const page = await viewer(ctx, pc.id);
+    await live(page, pc);
+    // Measured from the frames themselves (when the PC captured each one, when it's shown here).
+    await page.waitFor(`rc.stats?.picMs != null`, 10000, 'the picture’s delay');
+    const pic = await page.evaluate('rc.stats.picMs');
+    assert(pic >= 0 && pic < 2000, `a plausible delay (${pic} ms)`);
+    await page.waitFor(`rcLag() != null && rcUi.chip.textContent.includes(rcLag() + ' ms')`, 5000, 'the lag in the chip');
+    // Through Tailscale's relay (New York): the chip and the details say so; then direct, on the same network.
+    eq(await pc.js(`fakePc.send('ctl', { t: 'path', via: 'relay', relay: 'nyc' })`), true, 'the PC says: relayed');
+    await page.waitFor(`rc.path?.via === 'relay' && /relayed/.test(rcUi.chip.textContent)`, 5000, 'relayed: in the chip');
+    await page.evaluate('rc.pic.details = true; rcRenderDetails(); true');
+    await page.waitFor(`/through its relay in New York/.test(rcUi.details.textContent) && /from the PC’s screen to this one/.test(rcUi.details.textContent)`, 3000, 'the details: the relay, and the picture’s delay');
+    await pc.js(`fakePc.send('ctl', { t: 'path', via: 'direct', lan: true })`);
+    await page.waitFor(`rc.path?.via === 'direct' && !/relayed/.test(rcUi.chip.textContent) && /direct on the same network/.test(rcUi.details.textContent)`, 5000, 'direct, on the same network');
+    // Anything else from the PC is dropped.
+    await pc.js(`fakePc.send('ctl', { t: 'path', via: 'teleport', relay: '<b>x</b>' })`);
+    await page.waitFor(`rc.path === null && !/Tailscale,/.test(rcUi.details.textContent)`, 3000, 'an unknown path: dropped');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: FEATURE, timeout: 90000 });
+
   test('remote control 1.8: the picture’s settings (applied at once, kept per PC), fitting the PC to this screen (input waits, then maps to its new size; off puts it back), no frames while hidden, frames shown as they come', async ctx => {
     const pc = await fakePc(ctx, { caps: ['fit', 'settings', 'video'] });
     const page = await viewer(ctx, pc.id);

@@ -58,6 +58,9 @@ namespace Beam
         public string FitNote;           // why the last one couldn't be
         public Dictionary<string, object> Settings; // the viewer's picture settings (for the capture page, also a new one)
         public bool VideoOff;            // the viewer is hidden: no frames
+        public string PathKey;           // (1.11) how Tailscale reaches the viewer, as last told to it
+        public DateTime PathNext;        // ...when to ask Tailscale again
+        public bool PathChecking;
 
         public string Label
         {
@@ -659,6 +662,7 @@ namespace Beam
             if (first)
             {
                 s.LiveSince = DateTime.Now;
+                s.PathNext = DateTime.Now.AddSeconds(2); // (1.11) the path, once it has settled a little
                 KeepAwake(true);
                 Log.Write("Remote control: " + s.ViewerName + " is controlling this PC (peer " + remote + " is " + s.Machine + ", checked)");
                 app.Notify(RcPolicy.DisplayName(s.ViewerName) + " is controlling this PC", "Stop it with the banner at the top of the screen, or " + KillKeys + ".");
@@ -963,6 +967,32 @@ namespace Beam
                 SendCtl(s, st);
             }
             if (s.Clip && ClipPayload.IsolatedDir != null) CheckClipboard(s); // tests: the "clipboard" is a file
+            if (!s.PathChecking && s.PathNext != DateTime.MinValue && DateTime.Now >= s.PathNext) CheckPath(s);
+        }
+
+        // (1.11) How Tailscale reaches the viewer (this PC's own `tailscale status`): the viewer shows it, since a relay
+        // adds delay. Asked 2, 10 and 30 s into the session (a connection often starts relayed and goes direct within
+        // seconds), then every 30 s; told to the viewer when it changes.
+        async void CheckPath(RcSession s)
+        {
+            s.PathChecking = true;
+            var age = DateTime.Now - s.LiveSince;
+            s.PathNext = DateTime.Now.AddSeconds(age < TimeSpan.FromSeconds(9) ? 8 : age < TimeSpan.FromSeconds(29) ? 20 : 30);
+            try
+            {
+                var p = await tailnet.Path(s.CheckedIp);
+                if (current != s || p == null || p.Key == s.PathKey) return;
+                s.PathKey = p.Key;
+                Log.Write("Remote control: Tailscale reaches " + RcPolicy.DisplayName(s.ViewerName) + " " + p.Describe());
+                var m = new Dictionary<string, object>();
+                m["t"] = "path";
+                m["via"] = p.Via;
+                m["lan"] = p.Lan;
+                if (p.Relay != null) m["relay"] = p.Relay;
+                SendCtl(s, m);
+            }
+            catch (Exception ex) { Log.Error("Remote control: the path", ex); }
+            finally { s.PathChecking = false; }
         }
 
         // ------------------------------------------------------------------ ending
@@ -1443,6 +1473,14 @@ namespace Beam
             r.Name = string.IsNullOrEmpty(name) ? addr : RcPolicy.DisplayName(name);
             if (r.Refusal == null && string.IsNullOrEmpty(r.StableId)) r.Refusal = "Tailscale gave no node id";
             return r;
+        }
+
+        // (1.11) How Tailscale reaches that address now (RcPolicy.PathOf), or null when it can't tell.
+        public async Task<RcPath> Path(string ip)
+        {
+            if (exe == null || !RcPolicy.IsTailscaleIp(ip)) return null;
+            var status = await Run("status --json");
+            return status == null ? null : RcPolicy.PathOf(status, RcPolicy.Canonical(ip));
         }
 
         Task<Dictionary<string, object>> Run(string args)
