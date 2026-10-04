@@ -23,8 +23,8 @@ android {
         applicationId = "app.beam.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.8.2"
+        versionCode = 15
+        versionName = "1.9.0"
     }
 
     signingConfigs {

@@ -264,8 +264,14 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Sharing:** from any app, your devices appear right in the share sheet for one-tap sending, or pick Beam and then a
   device.
 - **Messages:**
-  - Long-press a message for Copy, Select text, Open link, Share, Forward, Save/Open, Pin and Delete.
+  - Long-press a message for Copy, Select text, Open link, Share, Select, Forward, Save/Open, Pin and Delete.
   - Tap a file to open it. Tap an "Arriving…" file to save it while it's still being sent.
+- **Several at once and a gallery** (Android app 1.9):
+  - **Select** in a message's menu, then tap more messages. The toolbar shows how many, with **Share** (all the files
+    in one share, into any app), **Save**, **Forward**, **Delete** and **Copy** (their text). Back stops.
+  - Files that aren't on the phone yet are downloaded first. In split screen, dragging a picked file drags them all.
+  - The picture button in a conversation shows its **photos and videos** as a grid and its **files** as a list;
+    long-press one to pick several there.
 - **Notifications:** they have **Copy**, **Open link** and quick **Reply**, and files open straight from the
   notification.
 - **Shortcuts and tools:**

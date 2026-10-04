@@ -11,7 +11,9 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.AttributeSet
 import android.view.DragEvent
+import android.view.MotionEvent
 import android.view.View
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
@@ -146,6 +148,24 @@ object FileActions {
         ctx.startActivity(chooser(ctx, send))
     }
 
+    /** Several files in one share (1.12), as the Photos or Files app shares them: the type they have in common. */
+    fun shareMany(ctx: Context, files: List<Pair<Uri, String>>) {
+        if (files.isEmpty()) return
+        if (files.size == 1) return share(ctx, files[0].first, files[0].second)
+        val types = files.map { it.second }.distinct()
+        val kinds = types.map { it.substringBefore('/') }.distinct()
+        val type = when {
+            types.size == 1 -> types[0]
+            kinds.size == 1 -> kinds[0] + "/*"
+            else -> "*/*"
+        }
+        val uris = ArrayList(files.map { it.first })
+        val send = Intent(Intent.ACTION_SEND_MULTIPLE).setType(type).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        send.clipData = ClipData.newRawUri("", uris[0]).apply { for (u in uris.drop(1)) addItem(ClipData.Item(u)) }
+        ctx.startActivity(chooser(ctx, send))
+    }
+
     fun shareText(ctx: Context, text: String) {
         ctx.startActivity(chooser(ctx, Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)))
     }
@@ -274,6 +294,21 @@ object Drops {
         }
         return uris.isNotEmpty() || texts.isNotEmpty()
     }
+}
+
+/**
+ * A message row (1.12): while picking several ([picking]) it takes every touch itself, so a tap picks the message and
+ * nothing inside reacts (a link, a file, the text's selection); its foreground tints it when picked (activated).
+ */
+class MessageRow @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null) : FrameLayout(context, attrs) {
+    var picking = false
+        set(value) {
+            field = value
+            isClickable = value
+            isLongClickable = value
+        }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean = picking || super.onInterceptTouchEvent(ev)
 }
 
 /** A LinearLayout that never gets wider than 82% of its parent (chat bubbles). */

@@ -453,4 +453,52 @@
     <string name="backup_restored">The settings from %1$s are back.</string>
     <string name="backup_sharing_body">They were on in that backup. Turning them on again needs Android\'s notification access, on the next screen.</string>
     <string name="backup_sharing_ok">Set up</string>
+
+    <!-- Picking several and the gallery (1.12) -->
+    <string name="pick_select">Select</string>
+    <string name="pick_messages">Select messages</string>
+    <string name="pick_stop">Stop selecting</string>
+    <string name="pick_none">Tap to select</string>
+    <string name="pick_all">Select all</string>
+    <string name="pick_picked">Selected</string>
+    <string name="pick_not_picked">Not selected</string>
+    <string name="pick_failed">Couldn\'t get %1$s, so nothing was shared.</string>
+    <string name="pick_save_failed">Couldn\'t save %1$s.</string>
+    <string name="pick_forward_failed">Forwarded %1$d of %2$d. %3$s</string>
+    <string name="pick_nothing_to_share">Only texts and files can be shared.</string>
+    <string name="gallery_title">Photos and files</string>
+    <string name="gallery_media">Photos &amp; videos · %1$d</string>
+    <string name="gallery_files">Files · %1$d</string>
+    <string name="gallery_empty_media">No photos or videos here yet.\nPictures and videos sent in this conversation show up here.</string>
+    <string name="gallery_empty_files">No files here yet.\nOther files sent in this conversation show up here.</string>
+    <string name="gallery_photo">Photo %1$s</string>
+    <string name="gallery_video">Video %1$s</string>
+    <plurals name="picked">
+        <item quantity="one">%d selected</item>
+        <item quantity="other">%d selected</item>
+    </plurals>
+    <plurals name="picked_delete_confirm">
+        <item quantity="one">Delete this for all your devices? Files already saved on a device stay there.</item>
+        <item quantity="other">Delete these %d for all your devices? Files already saved on a device stay there.</item>
+    </plurals>
+    <plurals name="picked_copied">
+        <item quantity="one">Copied</item>
+        <item quantity="other">Copied %d messages</item>
+    </plurals>
+    <plurals name="picked_getting">
+        <item quantity="one">Getting %d file…</item>
+        <item quantity="other">Getting %d files…</item>
+    </plurals>
+    <plurals name="picked_saved">
+        <item quantity="one">%d file saved to Downloads/Beam</item>
+        <item quantity="other">%d files saved to Downloads/Beam</item>
+    </plurals>
+    <plurals name="picked_forwarded">
+        <item quantity="one">Forwarded %1$d to %2$s</item>
+        <item quantity="other">Forwarded %1$d to %2$s</item>
+    </plurals>
+    <plurals name="picked_messages">
+        <item quantity="one">%d message</item>
+        <item quantity="other">%d messages</item>
+    </plurals>
 </resources>

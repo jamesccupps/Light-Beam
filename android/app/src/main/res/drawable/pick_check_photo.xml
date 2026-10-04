@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A gallery tile's check while picking several (1.12). -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/ic_pick_on" android:state_activated="true" />
+    <item android:drawable="@drawable/ic_pick_off_photo" />
+</selector>

@@ -15,6 +15,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.content.res.AppCompatResources
+import androidx.core.view.ViewCompat
 import androidx.core.view.doOnPreDraw
 import androidx.core.view.isVisible
 import androidx.recyclerview.widget.DiffUtil
@@ -90,10 +91,25 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         /** From the text selection toolbar. */
         fun forward(item: Item)
         fun delete(item: Item)
+        /** Picking several (1.12): a tap on a message picks it or puts it back. */
+        fun pick(row: Row.Msg)
+        /** Picking several: a long-press (in split screen, on a picked saved file: drag every picked saved file). */
+        fun pickLong(row: Row.Msg, view: View): Boolean
     }
 
     /** Briefly highlighted (a search result that was opened). */
     var highlightId: String? = null
+
+    /** Picking several (1.12): every message shows a check, and a tap picks it ([Picker]). */
+    private var picking = false
+    private var picked: Set<String> = emptySet()
+
+    fun setPicking(on: Boolean, ids: Set<String>) {
+        if (!on && !picking) return
+        picking = on
+        picked = ids.toSet()
+        notifyItemRangeChanged(0, itemCount, PAYLOAD_PICK)
+    }
 
     private class DayHolder(val b: ItemDayBinding) : RecyclerView.ViewHolder(b.root)
     private class MsgHolder(val b: ItemMessageBinding) : RecyclerView.ViewHolder(b.root) {
@@ -147,6 +163,10 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
             }
         }
         b.text.customSelectionActionModeCallback = SelectionActions(holder)
+        // Picking several: the row takes every tap (links, files and the text don't react); off otherwise.
+        b.root.setOnClickListener { (holder.row as? Row.Msg)?.let(actions::pick) }
+        b.root.setOnLongClickListener { v -> (holder.row as? Row.Msg)?.let { actions.pickLong(it, v) } ?: false }
+        b.root.picking = false
         return holder
     }
 
@@ -223,6 +243,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         val row = getItem(position)
         if (payloads.isEmpty() || holder !is MsgHolder || row is Row.Day) return onBindViewHolder(holder, position)
         holder.row = row
+        if (payloads.all { it == PAYLOAD_PICK }) return bindPick(holder.b, row)
         // Only receipts, pins or progress changed: leave the text (and any links) alone.
         when (row) {
             is Row.Msg -> {
@@ -234,6 +255,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
             is Row.In -> bindIncoming(holder.b, row.inc, row.download)
             is Row.Day -> Unit
         }
+        bindPick(holder.b, row)
     }
 
     private fun bind(h: MsgHolder, row: Row) {
@@ -245,6 +267,31 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
             is Row.In -> bindIncoming(h.b, row.inc, row.download)
             is Row.Day -> Unit
         }
+        bindPick(h.b, row)
+    }
+
+    /** Picking several: the check (on the side away from the bubble) and the row's tint; only messages on the server. */
+    private fun bindPick(b: ItemMessageBinding, row: Row) {
+        val msg = row as? Row.Msg
+        val show = picking && msg != null
+        b.root.picking = show
+        b.pickCheck.isVisible = show
+        if (msg == null || !show) {
+            b.root.isActivated = false
+            b.root.contentDescription = null
+            ViewCompat.setStateDescription(b.root, null)
+            return
+        }
+        val on = msg.item.id in picked
+        b.root.isActivated = on
+        val lp = b.pickCheck.layoutParams as FrameLayout.LayoutParams
+        val gravity = Gravity.CENTER_VERTICAL or if (msg.mine) Gravity.START else Gravity.END
+        if (lp.gravity != gravity) {
+            lp.gravity = gravity
+            b.pickCheck.layoutParams = lp
+        }
+        b.root.contentDescription = b.bubble.contentDescription
+        ViewCompat.setStateDescription(b.root, ctx.getString(if (on) R.string.pick_picked else R.string.pick_not_picked))
     }
 
     // ---------------------------------------------------------------- items on the server
@@ -559,6 +606,8 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         private const val MAX_CHARS = 4000
         private const val TAG_FAILED = "failed"
         const val PAYLOAD_META = "meta"
+        /** Only the picks changed (1.12): the checks, nothing else. */
+        const val PAYLOAD_PICK = "pick"
 
         private val DIFF = object : DiffUtil.ItemCallback<Row>() {
             override fun areItemsTheSame(a: Row, b: Row) = a.rowId == b.rowId

@@ -34,6 +34,16 @@
         android:title="@string/device_remote_desktop"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- 1.12: the conversation's photos, videos and files; picking several messages. -->
+    <item
+        android:id="@+id/action_gallery"
+        android:icon="@drawable/ic_image"
+        android:title="@string/gallery_title"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_select"
+        android:title="@string/pick_messages"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_clear"
         android:title="@string/clear_conversation"

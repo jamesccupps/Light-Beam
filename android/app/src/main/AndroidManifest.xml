@@ -85,6 +85,11 @@
             android:parentActivityName=".ui.MainActivity"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- A conversation's photos, videos and files (1.12). -->
+        <activity
+            android:name=".ui.GalleryActivity"
+            android:exported="false" />
+
         <activity
             android:name=".ui.SearchActivity"
             android:exported="false"
