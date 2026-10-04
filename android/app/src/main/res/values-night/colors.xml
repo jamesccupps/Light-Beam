@@ -15,4 +15,6 @@
     <color name="online">#34D399</color>
     <color name="danger">#FF6B6B</color>
     <color name="drop_scrim">#448D80FF</color>
+    <!-- A message picked among several (1.12): over the row, so see-through. -->
+    <color name="pick_tint">#478D80FF</color>
 </resources>

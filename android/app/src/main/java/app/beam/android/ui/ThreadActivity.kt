@@ -54,6 +54,7 @@ import java.io.File
 class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
     private lateinit var b: ActivityThreadBinding
     private lateinit var adapter: MessageAdapter
+    private lateinit var picks: Picker
     private lateinit var key: String
     private var convTitle = ""
     @Volatile private var newestTs = 0L // set while the rows are built (off the main thread)
@@ -78,7 +79,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
     private val finishedHandler = TransferManager.FinishedHandler { f ->
         val s = app.repo.state.value
         if (key !in Conversations.keysOf(f.item, s.me, s.devicesById)) return@FinishedHandler false
-        runOnUiThread { onDownloadFinished(f) }
+        runOnUiThread { if (!picks.onFinished(f)) onDownloadFinished(f) }
         true
     }
 
@@ -91,22 +92,22 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         setContentView(b.root)
         b.appbar.padForSystemBars(top = true)
         b.composeBar.padForSystemBars(bottom = true, ime = true)
-        b.toolbar.setNavigationOnClickListener { finish() }
-        b.toolbar.setOnMenuItemClickListener {
-            val device = app.repo.state.value.devicesById[key]
-            when (it.itemId) {
-                R.id.action_send_clipboard -> sendClipboard()
-                R.id.action_clear -> clearConversation()
-                R.id.action_ring -> device?.let { d -> DeviceActions.ring(this, d, stop = false, b.composeBar) }
-                R.id.action_stop_ringing -> device?.let { d -> DeviceActions.ring(this, d, stop = true, b.composeBar) }
-                R.id.action_wake -> device?.let { d -> DeviceActions.wake(this, d, b.composeBar) }
-                R.id.action_remote_desktop -> device?.let { d -> DeviceActions.remoteDesktopIntent(this, d)?.let(::startActivity) }
-                R.id.action_control -> device?.takeIf { app.remote.canControl(it) }?.let { d -> startActivity(RemoteActivity.intent(this, d.id)) }
-            }
-            true
-        }
+        setUpToolbar()
 
         adapter = MessageAdapter(this, this)
+        picks = Picker(
+            this, b.toolbar,
+            all = { app.repo.state.value.let { s -> Conversations.thread(key, s.me, s.items, s.devicesById) } },
+            onChange = {
+                adapter.clearSelection()
+                adapter.setPicking(picks.active, picks.ids)
+            },
+            onEnd = {
+                setUpToolbar()
+                renderHeader(app.repo.state.value)
+            },
+            snack = ::snack,
+        )
         adapter.highlightId = scrollTo
         b.list.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         b.list.adapter = adapter
@@ -139,7 +140,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 combine(
                     app.repo.state, app.transfers.uploads, app.transfers.downloads, app.prefs.localFiles, app.outbox.entries,
-                ) { s, ups, downs, locals, out -> Snapshot(s, buildRows(s, ups, downs, locals, out)) }
+                ) { s, ups, downs, locals, out -> Snapshot(s, buildRows(s, ups, downs, locals, out), downs) }
                     .flowOn(Dispatchers.Default) // the rows go over every item: not on the main thread
                     .conflate() // a busy transfer: only the latest rows get drawn
                     .collect { render(it) }
@@ -171,7 +172,35 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         cameraFile?.let { outState.putString(STATE_CAMERA, it.path) }
     }
 
-    private class Snapshot(val state: Repository.State, val rows: List<Row>)
+    private class Snapshot(val state: Repository.State, val rows: List<Row>, val downloads: Map<String, TransferManager.Download>)
+
+    /** The conversation's own toolbar (put back after picking several, which borrows it). */
+    private fun setUpToolbar() {
+        b.toolbar.menu.clear()
+        b.toolbar.inflateMenu(R.menu.thread)
+        b.toolbar.setNavigationIcon(R.drawable.ic_back)
+        b.toolbar.setNavigationContentDescription(R.string.back)
+        b.toolbar.setNavigationOnClickListener { finish() }
+        b.toolbar.setOnMenuItemClickListener {
+            onToolbarItem(it.itemId)
+            true
+        }
+    }
+
+    private fun onToolbarItem(id: Int) {
+        val device = app.repo.state.value.devicesById[key]
+        when (id) {
+            R.id.action_send_clipboard -> sendClipboard()
+            R.id.action_gallery -> startActivity(GalleryActivity.intent(this, key))
+            R.id.action_select -> picks.start()
+            R.id.action_clear -> clearConversation()
+            R.id.action_ring -> device?.let { d -> DeviceActions.ring(this, d, stop = false, b.composeBar) }
+            R.id.action_stop_ringing -> device?.let { d -> DeviceActions.ring(this, d, stop = true, b.composeBar) }
+            R.id.action_wake -> device?.let { d -> DeviceActions.wake(this, d, b.composeBar) }
+            R.id.action_remote_desktop -> device?.let { d -> DeviceActions.remoteDesktopIntent(this, d)?.let(::startActivity) }
+            R.id.action_control -> device?.takeIf { app.remote.canControl(it) }?.let { d -> startActivity(RemoteActivity.intent(this, d.id)) }
+        }
+    }
 
     private fun buildRows(
         s: Repository.State,
@@ -229,23 +258,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
 
     private fun render(snap: Snapshot) {
         val s = snap.state
-        val device = s.devicesById[key]
-        convTitle = when {
-            key == Conversations.ALL -> getString(R.string.all_devices)
-            device != null -> device.name
-            else -> s.items.firstOrNull { it.from == key }?.device ?: getString(R.string.unknown_device)
-        }
-        b.toolbar.title = convTitle
-        b.toolbar.subtitle = when {
-            s.conn == Repository.Conn.AUTH_FAILED -> getString(R.string.auth_failed)
-            s.conn == Repository.Conn.OFFLINE -> getString(R.string.offline)
-            !s.loaded && s.conn != Repository.Conn.CONNECTED -> getString(R.string.connecting)
-            key == Conversations.ALL -> getString(R.string.broadcast_subtitle)
-            // "Online · 85% battery · 120 GB free" (what the device last reported, server 1.3).
-            device != null -> listOfNotNull(Format.presence(device.online, device.lastSeen), Format.deviceStatus(device.status)).joinToString(" · ")
-            else -> getString(R.string.no_longer_registered)
-        }
-        bindDeviceMenu(device)
+        renderHeader(s)
         b.dropText.text = getString(R.string.drop_here, convTitle)
         b.empty.isVisible = s.loaded && snap.rows.isEmpty()
         b.empty.setText(R.string.no_messages_drop)
@@ -277,7 +290,31 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
             }
             if (snap.rows.isNotEmpty()) firstList = false
         }
+        picks.keepOnly(snap.rows.mapNotNullTo(HashSet()) { (it as? Row.Msg)?.item?.id })
+        picks.onDownloads(snap.downloads)
         if (isResumed) markRead()
+    }
+
+    /** Title, subtitle and the device's menu entries (not while the toolbar is the selection bar). */
+    private fun renderHeader(s: Repository.State) {
+        val device = s.devicesById[key]
+        convTitle = when {
+            key == Conversations.ALL -> getString(R.string.all_devices)
+            device != null -> device.name
+            else -> s.items.firstOrNull { it.from == key }?.device ?: getString(R.string.unknown_device)
+        }
+        if (picks.active) return
+        b.toolbar.title = convTitle
+        b.toolbar.subtitle = when {
+            s.conn == Repository.Conn.AUTH_FAILED -> getString(R.string.auth_failed)
+            s.conn == Repository.Conn.OFFLINE -> getString(R.string.offline)
+            !s.loaded && s.conn != Repository.Conn.CONNECTED -> getString(R.string.connecting)
+            key == Conversations.ALL -> getString(R.string.broadcast_subtitle)
+            // "Online · 85% battery · 120 GB free" (what the device last reported, server 1.3).
+            device != null -> listOfNotNull(Format.presence(device.online, device.lastSeen), Format.deviceStatus(device.status)).joinToString(" · ")
+            else -> getString(R.string.no_longer_registered)
+        }
+        bindDeviceMenu(device)
     }
 
     /** Control / Ring / Stop ringing / Wake / Remote Desktop in the menu, for what this device can do right now. */
@@ -301,6 +338,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         isResumed = true
         app.visibleConversation = key
         app.transfers.finishedHandler = finishedHandler
+        picks.resume()
         Notifier.cancelConversation(this, key)
         markRead()
     }
@@ -542,6 +580,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
             if (row.local == null) entries += ActionSheet.Entry(R.drawable.ic_download, getString(R.string.save)) { app.transfers.download(item, TransferManager.Reason.SAVE) }
         }
         entries += ActionSheet.Entry(R.drawable.ic_share, getString(R.string.share)) { share(item) }
+        entries += ActionSheet.Entry(R.drawable.ic_check, getString(R.string.pick_select)) { picks.start(item.id) }
         if (item.isText || info?.has("forward") == true) {
             entries += ActionSheet.Entry(R.drawable.ic_forward, getString(R.string.forward)) { ForwardSheet.show(this, item, b.composeBar) }
         }
@@ -579,12 +618,33 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         return view.startDragAndDrop(clip, View.DragShadowBuilder(view), Drops.LOCAL_DRAG, View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
     }
 
+    override fun pick(row: Row.Msg) = picks.toggle(row.item.id)
+
+    /**
+     * A long-press while picking several: in split screen (or a desktop window), on a picked file saved here, every
+     * picked file saved here goes in one drag into the other app; anywhere else it picks, like a tap.
+     */
+    override fun pickLong(row: Row.Msg, view: View): Boolean {
+        if (isInMultiWindowMode && row.item.isFile && row.item.id in picks.ids) {
+            val files = picks.items().filter { it.isFile }.mapNotNull { i -> localCopy(i)?.let { i to it } }
+            if (files.isNotEmpty()) {
+                val label = if (files.size == 1) files[0].first.displayName else resources.getQuantityString(R.plurals.file_count, files.size, files.size)
+                val clip = ClipData(ClipDescription(label, files.map { mimeOf(it.first) }.distinct().toTypedArray()), ClipData.Item(files[0].second))
+                for (f in files.drop(1)) clip.addItem(ClipData.Item(f.second))
+                return view.startDragAndDrop(clip, View.DragShadowBuilder(view), Drops.LOCAL_DRAG, View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
+            }
+        }
+        picks.toggle(row.item.id)
+        return true
+    }
+
     private fun onDownloadFinished(f: TransferManager.Finished) {
         val mime = mimeOf(f.item)
         when (f.reason) {
             TransferManager.Reason.OPEN -> FileActions.open(this, f.uri, mime)
             TransferManager.Reason.SHARE -> FileActions.share(this, f.uri, mime)
-            TransferManager.Reason.SAVE -> Snackbar.make(b.root, R.string.saved_to, Snackbar.LENGTH_LONG)
+            // (GROUP: one of several picked in another screen that's gone now: it's saved.)
+            TransferManager.Reason.SAVE, TransferManager.Reason.GROUP -> Snackbar.make(b.root, R.string.saved_to, Snackbar.LENGTH_LONG)
                 .setAnchorView(b.composeBar)
                 .setAction(R.string.open) { FileActions.open(this, f.uri, mime) }
                 .show()

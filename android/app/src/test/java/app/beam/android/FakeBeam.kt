@@ -86,6 +86,10 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     val phoneAnswers = CopyOnWriteArrayList<Pair<String, JSONObject>>()
     @Volatile var instance = "instance1"
 
+    /** Picking several (1.12): the ids of each `POST /api/items/delete`, and each forward (item id to its targets). */
+    val bulkDeletes = CopyOnWriteArrayList<List<String>>()
+    val forwards = CopyOnWriteArrayList<Pair<String, List<String>>>()
+
     /** The item list (newest first), its cursor, and what a `since` request returns. */
     @Volatile var items: List<JSONObject> = emptyList()
     @Volatile var cursor = "c1"
@@ -257,6 +261,24 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
                 rcEnded += id
                 rcSessions.removeIf { it.optString("id") == id }
                 json(ex, 204, "")
+            }
+            path == "/api/items/delete" && method == "POST" -> {
+                val ids = JSONObject(ex.requestBody.readBytes().decodeToString()).optJSONArray("ids") ?: JSONArray()
+                val list = (0 until ids.length()).map { ids.getString(it) }
+                bulkDeletes += list
+                items = items.filter { it.optString("id") !in list }
+                json(ex, 200, JSONObject().put("deleted", list.size))
+            }
+            path.startsWith("/api/items/") && path.endsWith("/forward") && method == "POST" -> {
+                val id = path.removePrefix("/api/items/").removeSuffix("/forward")
+                val to = JSONObject(ex.requestBody.readBytes().decodeToString()).optJSONArray("to") ?: JSONArray()
+                val targets = (0 until to.length()).map { to.getString(it) }
+                forwards += id to targets
+                // A new item from this device, like the server's copy.
+                val copy = JSONObject(items.firstOrNull { it.optString("id") == id }?.toString() ?: "{}")
+                    .put("id", "f" + "%015d".format(forwards.size)).put("to", JSONArray(targets)).put("delivered", JSONObject())
+                    .put("from", ex.requestHeaders.getFirst("X-Beam-Device-Id")).put("ts", System.currentTimeMillis()).put("forwardedFrom", id)
+                json(ex, 200, copy)
             }
             path == "/api/login-requests" -> json(ex, 200, JSONObject().put("requests", JSONArray()))
             path == "/api/alerts" -> json(ex, 200, JSONObject().put("alerts", JSONArray()))

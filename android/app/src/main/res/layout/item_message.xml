@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- The row takes the taps while picking several (1.12, MessageRow); its foreground tints it when picked. -->
+<app.beam.android.ui.MessageRow xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:foreground="@drawable/pick_row_bg"
     android:paddingVertical="3dp">
 
     <!-- Tap: open a file. Long-press on the text: select it in place. Long-press anywhere else: the item's menu. -->
@@ -211,4 +213,15 @@
                 android:visibility="gone" />
         </LinearLayout>
     </app.beam.android.ui.BubbleLayout>
-</FrameLayout>
+
+    <!-- Picking several (1.12): the check, on the side away from the bubble (activated = picked). -->
+    <ImageView
+        android:id="@+id/pickCheck"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_gravity="center_vertical|start"
+        android:layout_marginHorizontal="6dp"
+        android:importantForAccessibility="no"
+        android:src="@drawable/pick_check"
+        android:visibility="gone" />
+</app.beam.android.ui.MessageRow>

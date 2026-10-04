@@ -16,6 +16,8 @@
     <color name="online">#16A34A</color>
     <color name="danger">#D23A3A</color>
     <color name="drop_scrim">#335A4BF0</color>
+    <!-- A message picked among several (1.12): over the row, so see-through. -->
+    <color name="pick_tint">#2E5A4BF0</color>
     <!-- The same in light and dark: launcher and share-sheet icons (shortcuts). -->
     <color name="accent_fixed">#5A4BF0</color>
     <color name="accent_soft_fixed">#EBE9FF</color>

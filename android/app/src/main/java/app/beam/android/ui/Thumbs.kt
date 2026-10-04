@@ -34,11 +34,14 @@ object Thumbs {
     private val failed: MutableMap<String, Long> = Collections.synchronizedMap(HashMap())
     private val scope = CoroutineScope(SupervisorJob() + Executors.newFixedThreadPool(2).asCoroutineDispatcher())
 
-    /** Shows the preview for [key] in [view]; [onResult] says whether there is one (false: show it as a file). */
-    fun bind(view: ImageView, key: String, load: () -> Bitmap?, onResult: (Boolean) -> Unit = {}) {
+    /**
+     * Shows the preview for [key] in [view]; [onResult] says whether there is one (false: show it as a file). With
+     * [keepShape] the view keeps its size (a gallery tile, 1.12) instead of taking the picture's shape.
+     */
+    fun bind(view: ImageView, key: String, load: () -> Bitmap?, keepShape: Boolean = false, onResult: (Boolean) -> Unit = {}) {
         view.setTag(R.id.thumb_key, key)
         cache.get(key)?.let {
-            show(view, it)
+            show(view, it, keepShape)
             onResult(true)
             return
         }
@@ -58,7 +61,7 @@ object Thumbs {
             if (bmp != null) cache.put(key, bmp) else failed[key] = System.currentTimeMillis()
             withContext(Dispatchers.Main) {
                 if (view.getTag(R.id.thumb_key) == key) {
-                    if (bmp != null) show(view, bmp)
+                    if (bmp != null) show(view, bmp, keepShape)
                     onResult(bmp != null)
                 }
             }
@@ -128,8 +131,12 @@ object Thumbs {
         view.setImageDrawable(null)
     }
 
-    private fun show(view: ImageView, bmp: Bitmap) {
+    private fun show(view: ImageView, bmp: Bitmap, keepShape: Boolean = false) {
         view.isVisible = true
+        if (keepShape) {
+            view.setImageBitmap(bmp)
+            return
+        }
         val lp = view.layoutParams
         val width = lp.width.takeIf { it > 0 } ?: view.resources.getDimensionPixelSize(R.dimen.thumb_width)
         val height = (width.toFloat() * bmp.height / bmp.width.coerceAtLeast(1)).toInt()

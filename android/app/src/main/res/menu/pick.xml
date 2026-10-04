@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The selection bar (1.12): several messages, photos or files picked at once (Picker). -->
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/pick_share"
+        android:icon="@drawable/ic_share"
+        android:title="@string/share"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/pick_save"
+        android:icon="@drawable/ic_download"
+        android:title="@string/save"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/pick_forward"
+        android:icon="@drawable/ic_forward"
+        android:title="@string/forward"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/pick_delete"
+        android:icon="@drawable/ic_delete"
+        android:title="@string/delete"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/pick_copy"
+        android:title="@string/copy"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/pick_all"
+        android:title="@string/pick_all"
+        app:showAsAction="never" />
+</menu>

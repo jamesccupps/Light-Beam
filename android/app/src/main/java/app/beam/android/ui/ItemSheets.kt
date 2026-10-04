@@ -90,9 +90,15 @@ object TextSheet {
     }
 }
 
-/** Forward: pick where an item goes next (the server copies it; no download and upload). */
+/**
+ * Forward: pick where an item goes next (the server copies it; no download and upload). Several picked at once
+ * (1.12) go together, oldest first, so they arrive in the order they were sent; [onPicked] runs when a place is chosen.
+ */
 object ForwardSheet {
-    fun show(activity: AppCompatActivity, item: Item, anchorView: android.view.View) {
+    fun show(activity: AppCompatActivity, item: Item, anchorView: android.view.View) = show(activity, listOf(item), anchorView)
+
+    fun show(activity: AppCompatActivity, items: List<Item>, anchorView: android.view.View, onPicked: () -> Unit = {}) {
+        if (items.isEmpty()) return
         val app = BeamApp.from(activity)
         val b = SheetSendBinding.inflate(activity.layoutInflater)
         val dialog = BottomSheetDialog(activity)
@@ -100,19 +106,32 @@ object ForwardSheet {
         dialog.behavior.skipCollapsed = true
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         b.title.setText(R.string.forward_to)
-        b.preview.text = if (item.isText) "“" + item.text.orEmpty().trim().replace(Regex("\\s+"), " ").take(120) + "”" else item.displayName
+        val item = items[0]
+        b.preview.text = when {
+            items.size > 1 -> activity.resources.getQuantityString(R.plurals.picked_messages, items.size, items.size)
+            item.isText -> "“" + item.text.orEmpty().trim().replace(Regex("\\s+"), " ").take(120) + "”"
+            else -> item.displayName
+        }
         b.hint.setText(R.string.forward_hint)
         val s = app.repo.state.value
-        val source = Conversations.keysOf(item, s.me, s.devicesById)
+        val source = items.flatMap { Conversations.keysOf(it, s.me, s.devicesById) }.toSet()
         val targets = TargetAdapter(onTap = { t ->
             dialog.dismiss()
+            onPicked()
             activity.lifecycleScope.launch {
+                val name = if (t.isAll) activity.getString(R.string.all_devices) else t.name
+                var done = 0
                 try {
-                    app.repo.forward(item, Conversations.targets(t.key))
-                    val name = if (t.isAll) activity.getString(R.string.all_devices) else t.name
-                    Snackbar.make(anchorView, activity.getString(R.string.forwarded_to, name), Snackbar.LENGTH_SHORT).show()
+                    for (one in items.sortedBy { it.ts }) {
+                        app.repo.forward(one, Conversations.targets(t.key))
+                        done++
+                    }
+                    val said = if (items.size == 1) activity.getString(R.string.forwarded_to, name)
+                    else activity.resources.getQuantityString(R.plurals.picked_forwarded, done, done, name)
+                    Snackbar.make(anchorView, said, Snackbar.LENGTH_SHORT).show()
                 } catch (e: Exception) {
-                    Snackbar.make(anchorView, Format.error(e), Snackbar.LENGTH_LONG).show()
+                    val said = if (done > 0) activity.getString(R.string.pick_forward_failed, done, items.size, Format.error(e)) else Format.error(e)
+                    Snackbar.make(anchorView, said, Snackbar.LENGTH_LONG).show()
                 }
             }
         }, onLongPress = {})

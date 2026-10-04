@@ -51,6 +51,8 @@ class TransferManager(private val app: BeamApp) {
         AUTO,
         /** Save / Open / Share tapped in a conversation: that screen acts on it if it's still showing. */
         SAVE, OPEN, SHARE,
+        /** One of several files picked at once (1.12): the screen that asked shares or announces them once all are here. */
+        GROUP,
         /** Started from a notification (or resumed after a restart): a notification says when it's saved. */
         NOTIFY,
     }
@@ -164,7 +166,7 @@ class TransferManager(private val app: BeamApp) {
             val d = _downloads.value[task.item.id] ?: continue
             if (task.cancelled) continue
             // After a restart nobody is left to open or share it: say when it's saved instead.
-            val reasons = task.reasons.map { if (it == Reason.OPEN || it == Reason.SHARE || it == Reason.SAVE) Reason.NOTIFY else it }.toSet()
+            val reasons = task.reasons.map { if (it == Reason.OPEN || it == Reason.SHARE || it == Reason.SAVE || it == Reason.GROUP) Reason.NOTIFY else it }.toSet()
             downs.put(JSONObject().put("item", task.item.toJson()).put("reasons", JSONArray(reasons.map { it.name })).put("paused", d.status == Status.PAUSED))
         }
         app.prefs.saveArray(Prefs.K_TRANSFERS, JSONArray().put(JSONObject().put("uploads", ups).put("downloads", downs)))
