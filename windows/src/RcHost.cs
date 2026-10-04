@@ -8,6 +8,8 @@
 // One host per session (and per screen). At the end the capture stops at once and the host is kept, blank, for 2
 // minutes: a reconnect to the same screen starts without a new browser process (one takes ~6 s to exit). Then it's
 // closed, waiting for its browser process to exit.
+// (1.11) Its picture asks every viewer to show each frame at once (WebRTC's playout delay 0, sent with every frame): the
+// phone's WebView and browsers, which can't be given the Windows viewer's own flag, then hold nothing back.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -89,7 +91,9 @@ namespace Beam
             var o = new CoreWebView2EnvironmentOptions();
             // The spike's flags (plan/rd-spike-results.md): pick this screen without a picker; the blink flag is insurance
             // (capture is started with a user gesture through DevTools anyway).
-            o.AdditionalBrowserArguments = "--auto-select-desktop-capture-source=\"" + source + "\" --disable-blink-features=GetDisplayMediaRequiresUserActivation";
+            // (1.11) and WebRTC's sender field trial that puts playout delay 0 on every frame (the viewer shows it at once).
+            o.AdditionalBrowserArguments = "--auto-select-desktop-capture-source=\"" + source + "\" --disable-blink-features=GetDisplayMediaRequiresUserActivation" +
+                " --force-fieldtrials=WebRTC-ForceSendPlayoutDelay/min_ms:0,max_ms:0/";
             o.Language = "en-US"; // the source names are English
             o.AllowSingleSignOnUsingOSPrimaryAccount = false;
             var env = await CoreWebView2Environment.CreateAsync(null, folder, o);

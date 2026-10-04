@@ -101,6 +101,8 @@ const rc = {
   composing: false,
   pingN: 0,
   rtt: null,
+  delays: [],          // (1.14.2) each frame's way from the PC's screen to this one (ms), since the last stats tick
+  path: null,          // (1.14.2) how Tailscale reaches the PC, as it says: { via: direct | peer-relay | relay, lan, relay }
   stats: null,         // { fps, kbps, codec, w, h } as received here
   statsPrev: null,
   encoder: '', hostCodec: '', qlr: '',
@@ -375,6 +377,8 @@ function rcTeardown({ endSession = false, reason = 'stopped' } = {}) {
   rc.encoder = rc.hostCodec = rc.qlr = '';
   rc.qualityInfo = null;
   rc.rtt = null;
+  rc.path = null;
+  rc.delays = [];
   rc.mvSeq = 0;
   rc.clipPending = false;
   rc.lastClip = '';
@@ -581,6 +585,7 @@ function rcCreatePeer() {
     const v = rcUi.video;
     v.srcObject = e.streams[0] || new MediaStream([e.track]);
     v.play().catch(() => {});
+    rcWatchFrames(v);
   };
   pc.onicecandidate = e => { if (mine()) rcLocalCandidate(e.candidate); };
   pc.onconnectionstatechange = () => { if (mine()) rcOnConnState(); };
@@ -936,7 +941,11 @@ async function rcStats() {
     : span > 0 ? Math.round((inbound.framesDecoded - prev.framesDecoded) * 1000 / span) : null;
   const codec = inbound.codecId && pair.stats.get(inbound.codecId);
   rc.statsPrev = { timestamp: inbound.timestamp, bytesReceived: inbound.bytesReceived, framesDecoded: inbound.framesDecoded };
+  // (1.14.2) The picture's delay: the median of this second's frames (a still screen sends few: the last one stays).
+  const ds = rc.delays.splice(0).sort((a, b) => a - b);
+  const picMs = ds.length >= 3 ? Math.round(ds[ds.length >> 1]) : rc.stats?.picMs ?? null;
   rc.stats = {
+    picMs,
     fps, kbps, codec: codec ? String(codec.mimeType || '').replace(/^video\//i, '') : '',
     w: inbound.frameWidth || rcUi.video.videoWidth || 0, h: inbound.frameHeight || rcUi.video.videoHeight || 0,
     jitterMs: Number.isFinite(inbound.jitterBufferDelay) && inbound.jitterBufferEmittedCount > 0 ? Math.round(inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount * 1000) : null,
@@ -944,6 +953,45 @@ async function rcStats() {
   if (typeof inbound.decoderImplementation === 'string') rc.decoder = rcClean(inbound.decoderImplementation, 80) + (inbound.powerEfficientDecoder === true ? ' (hardware)' : '');
   rcRenderChip();
   rcRenderDetails();
+}
+
+// (1.14.2) Each frame's way from the PC's screen to this one: the browser knows when the PC captured it (from the PC's
+// sender reports, in this page's clock) and when it's shown here (requestVideoFrameCallback). Kept until the next
+// stats tick. A newer connection's watch takes over from an older one's.
+function rcWatchFrames(v) {
+  if (typeof v.requestVideoFrameCallback !== 'function') return;
+  const gen = v.rcFrameGen = (v.rcFrameGen || 0) + 1;
+  const tick = (now, m) => {
+    if (v.rcFrameGen !== gen) return;
+    const d = m.captureTime ? m.expectedDisplayTime - m.captureTime : null;
+    if (d != null && d >= 0 && d < 10000 && rc.delays.length < 600) rc.delays.push(d);
+    v.requestVideoFrameCallback(tick);
+  };
+  v.requestVideoFrameCallback(tick);
+}
+
+// The lag: a touch's way to the PC (half the round trip) and the picture's way back (measured per frame). A browser
+// that can't measure the picture: the round trip, as before.
+function rcLag() {
+  const rtt = rc.rtt ?? rc.pair?.rtt;
+  const pic = rc.stats?.picMs;
+  if (pic == null) return rtt ?? null;
+  return Math.round(pic + (rtt ?? 0) / 2);
+}
+
+// Tailscale's path to the PC, as the PC sees it (a Windows app 1.11 says): direct (on the same network, or over the
+// internet), through a peer relay, or through Tailscale's relay servers, which add delay.
+const RC_DERP = {
+  nyc: 'New York', sfo: 'San Francisco', sea: 'Seattle', ord: 'Chicago', dfw: 'Dallas', den: 'Denver', mia: 'Miami', lax: 'Los Angeles',
+  tor: 'Toronto', hnl: 'Honolulu', sao: 'São Paulo', lhr: 'London', fra: 'Frankfurt', par: 'Paris', mad: 'Madrid', ams: 'Amsterdam',
+  waw: 'Warsaw', jnb: 'Johannesburg', nai: 'Nairobi', dbi: 'Dubai', blr: 'Bangalore', sin: 'Singapore', hkg: 'Hong Kong', tok: 'Tokyo', syd: 'Sydney',
+};
+function rcPathText() {
+  const p = rc.path;
+  if (p?.via === 'direct') return p.lan ? 'Tailscale, direct on the same network' : 'Tailscale, direct over the internet';
+  if (p?.via === 'peer-relay') return 'Tailscale, through a peer relay';
+  if (p?.via === 'relay') return `Tailscale, through its relay${p.relay ? ` in ${RC_DERP[p.relay] || p.relay.toUpperCase()}` : ''} (slower: it usually goes direct within seconds)`;
+  return rc.pair?.remote ? `over Tailscale (${rc.pair.remote})` : '';
 }
 
 // ---------------------------------------------------------------- the data channels
@@ -1003,6 +1051,12 @@ function rcOnCtl(data) {
       break;
     case 'stats':
       rcHostStats(m);
+      rcRenderChip();
+      rcRenderDetails();
+      break;
+    case 'path': // (1.14.2, a Windows app 1.11) how Tailscale reaches this viewer: direct, or through a relay
+      rc.path = ['direct', 'relay', 'peer-relay'].includes(m.via)
+        ? { via: m.via, lan: m.lan === true, relay: typeof m.relay === 'string' && /^[a-z0-9-]{1,16}$/.test(m.relay) ? m.relay : '' } : null;
       rcRenderChip();
       rcRenderDetails();
       break;
@@ -2092,8 +2146,9 @@ function rcRenderChip() {
   if (s?.kbps != null) parts.push(s.kbps >= 1000 ? `${(s.kbps / 1000).toFixed(1)} Mbps` : `${s.kbps} kbps`);
   const codec = s?.codec || rc.hostCodec;
   if (codec) parts.push(codec);
-  const rtt = rc.rtt ?? rc.pair?.rtt;
-  if (rtt != null) parts.push(`${rtt} ms`);
+  const lag = rcLag();
+  if (lag != null) parts.push(`${lag} ms`);
+  if (rc.path?.via === 'relay') parts.push('relayed');
   if (rc.fitting) parts.splice(0, parts.length, 'Fitting the PC to this screen…');
   rcUi.chip.hidden = !live || !parts.length;
   rcUi.chip.textContent = parts.join(' · ');
@@ -2103,7 +2158,8 @@ function rcRenderChip() {
     rc.encoder && `Encoder: ${rc.encoder}`,
     rc.qlr && rc.qlr !== 'none' && `Limited by ${rc.qlr === 'cpu' ? 'the PC’s processor' : rc.qlr === 'bandwidth' ? 'the network' : rc.qlr}`,
     rc.qualityInfo?.fps && `Up to ${rc.qualityInfo.fps} fps${rc.qualityInfo.kbps ? `, ${Math.round(rc.qualityInfo.kbps / 1000)} Mbps` : ''}`,
-    rc.pair?.remote && `Direct to ${rc.pair.remote}`,
+    s?.picMs != null && `About ${lag} ms from a touch here to the PC’s answer on this screen`,
+    rcPathText(),
   ].filter(Boolean).join(' · ');
 }
 
@@ -2322,9 +2378,10 @@ function rcRenderDetails() {
     ['Frames', s.fps != null ? `${s.fps} fps${h?.maxFps ? `, up to ${h.maxFps}` : ''}` : ''],
     ['Data', s.kbps != null ? `${rate(s.kbps)}${h?.maxKbps ? `, limit ${rate(h.maxKbps)}` : ''}${h?.avail ? `, network about ${rate(h.avail)}` : ''}` : ''],
     ['Codec', [s.codec || rc.hostCodec, rc.encoder && `encoder ${rc.encoder}${hw(rc.encoder)}`, rc.decoder && `decoder ${rc.decoder}`].filter(Boolean).join(' · ')],
-    ['Delay', [rtt != null && `${rtt} ms round trip`, s.jitterMs != null && `${s.jitterMs} ms buffered here`, h?.lost != null && `${h.lost}% lost`].filter(Boolean).join(' · ')],
+    ['Delay', [s.picMs != null && `about ${rcLag()} ms from a touch to the picture`, s.picMs != null && `${s.picMs} ms from the PC’s screen to this one`,
+      rtt != null && `${rtt} ms round trip`, s.jitterMs != null && `${s.jitterMs} ms buffered here`, h?.lost != null && `${h.lost}% lost`].filter(Boolean).join(' · ')],
     ['Limited by', rc.qlr && rc.qlr !== 'none' ? (rc.qlr === 'cpu' ? 'the PC’s processor' : rc.qlr === 'bandwidth' ? 'the network' : rc.qlr) : 'nothing'],
-    ['Path', rc.pair?.remote ? `direct to ${rc.pair.remote}` : ''],
+    ['Path', rcPathText()],
   ].filter(([, v]) => v);
   box.replaceChildren(...rows.map(([k, v]) => el('div', {}, el('b', {}, k), el('span', {}, v))));
 }

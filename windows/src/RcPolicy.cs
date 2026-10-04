@@ -25,6 +25,23 @@ namespace Beam
         public string Ip4, Ip6;      // the viewer's Tailscale addresses, as the server saw them
     }
 
+    // (1.11) How Tailscale reaches a peer now: Via "direct" (Lan: through an address of the same network), "peer-relay"
+    // (through another node of the tailnet) or "relay" (through Tailscale's relay servers; Relay names the region).
+    class RcPath
+    {
+        public string Via, Relay;
+        public bool Lan;
+
+        public string Key { get { return Via + "|" + Lan + "|" + Relay; } }
+
+        public string Describe()
+        {
+            if (Via == "direct") return Lan ? "directly, on the same network" : "directly, over the internet";
+            if (Via == "peer-relay") return "through a peer relay";
+            return "through Tailscale's relay" + (Relay != null ? " (" + Relay + ")" : "");
+        }
+    }
+
     static class RcPolicy
     {
         public const string IsLocked = "this PC is locked", IsBusy = "another device is controlling this PC";
@@ -143,6 +160,53 @@ namespace Beam
             if (path.StartsWith("/api/admin/", StringComparison.Ordinal)) return "the server's admin actions";
             if (method == "POST" && path == "/api/rc/sessions") return "controlling another PC from this one";
             return null;
+        }
+
+        // (1.11) How Tailscale reaches the node with address `ip`, from `tailscale status --json`: its peer entry's CurAddr
+        // (the address it talks to directly; empty while relayed), PeerRelay and Relay (its relay region). Null when no
+        // peer has that address.
+        public static RcPath PathOf(IDictionary<string, object> status, string ip)
+        {
+            var peers = Obj(status, "Peer");
+            if (peers == null) return null;
+            foreach (var kv in peers)
+            {
+                var p = kv.Value as IDictionary<string, object>;
+                if (p == null) continue;
+                bool match = false;
+                foreach (string a in List(p, "TailscaleIPs")) if (SameIp(a, ip)) match = true;
+                if (!match) continue;
+                var r = new RcPath();
+                string cur = Str(p, "CurAddr"), peerRelay = Str(p, "PeerRelay");
+                if (!string.IsNullOrEmpty(cur)) { r.Via = "direct"; r.Lan = PrivateEndpoint(cur); }
+                else if (!string.IsNullOrEmpty(peerRelay)) r.Via = "peer-relay";
+                else { r.Via = "relay"; r.Relay = RegionCode(Str(p, "Relay")); }
+                return r;
+            }
+            return null;
+        }
+
+        // "192.168.1.20:41641" or "[fd00::1]:41641": an address of a private network (the same Wi-Fi or LAN).
+        static bool PrivateEndpoint(string endpoint)
+        {
+            string host = endpoint.Trim();
+            if (host.StartsWith("[")) { int end = host.IndexOf(']'); host = end > 0 ? host.Substring(1, end - 1) : host; }
+            else { int colon = host.LastIndexOf(':'); if (colon > 0 && host.IndexOf(':') == colon) host = host.Substring(0, colon); }
+            IPAddress a;
+            if (!IPAddress.TryParse(host, out a)) return false;
+            if (a.IsIPv4MappedToIPv6) a = a.MapToIPv4();
+            byte[] b = a.GetAddressBytes();
+            if (a.AddressFamily == AddressFamily.InterNetwork)
+                return b[0] == 10 || (b[0] == 172 && (b[1] & 0xF0) == 16) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254);
+            return (b[0] & 0xFE) == 0xFC || (b[0] == 0xFE && (b[1] & 0xC0) == 0x80); // fc00::/7, fe80::/10
+        }
+
+        // A relay region's code ("nyc"), or null for anything else.
+        static string RegionCode(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length > 16) return null;
+            foreach (char c in s) if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return null;
+            return s;
         }
 
         // A device name as the banner shows it: no control or direction characters, at most 40 characters.

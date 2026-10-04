@@ -159,7 +159,7 @@ function fakeLocalApi() {
 }
 
 // The app's `tailscale` CLI (status, whois), answering from ts/state.json, which the checks change.
-const tsState = { owner: 4242, nodes: {} };
+const tsState = { owner: 4242, nodes: {}, path: { CurAddr: '', Relay: 'nyc' } }; // (path, 1.11: how Tailscale reaches the viewer)
 for (const ip of selfIps) tsState.nodes[ip] = { id: 'nTESTNODE1', name: 'rc-test-machine', owner: 4242 };
 const writeTs = () => fs.writeFileSync(dir('ts/state.json'), JSON.stringify(tsState));
 fs.writeFileSync(dir('ts/fake-tailscale.mjs'), `
@@ -167,7 +167,8 @@ import fs from 'node:fs';
 const st = JSON.parse(fs.readFileSync(new URL('./state.json', import.meta.url), 'utf8'));
 const [cmd, ...rest] = process.argv.slice(2);
 const ips = Object.keys(st.nodes);
-if (cmd === 'status') { console.log(JSON.stringify({ Self: { UserID: st.owner, TailscaleIPs: ips }, User: { [st.owner]: { LoginName: 'owner@example.com' } } })); process.exit(0); }
+if (cmd === 'status') { console.log(JSON.stringify({ Self: { UserID: st.owner, TailscaleIPs: ips }, User: { [st.owner]: { LoginName: 'owner@example.com' } },
+  Peer: st.path ? { nVIEWER: { TailscaleIPs: ips, CurAddr: st.path.CurAddr || '', Relay: st.path.Relay || '', PeerRelay: st.path.PeerRelay || '' } } : {} })); process.exit(0); }
 if (cmd === 'whois') {
   const ip = rest[rest.length - 1];
   const n = st.nodes[ip];
@@ -342,6 +343,7 @@ const VIEWER_SCRIPT = `window.V = (() => {
     cands(list) { for (const c of list) for (const r of rewrite(c)) { if (pc && pc.remoteDescription) pc.addIceCandidate(r).catch(() => {}); else pending.push(r); } },
     send(name, m) { if (!ch || ch[name].readyState !== 'open') return false; ch[name].send(JSON.stringify(m)); return true; },
     async frames() { if (!pc) return 0; const s = await pc.getStats(); let n = 0; s.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'video') n = r.framesDecoded || 0; }); return n; },
+    async heldRaw() { if (!pc) return null; const s = await pc.getStats(); let r = null; s.forEach(x => { if (x.type === 'inbound-rtp' && x.kind === 'video') r = x; }); return r ? { d: r.jitterBufferDelay || 0, n: r.jitterBufferEmittedCount || 0 } : null; },
     pongs(on) { pongs = on; },
     state() { return pc ? pc.connectionState : 'none'; },
     close() { if (video) video.srcObject = null; if (pc) pc.close(); pc = null; sessionO = null; },
@@ -543,6 +545,25 @@ try {
   check(!!stats, `the host sends stats with its encoder (${stats ? stats.codec + ' / ' + stats.encoder + ', ' + stats.w + '×' + stats.h : 'none'})`);
   const state = await waitCtl('state', t0, 4000);
   check(!!state && state.locked === false, 'the host sends its state (locked / secure / elevated)');
+  // 1.11: how Tailscale reaches the viewer, from this PC's own `tailscale status` (the fake: through the relay in New
+  // York, then direct on the same network).
+  const viaRelay = await waitCtl('path', t0, 8000);
+  check(!!viaRelay && viaRelay.via === 'relay' && viaRelay.relay === 'nyc' && viaRelay.lan === false, `the viewer is told the path (${viaRelay ? JSON.stringify(viaRelay) : 'nothing'})`);
+  check(!!(await waitLog(/Tailscale reaches Test Phone through Tailscale's relay \(nyc\)/, from, 1000)), '...and beam.log says so');
+  const heldFrom = await evalIn('V.heldRaw()'); // (frames from here on: the first ones include a big keyframe, paced out)
+  tsState.path = { CurAddr: '192.168.1.20:41641', Relay: 'nyc' };
+  writeTs();
+  const direct = await waitCtl('path', Date.now(), 15000, m => m.via === 'direct');
+  check(!!direct && direct.lan === true && !('relay' in direct), `...and again when it goes direct (${direct ? JSON.stringify(direct) : 'nothing within 15 s'})`);
+  // 1.11: the PC's picture asks every viewer to show its frames at once: its capture page runs with WebRTC's sender
+  // field trial, and this viewer (no flags, like a phone's WebView) holds its frames back for nothing.
+  const hostArgs = spawnSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${TMP.replace(/'/g, "''")}') -and $_.CommandLine.Contains('RemoteHost') -and -not $_.CommandLine.Contains('--type=') } | Select-Object -First 1).CommandLine`], { encoding: 'utf8', windowsHide: true }).stdout || '';
+  check(hostArgs.includes('--force-fieldtrials=WebRTC-ForceSendPlayoutDelay/min_ms:0,max_ms:0/'), 'the capture page\'s browser runs with the sender\'s playout delay 0 (WebRTC-ForceSendPlayoutDelay)');
+  const heldTo = await evalIn('V.heldRaw()');
+  const heldN = heldTo && heldFrom ? heldTo.n - heldFrom.n : 0;
+  const heldMs = heldN > 0 ? Math.round((heldTo.d - heldFrom.d) / heldN * 10000) / 10 : null;
+  // (a frame's packets arriving take a few ms; without the PC's playout delay a receiver adds its own buffer on top)
+  check(heldN < 5 || heldMs < 5, `...and the viewer holds them back for nothing (${heldN >= 5 ? `${heldMs} ms each over ${heldN} frames` : `only ${heldN} frames to measure: a still screen`})`);
 
   // Input, recorded (never real): the exact INPUT records for this PC's real screen layout.
   const mon = hello.monitors.find(m => m.id === hello.monitor) || hello.monitors[0];

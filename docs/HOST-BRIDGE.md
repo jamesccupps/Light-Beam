@@ -408,6 +408,15 @@ retransmits).
   - `{ t: "video", on }`: the viewer can or can't be seen; no frames while it can't.
   - The PC's `stats` add `srcW`, `srcH` (its screen), `down` (how much smaller it's sent), `profile`, `auto`, `maxFps`,
     `maxKbps`, `avail` (the network's estimate, kbps), `lost` (%), `rtt` (ms) and `video`.
+- **1.11 (Windows app):**
+  - Every video frame carries WebRTC's playout delay 0 (the capture page's sender field trial
+    `WebRTC-ForceSendPlayoutDelay/min_ms:0,max_ms:0/`): any Chromium viewer (the phone's WebView, browsers) shows each
+    frame as soon as it's whole, holding none back for smoothness, as the Windows viewer's own flag does.
+  - `{ t: "path", via: "direct" | "peer-relay" | "relay", lan, relay? }`: how Tailscale reaches the viewer, from the PC's
+    own `tailscale status` (the peer's `CurAddr`; `lan`: that address is a private one, the same network; `relay`: the
+    relay region, e.g. `"nyc"`). Sent when it changes; asked 2, 10 and 30 s into the session, then every 30 s.
+  - (The viewer, web 1.14.2) It measures each frame's way from the PC's screen to its own (requestVideoFrameCallback's
+    `expectedDisplayTime - captureTime`) and shows the lag: that plus half the round trip.
 - **Screens:** `{ t: "monitor", id }` restarts the capture as a new connection. The new `offer` has a different SDP
   `o=` session id, so the viewer answers it with a fresh RTCPeerConnection. An offer with the same `o=` id is a
   renegotiation on the same connection: an ICE restart (after `restart`, or 3 s of `disconnected`), or a switch to
