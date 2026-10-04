@@ -209,12 +209,17 @@ export default function register(test) {
     const M2 = 'M2 queued after the other tab signed in elsewhere';
     const t1 = await ctx.signedIn({ base: proxy.base });
     await t1.waitFor(`live.serverId === '${ownId}'`, 8000, 'the old tab on its Beam');
+    // (Its service worker takes charge of it first: the requests of a page it took over after interception started
+    // weren't intercepted any more.)
+    await t1.waitFor(`navigator.serviceWorker.ready.then(() => Boolean(navigator.serviceWorker.controller))`, 10000, 'the old tab’s service worker in charge');
     // The old tab's own network goes down (every request it makes fails); the other tab's doesn't.
     const failed = [];
     const failAll = m => { if (m.method === 'Fetch.requestPaused') { failed.push(m.params.request.url.replace(/^.*?\/\/[^/]+/, '')); t1.send('Fetch.failRequest', { requestId: m.params.requestId, errorReason: 'InternetDisconnected' }).catch(() => {}); } };
     t1.on(failAll);
     await t1.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
-    await ctx.sleep(200); // (interception takes effect a moment after Fetch.enable answers; under load it took longer)
+    // Interception takes effect a moment after Fetch.enable answers (later under load, or with a busy page just loaded):
+    // wait until a probe request is caught before the reconnect goes out.
+    await t1.waitFor(`fetch('api/hello?probe=' + Date.now(), { cache: 'no-store' }).then(() => false, () => true)`, 10000, 'the old tab’s requests intercepted');
     await t1.evaluate(`(live.es?.close(), live.es = null, reconnectNow(), true)`);
     try {
       await t1.waitFor(`net.state === 'offline'`, 15000, 'the old tab offline');
