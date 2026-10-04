@@ -379,6 +379,13 @@ class Repository(private val app: BeamApp) {
         saveSoon()
     }
 
+    /** A fast link for a file (server 1.13 `fast-links`) → its address and when it stops working. */
+    suspend fun fastLink(item: Item, hours: Int): Pair<String, Long> = withContext(Dispatchers.IO) {
+        val api = app.api ?: throw IllegalStateException("Not paired")
+        val link = api.fastLink(item.id, hours)
+        link.getString("url") to link.optLong("expires")
+    }
+
     /** The whole text of an item (lists and events cut long texts short). */
     suspend fun fullText(item: Item): String = withContext(Dispatchers.IO) { fullTextBlocking(item) }
 

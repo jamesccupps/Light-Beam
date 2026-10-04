@@ -12,7 +12,9 @@ and a `features` list; check those before relying on something new. 1.3 adds the
 of files still arriving), `big-chunks` (upload chunks of any size) and `clear-cache` (`POST /api/clear-cache`), plus
 `GET /api/metrics`. Server 1.5 marks its additions **(1.5)** and adds the feature `phone-notifications` (a phone's
 notifications on your PCs). Server 1.6 marks its additions **(1.6)** and adds the feature `remote-control` (see and
-control a PC's screen from another device). Use each one only when its flag is there; everything older keeps working.
+control a PC's screen from another device). Server 1.8.1 adds `backups` (the apps' settings, the server's own backups)
+and 1.13 `fast-links` (a fast link for a file, made by Beam Family on the same machine; listed when `BEAM_FAMILY_URL`
+is set). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -529,6 +531,7 @@ changed with `PATCH /api/settings`; see Settings. Crossings are logged even when
 | `POST /api/items/{id}/ack` | Mark as delivered to the calling device → `{ "id", "delivered" }` |
 | `PATCH /api/items/{id}` | **(v3)** `{ "pinned": true|false }` → the Item; event `update` |
 | `POST /api/items/{id}/forward` | **(v3)** `{ "to": [...] }` → `201` + a new Item from the caller with the same content (files are hard-linked, not copied) |
+| `POST /api/items/{id}/fastlink` | **(1.13, feature `fast-links`)** `{ "hours": 1–720 }` (default 24) → `201 { "link": { "id", "url", "expires", "created", "downloads", "by" } }`: a link anyone can download this file with, without Beam or signing in, until it runs out. Beam Family on the same machine makes it (its local admin API, with the control.key in `BEAM_FAMILY_DATA`; docs/FAMILY.md), from the file itself: a hard link on the same drive, else a copy the link follows as it arrives. `400` not a file, or hours out of range; `404` not on the server any more; `503` Beam Family isn't set up, answering, or new enough; Family's own errors pass on (`409` no owner yet, `429` 50 links working, `507` storage full) |
 | `POST /api/items/delete` | **(v3)** `{ "ids": [...] }` (up to 1000) → `{ "deleted": n }`; events `delete` |
 | `PUT /api/items/{id}/thumb` | **(v3)** body = a JPEG or WebP thumbnail (`Content-Type: image/jpeg|image/webp`, ≤ 256 KB), only for image/video items → `204`; event `update` with `thumb: true` |
 | `GET /api/items/{id}/thumb` | **(v3)** the thumbnail, or `404` |

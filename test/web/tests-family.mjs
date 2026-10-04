@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { sleep } from './cdp.mjs';
 import { TMP } from './harness.mjs';
+import { dev } from './tests-core.mjs';
 import { assert, eq } from './harness.mjs';
 
 const PORT = 8828;
@@ -752,5 +753,40 @@ export function registerLink(test) {
     const plain = await ctx.signedIn();
     await plain.waitFor(`typeof server !== 'undefined' && Boolean(server.info)`, 10000, 'info loaded');
     eq(await plain.evaluate(`document.getElementById('familyLink').hidden`), true, 'no link without the setting');
+  }, { timeout: 60000 });
+
+  test('family: Beam’s own chat makes a fast link for a file: its menu → Fast link… → a week → the link, made by Beam Family on the same machine from the file itself; anyone downloads it; a text has none, nor a Beam without Family (1.13.0)', async ctx => {
+    const fam = await familyServer(ctx, { BEAM_FAMILY_URL: `http://127.0.0.1:${PORT}` });
+    await fam.call(owner, 'GET', '/api/bootstrap'); // (the owner, as on their first visit)
+    const beam = await ctx.startServer(8823, { BEAM_FAMILY_URL: fam.base, BEAM_FAMILY_DATA: fam.data, BEAM_FAMILY_PORT: String(PORT) });
+    ctx.defer(() => beam.stop());
+    const page = await ctx.signedIn({ server: beam });
+    const meId = await page.evaluate('me.id');
+    const phone = dev(ctx, 'Pixel', 'android', beam);
+    await phone.me();
+    const bytes = Buffer.alloc(2 * 1024 * 1024 + 5);
+    for (let i = 0; i < bytes.length; i += 997) bytes[i] = (i / 997) % 251;
+    await phone.file('trip.bin', bytes, [meId]);
+    await phone.text('just words', [meId]);
+    await page.waitFor(`Boolean(deviceById('${phone.id}')) && itemsIn('${phone.id}').length === 2 && serverHas('fast-links')`, 8000, 'the file and a text');
+    await page.evaluate(`openConv('${phone.id}')`);
+    const [fileId, textId] = await page.evaluate(`['file', 'text'].map(k => itemsIn('${phone.id}').find(i => i.kind === k).id)`);
+    const entry = id => `itemMenuEntries(itemMap.get('${id}'), null, null).find(e => e && e.label === 'Fast link…')`;
+    eq(await page.evaluate(`[Boolean(${entry(fileId)}), Boolean(${entry(textId)})]`), [true, false], 'in a file’s menu, not a text’s');
+    await page.evaluate(`${entry(fileId)}.action()`);
+    await page.waitFor(`$('#genDlg').open && $('#genDlg').classList.contains('fastlink-dlg')`, 3000, 'the dialog');
+    await page.evaluate(`$('#genDlg input[value="168"]').click(); [...$$('#genFoot button')].find(b => /Make the link/.test(b.textContent)).click(); true`);
+    await page.waitFor(`/\\/f\\/[A-Za-z0-9_-]{32}$/.test($('#genDlg .fl-url')?.value || '')`, 8000, 'the link');
+    const url = await page.evaluate(`$('#genDlg .fl-url').value`);
+    assert(url.startsWith(`${fam.base}/f/`), `Beam Family’s address: ${url}`);
+    const token = url.split('/f/')[1];
+    const info = await (await fetch(`${fam.base}/api/links/${token}`)).json();
+    eq([info.name, info.size, info.received, info.from, Math.round((info.expires - Date.now()) / 3600e3)], ['trip.bin', bytes.length, bytes.length, 'Robin', 168], 'the file, from Family’s owner, for a week');
+    assert(Buffer.from(await (await fetch(`${fam.base}/api/links/${token}/file`)).arrayBuffer()).equals(bytes), 'the same bytes, without an account');
+    assert(/made a fast link to trip\.bin \(through Beam Family, 7 days\)/.test(beam.log || ''), 'Beam’s log says so');
+    // A Beam without Beam Family doesn't offer it.
+    const plain = await ctx.signedIn();
+    await plain.waitFor(`typeof server !== 'undefined' && Boolean(server.info)`, 10000, 'info loaded');
+    eq(await plain.evaluate(`serverHas('fast-links')`), false, 'no fast links without Beam Family');
   }, { timeout: 60000 });
 }

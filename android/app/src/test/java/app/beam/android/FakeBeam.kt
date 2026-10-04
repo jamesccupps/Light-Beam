@@ -90,6 +90,9 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     val bulkDeletes = CopyOnWriteArrayList<List<String>>()
     val forwards = CopyOnWriteArrayList<Pair<String, List<String>>>()
 
+    /** Fast links (1.13): each `POST /api/items/{id}/fastlink` (item id to its hours). */
+    val fastLinks = CopyOnWriteArrayList<Pair<String, Int>>()
+
     /** The item list (newest first), its cursor, and what a `since` request returns. */
     @Volatile var items: List<JSONObject> = emptyList()
     @Volatile var cursor = "c1"
@@ -279,6 +282,14 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
                     .put("id", "f" + "%015d".format(forwards.size)).put("to", JSONArray(targets)).put("delivered", JSONObject())
                     .put("from", ex.requestHeaders.getFirst("X-Beam-Device-Id")).put("ts", System.currentTimeMillis()).put("forwardedFrom", id)
                 json(ex, 200, copy)
+            }
+            path.startsWith("/api/items/") && path.endsWith("/fastlink") && method == "POST" -> {
+                val id = path.removePrefix("/api/items/").removeSuffix("/fastlink")
+                val hours = JSONObject(ex.requestBody.readBytes().decodeToString()).optInt("hours", 24)
+                fastLinks += id to hours
+                val link = JSONObject().put("id", "link0001").put("url", "https://family.example.ts.net:8443/f/" + "a".repeat(32))
+                    .put("expires", System.currentTimeMillis() + hours * 3_600_000L)
+                json(ex, 201, JSONObject().put("link", link))
             }
             path == "/api/login-requests" -> json(ex, 200, JSONObject().put("requests", JSONArray()))
             path == "/api/alerts" -> json(ex, 200, JSONObject().put("alerts", JSONArray()))

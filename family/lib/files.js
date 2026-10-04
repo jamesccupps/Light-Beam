@@ -102,7 +102,9 @@ function createFiles(ctx) {
     if (!Number.isSafeInteger(size) || size < 0) throw httpError(400, 'size must be a whole number of bytes');
     if (size > config.maxUpload) throw httpError(413, `Files can be at most ${Math.round(config.maxUpload / 1024 / 1024)} MB`);
     // (1.7.2) a few unsent uploads at a time: declared sizes count against the storage until they're sent or swept
-    if (db.get('SELECT count(*) n FROM attachments WHERE uploader_id = ? AND message_id IS NULL', user.id).n >= 30) {
+    // (1.13.0: not counting files a working fast link shares, which are meant to stay unsent)
+    if (db.get(`SELECT count(*) n FROM attachments WHERE uploader_id = ? AND message_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM links WHERE attachment_id = attachments.id AND revoked_at IS NULL AND expires_at > ?)`, user.id, now()).n >= 30) {
       throw httpError(429, 'Send or remove the files you’re already sending first');
     }
     if (storageUsed() + size > config.maxStorage) {
@@ -250,6 +252,39 @@ function createFiles(ctx) {
     send(res, 204);
   }
 
+  // (1.13.0) One of Beam's files (Beam's server on this machine) to share by a fast link, for Beam's apps' "Fast link":
+  // an unsent upload of `owner`'s made from the file itself. Hard-linked into place at once (the same drive: no copy and
+  // no space; each server removes only its own name), else (another drive, or `link: false`) copied in the background,
+  // which a link follows as it arrives. → the attachment's row.
+  async function adoptFile({ path: from, name, size, mime, owner, link = true }) {
+    const clean = cleanFileName(name);
+    if (!Number.isSafeInteger(size) || size < 0) throw httpError(400, 'size must be a whole number of bytes');
+    if (size > config.maxUpload) throw httpError(413, `Files can be at most ${Math.round(config.maxUpload / 1024 / 1024)} MB`);
+    if (storageUsed() + size > config.maxStorage) {
+      log.warn(`Storage is full: refused ${clean} from Beam`);
+      throw httpError(507, 'The family space’s storage is full');
+    }
+    const st = await fsp.stat(from).catch(() => null);
+    if (!st?.isFile() || st.size !== size) throw httpError(404, 'That file isn’t there');
+    const id = newId();
+    db.run('INSERT INTO attachments (id, uploader_id, name, mime, size, received, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)', id, owner.id, clean, mimeFor(clean, mime), size, now());
+    let linked = false;
+    if (link) {
+      try { await fsp.link(from, filePath(id)); linked = true; } catch {}
+    }
+    if (linked) {
+      db.run('UPDATE attachments SET received = size WHERE id = ?', id);
+      ctx.media?.add(db.get('SELECT * FROM attachments WHERE id = ?', id));
+    } else {
+      await fsp.writeFile(partPath(id), '');
+      const a = db.get('SELECT * FROM attachments WHERE id = ?', id);
+      receive(a, 0, fs.createReadStream(from), size).then(
+        () => log.info(`Copied ${clean} from Beam for its fast link`),
+        err => log.warn(`Couldn’t copy ${clean} from Beam for its fast link: ${err.message}`));
+    }
+    return db.get('SELECT * FROM attachments WHERE id = ?', id);
+  }
+
   // PUT /api/files/:id/thumb?w=&h= (a JPEG or WebP preview from the sender's app; w×h: the original's size)
   async function putThumb(req, res, { id }, url) {
     const user = people().requireUser(req);
@@ -369,6 +404,7 @@ function createFiles(ctx) {
     attachmentJson, removeStored, storageUsed, sweepUnsent,
     // (1.9.0, for direct connections and fast links)
     visibleAttachment, receive, readFollowing, filePath, partPath, thumbPath, isWriting: id => writing.has(id),
+    adoptFile, // (1.13.0, Beam's fast links)
     routes: [
       ['POST', '/api/uploads', startUpload],
       ['GET', '/api/uploads', listUnsent],

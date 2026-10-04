@@ -20,7 +20,7 @@ const tailscale = require('../lib/tailscale');
 // (BEAM_FAMILY_VERSION: what it says it runs, for tests of a page meeting a newer server)
 const VERSION = process.env.BEAM_FAMILY_VERSION || require('../package.json').version;
 const { openDb } = require('./lib/db');
-const { send, httpError, createRouter, createStatic } = require('./lib/http');
+const { send, httpError, readJson, createRouter, createStatic } = require('./lib/http');
 const auth = require('./lib/auth');
 const { createHub } = require('./lib/events');
 const { createPeople } = require('./lib/people');
@@ -147,6 +147,19 @@ function serve() {
   ctx.links = createLinks(ctx);
   ctx.media = createMedia(ctx);
   const router = createRouter([...ctx.people.routes, ...ctx.chat.routes, ...ctx.files.routes, ...ctx.push.routes, ...ctx.direct.routes, ...ctx.links.routes, ...ctx.media.routes]);
+
+  // (1.13.0) Beam (the server on this machine) shares one of its files by a fast link, for its apps' "Fast link": the
+  // file becomes an unsent upload of the owner's (hard-linked: no copy on the same drive) and the link is the owner's
+  // ("from <the owner>" on its page). The sweep removes the file a day after its link stops working.
+  async function adminFastLink(body) {
+    const owner = db.get("SELECT * FROM users WHERE role = 'owner' AND disabled_at IS NULL ORDER BY created_at LIMIT 1");
+    if (!owner) throw httpError(409, 'Beam Family has no owner yet: open it once over Tailscale');
+    if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) throw httpError(400, 'Expected {"path", "name", "size", "mime", "hours"}');
+    const hours = body.hours === undefined ? 24 : Math.round(Number(body.hours));
+    ctx.links.checkNew(owner, hours); // (before anything is adopted for a link that can't be made)
+    const a = await ctx.files.adoptFile({ path: body.path, name: body.name, size: Number(body.size), mime: body.mime, owner, link: body.link !== false });
+    return { link: ctx.links.createFor(a, owner, hours) };
+  }
   const serveStatic = createStatic(path.join(__dirname, 'public'));
   const backups = backupsOf(db);
 
@@ -178,11 +191,12 @@ function serve() {
     try {
       if (p.startsWith('/api/')) {
         if (p === '/api/hello') return send(res, 200, { family: true, version: VERSION });
-        if (p === '/api/admin/shutdown' || p === '/api/admin/backup') {
+        if (p === '/api/admin/shutdown' || p === '/api/admin/backup' || p === '/api/admin/fastlink') {
           const given = Buffer.from(String(req.headers['x-family-control'] || ''));
           const ok = req.method === 'POST' && auth.fromLoopback(req) && !req.headers['x-forwarded-for'] && given.length === Buffer.byteLength(control) && crypto.timingSafeEqual(given, Buffer.from(control));
           if (!ok) throw httpError(404, 'Not found');
           if (p === '/api/admin/backup') return send(res, 201, { dir: BACKUP.dir, last: await backups.now('asked on this PC') }); // (1.8.1)
+          if (p === '/api/admin/fastlink') return send(res, 201, await adminFastLink(await readJson(req))); // (1.13.0, Beam's)
           send(res, 202, {});
           return shutdown('requested with "family/server.js stop"');
         }
