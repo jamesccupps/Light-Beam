@@ -43,9 +43,13 @@ export default function register(test) {
     await page.waitFor(`itemsIn('androidpixel0001').length >= 4 && [...document.querySelectorAll('#thread img')].every(i => i.complete)`, 10000);
     const mine = await page.evaluate(`itemsIn('androidpixel0001').find(i => i.from === me.id).id`);
     await phone.ack(mine);
+    // (A slow upload, so it's still going when it's paused: on an idle PC 48 MB to localhost was done before the pause.)
+    await page.send('Network.enable');
+    await page.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: 4 * 1024 * 1024 });
     await page.evaluate(`sendFiles([new File([new Uint8Array(48 * 1024 * 1024)], 'Holiday video.mp4', { type: 'video/mp4' })], 'androidpixel0001')`);
     await page.waitFor(`[...uploads.values()].some(u => (u.sent || 0) > 0)`, 10000);
     await page.evaluate(`pauseUpload([...uploads.values()][0])`);
+    await page.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
     await ctx.sleep(600);
     await shot(page, 'desktop-light-thread');
 
@@ -91,6 +95,41 @@ export default function register(test) {
     await ctx.sleep(300);
     await shot(page, 'desktop-settings-alerts');
     await page.evaluate(`$('#settingsDlg').close()`);
+
+    // Photos and files (1.12): a conversation's gallery, picking several there and in the thread.
+    const makerId = await maker.evaluate('me.id');
+    await maker.evaluate(`(async () => {
+      const files = [];
+      for (const [i, [a, b]] of [['#1f7a8c', '#bfdbf7'], ['#e07a5f', '#f2cc8f'], ['#3d405b', '#81b29a'], ['#ef476f', '#ffd166'], ['#118ab2', '#06d6a0'], ['#5f0f40', '#fb8b24']].entries()) {
+        const c = new OffscreenCanvas(1200, 900); const g = c.getContext('2d');
+        const grd = g.createLinearGradient(0, 0, 1200, 900); grd.addColorStop(0, a); grd.addColorStop(1, b);
+        g.fillStyle = grd; g.fillRect(0, 0, 1200, 900); g.fillStyle = 'rgba(255,255,255,.7)'; g.beginPath(); g.arc(260 + i * 130, 330, 150, 0, 7); g.fill();
+        files.push(new File([await c.convertToBlob({ type: 'image/jpeg', quality: 0.85 })], 'PXL_2026100' + i + '.jpg', { type: 'image/jpeg' }));
+      }
+      files.push(new File([new Uint8Array(96000)], 'Receipt.pdf', { type: 'application/pdf' }));
+      sendFiles(files, '${meId}');
+    })()`);
+    await maker.waitFor(`!uploads.size && items.filter(i => /^PXL_/.test(i.name) && i.thumb).length === 6 && items.some(i => i.name === 'Receipt.pdf')`, 30000);
+    await page.evaluate(`openConv('${makerId}'); openGallery()`);
+    await page.waitFor(`$$('#galleryPanel .gal-tile').length === 7 && $$('#galleryPanel .gal-tile img').every(i => i.complete && i.naturalWidth > 0)`, 10000);
+    await shot(page, 'desktop-gallery');
+    await page.evaluate(`startPicking(); for (const t of $$('#galleryPanel .gal-tile').slice(1, 4)) t.click()`);
+    await ctx.sleep(200);
+    await shot(page, 'desktop-gallery-picking');
+    await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
+    await ctx.sleep(300);
+    await shot(page, 'desktop-dark-gallery-picking');
+    await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
+    await page.evaluate(`stopPicking(); closeGallery(); openConv('androidpixel0001'); startPicking(itemsIn('androidpixel0001')[0].id); togglePick(itemsIn('androidpixel0001')[2].id)`);
+    await ctx.sleep(300);
+    await shot(page, 'desktop-picking');
+    await page.evaluate(`stopPicking()`);
+    await page.viewport(390, 844, true);
+    await page.evaluate(`openConv('${makerId}'); openGallery(); startPicking(); for (const t of $$('#galleryPanel .gal-tile').slice(0, 2)) t.click()`);
+    await ctx.sleep(400);
+    await shot(page, 'phone-gallery-picking');
+    await page.evaluate(`stopPicking(); closeGallery()`);
+    await page.viewport(1280, 800, false);
 
     // Phone.
     for (const dark of [false, true]) {

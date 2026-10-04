@@ -1302,20 +1302,28 @@ function bindDragAndDrop() {
 }
 
 // Drag a received file out of the page: Chrome/Edge download it where it's dropped; the Windows app starts a
-// native drag of the saved file.
+// native drag of the saved file. A file picked with others (1.12) takes all the picked files along in the Windows app
+// (a browser drags one file at a time).
 function bindDragOut(node, item) {
   node.setAttribute('draggable', 'true');
   node.addEventListener('dragstart', e => {
     if (HOST) {
       if (hostHas('dragOut')) {
         e.preventDefault();
+        const several = pick.on && pick.ids.has(item.id) && hostHas('dragOutMany') ? pickedFiles() : [];
+        const files = several.length > 1 ? several : [item];
         if (hostHas('dragOutDone')) ownDragOut = Date.now();
-        hostCall('dragOut', { itemId: item.id }).then(r => {
+        hostCall('dragOut', files.length > 1 ? { itemIds: files.map(f => f.id) } : { itemId: item.id }).then(r => {
           // While this PC is being controlled from another device the app copies the file instead (a drag froze it).
-          if (r?.copied) { ownDragEnded(); toast('Copied. Paste it where you want it (Ctrl+V): files can’t be dragged out of Beam while this PC is being controlled.', { ms: 8000 }); }
+          if (r?.copied) {
+            ownDragEnded();
+            toast(`Copied. Paste ${files.length > 1 ? 'them' : 'it'} where you want ${files.length > 1 ? 'them' : 'it'} (Ctrl+V): files can’t be dragged out of Beam while this PC is being controlled.`, { ms: 8000 });
+          }
         }).catch(err => {
           ownDragEnded();
-          if (err.code === 'not-saved') toast('Save the file first, then drag it.', { action: 'Save', onAction: () => hostDo('saveFile', { itemId: item.id }) });
+          const missing = files.filter(f => !isSaved(f.id));
+          const save = () => (missing.length ? missing : files).forEach(f => hostDo('saveFile', { itemId: f.id }));
+          if (err.code === 'not-saved') toast(files.length > 1 ? `Save them first (${missing.length === 1 ? 'one isn’t' : `${missing.length || 'some'} aren’t`} on this PC yet), then drag them.` : 'Save the file first, then drag it.', { action: 'Save', onAction: save });
           else if (err.code === 'clipboard') toast('Couldn’t copy it. Try again.', { error: true });
         });
       }

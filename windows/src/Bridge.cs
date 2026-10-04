@@ -13,7 +13,10 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany" };
+
+        // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
+        const int MaxFilesAtOnce = 1000;
 
         readonly App app;
         readonly WebWindow win;
@@ -170,12 +173,18 @@ namespace Beam
                 }
                 case "dragOut":
                 {
-                    string r = win.DragOut(itemId);
+                    // One file (itemId), or several picked together (itemIds, Beam 1.12): all of them in one drag.
+                    var several = Json.StrList(m, "itemIds").Distinct().ToList();
+                    if (several.Count > MaxFilesAtOnce) { Fail(id, "bad-request", "Too many files at once"); break; }
+                    string r = several.Count > 0 ? win.DragOut(several) : win.DragOut(itemId);
                     if (r == null) Reply(id, null);
                     else if (r == "copied") Reply(id, Obj("copied", true)); // (this PC is being controlled: no drag, 1.7.1)
-                    else Fail(id, r, r == "clipboard" ? "Couldn't copy it" : "Save the file first");
+                    else Fail(id, r, r == "clipboard" ? "Couldn't copy it" : several.Count > 1 ? "Save them first" : "Save the file first");
                     break;
                 }
+                case "copyFiles":
+                    CopyFiles(id, Json.StrList(m, "itemIds").Distinct().ToList(), Json.Long(m, "clipSeq", -1));
+                    break;
                 case "read":
                     app.MarkRead(App.FromPageConv(Json.Str(m, "conversation")), Json.Long(m, "ts", 0));
                     Reply(id, null);
@@ -314,6 +323,36 @@ namespace Beam
             else Fail(id, err, err == "too-big" ? "That image is too big to copy"
                 : err == "unsupported" ? "Windows can't read that kind of image"
                 : err == "not-found" ? "That image isn't on the server any more" : "Couldn't copy the image");
+        }
+
+        // Copy several files (Beam 1.12): the saved files go onto the clipboard together, as Explorer's Copy puts them. If any
+        // isn't on this PC yet nothing is copied: the reply names those ("missing") with the clipboard's sequence number;
+        // the page saves them and asks again with `clipSeq`, and hears "clipboard-changed" if something else was copied
+        // meanwhile (what the user copied while waiting stays where it is).
+        void CopyFiles(object id, List<string> itemIds, long clipSeq)
+        {
+            if (itemIds.Count == 0 || itemIds.Count > MaxFilesAtOnce) { Fail(id, "bad-request", itemIds.Count == 0 ? "No files to copy" : "Too many files at once"); return; }
+            var paths = new List<string>();
+            var missing = new List<object>();
+            foreach (string itemId in itemIds)
+            {
+                var it = app.ItemById(itemId);
+                if (it == null || !it.IsFile) { Fail(id, "not-found", "One of those files isn't on the server any more"); return; }
+                string path = app.LocalFile(itemId);
+                if (path == null) missing.Add(itemId); else paths.Add(path);
+            }
+            if (missing.Count > 0)
+            {
+                var r = new Dictionary<string, object>();
+                r["missing"] = missing.ToArray();
+                r["clipSeq"] = (long)ClipPayload.Sequence();
+                Reply(id, r);
+                return;
+            }
+            if (clipSeq >= 0 && clipSeq != (long)ClipPayload.Sequence()) { Fail(id, "clipboard-changed", "Something else was copied meanwhile"); return; }
+            if (!ClipPayload.SetFiles(paths)) { Fail(id, "clipboard", "Couldn't copy them"); return; }
+            Log.Write("Copied " + (paths.Count == 1 ? "a file" : paths.Count + " files") + " to the clipboard from the chat");
+            Reply(id, Obj("copied", paths.Count));
         }
 
         // A computer name for mstsc /v: a DNS name (letters, digits, hyphens, dots) or an IPv4/IPv6 address; else null.

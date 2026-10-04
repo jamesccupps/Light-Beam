@@ -213,6 +213,8 @@ async function dismissAllPhone() {
 
 function openPhone({ select = '', focus = false } = {}) {
   if (!phone.shown) return false;
+  closeGallery();
+  stopPicking();
   if (!phone.open && view.conv !== null) saveComposerDraft(view.conv);
   phone.open = true;
   phone.selected = select || '';

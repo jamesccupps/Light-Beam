@@ -29,7 +29,7 @@ The host injects `window.beamHost` before any page script runs (on every documen
 | `deviceName` | `"Desktop"` | This device's name. The app owns it; rename through `setSettings`. |
 | `platform` | `"windows"` | Send it as `X-Beam-Platform` and `platform=` (see §2). |
 | `server` | `"https://beam.tail1234.ts.net"` | The origin the host trusts. The bridge only works on this origin. |
-| `features` | `["transfers","localFiles","settings","clipboard","pickFiles","pickFolder","dragOut","dragOutDone","openPanel","remoteDesktop","phoneNotifications","remoteControl"]` | What this host supports (`remoteDesktop` since Beam for Windows 1.3.0, `phoneNotifications` since 1.5.0: see §10, `remoteControl` since 1.6.0: see §11, `dragOutDone` since 1.7.1: §5). |
+| `features` | `["transfers","localFiles","settings","clipboard","pickFiles","pickFolder","dragOut","dragOutDone","openPanel","remoteDesktop","phoneNotifications","remoteControl","restoreSettings","copyFiles","dragOutMany"]` | What this host supports (`remoteDesktop` since Beam for Windows 1.3.0, `phoneNotifications` since 1.5.0: see §10, `remoteControl` since 1.6.0: see §11, `dragOutDone` since 1.7.1: §5, `restoreSettings` since 1.8.1, `copyFiles` and `dragOutMany` since 1.9.0: §4). |
 | `debug` | `false` | `true` when Beam.exe runs with `--devtools` (DevTools and extra logging on). |
 
 `beamHost` is informational. Never treat it as a security boundary; the host re-checks everything it is asked to do.
@@ -125,7 +125,8 @@ every device.
 | `copyImage` **(1.6.2)** | `itemId` (an image file), or `png`: base64 PNG bytes | `{}`; `code: "unsupported"` (a type Windows can't read, e.g. WebP or HEIC: send it again as `png`), `"too-big"` (over 64 MB or 100 megapixels), `"not-found"`, `"failed"` | Puts the picture on the clipboard as a bitmap, plus PNG when it has transparency, turned as its EXIF orientation says; honours "keep out of clipboard history". The page's own clipboard can't take images over http. An app before 1.6.2 answers `unknown-type`. |
 | `openLink` | `url` | `{}` | Opens an `http:`, `https:` or `mailto:` link in the default browser. Anything else → `bad-request`. |
 | `remoteDesktop` | `host`: a DNS name or IP address (use the device's `tailscale.dns`, else its Tailscale IP) | `{}`; `code: "bad-request"` if `host` isn't a plain name/address; `code: "failed"` if the client couldn't start | Runs Windows' Remote Desktop client: `mstsc.exe /v:<host>`. Only if `features` has `remoteDesktop`; offer it for devices with `can.remoteDesktop`. |
-| `dragOut` | `itemId` | `{}`, `{ copied: true }`, or `code: "not-saved"` / `"clipboard"` | Starts a native drag of the local file (call it from `dragstart` on a file bubble with the mouse still down, after `preventDefault()`); `dragOutDone` follows when it ends. Only if `features` has `dragOut`. **While another device controls this PC** (1.7.1) there is no drag: the file goes onto the clipboard as Explorer's Copy puts it, and the reply is `{ copied: true }` (the page says to paste it). A drag's modal loop on the app's thread held up the remote session's own input, so the mouse button never came back up. |
+| `dragOut` | `itemId`, or `itemIds` **(1.9.0, `features` has `dragOutMany`)**: several files picked together (≤ 1,000), all in one drag | `{}`, `{ copied: true }`, or `code: "not-saved"` (any of them isn't saved on this PC: no drag) / `"clipboard"` / `"bad-request"` (over 1,000) | Starts a native drag of the local file (or files) (call it from `dragstart` on a file bubble with the mouse still down, after `preventDefault()`); `dragOutDone` follows when it ends. Only if `features` has `dragOut`. **While another device controls this PC** (1.7.1) there is no drag: the file goes onto the clipboard as Explorer's Copy puts it, and the reply is `{ copied: true }` (the page says to paste it). A drag's modal loop on the app's thread held up the remote session's own input, so the mouse button never came back up. |
+| `copyFiles` **(1.9.0)** | `itemIds` (1 to 1,000 file items), optional `clipSeq` | `{ copied: n }`; or `{ missing: [itemId…], clipSeq }` when some aren't saved on this PC (nothing copied); `code: "clipboard-changed"` (`clipSeq` given and something else was copied since), `"not-found"` (one isn't a file the app knows), `"bad-request"`, `"clipboard"` | Puts the files on the clipboard together, as Explorer's Copy does (any program that takes pasted files takes them). For files not on this PC yet the page saves them (`saveFile`), waits for their `localFile`, and asks again with the `clipSeq` it was given: the app never replaces something the user copied in between. Only if `features` has `copyFiles`. |
 | `read` | `conversation`, `ts` | (no reply needed) | Updates the tray unread count. |
 | `viewing` | `conversation`, `visible` | (no reply needed) | Which conversation is on screen. The host doesn't notify about items in it while the window is visible and focused. Send on every conversation switch. Use `"phone"` while the **Phone panel** is open: the host then shows no phone-notification balloons (1.5.0). |
 | `getSettings` | | `{ settings }` | See §6. |
@@ -156,7 +157,7 @@ every device.
 | `conn` | `conn` | Optional: the host's own connection state. |
 | `openPanel` | `panel`: `"settings"` or `"pair"` | Open that dialog (the tray's "Settings" and "Add a device…" land here). Scroll Settings to the "This PC" section. |
 | `openPhoneNotification` | `id` (a phone notification's `id`, `"<phone id>/<key>"`) | Open the **Phone panel** with that notification selected and its reply box focused (no reply action: just selected). If it's gone meanwhile, open the panel. Sent after a click on its balloon (1.5.0, `features` has `phoneNotifications`). |
-| `dragOutDone` | `itemId` | The native drag started by `dragOut` ended (dropped anywhere, or cancelled). Until then a file drag over the page is that drag coming back: no "Drop to send", and a drop on the page sends nothing (1.7.1, `features` has `dragOutDone`). |
+| `dragOutDone` | `itemId` (the first, for several) | The native drag started by `dragOut` ended (dropped anywhere, or cancelled). Until then a file drag over the page is that drag coming back: no "Drop to send", and a drop on the page sends nothing (1.7.1, `features` has `dragOutDone`). |
 
 **Transfer**
 
@@ -239,6 +240,12 @@ Render **in addition**:
 Keep as in a browser: sending text, the event stream, read markers, delete/forget/pin/forward, the pairing QR
 ("Add a device"), the password setting, search, previews, text selection and Copy.
 
+**Several at once (Beam 1.12, Windows 1.9.0):** messages picked together (or photos and files picked in a
+conversation's gallery) are copied as files with `copyFiles`, and a drag of a picked file takes every picked file along
+(`dragOut` with `itemIds`). Save saves the ones not on this PC yet (`saveFile` each); with all of them saved it's
+"Show in folder" (`revealFile` of the first). A test instance (its own `--config`) never starts a real drag: the paths
+go to `drag-files.txt` in its folder, as its clipboard goes to `clipboard-files.txt`.
+
 Phone notifications (1.5.0): see §10.
 
 ## 8. What the host enforces (for the page author's awareness)
@@ -266,8 +273,8 @@ Phone notifications (1.5.0): see §10.
 - **Offline:** if the server can't be reached when the window opens, the host shows its own small local page
   ("Can't reach Beam… retrying") and loads the real page once it's back. If the page is already open, it shows its
   usual offline state.
-- **Security:** `openFile` / `revealFile` / `dragOut` only ever act on items the host saved or sent itself, looked up by
-  item id; the page never passes file-system paths. `openLink` only opens http, https and mailto. `remoteDesktop`
+- **Security:** `openFile` / `revealFile` / `dragOut` / `copyFiles` only ever act on items the host saved or sent itself,
+  looked up by item id; the page never passes file-system paths. `openLink` only opens http, https and mailto. `remoteDesktop`
   only accepts a DNS name (letters, digits, hyphens, dots) or an IP address, nothing else reaches the command line.
   Nothing returns the key or token.
 

@@ -498,7 +498,7 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
   padding: 12px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
 }
 .app.phone-open #thread, .app.phone-open #composer, .app.phone-open #composerNote, .app.phone-open #newPill,
-.app.phone-open #pinnedBtn, .app.phone-open #threadSearchBtn, .app.phone-open #threadMenuBtn, .app.phone-open #threadSearch { display: none !important; }
+.app.phone-open #pinnedBtn, .app.phone-open #galleryBtn, .app.phone-open #threadSearchBtn, .app.phone-open #threadMenuBtn, .app.phone-open #threadSearch { display: none !important; }
 .avatar.phone { background: var(--accent-soft); color: var(--accent); }
 .phone-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; }
 .phone-group { display: flex; flex-direction: column; gap: 8px; }
@@ -527,6 +527,85 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 /* Phone text is bidi-isolated piece by piece (phone.js: dir="auto", <bdi>): an RLO in it can't reorder what's around it. */
 .phone-row .conv-name, .phone-row .conv-preview, .app.phone-open #threadName, .phone-app-name, .phone-title, .phone-conv,
 .phone-lines p, .phone-actions button, .phone-status { unicode-bidi: isolate; }
+
+/* ---------- picking several (1.12, gallery.js): a check on each message, the bar in place of the message box ---------- */
+.pick-bar { display: none; }
+.app.picking .pick-bar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 10px max(12px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  border-top: 1px solid var(--border); background: var(--bg); user-select: none; -webkit-user-select: none;
+}
+.app.picking #composer, .app.picking #composerNote { display: none !important; }
+.pick-count { flex: 1; min-width: 8em; font-weight: 600; font-size: 14px; }
+.app.picking .msg.pickable { cursor: pointer; }
+.app.picking .msg.pickable .bubble { position: relative; }
+.app.picking .msg.pickable .bubble::after, .app.picking .gal-check {
+  content: ""; position: absolute; top: -7px; z-index: 1; width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--muted); background: var(--surface); box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
+}
+.app.picking .msg.pickable.mine .bubble::after { left: -7px; }
+.app.picking .msg.pickable.theirs .bubble::after { right: -7px; }
+.app.picking .msg.picked .bubble { outline: 3px solid var(--accent); outline-offset: 2px; }
+.app.picking .msg.picked .bubble::after {
+  border-color: var(--accent);
+  background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / 14px no-repeat;
+}
+
+/* ---------- the gallery (1.12, gallery.js): a conversation's photos, videos and files, in place of the thread ---------- */
+.gallery-panel { display: none; }
+.app.gallery-open .gallery-panel {
+  flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
+  padding: 0 max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
+}
+.app.gallery-open #thread, .app.gallery-open #composer, .app.gallery-open #composerNote, .app.gallery-open #newPill,
+.app.gallery-open #pinnedBtn, .app.gallery-open #threadSearchBtn, .app.gallery-open #threadSearch { display: none !important; }
+.gal-bar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 6px; padding: 10px 0 8px; background: var(--bg); }
+.gal-tabs { display: flex; gap: 4px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.gal-tab {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.gal-tab:hover { background: var(--surface-2); color: var(--text); }
+.gal-tab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+.gal-n { font-weight: 500; opacity: .8; font-variant-numeric: tabular-nums; }
+.gal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 4px; }
+.gal-month { grid-column: 1 / -1; margin: 10px 2px 2px; color: var(--muted); font-size: 13px; font-weight: 650; }
+.gal-month:first-child { margin-top: 0; }
+.gal-tile {
+  position: relative; aspect-ratio: 1; padding: 0; border: 0; border-radius: 8px; overflow: hidden;
+  background: var(--surface-2); color: var(--muted); cursor: pointer;
+}
+.gal-tile img { display: block; width: 100%; height: 100%; object-fit: cover; -webkit-user-drag: none; }
+.gal-tile:hover img { filter: brightness(.94); }
+.gal-ph { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; height: 100%; padding: 8px; font-size: 12px; text-align: center; overflow-wrap: anywhere; overflow: hidden; }
+.gal-ph span { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.gal-play { position: absolute; left: 6px; bottom: 6px; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: rgba(0, 0, 0, .55); color: #fff; }
+.gal-play .i { width: 13px; height: 13px; fill: currentColor; }
+.gal-files { display: flex; flex-direction: column; gap: 2px; }
+.gal-file {
+  position: relative; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 58px; padding: 7px 40px 7px 8px; border: 0; border-radius: 10px;
+  background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.gal-file:hover { background: var(--surface-2); }
+.gal-file-body { display: flex; flex-direction: column; min-width: 0; }
+.gal-file-name { font-weight: 600; overflow-wrap: anywhere; }
+.gal-check { display: none; }
+.app.picking .gal-check { display: block; right: 6px; top: 6px; }
+.app.picking .gal-tile .gal-check { border-color: #fff; background-color: rgba(0, 0, 0, .2); }
+.app.picking .gal-file .gal-check { top: 50%; right: 10px; margin-top: -11px; }
+.gal-tile.picked { outline: 3px solid var(--accent); outline-offset: -3px; }
+.gal-file.picked { background: var(--accent-soft); }
+.app.picking .picked .gal-check {
+  border-color: var(--accent);
+  background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / 14px no-repeat;
+}
+.gal-check .i { display: none; }
+.gal-empty { margin: 48px auto; }
+.video-dlg .gal-video { display: block; width: 100%; max-height: 70vh; border-radius: 10px; background: #000; }
+@media (max-width: 560px) {
+  .pick-bar .pick-label { display: none; }
+  .gal-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 3px; }
+}
 
 /* ---------- remote control (1.6, remote.js): the viewer at index.html#remote=<PC id>, dark whatever the theme ---------- */
 .rc { display: none; }

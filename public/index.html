@@ -30,6 +30,7 @@
   <script src="devices.js" defer></script>
   <script src="phone.js" defer></script>
   <script src="extras.js" defer></script>
+  <script src="gallery.js" defer></script>
   <script src="remote.js" defer></script>
   <script src="app.js" defer></script>
 </head>
@@ -177,6 +178,7 @@
           <span id="threadSub"></span>
         </div>
         <button id="pinnedBtn" class="icon-btn pill-btn" type="button" aria-pressed="false" hidden><svg class="i" aria-hidden="true"><use href="#i-pin"/></svg><span id="pinnedCount"></span></button>
+        <button id="galleryBtn" class="icon-btn" type="button" title="Photos and files" aria-label="Photos and files" aria-pressed="false" hidden><svg class="i" aria-hidden="true"><use href="#i-image"/></svg></button>
         <button id="threadSearchBtn" class="icon-btn" type="button" title="Find in this conversation (Ctrl+F)" aria-label="Find in this conversation"><svg class="i" aria-hidden="true"><use href="#i-search"/></svg></button>
         <button id="threadMenuBtn" class="icon-btn" type="button" title="More" aria-label="More options" aria-haspopup="menu"><svg class="i" aria-hidden="true"><use href="#i-more"/></svg></button>
       </header>
@@ -191,6 +193,7 @@
 
       <div id="thread" class="thread" role="log" aria-live="polite" aria-relevant="additions" aria-label="Messages" tabindex="-1"></div>
       <div id="phonePanel" class="phone-panel" role="region" aria-label="Phone notifications"></div>
+      <div id="galleryPanel" class="gallery-panel" role="region" aria-label="Photos and files"></div>
       <button id="newPill" class="new-pill" type="button" hidden><svg class="i" aria-hidden="true"><use href="#i-arrow-down"/></svg><span id="newPillText">New messages</span></button>
 
       <footer id="composer" class="composer">
@@ -203,6 +206,7 @@
         <input id="folderInput" class="visually-hidden" type="file" webkitdirectory tabindex="-1" aria-hidden="true">
       </footer>
       <div id="composerNote" class="composer-note" hidden></div>
+      <div id="pickBar" class="pick-bar" role="toolbar" aria-label="Selected messages"></div>
     </section>
   </div>
 

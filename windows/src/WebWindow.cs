@@ -921,22 +921,47 @@ namespace Beam
         // reconnect until something else let go of it.
         public string DragOut(string itemId)
         {
-            string path = app.LocalFile(itemId);
-            if (path == null) return "not-saved";
+            return DragOut(new List<string> { itemId });
+        }
+
+        // Several files picked together (Beam 1.12) go in one drag; every one of them must be saved on this PC.
+        public string DragOut(IList<string> itemIds)
+        {
+            var paths = new List<string>();
+            foreach (string itemId in itemIds)
+            {
+                string path = app.LocalFile(itemId);
+                if (path == null) return "not-saved";
+                paths.Add(path);
+            }
+            if (paths.Count == 0) return "not-saved";
+            string what = paths.Count == 1 ? itemIds[0] : paths.Count + " files";
             if (app.Rc != null && app.Rc.Active)
             {
-                bool copied = ClipPayload.SetFiles(new[] { path });
-                Log.Write("Drag out of " + itemId + " while this PC is being controlled: " + (copied ? "copied instead" : "couldn't copy it"));
+                bool copied = ClipPayload.SetFiles(paths);
+                Log.Write("Drag out of " + what + " while this PC is being controlled: " + (copied ? "copied instead" : "couldn't copy it"));
                 return copied ? "copied" : "clipboard";
+            }
+            // A test instance (its own config) never starts a real drag: that would drop wherever the real mouse is. The
+            // paths go to a file in its folder instead, as its "clipboard" does.
+            if (ClipPayload.IsolatedDir != null)
+            {
+                try { File.WriteAllLines(Path.Combine(ClipPayload.IsolatedDir, "drag-files.txt"), paths); }
+                catch (Exception ex) { Log.Error("Test drag", ex); }
+                Log.Write("Drag out of " + what + " (a test instance: written to drag-files.txt)");
+                BeginInvoke(new Action(() => PostEvent("dragOutDone", "itemId", itemIds[0])));
+                return null;
             }
             if (web == null) return "busy";
             var data = new DataObject();
-            data.SetFileDropList(new StringCollection { path });
+            var list = new StringCollection();
+            list.AddRange(paths.ToArray());
+            data.SetFileDropList(list);
             BeginInvoke(new Action(() =>
             {
                 try { web.DoDragDrop(data, DragDropEffects.Copy); }
                 catch (Exception ex) { Log.Error("Drag out", ex); }
-                PostEvent("dragOutDone", "itemId", itemId);
+                PostEvent("dragOutDone", "itemId", itemIds[0]);
             }));
             return null;
         }

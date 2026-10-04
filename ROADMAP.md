@@ -17,11 +17,12 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   your own key).
 - **Backups:** the server and Beam Family back themselves up every day (a restore puts one back), and each PC's and
   phone's Beam app keeps its settings on your Beam, offered back after a reinstall.
+- **Several at once** (Beam 1.12, Beam Family 1.11): select several messages, photos or files to copy, save, forward
+  or delete them together (the Windows app copies them as files and drags them out together), and a gallery of each
+  conversation's photos, videos and files.
 
 ## Next
-- **Several at once:** select several messages or pictures to copy, drag into another program, save or forward them
-  together, and a gallery of everything a device sent (✅ in Beam Family 1.11: a gallery per conversation and
-  selecting several messages; still to come in Beam itself).
+- **Several at once on Android:** the gallery and selecting several in the Android app.
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;
   several separate families on one server, each its own site, and guests who see only the channels they're given.
 - **Servers that talk to each other** (with several families): other people's family servers and Beams, linked only
