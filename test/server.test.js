@@ -1617,7 +1617,8 @@ test('B6–B9: forward, bulk delete, pin, read markers', async () => {
     assert.equal(r.json.pinned, true);
     const upd = await ev.wait('update', d => d.id === t.id && d.pinned);
     assert.ok(upd.data.delivered.itemsbbb001, 'pin updates keep the delivered map');
-    assert.equal((await s.req('PATCH', `/api/items/${t.id}`, { headers: json(a), body: JSON.stringify({ text: 'x' }) })).status, 400);
+    assert.equal((await s.req('PATCH', `/api/items/${f.id}`, { headers: json(a), body: JSON.stringify({ text: 'x' }) })).status, 400, 'a file has no words to change');
+    assert.equal((await s.req('PATCH', `/api/items/${t.id}`, { headers: json(a), body: JSON.stringify({ size: 1 }) })).status, 400);
     r = await post(s, '/api/items/delete', { ids: [f.id, t.id, 'ffffffffffffffff'] }, a);
     assert.equal(r.json.deleted, 2);
     await ev.wait('delete', d => d.id === f.id);
@@ -1627,6 +1628,60 @@ test('B6–B9: forward, bulk delete, pin, read markers', async () => {
     await s.req('PUT', '/api/read', { headers: json(b), body: JSON.stringify({ conversation: 'itemsaaa001', ts: 10 }) });
     assert.equal((await s.req('GET', '/api/me', { headers: b })).json.read.itemsaaa001, 5000, 'markers only move forward');
     assert.equal((await s.req('PUT', '/api/read', { headers: json(b), body: JSON.stringify({ conversation: 'nope', ts: 1 }) })).status, 400);
+    ev.close();
+  } finally { await s.stop(); }
+});
+
+test('1.14.0: a reply keeps what it answers (a preview that stays after edits); reactions are each device’s own; a text can be edited (a long one too); the update events carry them', async () => {
+  const s = await startServer('chat114', 8792);
+  try {
+    const K = s.key;
+    const a = app(K, 'chataaaa0001', 'A');
+    const b = app(K, 'chatbbbb0001', 'B', 'android');
+    await s.req('GET', '/api/me', { headers: b });
+    const ev = await openEvents(s.port, b);
+    const first = await sendText(s, a, 'Where are the keys?');
+    // A reply: the message it answers, with a preview.
+    let r = await post(s, '/api/text', { text: 'On the hook', reply: first.id }, b);
+    assert.equal(r.status, 201, r.body);
+    assert.deepEqual(r.json.reply, { id: first.id, kind: 'text', from: 'chataaaa0001', device: 'A', text: 'Where are the keys?' });
+    const answer = r.json;
+    r = await post(s, '/api/text', { text: 'To what?', reply: 'ffffffffffffffff' }, b);
+    assert.deepEqual(r.json.reply, { id: 'ffffffffffffffff' }, 'one that is gone keeps its id');
+    assert.equal((await post(s, '/api/text', { text: 'x', reply: 'nope' }, b)).status, 400);
+    // Reactions: each device's own; the last one off leaves none.
+    const thumbs = encodeURIComponent('👍');
+    r = await s.req('PUT', `/api/items/${first.id}/reactions/${thumbs}`, { headers: b });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json.reactions, { '👍': ['chatbbbb0001'] });
+    await ev.wait('update', d => d.id === first.id && d.reactions?.['👍']?.length === 1);
+    r = await s.req('PUT', `/api/items/${first.id}/reactions/${thumbs}`, { headers: a });
+    assert.deepEqual(r.json.reactions, { '👍': ['chatbbbb0001', 'chataaaa0001'] });
+    r = await s.req('PUT', `/api/items/${first.id}/reactions/${encodeURIComponent('❤️')}`, { headers: a });
+    assert.deepEqual(Object.keys(r.json.reactions), ['👍', '❤️']);
+    for (const [e, who] of [['👍', b], ['👍', a], ['❤️', a]]) r = await s.req('DELETE', `/api/items/${first.id}/reactions/${encodeURIComponent(e)}`, { headers: who });
+    assert.equal(r.json.reactions, undefined, 'none left');
+    await ev.wait('update', d => d.id === first.id && d.reactions && !Object.keys(d.reactions).length);
+    assert.equal((await s.req('PUT', `/api/items/${first.id}/reactions/${encodeURIComponent('a b')}`, { headers: a })).status, 400);
+    assert.equal((await s.req('PUT', `/api/items/ffffffffffffffff/reactions/${thumbs}`, { headers: a })).status, 404);
+    // Edits: the new words and `edited`, in the event too; the reply's preview stays as it was.
+    r = await s.req('PATCH', `/api/items/${first.id}`, { headers: json(a), body: JSON.stringify({ text: 'Where are the car keys?' }) });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.json.text, 'Where are the car keys?');
+    assert.ok(r.json.edited > 0);
+    await ev.wait('update', d => d.id === first.id && d.text === 'Where are the car keys?' && d.edited > 0 && d.truncated === false);
+    const items = (await s.req('GET', '/api/items', { headers: a })).json.items;
+    assert.equal(items.find(i => i.id === answer.id).reply.text, 'Where are the keys?', 'the reply quotes it as it was');
+    assert.equal((await s.req('PATCH', `/api/items/${first.id}`, { headers: json(a), body: JSON.stringify({ text: '   ' }) })).status, 400, 'nothing left');
+    // A long one goes to data/texts (lists carry a preview), and back inline when it's short again.
+    const long = 'k'.repeat(70_000);
+    r = await s.req('PATCH', `/api/items/${first.id}`, { headers: json(a), body: JSON.stringify({ text: long }) });
+    assert.deepEqual([r.json.truncated, r.json.textLength], [true, 70_000]);
+    assert.equal((await s.req('GET', `/api/items/${first.id}/text`, { headers: a })).body, long);
+    assert.ok(fs.existsSync(path.join(s.data, 'texts', `${first.id}.txt`)));
+    r = await s.req('PATCH', `/api/items/${first.id}`, { headers: json(a), body: JSON.stringify({ text: 'short again' }) });
+    assert.deepEqual([r.json.text, r.json.truncated], ['short again', undefined]);
+    assert.ok(!fs.existsSync(path.join(s.data, 'texts', `${first.id}.txt`)), 'its long copy is gone');
     ev.close();
   } finally { await s.stop(); }
 });

@@ -29,6 +29,7 @@ import app.beam.android.data.Repository
 import app.beam.android.data.TransferManager
 import app.beam.android.databinding.ItemDayBinding
 import app.beam.android.databinding.ItemMessageBinding
+import com.google.android.material.chip.Chip
 
 /** One row in a conversation. */
 sealed interface Row {
@@ -95,6 +96,14 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         fun pick(row: Row.Msg)
         /** Picking several: a long-press (in split screen, on a picked saved file: drag every picked saved file). */
         fun pickLong(row: Row.Msg, view: View): Boolean
+        /** (server 1.14) A tap on a reaction: this device's on or off. */
+        fun react(item: Item, emoji: String)
+        /** (server 1.14) A tap on a reply's quote: the message it answers. */
+        fun showReplied(id: String)
+        /** (server 1.14) Who a device is, for a reply's quote and the reactions ("You" for this phone). */
+        fun nameOf(deviceId: String?, fallback: String?): String
+        /** This phone's id as the server knows it. */
+        fun myId(): String
     }
 
     /** Briefly highlighted (a search result that was opened). */
@@ -308,6 +317,8 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         b.bubble.contentDescription = null
         highlight(b, item.id)
 
+        bindReply(b, item)
+        bindReactions(b, item)
         if (item.isText) {
             showText(b, item)
             b.imageBox.isVisible = false
@@ -320,6 +331,47 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
             bindFile(b, row)
         }
         bindMeta(b, row)
+    }
+
+    /** (server 1.14) A reply's quote of what it answers, as it was then; a tap goes there. */
+    private fun bindReply(b: ItemMessageBinding, item: Item) {
+        val r = item.reply
+        b.replyQuote.isVisible = r != null
+        if (r == null) return
+        b.replyWho.text = actions.nameOf(r.from, r.device)
+        b.replyText.text = when {
+            r.kind == "file" -> ctx.getString(R.string.reply_file, r.name ?: "file")
+            r.text != null -> r.text.replace(Regex("\\s+"), " ").trim()
+            else -> ctx.getString(R.string.reply_gone)
+        }
+        b.replyQuote.setOnClickListener { actions.showReplied(r.id) }
+    }
+
+    /** (server 1.14) Reactions under the words: each with how many; this phone's are checked; a tap turns it on or off. */
+    private fun bindReactions(b: ItemMessageBinding, item: Item) {
+        val list = item.reactions.filterValues { it.isNotEmpty() }
+        b.reactions.isVisible = list.isNotEmpty()
+        b.reactions.removeAllViews()
+        val mine = actions.myId()
+        for ((emoji, by) in list) {
+            val who = by.joinToString(", ") { if (it == mine) ctx.getString(R.string.this_device) else actions.nameOf(it, null) }
+            b.reactions.addView(Chip(ctx).apply {
+                text = "$emoji ${by.size}"
+                isCheckable = true
+                isChecked = mine in by
+                isCheckedIconVisible = false
+                setEnsureMinTouchTargetSize(false)
+                chipMinHeight = 28 * ctx.resources.displayMetrics.density
+                contentDescription = ctx.getString(R.string.reaction_count, emoji, by.size, who)
+                setOnClickListener { actions.react(item, emoji) }
+            })
+        }
+    }
+
+    /** Rows that aren't messages on the server (sending, arriving, waiting) have no quote or reactions. */
+    private fun noChatExtras(b: ItemMessageBinding) {
+        b.replyQuote.isVisible = false
+        b.reactions.isVisible = false
     }
 
     /** Up to [MAX_LINES] lines (and at most [MAX_CHARS] characters are laid out); the rest is behind "Show all". */
@@ -345,6 +397,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
     private fun bindMeta(b: ItemMessageBinding, row: Row.Msg) {
         val item = row.item
         val parts = mutableListOf(Format.time(item.ts))
+        if (item.edited > 0) parts += ctx.getString(R.string.edited) // (server 1.14)
         if (row.status != null) parts += row.status
         val meta = parts.joinToString(" · ")
         b.meta.text = meta
@@ -430,6 +483,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
     // ---------------------------------------------------------------- files being sent
 
     private fun bindUpload(b: ItemMessageBinding, up: TransferManager.Upload, contentToo: Boolean) {
+        noChatExtras(b)
         val failed = up.status == TransferManager.Status.FAILED
         val paused = up.status == TransferManager.Status.PAUSED
         if (contentToo) {
@@ -487,6 +541,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
     // ---------------------------------------------------------------- files on their way here
 
     private fun bindIncoming(b: ItemMessageBinding, inc: Repository.Incoming, download: TransferManager.Download?) {
+        noChatExtras(b)
         style(b, mine = false, failed = false, pending = false, imageOnly = false)
         highlight(b, null)
         b.sender.isVisible = false
@@ -518,6 +573,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
     // ---------------------------------------------------------------- texts waiting to be sent
 
     private fun bindOutbox(b: ItemMessageBinding, e: Outbox.Entry) {
+        noChatExtras(b)
         val failed = e.status == Outbox.Status.FAILED
         style(b, mine = true, failed = failed, pending = !failed, imageOnly = false)
         highlight(b, null)
@@ -624,7 +680,9 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
             private fun sameContent(a: Row.Msg, b: Row.Msg) =
                 a.item.id == b.item.id && a.item.text == b.item.text && a.item.name == b.item.name && a.item.mime == b.item.mime &&
                     a.item.size == b.item.size && a.item.thumb == b.item.thumb && a.mine == b.mine && a.sender == b.sender &&
-                    (a.local == null) == (b.local == null)
+                    (a.local == null) == (b.local == null) &&
+                    // (server 1.14: these are drawn in the bubble too)
+                    a.item.reactions == b.item.reactions && a.item.edited == b.item.edited && a.item.reply == b.item.reply
         }
     }
 }

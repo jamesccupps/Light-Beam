@@ -31,6 +31,7 @@ import app.beam.android.core.Conversations
 import app.beam.android.core.Device
 import app.beam.android.core.Format
 import app.beam.android.core.Item
+import android.view.inputmethod.InputMethodManager
 import app.beam.android.data.Files
 import app.beam.android.data.Outbox
 import app.beam.android.data.Repository
@@ -51,6 +52,9 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /** One conversation: chat bubbles (mine on the right), compose bar, attach, drag and drop. */
+/** (1.11, server 1.14) The quick reactions on top of a message's sheet. */
+private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
 class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
     private lateinit var b: ActivityThreadBinding
     private lateinit var adapter: MessageAdapter
@@ -62,6 +66,10 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
     private var isResumed = false
     private var scrollTo: String? = null
     private var cameraFile: File? = null
+    /** (1.11, server 1.14) Replying to this message, or editing this text: the bar above the message box says which. */
+    private var replyTo: Item? = null
+    private var editing: Item? = null
+    private var draftBeforeEdit = ""
 
     private val picker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> sendFiles(uris, persist = true) }
     private val photos = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris -> sendFiles(uris, persist = true) }
@@ -123,9 +131,10 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         b.send.isEnabled = !b.input.text.isNullOrBlank()
         b.input.doAfterTextChanged {
             b.send.isEnabled = !it.isNullOrBlank()
-            app.prefs.setDraft(key, it?.toString().orEmpty())
+            if (editing == null) app.prefs.setDraft(key, it?.toString().orEmpty()) // (the words being edited aren't a draft)
         }
         b.send.setOnClickListener { sendText() }
+        b.replyClose.setOnClickListener { endCompose() }
         b.attach.setOnClickListener { attach() }
         b.root.setOnDragListener(Drops.listener(this, { key }) { hover -> b.dropOverlay.isVisible = hover })
         // Pictures from the keyboard (Gboard clipboard, GIFs) and pasted files go out as files.
@@ -370,16 +379,124 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
 
     private fun sendText() {
         val text = b.input.text?.toString().orEmpty()
+        editing?.let { return saveEdit(it, text) }
         if (text.isBlank()) return
+        val reply = replyTo?.id
         adapter.clearSelection()
         b.input.setText("")
         app.prefs.setDraft(key, "")
+        endCompose()
         lifecycleScope.launch {
             // Queued (not lost) while offline: it shows as "Waiting to send…" and goes out on reconnect.
-            val result = app.outbox.send(text, Conversations.targets(key))
+            val result = app.outbox.send(text, Conversations.targets(key), reply)
             if (result is Outbox.Result.Failed) snack(result.message)
         }
     }
+
+    // ---------------------------------------------------------------- replying and editing (1.11, server 1.14)
+
+    private fun startReply(item: Item) {
+        if (editing != null) endCompose()
+        replyTo = item
+        renderReplyBar()
+        showKeyboard()
+    }
+
+    private fun startEdit(item: Item) {
+        lifecycleScope.launch {
+            val text = try {
+                app.repo.fullText(item)
+            } catch (e: Exception) {
+                snack(Format.error(e))
+                return@launch
+            }
+            if (editing == null) draftBeforeEdit = b.input.text?.toString().orEmpty()
+            replyTo = null
+            editing = item
+            b.input.setText(text)
+            b.input.setSelection(b.input.text?.length ?: 0)
+            renderReplyBar()
+            showKeyboard()
+        }
+    }
+
+    /** The bar's ×: no reply, or the edit dropped (the draft comes back). */
+    private fun endCompose() {
+        if (editing != null) {
+            editing = null
+            b.input.setText(draftBeforeEdit)
+            b.input.setSelection(b.input.text?.length ?: 0)
+            draftBeforeEdit = ""
+        }
+        replyTo = null
+        renderReplyBar()
+    }
+
+    private fun renderReplyBar() {
+        val item = editing ?: replyTo
+        b.replyBar.isVisible = item != null
+        if (item == null) return
+        val what = if (item.isText) item.text.orEmpty().replace(Regex("\\s+"), " ").trim() else getString(R.string.reply_file, item.displayName)
+        b.replyIcon.setImageResource(if (editing != null) R.drawable.ic_edit else R.drawable.ic_reply)
+        b.replyBarText.text = if (editing != null) getString(R.string.editing, what) else getString(R.string.replying_to, senderOf(item), what)
+    }
+
+    private fun saveEdit(item: Item, text: String) {
+        if (text.isBlank()) return snack(getString(R.string.edit_empty))
+        lifecycleScope.launch {
+            try {
+                if (item.truncated || text != item.text) app.repo.editText(item, text)
+                editing = null
+                b.input.setText(draftBeforeEdit)
+                b.input.setSelection(b.input.text?.length ?: 0)
+                draftBeforeEdit = ""
+                renderReplyBar()
+            } catch (e: Exception) {
+                snack(Format.error(e))
+            }
+        }
+    }
+
+    private fun showKeyboard() {
+        b.input.requestFocus()
+        getSystemService(InputMethodManager::class.java)?.showSoftInput(b.input, 0)
+    }
+
+    override fun react(item: Item, emoji: String) {
+        val on = app.repo.me !in item.reactions[emoji].orEmpty()
+        lifecycleScope.launch {
+            try {
+                app.repo.react(item, emoji, on)
+            } catch (e: Exception) {
+                snack(Format.error(e))
+            }
+        }
+    }
+
+    /** The message a reply answers: scrolled to and lit up for a moment (or a note when it's gone). */
+    override fun showReplied(id: String) {
+        val pos = adapter.currentList.indexOfFirst { it.rowId == "i:$id" }
+        if (pos < 0) return snack(getString(R.string.reply_gone))
+        (b.list.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(pos, (b.list.height / 3).coerceAtLeast(0))
+        adapter.highlightId = id
+        adapter.notifyItemChanged(pos)
+        b.list.postDelayed({
+            if (adapter.highlightId == id) adapter.highlightId = null
+            val p = adapter.currentList.indexOfFirst { it.rowId == "i:$id" }
+            if (p >= 0) adapter.notifyItemChanged(p)
+        }, 2500)
+    }
+
+    override fun nameOf(deviceId: String?, fallback: String?): String {
+        val s = app.repo.state.value
+        return when {
+            deviceId != null && deviceId == app.repo.me -> getString(R.string.you)
+            deviceId != null -> s.devicesById[deviceId]?.name ?: fallback ?: deviceId
+            else -> fallback ?: "?"
+        }
+    }
+
+    override fun myId(): String = app.repo.me
 
     private fun sendFiles(uris: List<Uri>, persist: Boolean) {
         if (uris.isEmpty()) return
@@ -569,8 +686,11 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         val item = row.item
         val info = app.repo.state.value.info
         val entries = ArrayList<ActionSheet.Entry>()
+        // (1.11, server 1.14) Reply first, as in any chat; Edit for a text
+        if (info?.lists("replies") == true) entries += ActionSheet.Entry(R.drawable.ic_reply, getString(R.string.reply)) { startReply(item) }
         if (item.isText) {
             entries += ActionSheet.Entry(R.drawable.ic_copy, getString(R.string.copy)) { copy(item) }
+            if (info?.lists("edit") == true) entries += ActionSheet.Entry(R.drawable.ic_edit, getString(R.string.edit)) { startEdit(item) }
             entries += ActionSheet.Entry(R.drawable.ic_select_text, getString(R.string.select_text)) { TextSheet.show(this, item, senderOf(item)) }
             Notifier.firstLink(item.text.orEmpty())?.let { link ->
                 entries += ActionSheet.Entry(R.drawable.ic_link, getString(R.string.open_link)) { FileActions.openLink(this, link) }
@@ -592,7 +712,10 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         }
         entries += ActionSheet.Entry(R.drawable.ic_delete, getString(R.string.delete)) { delete(item) }
         val title = if (item.isText) item.text.orEmpty().trim().replace(Regex("\\s+"), " ").take(120) else item.displayName
-        ActionSheet.show(this, title, entries)
+        // (server 1.14) quick reactions on top; this phone's own stand out
+        val quick = if (info?.lists("reactions") == true) QUICK_REACTIONS else emptyList()
+        val mine = app.repo.me
+        ActionSheet.show(this, title, entries, quick, item.reactions.filterValues { mine in it }.keys) { react(item, it) }
     }
 
     override fun showAll(item: Item) = TextSheet.show(this, item, senderOf(item))

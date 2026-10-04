@@ -220,6 +220,7 @@ function renderComposerState() {
 function openConv(conv, { push = true, focus = true } = {}) {
   closePhone();
   closeGallery();
+  if (conv !== current) endCompose(); // (1.14.0: a reply or an edit belongs to the conversation it was started in)
   if (devicesKnown && conv !== 'all' && !deviceById(conv) && !itemsIn(conv).length) conv = 'all';
   const changed = conv !== view.conv;
   if (changed && view.conv !== null) saveComposerDraft(view.conv);
@@ -429,7 +430,7 @@ function buildMsg(item) {
   if (item.kind === 'text') {
     const text = view.fullText.get(item.id) || item.text;
     const body = linkify(el('div', { class: 'text' }), text);
-    bubble = el('div', { class: 'bubble' }, body);
+    bubble = el('div', { class: 'bubble' }, item.reply && replyQuote(item.reply), body); // (1.14.0: what it answers)
     if (text.length > 700 || text.split('\n').length > 12) {
       const open = view.expanded.has(item.id);
       body.classList.toggle('clamp', !open);
@@ -449,6 +450,7 @@ function buildMsg(item) {
     }
   } else {
     bubble = el('div', { class: 'bubble file' });
+    if (item.reply) bubble.append(replyQuote(item.reply)); // (1.14.0)
     const media = buildMedia(item);
     if (media) bubble.append(media);
     const row = el('div', { class: 'file-row' },
@@ -463,8 +465,34 @@ function buildMsg(item) {
   node.setAttribute('aria-label', `${mine ? 'You' : senderName(item)}, ${clock(item.ts)}`);
   const meta = el('div', { class: 'meta' });
   fillMeta(meta, item);
-  node.append(bubble, meta);
+  node.append(...[bubble, reactionsRow(item), meta].filter(Boolean));
   return node;
+}
+
+// (1.14.0) A reply's quote of what it answers (as it was then); a tap goes there.
+function replyQuote(ref) {
+  const who = ref.from === me.id ? 'You' : ref.from ? nameOf(ref.from) : ref.device || 'A message';
+  const what = ref.kind === 'file' ? `📎 ${ref.name || 'a file'}` : typeof ref.text === 'string' ? ref.text.replace(/\s+/g, ' ').trim() : 'A message that isn’t here any more';
+  const quote = el('button', { class: 'reply-quote', type: 'button', title: 'Show the message it answers' }, el('span', { class: 'rq-who' }, who), el('span', { class: 'rq-text' }, what));
+  quote.addEventListener('click', e => {
+    e.stopPropagation();
+    if (!revealItem(ref.id)) toast('That message isn’t here any more');
+  });
+  return quote;
+}
+
+// (1.14.0) Reactions under the bubble: each with how many; this device's stand out, and a tap turns them on or off.
+function reactionsRow(item) {
+  const list = Object.entries(item.reactions || {}).filter(([, by]) => Array.isArray(by) && by.length);
+  if (!list.length) return null;
+  return el('div', { class: 'reactions' }, ...list.map(([emoji, by]) => {
+    const on = by.includes(me.id);
+    const who = by.map(id => (id === me.id ? 'this device' : nameOf(id))).join(', ');
+    const chip = el('button', { class: `reaction${on ? ' on' : ''}`, type: 'button', 'aria-pressed': String(on), title: who, 'aria-label': `${emoji} ${by.length}: ${who}` },
+      el('span', { class: 'r-emoji', 'aria-hidden': 'true' }, emoji), el('span', { class: 'r-n', 'aria-hidden': 'true' }, String(by.length)));
+    chip.addEventListener('click', e => { e.stopPropagation(); toggleReaction(item, emoji); });
+    return chip;
+  }));
 }
 
 async function loadFullText(item) {
@@ -540,6 +568,7 @@ function buildMedia(item) {
 function fillMeta(meta, item) {
   const mine = item.from === me.id;
   const parts = [el('span', { class: 'when', title: fullWhen(item.ts) }, clock(item.ts))];
+  if (item.edited) parts.push(el('span', { class: 'edited', title: `Edited ${fullWhen(item.edited)}` }, 'edited')); // (1.14.0)
   if (item.pinned) parts.push(el('span', { class: 'pinned-mark', title: 'Pinned' }, icon('pin'), 'Pinned'));
   if (mine) parts.push(item.sending ? el('span', { class: 'tick', title: 'Sending…' }, icon('clock')) : tick(item));
   if (!item.sending) parts.push(el('span', { class: 'actions' }, ...quickActions(item)));

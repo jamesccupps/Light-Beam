@@ -31,9 +31,11 @@ class Outbox(private val app: BeamApp) {
         val createdAt: Long,
         val status: Status = Status.QUEUED,
         val error: String? = null,
+        /** (server 1.14) The message it answers. */
+        val reply: String? = null,
     ) {
         fun toJson(): JSONObject = JSONObject().put("localId", localId).put("text", text).put("to", JSONArray(to))
-            .put("createdAt", createdAt).put("status", status.name).put("error", error)
+            .put("createdAt", createdAt).put("status", status.name).put("error", error).put("reply", reply)
 
         companion object {
             fun parse(o: JSONObject) = Entry(
@@ -44,6 +46,7 @@ class Outbox(private val app: BeamApp) {
                 // Anything that was being sent when the app stopped is simply queued again.
                 status = if (o.optString("status") == Status.FAILED.name) Status.FAILED else Status.QUEUED,
                 error = o.optString("error").takeIf { it.isNotEmpty() && it != "null" },
+                reply = o.optString("reply").takeIf { it.isNotEmpty() && it != "null" },
             )
         }
     }
@@ -72,8 +75,8 @@ class Outbox(private val app: BeamApp) {
     }
 
     /** Sends [text] to [to] (empty = all devices) now, or queues it if the server can't be reached. */
-    suspend fun send(text: String, to: List<String>): Result {
-        val entry = Entry(UUID.randomUUID().toString(), text, to, System.currentTimeMillis())
+    suspend fun send(text: String, to: List<String>, reply: String? = null): Result {
+        val entry = Entry(UUID.randomUUID().toString(), text, to, System.currentTimeMillis(), reply = reply)
         _entries.update { it + entry }
         save()
         return withContext(Dispatchers.IO) {
@@ -112,7 +115,7 @@ class Outbox(private val app: BeamApp) {
         }
         change(localId) { copy(status = Status.SENDING, error = null) }
         return try {
-            val item = app.repo.sendTextBlocking(e.text, e.to)
+            val item = app.repo.sendTextBlocking(e.text, e.to, e.reply)
             cancel(localId)
             Result.Sent(item)
         } catch (err: BeamException) {

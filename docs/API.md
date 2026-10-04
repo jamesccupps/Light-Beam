@@ -14,7 +14,8 @@ of files still arriving), `big-chunks` (upload chunks of any size) and `clear-ca
 notifications on your PCs). Server 1.6 marks its additions **(1.6)** and adds the feature `remote-control` (see and
 control a PC's screen from another device). Server 1.8.1 adds `backups` (the apps' settings, the server's own backups)
 and 1.13 `fast-links` (a fast link for a file, made by Beam Family on the same machine; listed when `BEAM_FAMILY_URL`
-is set). Use each one only when its flag is there; everything older keeps working.
+is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat). Use each one only when its flag is there; everything
+older keeps working.
 
 ## Credentials
 
@@ -394,6 +395,10 @@ can't pass for it.
 - `pinned` (v3): retention and the item limit never remove it.
 - `thumb` (v3): a thumbnail exists at `/api/items/{id}/thumb`.
 - `forwardedFrom` (v3): the item it was forwarded from.
+- `reply` (1.14): what a reply answers, as it was when the reply was sent: `{ "id", "kind", "from", "device", "text" }`
+  (the first 140 characters) or `"name"` for a file; only `{ "id" }` when that item was gone already.
+- `reactions` (1.14): `{ "👍": ["<device id>", …] }`, each emoji with the devices that chose it (absent when none).
+- `edited` (1.14): when a text's words were last changed.
 - **Long texts (v3):**
   - In lists and live events, texts over **16 KB** are cut short (`"truncated": true, "textLength": N`). This was
     64 KB in v2.
@@ -529,7 +534,8 @@ changed with `PATCH /api/settings`; see Settings. Crossings are logged even when
 | `GET /api/items/{id}` | the full Item |
 | `GET /api/items/{id}/text` | full text as `text/plain`. Sends `ETag`/`Last-Modified` (`304` with `If-None-Match`) (v3) |
 | `POST /api/items/{id}/ack` | Mark as delivered to the calling device → `{ "id", "delivered" }` |
-| `PATCH /api/items/{id}` | **(v3)** `{ "pinned": true|false }` → the Item; event `update` |
+| `PATCH /api/items/{id}` | **(v3)** `{ "pinned": true|false }` and **(1.14, feature `edit`)** `{ "text": "…" }` (a text's new words: any of the owner's devices may; `edited` is set; a long one goes to data/texts as when it was sent; `400` for a file or nothing left) → the Item; event `update` |
+| `PUT /api/items/{id}/reactions/{emoji}`, `DELETE …` | **(1.14, feature `reactions`)** this device's reaction (one emoji, at most 16 characters, URL-encoded in the path) on or off → `200` + the Item; at most 20 kinds on an item (`409`); event `update` |
 | `POST /api/items/{id}/forward` | **(v3)** `{ "to": [...] }` → `201` + a new Item from the caller with the same content (files are hard-linked, not copied) |
 | `POST /api/items/{id}/fastlink` | **(1.13, feature `fast-links`)** `{ "hours": 1–720 }` (default 24) → `201 { "link": { "id", "url", "expires", "created", "downloads", "by" } }`: a link anyone can download this file with, without Beam or signing in, until it runs out. Beam Family on the same machine makes it (its local admin API, with the control.key in `BEAM_FAMILY_DATA`; docs/FAMILY.md), from the file itself: a hard link on the same drive, else a copy the link follows as it arrives. `400` not a file, or hours out of range; `404` not on the server any more; `503` Beam Family isn't set up, answering, or new enough; Family's own errors pass on (`409` no owner yet, `429` 50 links working, `507` storage full) |
 | `POST /api/items/delete` | **(v3)** `{ "ids": [...] }` (up to 1000) → `{ "deleted": n }`; events `delete` |
@@ -558,6 +564,8 @@ server:
 
 ### Sending text
 `POST /api/text` with JSON `{ "text": "hello", "to": ["<device id>", ...] }` → `201` + Item.
+- **(1.14, feature `replies`)** `"reply": "<item id>"` makes it a reply: the item gets `reply` (see the Item's fields),
+  a preview of what it answers as it was then. `400` for something that isn't an item id.
 - Omit `to`, or pass `[]` or `null`, to send to all devices.
 - **(v3)** `to` must be a list of strings or a comma-separated string. Anything else is `400` (it used to silently
   mean "everyone").
@@ -640,7 +648,7 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `ping` | **(v3)** `{}` after 25 s without other data (it was a `: ping` comment). **(1.4)** After `ping` seconds; `{ "poke": true }` answers a poke |
 | `item` | an Item (new item) |
 | `delete` | `{ "id" }` |
-| `update` | `{ "id", "delivered", "pinned", "thumb" }`. The item's delivery receipts, pin or thumbnail changed. `delivered` is always the complete map (v3 adds `pinned`, `thumb`) |
+| `update` | `{ "id", "delivered", "pinned", "thumb" }`. The item's delivery receipts, pin or thumbnail changed. `delivered` is always the complete map (v3 adds `pinned`, `thumb`). **(1.14)** Also `reactions` (always the complete map: `{}` when none are left) and, once a text was edited, `edited`, `text` (cut as in lists) and `truncated` (with `textLength`) |
 | `devices` | `{ "devices": [Device...] }` (someone came online, went offline or was renamed) |
 | `refresh` | `{ "reason" }`. Devices were linked, so item senders/targets changed: re-fetch `GET /api/items` |
 | `read` | **(v3)** `{ "device", "conversation", "ts" }`: a read marker moved (see Conversations) |

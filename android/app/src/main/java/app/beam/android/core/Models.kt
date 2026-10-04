@@ -185,6 +185,12 @@ data class Item(
     /** Picture size in pixels, when the sender said (API v3): lets a preview take its shape before it loads. */
     val w: Int = 0,
     val h: Int = 0,
+    /** (server 1.14) What this text answers, as it was when it was sent; null: not a reply. */
+    val reply: Reply? = null,
+    /** (server 1.14) Reactions: each emoji with the devices that chose it. */
+    val reactions: Map<String, List<String>> = emptyMap(),
+    /** (server 1.14) When its words were last changed (0: never). */
+    val edited: Long = 0,
 ) {
     val isText get() = kind == "text"
     val isFile get() = kind == "file"
@@ -209,6 +215,9 @@ data class Item(
         if (pinned) o.put("pinned", true)
         if (thumb) o.put("thumb", true)
         if (w > 0 && h > 0) o.put("w", w).put("h", h)
+        reply?.let { o.put("reply", it.toJson()) }
+        if (reactions.isNotEmpty()) o.put("reactions", JSONObject().apply { for ((e, by) in reactions) put(e, JSONArray(by)) })
+        if (edited > 0) o.put("edited", edited)
         return o
     }
 
@@ -231,10 +240,33 @@ data class Item(
             thumb = o.optBoolean("thumb"),
             w = o.optInt("w"),
             h = o.optInt("h"),
+            reply = Reply.parse(o.optJSONObject("reply")),
+            reactions = reactionsOf(o.optJSONObject("reactions")),
+            edited = o.optLong("edited"),
         )
+
+        /** `{ "👍": ["<device>", …] }` → each emoji with its devices (none left: not there). */
+        fun reactionsOf(o: JSONObject?): Map<String, List<String>> =
+            if (o == null) emptyMap()
+            else o.keys().asSequence().mapNotNull { k -> o.optJSONArray(k).strings().takeIf { it.isNotEmpty() }?.let { k to it } }.toMap()
 
         fun parseList(a: JSONArray?): List<Item> =
             if (a == null) emptyList() else (0 until a.length()).mapNotNull { a.optJSONObject(it)?.let(::parse) }
+    }
+}
+
+/** (server 1.14) What a reply answers, as it was when the reply was sent (only `id` when it was gone already). */
+data class Reply(val id: String, val kind: String? = null, val from: String? = null, val device: String? = null, val text: String? = null, val name: String? = null) {
+    fun toJson(): JSONObject = JSONObject().put("id", id).apply {
+        kind?.let { put("kind", it) }
+        from?.let { put("from", it) }
+        device?.let { put("device", it) }
+        text?.let { put("text", it) }
+        name?.let { put("name", it) }
+    }
+
+    companion object {
+        fun parse(o: JSONObject?): Reply? = o?.str("id")?.let { Reply(it, o.str("kind"), o.str("from"), o.str("device"), o.str("text"), o.str("name")) }
     }
 }
 
