@@ -136,6 +136,8 @@ const cookie = (secret, deviceId, extra = {}) => ({ Cookie: `beam_key=${encodeUR
 const sameOrigin = { 'Sec-Fetch-Site': 'same-origin' };
 const from = ip => ({ 'X-Forwarded-For': ip }); // requests arrive from loopback, a trusted proxy
 const cookieValue = res => /beam_key=([^;]*)/.exec([].concat(res.headers['set-cookie'] || []).join('\n'))?.[1];
+// (1.11.1) the sign-in a page got over https (as __Host-beam_key)
+const hostCookieValue = res => /__Host-beam_key=([^;]+)/.exec([].concat(res.headers['set-cookie'] || []).join('\n'))?.[1];
 const post = (srv, route, body, headers) => srv.req('POST', route, { headers: json(headers), body: JSON.stringify(body) });
 
 async function sendText(srv, headers, text, to) {
@@ -1483,7 +1485,7 @@ test('B5: import-from copies a running Beam after approval and moves everyone ov
   } finally { await old.stop(); await neu?.stop(); }
 });
 
-test('1.7.6/1.7.7: __Host-beam_key signs in before the legacy beam_key; over https sign-ins set it, a page still on the old name is moved over, and signing out clears both', async () => {
+test('1.7.6/1.7.7/1.11.1: __Host-beam_key signs in before the legacy beam_key, which counts only over plain http; over https sign-ins set the new name, and signing out clears both', async () => {
   const s = await startServer('hostcookie', 8792);
   try {
     const key = (await post(s, '/api/login', { secret: s.key, client: 'app', platform: 'windows' }, { 'X-Beam-Device-Id': 'hostcook001', ...from('100.64.76.1') })).json.key;
@@ -1492,15 +1494,15 @@ test('1.7.6/1.7.7: __Host-beam_key signs in before the legacy beam_key; over htt
     const setCookies = r => [].concat(r.headers['set-cookie'] || []);
     assert.equal((await me(`__Host-beam_key=${key}`)).status, 200, 'the new name');
     let r = await me(`beam_key=${key}`);
-    assert.equal(r.status, 200, 'the old name, until the next release');
+    assert.equal(r.status, 200, 'the old name over plain http (this PC\'s own app)');
     assert.deepEqual(setCookies(r), [], 'plain http keeps the old name');
     assert.equal((await me(`__Host-beam_key=notatoken; beam_key=${key}`)).status, 200, 'a stale new one falls back to the old');
     assert.equal((await me('__Host-beam_key=notatoken')).status, 401);
+    // (1.11.1, step 3) over https the old name isn't read: nothing is moved over any more
     r = await me(`beam_key=${key}`, https);
-    assert.equal(r.status, 200);
-    assert.deepEqual(setCookies(r), [`__Host-beam_key=${key}; Path=/; Max-Age=315360000; HttpOnly; SameSite=Lax; Secure`, 'beam_key=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure'], 'moved over');
-    assert.deepEqual(setCookies(await me(`__Host-beam_key=${key}`, https)), [], 'nothing to move');
-    await waitFor(() => /page sign-in to the __Host-beam_key cookie/.test(fs.readFileSync(path.join(s.data, 'logs', 'server.log'), 'utf8')));
+    assert.equal(r.status, 401, 'the old name over https');
+    assert.deepEqual(setCookies(r), []);
+    assert.equal((await me(`__Host-beam_key=${key}`, https)).status, 200, 'the new one over https');
     await post(s, '/api/password', { password: 'host cookie pass' }, app(s.key, 'hostcook002'));
     r = await post(s, '/api/login', { secret: 'host cookie pass', remember: false }, { ...https, ...sameOrigin, Cookie: 'beam_device_id=hostcook003' });
     assert.equal(r.status, 204);
@@ -3746,7 +3748,7 @@ test('1.6 Remote control is for an app\'s own sign-in or a browser signed in wit
     // then merges it into the laptop app's id. The sign-in decides, not the id: refused.
     const tsWeb = await post(s, '/api/autopair', { client: 'web' }, { ...sameOrigin, Cookie: 'beam_device_id=rctsweb0001', ...viaServe(RC_NET.laptop.ip4, RC_USER) });
     assert.deepEqual([tsWeb.status, tsWeb.json.via], [200, 'tailscale'], tsWeb.body);
-    const tsBrowser = { Cookie: `beam_key=${cookieValue(tsWeb)}; beam_device_id=rctsweb0001`, ...sameOrigin, ...viaServe(RC_NET.laptop.ip4, RC_USER) };
+    const tsBrowser = { Cookie: `__Host-beam_key=${hostCookieValue(tsWeb)}; beam_device_id=rctsweb0001`, ...sameOrigin, ...viaServe(RC_NET.laptop.ip4, RC_USER) };
     assert.equal((await s.req('GET', '/api/me', { headers: tsBrowser })).headers['x-beam-you'], 'rclaptop001', 'linked to the laptop app');
     await refused(tsBrowser, 'a browser signed in by Tailscale identity, merged into an app');
     // Signed in because a Beam app runs on the same machine, even naming the app's id; and a link made from that.
@@ -3842,7 +3844,7 @@ test('1.6 Remote control and sign-ins from before 1.6: an app\'s counts once the
     const pcEv = await openEvents(t.s.port, t.pc, '/api/events?mode=background');
     await pcEv.wait('hello');
     const startWith = h => t.s.req('POST', '/api/rc/sessions', { headers: { 'Content-Type': 'application/json', ...h }, body: '{"device":"rcdesk00001"}' });
-    let r = await startWith({ Cookie: `beam_key=${cookieValue(webSignIn)}; beam_device_id=rcoldweb001`, ...sameOrigin, ...viaServe(RC_NET.other.ip4, RC_USER) });
+    let r = await startWith({ Cookie: `__Host-beam_key=${hostCookieValue(webSignIn)}; beam_device_id=rcoldweb001`, ...sameOrigin, ...viaServe(RC_NET.other.ip4, RC_USER) });
     assert.deepEqual([r.status, r.json.reason], [403, 'sign-in'], 'a browser signed in by Tailscale identity');
     const lapApp = { Authorization: `Bearer ${appSignIn.json.key}`, 'X-Beam-Device-Id': 'rclaptop001', 'X-Beam-Platform': 'windows', 'X-Beam-Profile': RC_PROFILE.laptop, 'X-Beam-App-Version': '1.6.0', 'X-Beam-Device-Key': deviceKey(), ...from(RC_NET.laptop.ip4) };
     r = await startWith({ Cookie: `beam_key=${appSignIn.json.key}`, 'X-Beam-Device-Id': 'rclaptop001', 'X-Beam-Platform': 'windows', ...sameOrigin, ...from(RC_NET.laptop.ip4) });

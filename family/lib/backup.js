@@ -45,6 +45,7 @@ function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, 
   let timer = null;
   let running = null;
   let last = null;
+  let replan = null; // (once scheduled) plans the next scheduled backup this long from now
 
   // One at a time: a second asks while one is written get that one.
   function now(why) {
@@ -84,6 +85,9 @@ function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, 
         const old = (await listBackups(backupDir)).slice(keep);
         for (const b of old) await fsp.rm(path.join(backupDir, b.name), { force: true });
         if (old.length) log.info(`Removed ${old.length} old backup${old.length > 1 ? 's' : ''} (the newest ${keep} are kept)`);
+        // (1.11.1) the next scheduled one comes `hours` after this one, however it was made (one by hand right after a
+        // start had still been followed by the start's own, 10 minutes later)
+        replan?.(hours * 3600e3);
         return last;
       } catch (err) {
         await fsp.rm(partial, { force: true }).catch(() => {});
@@ -108,9 +112,10 @@ function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, 
     const every = hours * 3600e3;
     const plan = ms => {
       clearTimeout(timer);
-      timer = setTimeout(() => now(`every ${hours} h`).catch(() => {}).finally(() => plan(every)), Math.min(ms, 2 ** 31 - 1));
+      timer = setTimeout(() => now(`every ${hours} h`).catch(() => plan(every)), Math.min(ms, 2 ** 31 - 1));
       timer.unref();
     };
+    replan = plan;
     plan(Math.max(10 * 60e3, newest ? newest.at + every - Date.now() : 0));
   }
 

@@ -1071,15 +1071,15 @@ function redeemPairing(hash, req) {
 function authOf(req) {
   if (req._auth !== undefined) return req._auth;
   const header = String(req.headers.authorization || '');
-  // Cookies (audit S-10): `__Host-beam_key` first (host-only, so another machine of the tailnet can't plant it), then
-  // the legacy `beam_key`, during the move to the new name: since 1.7.7 a page still signed in with the old one over
-  // https is moved to the new one (moveCookie); the old name is read until the next release.
+  // Cookies (audit S-10): `__Host-beam_key` (host-only, so another machine of the tailnet can't plant it); the legacy
+  // `beam_key` only over plain http (this PC's own app on localhost: `__Host-` cookies need https). (1.11.1, step 3:
+  // over https the old name isn't read any more; 1.7.7 had moved every page over, and none had used it since.)
   const candidates = [];
   if (/^bearer\s/i.test(header)) candidates.push([header.slice(7).trim(), 'bearer']);
   else {
     const cookies = parseCookies(req);
     if (cookies[HOST_COOKIE]) candidates.push([cookies[HOST_COOKIE], 'cookie', HOST_COOKIE]);
-    if (cookies.beam_key) candidates.push([cookies.beam_key, 'cookie', 'beam_key']);
+    if (cookies.beam_key && !isHttps(req)) candidates.push([cookies.beam_key, 'cookie', 'beam_key']);
   }
   req._authPresented = candidates.length > 0;
   let auth = null;
@@ -1093,17 +1093,6 @@ function authOf(req) {
 }
 
 const HOST_COOKIE = '__Host-beam_key';
-const cookieMoved = new Set(); // devices whose pages were moved to HOST_COOKIE, logged once each
-
-// (1.7.7, audit S-10 step 2) The same sign-in again as HOST_COOKIE; authCookie clears the old name.
-function moveCookie(req, res, auth) {
-  res.setHeader('Set-Cookie', authCookie(req, parseCookies(req).beam_key, { session: auth.session }));
-  // (once per device while the server runs; not logOnce, whose summary a minute later needs a `more` text)
-  if (auth.deviceId && !cookieMoved.has(auth.deviceId)) {
-    cookieMoved.add(auth.deviceId);
-    log.info(`Moved ${whoName(auth.deviceId)}'s page sign-in to the ${HOST_COOKIE} cookie`);
-  }
-}
 
 function authBySecret(secret, source, req) {
   if (keyMatches(secret)) return { via: 'master', tokenId: null, hash: null, token: null, deviceId: null, user: 'owner', role: 'owner', scope: null, source };
@@ -6143,7 +6132,6 @@ async function handle(req, res) {
   if (isFrozen() && req.method !== 'GET' && req.method !== 'HEAD' && !FROZEN_OK.test(pathname)) {
     return send(res, 503, { error: 'Beam is moving to a new server. Try again in a minute.', retryAfter: 30 }, { 'Retry-After': '30' });
   }
-  if (auth.cookie === 'beam_key' && isHttps(req)) moveCookie(req, res, auth);
 
   touchToken(auth);
   if (auth.via === 'token' && !auth.token.platform && auth.source === 'bearer') {
