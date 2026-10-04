@@ -26,8 +26,12 @@ const view = {
 };
 const acked = new Set();
 const forcedPreviews = new Set(); // big photos the user asked to preview anyway
+// Selecting several (gallery.js, 1.12): the picked item ids, and the last one tapped (Shift+click picks the range to it).
+const pick = { on: false, ids: new Set(), last: '' };
+// The conversation's photos, videos and files, shown in place of the thread (gallery.js, 1.12).
+const gallery = { open: false, tab: 'media', key: '', conv: null, nodes: new Map(), scroll: null };
 
-const threadVisible = () => !document.hidden && !$('#app').hidden && !phonePanelOpen() && (!NARROW.matches || $('#app').classList.contains('in-thread'));
+const threadVisible = () => !document.hidden && !$('#app').hidden && !phonePanelOpen() && !gallery.open && (!NARROW.matches || $('#app').classList.contains('in-thread'));
 const threadItems = () => (view.pinnedOnly ? itemsIn(current).filter(i => i.pinned) : itemsIn(current));
 
 // ---------------------------------------------------------------- hidden pages render nothing
@@ -70,6 +74,7 @@ function clearRendered() {
   acked.clear();
   for (const id of [...localPreviews.keys()]) releasePreview(id);
   clearPhoneRendered();
+  resetGallery();
   Object.assign(hiddenWork, { all: false, patch: new Set(), replace: new Set(), incoming: false, reveal: null, newHere: 0 });
   document.title = 'Beam';
 }
@@ -192,6 +197,8 @@ function renderHeader() {
   $('#pinnedBtn').setAttribute('aria-pressed', String(view.pinnedOnly));
   $('#pinnedBtn').setAttribute('aria-label', view.pinnedOnly ? 'Show all messages' : `Show pinned messages (${pinned})`);
   $('#pinnedBtn').title = view.pinnedOnly ? 'Show all messages' : 'Show pinned messages';
+  $('#galleryBtn').hidden = !gallery.open && !itemsIn(current).some(i => i.kind === 'file');
+  $('#galleryBtn').setAttribute('aria-pressed', String(gallery.open));
   renderComposerState();
 }
 
@@ -212,6 +219,7 @@ function renderComposerState() {
 
 function openConv(conv, { push = true, focus = true } = {}) {
   closePhone();
+  closeGallery();
   if (devicesKnown && conv !== 'all' && !deviceById(conv) && !itemsIn(conv).length) conv = 'all';
   const changed = conv !== view.conv;
   if (changed && view.conv !== null) saveComposerDraft(view.conv);
@@ -245,6 +253,7 @@ function showList() {
 // ---------------------------------------------------------------- the thread
 
 function resetThread() {
+  stopPicking(); // a selection belongs to the list it was made in
   const box = $('#thread');
   box.replaceChildren();
   view.nodes.clear();
@@ -286,6 +295,8 @@ function restoreAnchor(anchor) {
 function renderThread({ scroll = 'keep' } = {}) {
   if (renderingPaused()) { hiddenWork.all = true; return; }
   if (phonePanelOpen()) return;
+  // (The gallery is on screen instead: the thread catches up when it's closed.)
+  if (gallery.open) { renderGallery(); return; }
   const box = $('#thread');
   if (view.conv !== current) resetThread();
   const list = threadItems();
@@ -313,6 +324,7 @@ function renderThread({ scroll = 'keep' } = {}) {
   if (older) older.querySelector('span').textContent = `${plural(view.start, 'earlier message')}`;
   if (scroll === 'bottom' || (scroll === 'keep' && wasBottom)) scrollToBottom();
   else if (anchor) restoreAnchor(anchor);
+  if (pick.on) renderPickBar(); // (some of the picked may have gone)
   scheduleCheckRead();
 }
 
@@ -409,6 +421,8 @@ function senderLine(item) {
 function buildMsg(item) {
   const mine = item.from === me.id;
   const node = el('div', { class: `msg ${mine ? 'mine' : 'theirs'}`, 'data-id': item.id, tabindex: '-1', role: 'group' });
+  if (itemMap.has(item.id)) node.classList.add('pickable'); // (not a text still being sent)
+  if (pick.ids.has(item.id)) node.classList.add('picked');
   const who = senderLine(item);
   node.append(el('div', { class: 'sender' }, who));
   let bubble;
@@ -443,7 +457,7 @@ function buildMsg(item) {
     bindDragOut(row, item);
     bubble.append(row);
     bubble.addEventListener('dblclick', e => {
-      if (HOST && !e.target.closest('a, button, video, audio')) { getSelection().removeAllRanges(); hostDo('openFile', { itemId: item.id }); }
+      if (HOST && !pick.on && !e.target.closest('a, button, video, audio')) { getSelection().removeAllRanges(); hostDo('openFile', { itemId: item.id }); }
     });
   }
   node.setAttribute('aria-label', `${mine ? 'You' : senderName(item)}, ${clock(item.ts)}`);
@@ -563,6 +577,7 @@ function patchMsg(item) {
 function patchFileActions(itemId) {
   const item = itemMap.get(itemId);
   if (item) patchMsg(item);
+  if (pick.ids.has(itemId)) renderPickBar(); // (Save or Show in folder)
 }
 function patchAllFileActions() {
   for (const [key] of view.nodes) if (key.startsWith('m:')) { const item = itemMap.get(key.slice(2)); if (item && item.kind === 'file') patchMsg(item); }
@@ -616,6 +631,8 @@ function onItemAdded(item, { fromMe = false, quiet = false } = {}) {
 function onItemRemoved(id) {
   const key = `m:${id}`;
   if (view.nodes.has(key)) renderThread({ scroll: 'keep' });
+  if (gallery.open) renderGallery();
+  if (pick.ids.delete(id)) renderPickBar();
   view.expanded.delete(id);
   view.fullText.delete(id);
   renderSidebar();

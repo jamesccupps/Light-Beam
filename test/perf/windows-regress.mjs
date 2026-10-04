@@ -5,7 +5,7 @@
 // any check fails.
 //
 //   node test/perf/windows-regress.mjs [all|reconnect|restart|revoke|ack|doublepoke|nonbeam401|cancel-after-restart|cancel-live|lane
-//        |pause-full|retry-early|lost-finish|copy-image|notify-open] [--exe <Beam.exe>]
+//        |pause-full|retry-early|lost-finish|copy-image|copy-files|notify-open] [--exe <Beam.exe>]
 //
 // Isolated like the other windows-* checks: a scratch server (this checkout's server.js) on 127.0.0.1:8805, the app
 // reaching it through a small TCP proxy on 8855 (so its connections can be dropped), a fake peer, and a copy of Beam.exe
@@ -517,6 +517,74 @@ async function copyImage(r) {
   r.check(rep && rep.ok === false && rep.code === 'not-found', `a text item: "not-found" (${rep && rep.code})`);
 }
 
+// 1.12 (Windows 1.9.0): files picked together in the chat go onto the clipboard together (copyFiles) or in one drag
+// (dragOut with itemIds). The clipboard is the isolated one (cfg/clipboard-files.txt), and a test instance never starts
+// a real drag (cfg/drag-files.txt instead). A file that isn't on this PC yet is named in "missing" with the clipboard's
+// sequence number; something copied meanwhile makes the next ask with that number "clipboard-changed".
+async function copyFiles(r) {
+  await r.setup({ maxSaveMB: 1 }); // (bigger files aren't saved by themselves)
+  const send = async (name, data) => {
+    const c = await r.api('POST', '/api/uploads', { name, size: data.length, mime: 'image/png', to: [r.appId] });
+    await r.upload(c.data.id, data, 0, data.length);
+    return c.data.id;
+  };
+  const one = Buffer.from('\x89PNG first picture'), two = Buffer.from('\x89PNG second picture'), big = crypto.randomBytes(2 * MB);
+  const a = await send('one.png', one);
+  const b = await send('two.png', two);
+  r.check(await r.waitFor(() => r.saved(one, 'one.png') && r.saved(two, 'two.png'), 20000), 'two pictures came and were saved');
+  const c = await send('big.png', big);
+  await sleep(2000);
+  r.check(!r.saved(big, 'big.png'), 'a bigger one wasn\'t saved by itself');
+  let seq = 0;
+  const bridge = async msg => {
+    const id = `test-files-${++seq}`;
+    const from = r.logLines().length;
+    r.forward(['--test-bridge', JSON.stringify({ id, ...msg })]);
+    const line = await r.waitLog(new RegExp(`Bridge test reply: .*"id":"${id}"`), from, 20000);
+    return line ? JSON.parse(line.slice(line.indexOf('{'))) : null;
+  };
+  const lines = f => { try { return fs.readFileSync(path.join(r.dir, 'cfg', f), 'utf8').split(/\r?\n/).filter(Boolean).map(p => path.basename(p)); } catch { return []; } };
+  const what = rep => JSON.stringify(rep && (rep.ok ? rep.result : rep.code));
+  let rep = await bridge({ type: 'copyFiles', itemIds: [a, b] });
+  r.check(rep && rep.ok && rep.result.copied === 2, `two saved files are copied (${what(rep)})`);
+  r.check(lines('clipboard-files.txt').join() === 'one.png,two.png', `...onto the clipboard as files, in order (${lines('clipboard-files.txt')})`);
+  fs.rmSync(path.join(r.dir, 'cfg', 'clipboard-files.txt'), { force: true });
+  rep = await bridge({ type: 'copyFiles', itemIds: [a, c] });
+  const clipSeq = rep && rep.ok ? rep.result.clipSeq : undefined;
+  r.check(rep && rep.ok && JSON.stringify(rep.result.missing) === JSON.stringify([c]) && Number.isFinite(clipSeq) && !lines('clipboard-files.txt').length,
+    `one not on this PC: nothing copied, it's named as missing, with the clipboard's number (${what(rep)})`);
+  rep = await bridge({ type: 'dragOut', itemIds: [a, c] });
+  r.check(rep && rep.ok === false && rep.code === 'not-saved' && !lines('drag-files.txt').length, `a drag with one not saved: "not-saved", no drag (${what(rep)})`);
+  rep = await bridge({ type: 'saveFile', itemId: c });
+  r.check(await r.waitFor(() => r.saved(big, 'big.png'), 30000), 'saved when asked');
+  rep = await bridge({ type: 'copyFiles', itemIds: [a, c], clipSeq });
+  r.check(rep && rep.ok && rep.result.copied === 2 && lines('clipboard-files.txt').join() === 'one.png,big.png', `asked again with that number: both copied (${what(rep)})`);
+  // Something else copied in between: the files don't replace it.
+  rep = await bridge({ type: 'copyFiles', itemIds: [b], clipSeq });
+  r.check(rep && rep.ok && rep.result.copied === 1, `the number still matches: copied (${what(rep)})`);
+  await sleep(50);
+  fs.writeFileSync(path.join(r.dir, 'cfg', 'clipboard-in.png'), Buffer.from('copied meanwhile')); // (the test clipboard's number is this file's time)
+  fs.rmSync(path.join(r.dir, 'cfg', 'clipboard-files.txt'), { force: true });
+  rep = await bridge({ type: 'copyFiles', itemIds: [a, b], clipSeq });
+  r.check(rep && rep.ok === false && rep.code === 'clipboard-changed' && !lines('clipboard-files.txt').length, `something else was copied meanwhile: "clipboard-changed", nothing copied (${what(rep)})`);
+  // One drag for several (a test instance writes them down instead of dragging).
+  let from = r.logLines().length;
+  rep = await bridge({ type: 'dragOut', itemIds: [b, a, c] });
+  r.check(rep && rep.ok && lines('drag-files.txt').join() === 'two.png,one.png,big.png', `a drag of three: one drag, all three (${what(rep)}; ${lines('drag-files.txt')})`);
+  r.check(!!(await r.waitLog(/Drag out of 3 files \(a test instance/, from, 5000)), '...logged as one drag');
+  rep = await bridge({ type: 'dragOut', itemId: a });
+  r.check(rep && rep.ok && lines('drag-files.txt').join() === 'one.png', `one file, as before (${what(rep)})`);
+  // Not files: "not-found"; none or too many: "bad-request".
+  const note = await r.api('POST', '/api/text', { text: 'not a file', to: [r.appId] });
+  await sleep(1500);
+  rep = await bridge({ type: 'copyFiles', itemIds: [a, note.data.id] });
+  r.check(rep && rep.ok === false && rep.code === 'not-found', `a text among them: "not-found" (${what(rep)})`);
+  rep = await bridge({ type: 'copyFiles', itemIds: [] });
+  r.check(rep && rep.ok === false && rep.code === 'bad-request', `nothing to copy: "bad-request" (${what(rep)})`);
+  rep = await bridge({ type: 'copyFiles', itemIds: Array.from({ length: 1001 }, (_, i) => `x${i}`) });
+  r.check(rep && rep.ok === false && rep.code === 'bad-request', `1,001 at once: "bad-request" (${what(rep)})`);
+}
+
 // 1.7.1: a click on the notification for files that came opens their conversation at the newest of them (with several at
 // once it just brought Beam up, wherever it was), and a picture's own notification opens it in Beam rather than in
 // Explorer. (Other files still show in their folder: not clicked here, it would open Explorer.)
@@ -595,7 +663,7 @@ async function backups(r) {
 }
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
-  'pause-full': pauseFull, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'notify-open': notifyOpen, backups };
+  'pause-full': pauseFull, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

@@ -214,6 +214,8 @@ function bindMenu() {
     if (!item) return;
     if ((e.pointerType === 'touch' || lastPointer === 'touch') && nativeSelect.id === item.id && Date.now() < nativeSelect.until) return;
     e.preventDefault();
+    // While picking several: the menu is for all of them (a message not picked yet is picked first).
+    if (pick.on) { if (!pick.ids.has(item.id)) togglePick(item.id); pickMenu({ x: e.clientX, y: e.clientY }); return; }
     openMenu(itemMenuEntries(item, e.target, node), { x: e.clientX, y: e.clientY }, { label: 'Message actions' });
   });
 }
@@ -258,6 +260,7 @@ function itemMenuEntries(item, target, node) {
     e.push({ label: 'Copy file name', icon: 'copy', action: () => copyText(item.name) });
   }
   e.push('sep');
+  if (itemMap.has(item.id)) e.push({ label: 'Select', icon: 'check', action: () => startPicking(item.id) });
   e.push({ label: 'Forward…', icon: 'forward', action: () => forwardPrompt(item) });
   if (serverHas('pin')) e.push({ label: item.pinned ? 'Unpin' : 'Pin', icon: 'pin', action: () => togglePin(item) });
   e.push('sep');
@@ -364,19 +367,31 @@ async function forwardPrompt(item) {
   if (conv) forwardItem(item, [conv]);
 }
 
-async function forwardItem(item, convs) {
+function forwardItem(item, convs) { return forwardItems([item], convs); }
+
+// Several (picked together, 1.12): oldest first, so they arrive in the order they were sent.
+async function forwardItems(list, convs) {
   const to = convs.flatMap(targetsOf);
+  const where = convs.map(convName).join(', ');
+  let done = 0;
   try {
-    if (serverHas('forward')) {
-      acceptOwnItem(await apiJson(`api/items/${item.id}/forward`, jsonBody({ to })));
-    } else if (item.kind === 'text') {
-      const text = view.fullText.get(item.id) || (item.truncated ? await (await api(`api/items/${item.id}/text`)).text() : item.text);
-      for (const c of convs) await sendText(text, c);
-    } else {
-      return toast('Forwarding files needs the updated Beam server.', { error: true });
+    for (const item of list) {
+      if (serverHas('forward')) {
+        acceptOwnItem(await apiJson(`api/items/${item.id}/forward`, jsonBody({ to })));
+      } else if (item.kind === 'text') {
+        const text = view.fullText.get(item.id) || (item.truncated ? await (await api(`api/items/${item.id}/text`)).text() : item.text);
+        for (const c of convs) await sendText(text, c);
+      } else {
+        if (list.length === 1) return toast('Forwarding files needs the updated Beam server.', { error: true });
+        continue;
+      }
+      done++;
     }
-    toast(`Forwarded to ${convs.map(convName).join(', ')}`);
-  } catch (err) { toast(friendlyError(err), { error: true }); }
+    if (list.length === 1) toast(`Forwarded to ${where}`);
+    else toast(done === list.length ? `Forwarded ${done} to ${where}` : `Forwarded ${done} of ${list.length} to ${where} (forwarding files needs the updated Beam server)`, { error: done < list.length });
+  } catch (err) {
+    toast(done ? `Forwarded ${done} of ${list.length}. ${friendlyError(err)}` : friendlyError(err), { error: true });
+  }
 }
 
 async function clearConversation(conv = current) {
@@ -396,6 +411,8 @@ function threadMenu(anchor) {
   openMenu([
     ...(d ? [...deviceActions(d), { label: 'Device info…', icon: 'eye', action: () => openDeviceInfo(d) }, 'sep'] : []),
     { label: 'Find in conversation', icon: 'search', hint: 'Ctrl+F', action: openThreadSearch },
+    itemsIn(current).some(i => i.kind === 'file') && { label: 'Photos and files', icon: 'image', action: () => openGallery() },
+    itemsIn(current).length > 0 && { label: 'Select messages', icon: 'check', action: () => { closeGallery(); startPicking(); } },
     (pinned || view.pinnedOnly) && { label: view.pinnedOnly ? 'Show all messages' : 'Show pinned only', icon: 'pin', action: togglePinnedView },
     canSendTo(current) && { label: 'Send clipboard', icon: 'clip', hint: 'Ctrl+Shift+V', action: pasteAndSend },
     canSendTo(current) && { label: 'Send files…', icon: 'attach', hint: 'Ctrl+O', action: attachFiles },
@@ -481,6 +498,7 @@ const HAS_HIGHLIGHTS = typeof CSS !== 'undefined' && 'highlights' in CSS && type
 
 function openThreadSearch() {
   if (NARROW.matches && !$('#app').classList.contains('in-thread')) return openSearch();
+  closeGalleryByUser(); // (it's in the thread)
   $('#threadSearch').hidden = false;
   $('#threadSearchInput').focus();
   $('#threadSearchInput').select();
@@ -742,6 +760,7 @@ const SHORTCUTS = [
   ['↑ ↓ Home End', 'Move between messages'],
   ['Ctrl+C', 'Copy the selected message (or the selection)'],
   ['Delete', 'Delete the selected message (with Undo)'],
+  ['Ctrl+click / Shift+click', 'Pick several messages (then Ctrl+A, Ctrl+C or Delete)'],
   ['Shift+F10 / Menu key', 'Message actions'],
   ['Esc', 'Close, go back, or return to the message box'],
   ['Ctrl+/', 'This list'],
@@ -787,11 +806,23 @@ function onKeydown(e) {
   if (mod && e.key === '/') { e.preventDefault(); openDialog({ title: 'Keyboard shortcuts', body: shortcutList() }); return; }
   if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); stepConversation(e.key === 'ArrowUp' ? -1 : 1); return; }
   if (e.key === 'Escape') {
+    if (pick.on) { stopPicking(); return; }
+    if (gallery.open) { closeGalleryByUser(); return; }
     if (!$('#threadSearch').hidden) { closeThreadSearch(); $('#text').focus(); return; }
     if (!$('#sideSearch').hidden) { closeSearch(); return; }
     if (NARROW.matches && $('#app').classList.contains('in-thread')) { $('#backBtn').click(); return; }
     if (focusedMsg()) { $('#text').focus(); return; }
     return;
+  }
+  // Picking several: the keys act on all of them; Space or Enter picks the focused message.
+  if (pick.on && !typing) {
+    const k = e.key.toLowerCase();
+    if (mod && k === 'a') { e.preventDefault(); pickAll(); return; }
+    if (mod && k === 'c' && getSelection().isCollapsed) { e.preventDefault(); copyPicked(); return; }
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deletePicked(); return; }
+    if ((e.shiftKey && e.key === 'F10') || e.key === 'ContextMenu') { e.preventDefault(); pickMenu(focusedMsg() || $('#pickBar')); return; }
+    const node = focusedMsg();
+    if (node && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); togglePick(node.dataset.id); return; }
   }
   const msg = focusedMsg();
   if (msg && !typing) {

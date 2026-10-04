@@ -31,9 +31,11 @@ function bindUI() {
   bindDragAndDrop();
   bindMenu();
   bindLightbox();
+  bindPicking();
+  bindGallery();
 
-  $('#backBtn').addEventListener('click', () => (history.state?.conv ? history.back() : showList()));
-  window.addEventListener('popstate', e => { if (!e.state?.conv && NARROW.matches) showList(); });
+  $('#backBtn').addEventListener('click', () => (gallery.open ? closeGalleryByUser() : history.state?.conv ? history.back() : showList()));
+  window.addEventListener('popstate', e => { if (!galleryPopState(e) && !e.state?.conv && NARROW.matches) showList(); });
   NARROW.addEventListener('change', () => {
     if (!NARROW.matches) { $('#app').classList.remove('in-thread'); if (paired) openConv(current, { push: false }); }
     layoutLock();

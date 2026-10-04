@@ -112,6 +112,15 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Photos and files:**
   - Photos show as thumbnails; click one for a full-screen viewer with zoom and swipe.
   - Text files can be previewed.
+  - **A gallery for each conversation** (Beam 1.12): the picture button in the header shows its photos and videos as
+    a grid, newest first, and its other files as a list. Click one to view, play or save it.
+- **Several at once** (Beam 1.12):
+  - **Select** in a message's menu (or **Ctrl+click**, and **Shift+click** for a range) picks several messages,
+    photos or files, in the chat or in the gallery.
+  - Then **Copy**, **Save** (Download in a browser), **Forward** or **Delete** them together. **Ctrl+A** picks them
+    all and **Esc** stops.
+  - In the Windows app, Copy puts the files on the clipboard as files, so you can paste them into any program, and
+    dragging one of them out drags them all.
 - **Pin** keeps an item past the clean-up. **Forward** sends an item to another device without uploading it again.
 - **Delivery:**
   - Every item shows **Sent**, then **Delivered**.
