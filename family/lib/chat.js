@@ -515,6 +515,29 @@ function createChat(ctx) {
     send(res, 200, { messages: messagesJson(db.all('SELECT * FROM messages WHERE channel_id = ? AND pinned_at IS NOT NULL AND deleted_at IS NULL ORDER BY pinned_at DESC LIMIT 100', c.id)) });
   }
 
+  // GET /api/channels/:id/files?kind=media|other&before=<next>&limit= (1.11.0, the gallery): the conversation's
+  // pictures and videos (media, the default) or its other files, newest first, each with its message, author and
+  // time; `next` goes on from there. Only files that have all come in, in messages that are still there.
+  function files(req, res, { id }, url) {
+    const user = people().requireUser(req);
+    const c = channelFor(user, id);
+    const limit = Math.min(200, Math.max(1, Math.floor(Number(url.searchParams.get('limit')) || 60)));
+    const media = "(a.mime LIKE 'image/%' OR a.mime LIKE 'video/%')";
+    const kind = url.searchParams.get('kind') === 'other' ? `NOT ${media}` : media;
+    const raw = url.searchParams.get('before');
+    const before = raw ? /^([0-9A-Z]{26})\.([0-9A-Z]{26})$/.exec(raw) : null;
+    if (raw && !before) throw httpError(400, 'before must be the next the last page gave');
+    const rows = db.all(`SELECT a.*, m.author_id AS m_author, m.created_at AS m_at FROM attachments a JOIN messages m ON m.id = a.message_id
+      WHERE m.channel_id = ? AND m.deleted_at IS NULL AND a.received >= a.size AND ${kind}
+      ${before ? 'AND (a.message_id < ? OR (a.message_id = ? AND a.id < ?))' : ''}
+      ORDER BY a.message_id DESC, a.id DESC LIMIT ?`, c.id, ...(before ? [before[1], before[1], before[2]] : []), limit + 1);
+    const page = rows.slice(0, limit);
+    send(res, 200, {
+      files: page.map(a => ({ ...ctx.files.attachmentJson(a), message: a.message_id, author: a.m_author, at: a.m_at })),
+      next: rows.length > limit ? `${page.at(-1).message_id}.${page.at(-1).id}` : null,
+    });
+  }
+
   // POST /api/channels/:id/read { id }: read up to that message (only ever forward).
   async function markRead(req, res, { id }) {
     const user = people().requireUser(req);
@@ -584,6 +607,7 @@ function createChat(ctx) {
       ['GET', '/api/channels/:id/messages', listMessages],
       ['POST', '/api/channels/:id/messages', postMessage],
       ['GET', '/api/channels/:id/pins', pins],
+      ['GET', '/api/channels/:id/files', files],
       ['POST', '/api/channels/:id/read', markRead],
       ['POST', '/api/channels/:id/typing', typing],
       ['PUT', '/api/channels/:id/notify', setNotify],

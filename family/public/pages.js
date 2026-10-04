@@ -8,6 +8,8 @@ import { renderBody } from './text.js';
 import { pushState, enablePush, disablePush, isIos } from './notify.js';
 import { nav } from './nav.js';
 import { fastLink } from './fastlinks.js';
+import { downloadFile } from './downloads.js';
+import { galleryPanel } from './gallery.js';
 
 // ---------------------------------------------------------------- signing in and joining
 
@@ -335,7 +337,7 @@ export function adminView() {
 export function panelView(kind, { channel: channelId = null } = {}, close) {
   const offs = [];
   const bodyEl = h('div', { class: 'panel-body' });
-  const heading = { members: 'People', pins: 'Pinned messages', search: 'Search' }[kind];
+  const heading = { members: 'People', pins: 'Pinned messages', search: 'Search', gallery: 'Photos & files' }[kind];
   const el = h('aside', { class: 'panel', 'aria-label': heading }, h('div', { class: 'panel-head' }, h('h2', {}, heading), iconBtn('x', 'Close', close)), bodyEl);
 
   function result(m, { highlight = '' } = {}) {
@@ -386,6 +388,9 @@ export function panelView(kind, { channel: channelId = null } = {}, close) {
     });
     bodyEl.append(input, h('div', { style: { height: '10px' } }), results);
     setTimeout(() => input.focus(), 50);
+  } else if (kind === 'gallery') {
+    // (1.11.0) the conversation's photos, videos and files
+    galleryPanel(bodyEl, channelId, offs);
   }
   return { el, destroy() { for (const off of offs) off(); } };
 }
@@ -431,7 +436,8 @@ export function openViewer(items, start = 0) {
   let i = start;
   const stage = h('div', { class: 'viewer-stage' });
   const name = h('span', { class: 'name' });
-  const download = h('a', { class: 'icon-btn', title: 'Download', 'aria-label': 'Download' }, icon('download'));
+  // (1.11.0) a big file over the direct connection (an iPhone: Safari's own download, of the copy that plays there)
+  const download = h('a', { class: 'icon-btn', title: 'Download', 'aria-label': 'Download', onclick: e => { e.preventDefault(); downloadFile(items[i], download.getAttribute('href')); } }, icon('download'));
   const el = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Picture' },
     h('div', { class: 'viewer-head' }, name, iconBtn('link', 'Fast link', () => fastLink(items[i])), download, iconBtn('x', 'Close', () => close())), stage);
   const show = () => {

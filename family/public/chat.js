@@ -8,6 +8,7 @@ import { pickEmoji, QUICK, noteUsed } from './emoji.js';
 import { makeThumb, upload, cancelUpload, sendingFiles, busy, leftOver, discardUpload } from './uploads.js';
 import { nav } from './nav.js';
 import { fastLink, makeFastLink } from './fastlinks.js';
+import { downloadFile, downloadFiles } from './downloads.js';
 
 const GROUP_MS = 7 * 60e3;
 const SYSTEM = { joined: 'joined the family space', left: 'left the group', renamed: 'renamed the group' };
@@ -34,6 +35,7 @@ export function conversationView(channelId, { jump = null } = {}) {
   let tray = []; // files being attached
   let lastTyping = 0;
   let editing = null;
+  let selecting = null; // (1.11.0) the messages picked while selecting several (a Set of ids), or null
 
   // ---------------------------------------------------------------- header
 
@@ -47,6 +49,7 @@ export function conversationView(channelId, { jump = null } = {}) {
       h('div', { class: 'title' }, glyph, h('div', { style: { minWidth: 0 } }, h('strong', {}, title(ch)), sub ? h('div', { class: 'topic' }, sub) : null)),
       iconBtn('search', 'Search this conversation', () => nav.panel('search', { channel: channelId })),
       iconBtn('pin', 'Pinned messages', () => nav.panel('pins', { channel: channelId })),
+      iconBtn('image', 'Photos and files', () => nav.panel('gallery', { channel: channelId })),
       ch.kind !== 'dm' ? iconBtn('users', 'People', () => nav.panel('members', { channel: channelId })) : null,
       iconBtn('more', 'More', e => conversationMenu(e.currentTarget)),
     );
@@ -152,9 +155,10 @@ export function conversationView(channelId, { jump = null } = {}) {
     const cont = continues(m, prev);
     const author = person(m.author);
     const el = h('div', {
-      class: `msg${cont ? ' cont' : ''}${mentionsMe(m) ? ' mentioned' : ''}${m.pending ? ' pending' : ''}${m.failed ? ' failed' : ''}`,
-      dataset: { id: m.id },
+      class: `msg${cont ? ' cont' : ''}${mentionsMe(m) ? ' mentioned' : ''}${m.pending ? ' pending' : ''}${m.failed ? ' failed' : ''}${selecting?.has(m.id) ? ' selected' : ''}`,
+      dataset: { id: m.id, ...(!m.pending && { pickable: '1' }) },
     });
+    if (!m.pending) el.append(h('span', { class: 'pick', 'aria-hidden': 'true' }, icon('check', 'i small')));
     if (cont) el.append(h('span', { class: 'side-time', title: fullTime(m.created) }, timeShort(m.created)));
     else el.append(avatar(author), h('div', { class: 'msg-head' }, h('strong', {}, author.name), m.pending && !m.failed
       ? h('span', { class: 'sending-label' }, 'Sending…') // (1.8.5: until it's sent; it looked sent)
@@ -193,7 +197,7 @@ export function conversationView(channelId, { jump = null } = {}) {
         e.preventDefault();
         messageMenu(m, { x: e.clientX, y: e.clientY }, el);
       });
-      el.addEventListener('dblclick', e => { if (!isTouch() && m.author === state.me.id && !e.target.closest('a, button, img, video')) startEdit(m); });
+      el.addEventListener('dblclick', e => { if (!selecting && !isTouch() && m.author === state.me.id && !e.target.closest('a, button, img, video')) startEdit(m); });
     }
     return el;
   }
@@ -246,7 +250,7 @@ export function conversationView(channelId, { jump = null } = {}) {
       } else if (f.mime.startsWith('audio/') && f.url) {
         box.append(h('audio', { controls: true, preload: 'none', src: f.url }));
       } else {
-        box.append(h('a', { class: 'file-card', href: f.url ? `${f.url}?download` : '#', download: f.name, onclick: e => { if (!f.url) e.preventDefault(); } },
+        box.append(h('a', { class: 'file-card', href: f.url ? `${f.url}?download` : '#', download: f.name, onclick: e => { e.preventDefault(); if (f.url) downloadFile(f); } },
           icon('file', 'i big'), h('span', { class: 'meta' }, h('strong', {}, f.name), h('span', { class: 'muted small' }, formatSize(f.size)))));
       }
     }
@@ -288,13 +292,18 @@ export function conversationView(channelId, { jump = null } = {}) {
   const reactWithPicker = (m, anchor) => pickEmoji(anchor, e => toggleReaction(m, e, !(m.reactions || []).some(r => r.emoji === e && r.users.includes(state.me.id))));
 
   function messageMenu(m, anchor, el) {
+    if (selecting) return pick(m.id);
     const mine = m.author === state.me.id;
     el.classList.add('menu-open');
     menu(anchor, [
       { label: 'Reply', icon: 'reply', onclick: () => startReply(m) },
       mine ? { label: 'Edit', icon: 'edit', onclick: () => startEdit(m) } : null,
       m.body ? { label: 'Copy text', icon: 'copy', onclick: () => copyText(plainText(m.body)) } : null,
+      // (1.11.0) several at once: copy, download or delete them together
+      { label: 'Select', icon: 'check', onclick: () => startSelecting(m.id) },
       { label: 'Copy link', icon: 'link', onclick: () => copyText(`${location.origin}/c/${channelId}?m=${m.id}`, 'Link copied') },
+      // (1.11.0) its files (big ones over the direct connection)
+      m.files?.some(f => f.url) ? { label: m.files.length > 1 ? `Download ${m.files.length} files` : 'Download', icon: 'download', onclick: () => downloadFiles(m.files) } : null,
       // (1.9.0) a link anyone can download its file with, no sign-in
       m.files?.length ? { label: 'Fast link', icon: 'link', onclick: () => (m.files.length === 1 ? fastLink(m.files[0]) : menu(anchor, m.files.map(f => ({ label: f.name, icon: 'file', onclick: () => fastLink(f) })))) } : null,
       { label: m.pinned ? 'Unpin' : 'Pin', icon: 'pin', onclick: () => api(`/api/messages/${m.id}/pin`, { method: m.pinned ? 'DELETE' : 'PUT' }).catch(err => toast(err.message, { error: true })) },
@@ -305,6 +314,79 @@ export function conversationView(channelId, { jump = null } = {}) {
       onQuick: e => toggleReaction(m, e, !(m.reactions || []).some(r => r.emoji === e && r.users.includes(state.me.id))),
       onClose: () => el.classList.remove('menu-open'),
     });
+  }
+
+  // ---------------------------------------------------------------- selecting several (1.11.0; the user: "gallery select")
+
+  const selectBar = h('div', { class: 'select-bar', hidden: true, role: 'toolbar', 'aria-label': 'Selected messages' });
+  const pickedMessages = () => cache.list.filter(m => selecting?.has(m.id));
+
+  function startSelecting(id) {
+    selecting = new Set([id]);
+    view.classList.add('selecting');
+    els.get(id)?.classList.add('selected');
+    document.addEventListener('keydown', onSelectKey, true);
+    renderSelectBar();
+  }
+
+  function stopSelecting() {
+    if (!selecting) return;
+    for (const id of selecting) els.get(id)?.classList.remove('selected');
+    selecting = null;
+    view.classList.remove('selecting');
+    document.removeEventListener('keydown', onSelectKey, true);
+    renderSelectBar();
+  }
+
+  function onSelectKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); stopSelecting(); }
+  }
+
+  function pick(id) {
+    if (!selecting) return;
+    if (selecting.has(id)) selecting.delete(id); else selecting.add(id);
+    els.get(id)?.classList.toggle('selected', selecting.has(id));
+    renderSelectBar();
+  }
+
+  function renderSelectBar() {
+    if (composer) composer.hidden = Boolean(selecting);
+    selectBar.hidden = !selecting;
+    if (!selecting) return fill(selectBar);
+    for (const id of [...selecting]) if (!cache.list.some(m => m.id === id)) selecting.delete(id); // (deleted meanwhile)
+    const picked = pickedMessages();
+    const files = picked.flatMap(m => m.files || []).filter(f => f.url);
+    fill(selectBar,
+      h('span', { class: 'grow' }, picked.length ? `${picked.length} selected` : 'Tap messages to select them'),
+      h('button', { type: 'button', class: 'btn', disabled: !picked.some(m => m.body), onclick: copyPicked }, icon('copy'), 'Copy'),
+      h('button', { type: 'button', class: 'btn', disabled: !files.length, onclick: () => { downloadFiles(files); stopSelecting(); } }, icon('download'), files.length > 1 ? `Download ${files.length}` : 'Download'),
+      h('button', { type: 'button', class: 'btn danger', disabled: !picked.some(m => m.author === state.me.id || isAdmin()), onclick: deletePicked }, icon('trash'), 'Delete'),
+      iconBtn('x', 'Stop selecting', stopSelecting));
+  }
+
+  // Their text, oldest first, each with who wrote it.
+  function copyPicked() {
+    const picked = pickedMessages().filter(m => m.body);
+    copyText(picked.length === 1 ? plainText(picked[0].body) : picked.map(m => `${person(m.author).name}: ${plainText(m.body)}`).join('\n'));
+    stopSelecting();
+  }
+
+  async function deletePicked() {
+    const picked = pickedMessages();
+    const allowed = picked.filter(m => m.author === state.me.id || isAdmin());
+    const skipped = picked.length - allowed.length;
+    const ok = await confirmDialog({
+      title: allowed.length === 1 ? 'Delete this message?' : `Delete these ${allowed.length} messages?`,
+      text: `They go for everyone, with their files.${skipped ? ` (${skipped} of them ${skipped === 1 ? 'isn’t' : 'aren’t'} yours: ${skipped === 1 ? 'it stays' : 'they stay'}.)` : ''}`,
+      ok: 'Delete', danger: true,
+    });
+    if (!ok) return;
+    let failed = 0;
+    for (const m of allowed) {
+      try { await api(`/api/messages/${m.id}`, { method: 'DELETE' }); } catch { failed++; }
+    }
+    if (failed) toast(`${failed} couldn’t be deleted`, { error: true });
+    stopSelecting();
   }
 
   async function deleteMessage(m) {
@@ -772,7 +854,15 @@ export function conversationView(channelId, { jump = null } = {}) {
   }
 
   // Dropping files anywhere on the conversation.
-  const view = h('section', { class: 'main', 'aria-label': 'Conversation' }, head, h('div', { class: 'list-wrap' }, list, jumpBtn), typingLine, composer);
+  const view = h('section', { class: 'main', 'aria-label': 'Conversation' }, head, h('div', { class: 'list-wrap' }, list, jumpBtn), typingLine, composer, selectBar);
+  list.addEventListener('click', e => {
+    if (!selecting) return;
+    const el = e.target.closest('.msg[data-pickable]');
+    if (!el) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pick(el.dataset.id);
+  }, true);
   view.addEventListener('dragover', e => { if ([...(e.dataTransfer?.types || [])].includes('Files') && !readonly) e.preventDefault(); });
   view.addEventListener('drop', e => {
     if (!e.dataTransfer?.files?.length || readonly) return;
@@ -822,6 +912,7 @@ export function conversationView(channelId, { jump = null } = {}) {
     focusComposer: () => composerInput.focus(),
     destroy() {
       destroyed = true;
+      stopSelecting();
       closeMenu();
       clearInterval(typingTimer);
       clearTimeout(readTimer);

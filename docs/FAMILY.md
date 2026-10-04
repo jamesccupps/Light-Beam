@@ -58,6 +58,23 @@ New-NetFirewallRule -DisplayName "Beam Family direct connections (home network)"
 Without it (or when a network blocks direct connections) everything still works over https. The log says how each
 direct connection went ("came up on the same network / over the internet / didn't come up").
 
+### Fast downloads, the gallery and selecting several (1.11)
+
+- **Downloads in the chat** (a file card, a message's menu → Download, the viewer's download button): a file of 8 MB
+  and more comes over the same direct connection as a fast link's (`public/downloads.js`; 14–28 MB/s seen, where the
+  public link carries ~2 MB/s), into the browser's downloads through the service worker, one at a time, in a small
+  panel with how far it got, how fast, and Stop; the screen stays on meanwhile. A smaller file, an iPhone or iPad
+  (Safari's own download), or no direct connection: the browser's own download, as before. The fast link's page and
+  the app share the saving code (`public/saving.js`).
+- **The gallery** (the picture button in a conversation's header): its photos and videos, newest first, more as you
+  scroll, and its other files on their own tab; a tap opens one in the viewer (or downloads a file); **Select** picks
+  several to download or delete together. A file goes with its message, so deleting one deletes its whole message
+  (one's own, unless an admin), after asking.
+- **Selecting several messages**: Select in a message's menu, then taps pick and unpick (a press, a right-click or a
+  double click too); the bar instead of the composer copies their text (each with who wrote it), downloads their
+  files, or deletes them (asks first); × or Escape stops.
+- Closing the viewer no longer rebuilds the page behind it (it closed the gallery, and redrew the conversation).
+
 ### Videos that play everywhere (1.10)
 
 A phone's HDR video (the Pixel records HEVC 10-bit HLG, BT.2020) didn't open on an iPhone, not even in VLC. So, the
@@ -223,6 +240,8 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   `GET /api/files/:id/links`, `DELETE /api/links/:id`; for anyone with the link: `GET /f/:token` (the page),
   `GET /api/links/:token` (name, size, mime, received, from, expires, preview, direct), `GET /api/links/:token/file`
   (https, Range, follows an upload), `GET /api/links/:token/preview`, `POST /api/links/:token/direct {sdp}`.
+- The gallery (1.11): `GET /api/channels/:id/files?kind=media|other&before=<next>&limit=` → `{files: [attachment +
+  message, author, at], next}` (newest first; only files that have all come in, in messages still there).
 - Videos that play everywhere (1.10): a video's attachment says `play` (`working`, `ready`, `original`: it plays as it
   is, `failed`), `playUrl`, `playSize`, `playProgress` (0–1 while it's made); so does a fast link's info (with `video`).
   `GET /api/files/:id/play[?download]` and `GET /api/links/:token/play[?download]`: the copy (or the original), Range,

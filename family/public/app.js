@@ -55,7 +55,9 @@ async function boot() {
   connect();
   refreshPush();
   route();
-  window.addEventListener('popstate', route);
+  // (1.11.0) a step back that leaves the address as it was is an overlay's own (the viewer's): it closes that alone,
+  // without the page being made again (that closed the gallery behind the viewer, and redrew the conversation)
+  window.addEventListener('popstate', () => { if (location.pathname + location.search !== routedAt) route(); });
 }
 
 // ---------------------------------------------------------------- the frame and finding the way
@@ -87,7 +89,9 @@ function defaultChannel() {
   return sortedChannels().text[0]?.id || sortedChannels().direct[0]?.id || null;
 }
 
+let routedAt = null;
 function route() {
+  routedAt = location.pathname + location.search;
   closeMenu();
   closePanel();
   const path = location.pathname;

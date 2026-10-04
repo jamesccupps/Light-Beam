@@ -20,7 +20,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 
 ## Next
 - **Several at once:** select several messages or pictures to copy, drag into another program, save or forward them
-  together, and a gallery of everything a device sent.
+  together, and a gallery of everything a device sent (✅ in Beam Family 1.11: a gallery per conversation and
+  selecting several messages; still to come in Beam itself).
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;
   several separate families on one server, each its own site, and guests who see only the channels they're given.
 - **Servers that talk to each other** (with several families): other people's family servers and Beams, linked only
