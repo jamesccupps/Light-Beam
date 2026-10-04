@@ -27,10 +27,9 @@ handed as their `key`.
 
 Send the secret as `Authorization: Bearer <secret>` (apps, CLI) or in a cookie (browsers; the server sets it,
 `HttpOnly`): over https `__Host-beam_key` (host-only, `Secure`, `Path=/`: no other machine of the tailnet can plant
-it; audit S-10), over plain http `beam_key`. The server reads `__Host-beam_key` first (since 1.7.6), then `beam_key`.
-Since 1.7.7 every sign-in over https sets `__Host-beam_key` and clears `beam_key`, and a page still signed in with
-`beam_key` over https gets the same sign-in moved to `__Host-beam_key`. The next release stops reading `beam_key` over
-https.
+it; audit S-10), over plain http `beam_key`. The server reads `__Host-beam_key` first (since 1.7.6), then `beam_key`
+over plain http only: since 1.11.1 `beam_key` over https isn't read (1.7.7 had moved every page's sign-in over: every
+sign-in over https sets `__Host-beam_key` and clears `beam_key`). The Windows app's pages still set both; harmless.
 
 - **A device token speaks for its device (v3).** Once a token is bound to a device, the server uses that device's id
   whatever `X-Beam-Device-Id` says. A token issued without a device id is bound to the first id it is used with.

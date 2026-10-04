@@ -71,20 +71,15 @@ class SignInV3Test {
             c.proceed(b.build())
         }.build()
 
+    /**
+     * Since server 1.7.2 an automatic sign-in needs Tailscale itself (tailscaled's whois) to confirm who is calling:
+     * the Tailscale-User-Login header alone (here, without a tailscaled: BEAM_TAILSCALE=off) signs nobody in, not even
+     * as the owner. (The owner's phone signing in with a confirmed identity is covered by the server's own tests, which
+     * fake tailscaled's LocalAPI.) Was "an owner's phone signs in without any step", written before that rule.
+     */
     @Test
-    fun anOwnersPhoneSignsInWithoutAnyStep() {
-        val id = TestNet.newId()
-        val ip = TestNet.tailscaleIp()
-        val result = SignInClient(base, viaTailscale(OWNER, ip)).autopair(id, "Auto Phone")
-        assertTrue(result.key, result.key.startsWith("bt_"))
-        val phone = BeamApi(base, result.key, id, "Auto Phone", "android", TestNet.client(ip))
-        assertTrue(phone.me())
-        assertEquals(id, phone.meResult().you)
-        // Signed-in devices see it by name.
-        assertTrue(TestNet.device(base, master, "Desk", "windows").devices().devices.any { it.id == id && it.name == "Auto Phone" })
-
-        // Someone else's Tailscale account, or no identity at all: no automatic sign-in.
-        for (login in listOf("stranger@example.com", null)) {
+    fun aTailscaleHeaderAloneSignsNobodyIn() {
+        for (login in listOf(OWNER, "stranger@example.com", null)) {
             try {
                 SignInClient(base, viaTailscale(login)).autopair(TestNet.newId(), "Other Phone")
                 fail("expected 403 for $login")
@@ -92,6 +87,7 @@ class SignInV3Test {
                 assertEquals(403, e.status)
             }
         }
+        assertFalse("nobody new among the devices", TestNet.device(base, master, "Desk", "windows").devices().devices.any { it.name == "Other Phone" })
     }
 
     @Test
@@ -119,10 +115,10 @@ class SignInV3Test {
         assertTrue(Proof.matches(master, serverId, nonce, hello.proof))
         assertFalse("another nonce", Proof.matches(master, serverId, Proof.nonce(), hello.proof))
         assertFalse("another secret", Proof.matches("not-the-key", serverId, nonce, hello.proof))
-        // Device tokens too.
-        val id = TestNet.newId()
-        val ip = TestNet.tailscaleIp()
-        val token = SignInClient(base, viaTailscale(OWNER, ip)).autopair(id, "Proof Phone").key
+        // Device tokens too: a phone's own, from a pairing link (an automatic sign-in needs a real tailscaled since 1.7.2).
+        val token = TestNet.device(base, master, "Desk", "windows").pairInfo().getString("key")
+        val phone = BeamApi(base, token, TestNet.newId(), "Proof Phone", "android", TestNet.client())
+        assertTrue(phone.me())
         val n2 = Proof.nonce()
         assertTrue(Proof.matches(token, serverId, n2, SignInClient(base).hello(token, n2).proof))
     }
