@@ -262,10 +262,60 @@ function itemMenuEntries(item, target, node) {
   e.push('sep');
   if (itemMap.has(item.id)) e.push({ label: 'Select', icon: 'check', action: () => startPicking(item.id) });
   e.push({ label: 'Forward…', icon: 'forward', action: () => forwardPrompt(item) });
+  if (item.kind === 'file' && serverHas('fast-links')) e.push({ label: 'Fast link…', icon: 'link', action: () => fastLinkDialog(item) });
   if (serverHas('pin')) e.push({ label: item.pinned ? 'Unpin' : 'Pin', icon: 'pin', action: () => togglePin(item) });
   e.push('sep');
   e.push({ label: 'Delete for everyone', icon: 'trash', danger: true, hint: 'Del', action: () => deleteItems([item.id]) });
   return e;
+}
+
+// (1.13.0) A fast link for a file: anyone with it can download the file without Beam or signing in, until it runs out.
+// Beam Family on the server's machine makes it (its public link is reachable from anywhere; Beam isn't), from the file
+// itself (no copy on the same drive); its page says it's from Family's owner.
+const FAST_LINK_HOURS = [[1, 'An hour'], [24, 'A day'], [24 * 7, 'A week']];
+
+function fastLinkDialog(item) {
+  let hours = 24;
+  const make = el('button', { class: 'btn primary', type: 'button' }, 'Make the link');
+  make.addEventListener('click', async () => {
+    make.disabled = true;
+    make.textContent = 'Making it…';
+    try {
+      const { link } = await apiJson(`api/items/${item.id}/fastlink`, jsonBody({ hours }));
+      showFastLink(item, link);
+    } catch (err) {
+      make.disabled = false;
+      make.textContent = 'Make the link';
+      toast(friendlyError(err), { error: true });
+    }
+  });
+  openDialog({
+    title: 'Fast link',
+    className: 'fastlink-dlg',
+    body: [
+      el('p', {}, el('strong', {}, item.name), ` · ${formatSize(item.size)}`),
+      el('p', { class: 'muted small' }, 'Anyone with the link can download it, without Beam or signing in, until it runs out. Beam Family on your server shares it, from where the file already is.'),
+      el('div', { class: 'fl-hours', role: 'radiogroup', 'aria-label': 'How long it works' }, ...FAST_LINK_HOURS.map(([n, label]) =>
+        el('label', { class: 'check' }, el('input', { type: 'radio', name: 'flHours', value: String(n), checked: n === hours, onchange: () => { hours = n; } }), el('span', {}, label)))),
+    ],
+    buttons: [el('button', { class: 'btn ghost', type: 'button', onclick: () => $('#genDlg').close('cancel') }, 'Cancel'), make],
+  });
+}
+
+function showFastLink(item, link) {
+  const box = el('input', { type: 'text', readonly: true, class: 'fl-url', 'aria-label': 'The link', value: link.url });
+  box.addEventListener('focus', () => box.select());
+  const until = new Date(link.expires).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  openDialog({
+    title: 'Fast link',
+    className: 'fastlink-dlg',
+    body: [el('p', {}, el('strong', {}, item.name)), box, el('p', { class: 'muted small' }, `It works until ${until} for anyone who has it. Send it however you like.`)],
+    buttons: [
+      navigator.share && el('button', { class: 'btn', type: 'button', onclick: () => navigator.share({ title: item.name, url: link.url }).catch(() => {}) }, 'Share'),
+      el('button', { class: 'btn primary', type: 'button', onclick: () => copyText(link.url, 'Link copied') }, 'Copy'),
+    ].filter(Boolean),
+  });
+  copyText(link.url, 'Link made and copied');
 }
 
 function downloadItem(item) {

@@ -266,6 +266,15 @@ class BeamApi(
         return Item.parse(o.optJSONObject("item") ?: o)
     }
 
+    /**
+     * `POST /api/items/{id}/fastlink { hours }` (server 1.13 `fast-links`): a link anyone can download the file with
+     * until it runs out, made by Beam Family on the server's machine → its `{ url, expires, … }`.
+     */
+    fun fastLink(id: String, hours: Int): JSONObject {
+        val body = JSONObject().put("hours", hours).toString().toRequestBody(JSON)
+        return json(request(url("/api/items/$id/fastlink")).post(body).build()).getJSONObject("link")
+    }
+
     /** `POST /api/items/delete { ids }` → how many were deleted. */
     fun deleteItems(ids: Collection<String>): Int {
         val body = JSONObject().put("ids", JSONArray(ids)).toString().toRequestBody(JSON)

@@ -58,6 +58,14 @@ New-NetFirewallRule -DisplayName "Beam Family direct connections (home network)"
 Without it (or when a network blocks direct connections) everything still works over https. The log says how each
 direct connection went ("came up on the same network / over the internet / didn't come up").
 
+**Fast links for Beam's files (1.13):** "Fast link…" on a file in Beam's own chat asks Beam's server, which asks Beam
+Family on the same machine: `POST /api/admin/fastlink { path, name, size, mime, hours }` (loopback only, with the
+`X-Family-Control` key from `control.key`, like `stop` and `backup`). The file becomes an unsent upload of the
+owner's, hard-linked from Beam's copy (no copy on the same drive; each server removes only its own name), else copied in
+the background, which the link follows as it arrives; the link is the owner's ("from <the owner>" on its page). The
+sweep removes the file a day after its link stops working. Files a working link shares don't count toward a person's
+30 unsent uploads.
+
 ### Fast downloads, the gallery and selecting several (1.11)
 
 - **Downloads in the chat** (a file card, a message's menu → Download, the viewer's download button): a file of 8 MB

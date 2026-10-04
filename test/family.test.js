@@ -1246,6 +1246,44 @@ test('F-T (1.12.1): a download following an upload goes on when the upload is co
   } finally { db.close(); }
 });
 
+test('F-U (1.13.0): Beam’s fast links: on this machine and with the control key, one of Beam’s files becomes the owner’s unsent file (hard-linked, or copied) with a link anyone can use; nothing without the key or through a proxy; working links don’t count toward the 30 unsent', async () => {
+  const s = await start('beamlink', 8844);
+  try {
+    const f = await family(s);
+    const control = fs.readFileSync(path.join(s.data, 'control.key'), 'utf8').trim();
+    const src = path.join(TMP, 'beam-item.bin');
+    const data = crypto.randomBytes(3 * 1024 * 1024 + 11);
+    fs.writeFileSync(src, data);
+    const admin = (body, headers = { 'X-Family-Control': control }) =>
+      s.req('POST', '/api/admin/fastlink', { headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    // Nothing without the key, or through a proxy (tailscale serve's requests carry X-Forwarded-For).
+    assert.equal((await admin({ path: src, name: 'x.bin', size: data.length }, {})).status, 404);
+    assert.equal((await admin({ path: src, name: 'x.bin', size: data.length }, { 'X-Family-Control': control, 'X-Forwarded-For': '100.64.0.9' })).status, 404);
+    // Hard-linked: the owner's, the same bytes, and no copy (a second name for the same file).
+    let r = await admin({ path: src, name: 'Holiday.bin', size: data.length, mime: 'application/octet-stream', hours: 24 });
+    assert.equal(r.status, 201, r.body);
+    assert.match(r.json.link.url, /\/f\/[A-Za-z0-9_-]{32}$/);
+    const token = r.json.link.url.split('/f/')[1];
+    r = await s.req('GET', `/api/links/${token}`);
+    assert.deepEqual([r.json.name, r.json.size, r.json.received, r.json.from], ['Holiday.bin', data.length, data.length, 'Robin']);
+    assert.ok((await s.req('GET', `/api/links/${token}/file`, { raw: true })).body.equals(data), 'the file over the link');
+    assert.equal(fs.statSync(src).nlink, 2, 'hard-linked, not copied');
+    // Copied (another drive, or link: false): the link follows the copy as it arrives.
+    r = await admin({ path: src, name: 'Copy.bin', size: data.length, link: false });
+    assert.equal(r.status, 201, r.body);
+    const token2 = r.json.link.url.split('/f/')[1];
+    assert.ok((await s.req('GET', `/api/links/${token2}/file`, { raw: true })).body.equals(data), 'the copy over the link');
+    // Not there, or not that size; a link too long.
+    assert.equal((await admin({ path: path.join(TMP, 'no-such.bin'), name: 'n.bin', size: 3 })).status, 404);
+    assert.equal((await admin({ path: src, name: 'x.bin', size: 5 })).status, 404);
+    assert.equal((await admin({ path: src, name: 'x.bin', size: data.length, hours: 24 * 31 })).status, 400);
+    // The owner's own uploads aren't blocked by files that working links share.
+    for (let i = 0; i < 29; i++) assert.equal((await call(s, 'POST', '/api/uploads', f.owner, { name: `u${i}.bin`, size: 1 })).status, 201);
+    assert.equal((await call(s, 'POST', '/api/uploads', f.owner, { name: 'u29.bin', size: 1 })).status, 201, 'the 30th of their own');
+    assert.equal((await call(s, 'POST', '/api/uploads', f.owner, { name: 'u30.bin', size: 1 })).status, 429, 'then the limit');
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

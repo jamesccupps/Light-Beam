@@ -43,6 +43,14 @@ const MB = 1024 * 1024;
 
 // (1.7) Beam Family's address (a separate server; see family/): an http(s) address, else nothing.
 const FAMILY_URL = /^https?:\/\/[^\s/]+(\/\S*)?$/i.test(trimUrl(env.BEAM_FAMILY_URL)) ? trimUrl(env.BEAM_FAMILY_URL) : null;
+// (1.13.0) Beam Family on this machine, for fast links of Beam's files: its data folder (its control.key) and its local
+// address, as Beam Family reads them from the same .env.
+const FAMILY_DATA = path.resolve(env.BEAM_FAMILY_DATA || path.join(__dirname, 'family-data'));
+const FAMILY_LOCAL = (() => {
+  const host = env.BEAM_FAMILY_HOST || '127.0.0.1';
+  const h = host === '0.0.0.0' ? '127.0.0.1' : host === '::' ? '::1' : host;
+  return `http://${h.includes(':') ? `[${h}]` : h}:${num(env.BEAM_FAMILY_PORT, 8766)}`;
+})();
 const PORT = num(env.BEAM_PORT, 8765);
 const HOST = env.BEAM_HOST || '0.0.0.0';
 const DATA_DIR = path.resolve(env.BEAM_DATA || path.join(__dirname, 'data'));
@@ -3782,6 +3790,44 @@ async function forwardItem(req, res, [id], url) {
   send(res, 201, summary(item));
 }
 
+// (1.13.0) "Fast link" on a file in Beam's chat (the user: "Make a fast link" from Beam's own apps): Beam Family, on this
+// machine, makes it, since Beam isn't reachable from the internet and Family's public link is. Family takes the file as
+// a second name for it (a hard link: no copy on the same drive) and answers with a link anyone can use without signing
+// in until it runs out; its page says it's from Family's owner. POST /api/items/:id/fastlink { hours } → 201 { link }.
+async function fastLinkItem(req, res, [id], url) {
+  if (!FAMILY_URL) throw httpError(404, 'Fast links need Beam Family on this server (BEAM_FAMILY_URL)');
+  const item = findItem(id);
+  if (!item) return send(res, 404, { error: 'Not found' });
+  if (item.kind !== 'file') throw httpError(400, 'Only files get fast links');
+  const file = filePath(item.id);
+  const st = await fsp.stat(file).catch(() => null);
+  // (not 410 or 502/504 below: the apps take those for "Beam moved" and "offline")
+  if (!st || st.size !== item.size) throw httpError(404, 'That file isn’t on the server any more');
+  const body = await readJson(req, { optional: true });
+  const hours = body?.hours === undefined ? 24 : Math.round(Number(body.hours));
+  let control = '';
+  try { control = (await fsp.readFile(path.join(FAMILY_DATA, 'control.key'), 'utf8')).trim(); } catch {}
+  if (!control) throw httpError(503, 'Beam Family isn’t set up on this server');
+  let r;
+  try {
+    r = await fetch(`${FAMILY_LOCAL}/api/admin/fastlink`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Family-Control': control },
+      body: JSON.stringify({ path: file, name: item.name, size: item.size, mime: item.mime, hours }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    throw httpError(503, 'Beam Family isn’t answering on this machine');
+  }
+  const answer = await r.json().catch(() => ({}));
+  if (!r.ok || !answer.link?.url) {
+    // (404: a Beam Family before 1.13 or another key; its own errors pass on: no owner yet, the 50 links, storage)
+    throw httpError(r.ok || r.status === 404 || r.status >= 500 ? 503 : r.status, r.status === 404 ? 'Beam Family on this machine needs version 1.13 or later' : answer.error || `Beam Family answered ${r.status}`);
+  }
+  log.info(`${whoName(deviceIdOf(req, url))} made a fast link to ${item.name} (through Beam Family, ${hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`})`);
+  send(res, 201, { link: answer.link });
+}
+
 async function linkOrCopy(from, to, size) {
   try {
     await fsp.link(from, to);
@@ -4573,6 +4619,7 @@ const FEATURES = [
   'device-status', 'ring', 'wake', 'remote-desktop', 'alerts',
   'stream-modes', 'items-since', 'gzip', 'live-download', 'big-chunks', 'clear-cache',
   'phone-notifications', 'remote-control', 'backups',
+  ...(FAMILY_URL ? ['fast-links'] : []), // (1.13.0: Beam Family on this machine makes fast links of Beam's files)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -5878,6 +5925,7 @@ const routes = [
   ['GET', `/api/items/${ID}/text`, getItemText],
   ['POST', `/api/items/${ID}/ack`, ackItem],
   ['POST', `/api/items/${ID}/forward`, forwardItem],
+  ['POST', `/api/items/${ID}/fastlink`, fastLinkItem],
   ['PUT', `/api/items/${ID}/thumb`, putThumb],
   ['GET', `/api/items/${ID}/thumb`, getThumb],
   ['DELETE', `/api/items/${ID}`, deleteItem],

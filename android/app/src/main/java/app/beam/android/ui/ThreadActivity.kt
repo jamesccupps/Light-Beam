@@ -584,6 +584,9 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         if (item.isText || info?.has("forward") == true) {
             entries += ActionSheet.Entry(R.drawable.ic_forward, getString(R.string.forward)) { ForwardSheet.show(this, item, b.composeBar) }
         }
+        if (!item.isText && info?.has(FastLinks.FEATURE) == true) {
+            entries += ActionSheet.Entry(R.drawable.ic_link, getString(R.string.fast_link)) { FastLinks.show(this, item, ::snack) }
+        }
         if (info?.has("pin") == true) {
             entries += ActionSheet.Entry(R.drawable.ic_pin, getString(if (item.pinned) R.string.unpin else R.string.pin)) { togglePin(item) }
         }

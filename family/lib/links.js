@@ -58,23 +58,34 @@ function createLinks(ctx) {
 
   const json = (l, extra = {}) => ({ id: l.id, created: l.created_at, expires: l.expires_at, downloads: l.downloads, by: l.created_by, ...extra });
 
+  // Whether `user` may make another link lasting `hours`: throws why not.
+  function checkNew(user, hours) {
+    if (!(hours >= 1 && hours <= MAX_HOURS)) throw httpError(400, `A fast link lasts 1 hour to ${MAX_HOURS / 24} days`);
+    if (db.get('SELECT count(*) n FROM links WHERE created_by = ? AND revoked_at IS NULL AND expires_at > ?', user.id, now()).n >= 50) {
+      throw httpError(429, 'You have 50 fast links working: switch some off first');
+    }
+  }
+
   // POST /api/files/:id/links { hours } → 201 { link: { id, url, expires, … } }: a file the person may see (one in a
-  // message they can read, or their own still being uploaded). The url is shown once: only its hash is kept.
+  // message they can read, or their own still being uploaded).
   async function create(req, res, { id }) {
     const user = people().requireUser(req);
     const body = await readJson(req);
     const a = files().visibleAttachment(user, id);
     const hours = body.hours === undefined ? 24 : Math.round(Number(body.hours));
-    if (!(hours >= 1 && hours <= MAX_HOURS)) throw httpError(400, `A fast link lasts 1 hour to ${MAX_HOURS / 24} days`);
-    if (db.get('SELECT count(*) n FROM links WHERE created_by = ? AND revoked_at IS NULL AND expires_at > ?', user.id, now()).n >= 50) {
-      throw httpError(429, 'You have 50 fast links working: switch some off first');
-    }
+    send(res, 201, { link: createFor(a, user, hours) });
+  }
+
+  // A link to attachment `a` made by `user` (1.13.0: also Beam's, through the admin API) → its JSON with the url, shown
+  // this once: only its hash is kept.
+  function createFor(a, user, hours) {
+    checkNew(user, hours);
     const token = crypto.randomBytes(24).toString('base64url');
     const l = { id: newId(), token_hash: hashOf(token), attachment_id: a.id, created_by: user.id, created_at: now(), expires_at: now() + hours * HOUR, revoked_at: null, downloads: 0 };
     db.run('INSERT INTO links (id, token_hash, attachment_id, created_by, created_at, expires_at, downloads) VALUES (?, ?, ?, ?, ?, ?, 0)',
       l.id, l.token_hash, l.attachment_id, l.created_by, l.created_at, l.expires_at);
     log.info(`${user.name} made a fast link to ${a.name} (${hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`})`);
-    send(res, 201, { link: json(l, { url: urlOf(token) }) });
+    return json(l, { url: urlOf(token) });
   }
 
   // GET /api/files/:id/links → { links }: the ones working (an admin sees everyone's, others their own).
@@ -180,7 +191,7 @@ function createLinks(ctx) {
   }
 
   return {
-    attachmentOf, counted,
+    attachmentOf, counted, checkNew, createFor,
     routes: [
       ['POST', '/api/files/:id/links', create],
       ['GET', '/api/files/:id/links', list],
