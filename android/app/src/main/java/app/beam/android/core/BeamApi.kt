@@ -252,8 +252,9 @@ class BeamApi(
         execute(request(url("/api/items/$id")).delete().build()).close()
     }
 
-    fun sendText(text: String, to: List<String>): Item {
+    fun sendText(text: String, to: List<String>, reply: String? = null): Item {
         val body = JSONObject().put("text", text).put("to", JSONArray(to))
+        if (reply != null) body.put("reply", reply) // (server 1.14 `replies`)
         return Item.parse(json(request(url("/api/text")).post(body.toString().toRequestBody(JSON)).build()))
     }
 
@@ -285,6 +286,18 @@ class BeamApi(
     fun setPinned(id: String, pinned: Boolean) {
         val body = JSONObject().put("pinned", pinned).toString().toRequestBody(JSON)
         execute(request(url("/api/items/$id")).patch(body).build()).close()
+    }
+
+    /** `PUT|DELETE /api/items/{id}/reactions/{emoji}` (server 1.14 `reactions`): this device's reaction on or off. */
+    fun react(id: String, emoji: String, on: Boolean) {
+        val r = request(url("/api/items/$id/reactions").newBuilder().addPathSegment(emoji).build())
+        execute((if (on) r.put(ByteArray(0).toRequestBody(null)) else r.delete()).build()).close()
+    }
+
+    /** `PATCH /api/items/{id} { text }` (server 1.14 `edit`): a text's new words → the item. */
+    fun editText(id: String, text: String): Item {
+        val body = JSONObject().put("text", text).toString().toRequestBody(JSON)
+        return Item.parse(json(request(url("/api/items/$id")).patch(body).build()))
     }
 
     /** `PUT /api/read { conversation, ts }`: conversation is a device id or "all". */

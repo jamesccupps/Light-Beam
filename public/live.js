@@ -398,12 +398,16 @@ function applyItem(raw, since) {
   const old = itemMap.get(item.id);
   if (!old) { if (!changedSince(item.id, since)) putItem(item); return item.id; }
   const moved = old.from !== item.from || !sameJson(old.to, item.to);
-  const changed = moved || !sameJson(old.delivered, item.delivered) || old.pinned !== item.pinned || !sameJson(old.thumb, item.thumb)
-    || old.truncated !== item.truncated || (item.kind === 'text' && old.text !== item.text);
+  // (1.14.0) reactions and edits redraw the bubble
+  const content = !sameJson(old.reactions || {}, item.reactions || {}) || old.edited !== item.edited || (item.kind === 'text' && old.text !== item.text);
+  const changed = moved || content || !sameJson(old.delivered, item.delivered) || old.pinned !== item.pinned || !sameJson(old.thumb, item.thumb)
+    || old.truncated !== item.truncated;
   if (!changed) return item.id;
   const thumbChanged = !sameJson(old.thumb, item.thumb);
+  if (item.kind === 'text' && old.text !== item.text) view.fullText.delete(item.id);
+  if (!item.reactions) delete old.reactions;
   Object.assign(old, item);
-  if (moved || thumbChanged) replaceMsg(old); else patchMsg(old);
+  if (moved || thumbChanged || content) replaceMsg(old); else patchMsg(old);
   dataVersion++;
   return item.id;
 }
@@ -468,10 +472,16 @@ function onEventUpdate(data) {
   if (!item) return;
   const thumbChanged = 'thumb' in data && !sameJson(item.thumb, data.thumb);
   const pinChanged = 'pinned' in data && item.pinned !== data.pinned;
+  // (1.14.0) reactions and edits change the bubble itself
+  const textChanged = 'text' in data && data.text !== item.text;
+  const redraw = thumbChanged || textChanged || ('reactions' in data && !sameJson(item.reactions || {}, data.reactions || {})) || ('edited' in data && item.edited !== data.edited);
+  if (textChanged) view.fullText.delete(item.id);
   for (const [k, v] of Object.entries(data)) if (k !== 'id') item[k] = v;
+  if (item.reactions && !Object.keys(item.reactions).length) delete item.reactions;
   dataVersion++;
   cache.putItem(item);
-  if (thumbChanged) replaceMsg(item); else patchMsg(item);
+  if (redraw) replaceMsg(item); else patchMsg(item);
+  if (textChanged && compose.reply === item.id) renderComposeBar();
   if (pinChanged) { renderHeader(); if (view.pinnedOnly) renderThread({ scroll: 'keep' }); }
 }
 

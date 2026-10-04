@@ -121,6 +121,11 @@ address, so the browser becomes part of that device instead of a separate entry.
     all and **Esc** stops.
   - In the Windows app, Copy puts the files on the clipboard as files, so you can paste them into any program, and
     dragging one of them out drags them all.
+- **Reply, react, edit** (Beam 1.14):
+  - **Reply** in a message's menu quotes it above your answer; click the quote to go to the message it answers.
+  - A row of quick reactions sits on top of a message's menu (👍 ❤️ 😂 😮 😢 🙏). Reactions show under the message
+    with how many; each device has its own, and a click takes yours back.
+  - **Edit** changes a text's words; it then says "edited". Other devices see replies, reactions and edits at once.
 - **Pin** keeps an item past the clean-up. **Forward** sends an item to another device without uploading it again.
 - **Delivery:**
   - Every item shows **Sent**, then **Delivered**.
@@ -272,6 +277,8 @@ address, so the browser becomes part of that device instead of a separate entry.
   - Files that aren't on the phone yet are downloaded first. In split screen, dragging a picked file drags them all.
   - The picture button in a conversation shows its **photos and videos** as a grid and its **files** as a list;
     long-press one to pick several there.
+- **Reply, react, edit** (Android app 1.11): the same from a message's sheet (Reply, the quick reactions on top, Edit);
+  the bar above the message box says what you're replying to or editing, with × to stop.
 - **Notifications:** they have **Copy**, **Open link** and quick **Reply**, and files open straight from the
   notification.
 - **Shortcuts and tools:**

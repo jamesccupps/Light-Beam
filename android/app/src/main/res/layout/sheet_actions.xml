@@ -20,6 +20,16 @@
         android:textAppearance="?attr/textAppearanceBodyMedium"
         android:textColor="?attr/colorOnSurfaceVariant" />
 
+    <!-- (1.11, server 1.14) Quick reactions on top of a message's sheet. -->
+    <LinearLayout
+        android:id="@+id/quick"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="4dp"
+        android:orientation="horizontal"
+        android:paddingHorizontal="12dp"
+        android:visibility="gone" />
+
     <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="wrap_content">

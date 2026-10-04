@@ -497,6 +497,18 @@
         <item quantity="one">Forwarded %1$d to %2$s</item>
         <item quantity="other">Forwarded %1$d to %2$s</item>
     </plurals>
+    <!-- 1.11.0: replies, reactions, edits (server 1.14) -->
+    <string name="edit">Edit</string>
+    <string name="edited">edited</string>
+    <string name="replying_to">Replying to %1$s: %2$s</string>
+    <string name="editing">Editing: %1$s</string>
+    <string name="reply_gone">That message isn\'t here any more</string>
+    <string name="reply_file">📎 %1$s</string>
+    <string name="react_on">React %1$s</string>
+    <string name="react_off">Take back %1$s</string>
+    <string name="reaction_count">%1$s %2$d: %3$s</string>
+    <string name="this_device">this device</string>
+    <string name="edit_empty">Nothing would be left: delete the message instead</string>
     <!-- 1.10.0: fast links (server 1.13) -->
     <string name="fast_link">Fast link</string>
     <string name="fast_link_for">Fast link: %1$s</string>

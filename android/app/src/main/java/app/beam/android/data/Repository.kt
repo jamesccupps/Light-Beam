@@ -225,9 +225,20 @@ class Repository(private val app: BeamApp) {
                 val delivered = if (o.has("delivered")) o.optJSONObject("delivered").longs() else null
                 val pinned = if (o.has("pinned")) o.optBoolean("pinned") else null
                 val thumb = if (o.has("thumb")) o.optBoolean("thumb") else null
+                // (server 1.14) reactions (all of them), and an edited text with its new words
+                val reactions = if (o.has("reactions")) Item.reactionsOf(o.optJSONObject("reactions")) else null
+                val edited = if (o.has("edited")) o.optLong("edited") else null
+                val text = o.str("text")
+                val truncated = if (o.has("truncated")) o.optBoolean("truncated") else null
                 _state.update { s ->
                     s.copy(items = s.items.map {
-                        if (it.id != id) it else it.copy(delivered = delivered ?: it.delivered, pinned = pinned ?: it.pinned, thumb = thumb ?: it.thumb)
+                        if (it.id != id) it
+                        else it.copy(
+                            delivered = delivered ?: it.delivered, pinned = pinned ?: it.pinned, thumb = thumb ?: it.thumb,
+                            reactions = reactions ?: it.reactions, edited = edited ?: it.edited, text = text ?: it.text,
+                            truncated = truncated ?: it.truncated,
+                            textLength = if (o.has("textLength")) o.optInt("textLength") else if (text != null) text.length else it.textLength,
+                        )
                     })
                 }
                 saveSoon()
@@ -307,12 +318,12 @@ class Repository(private val app: BeamApp) {
     // ---------------------------------------------------------------- actions
 
     /** Sends a text right now (the [Outbox] wraps this with queueing while offline). */
-    suspend fun sendText(text: String, to: List<String>): Item = withContext(Dispatchers.IO) { sendTextBlocking(text, to) }
+    suspend fun sendText(text: String, to: List<String>, reply: String? = null): Item = withContext(Dispatchers.IO) { sendTextBlocking(text, to, reply) }
 
-    fun sendTextBlocking(text: String, to: List<String>): Item {
+    fun sendTextBlocking(text: String, to: List<String>, reply: String? = null): Item {
         val api = app.api ?: throw IllegalStateException("Not paired")
         val item = try {
-            api.sendText(text, to)
+            api.sendText(text, to, reply)
         } catch (e: BeamException) {
             // A target that was forgotten on the server: refresh the device list so it disappears.
             if (e.status == 400) runCatching { resyncBlocking() }
@@ -384,6 +395,43 @@ class Repository(private val app: BeamApp) {
         val api = app.api ?: throw IllegalStateException("Not paired")
         val link = api.fastLink(item.id, hours)
         link.getString("url") to link.optLong("expires")
+    }
+
+    /**
+     * (server 1.14) This device's reaction on or off: shown at once, and the server's `update` event (this phone gets it
+     * too) sets it from then on, so a reaction another device made meanwhile isn't lost. Undone when the server refuses.
+     */
+    suspend fun react(item: Item, emoji: String, on: Boolean) = withContext(Dispatchers.IO) {
+        val api = app.api ?: throw IllegalStateException("Not paired")
+        setMyReaction(item.id, emoji, on)
+        try {
+            api.react(item.id, emoji, on)
+        } catch (e: Exception) {
+            setMyReaction(item.id, emoji, !on)
+            throw e
+        }
+    }
+
+    private fun setMyReaction(id: String, emoji: String, on: Boolean) {
+        val mine = me
+        _state.update { s ->
+            s.copy(items = s.items.map { item ->
+                if (item.id != id) item
+                else {
+                    val by = item.reactions[emoji].orEmpty().filter { it != mine } + if (on) listOf(mine) else emptyList()
+                    item.copy(reactions = if (by.isEmpty()) item.reactions - emoji else item.reactions + (emoji to by))
+                }
+            })
+        }
+        saveSoon()
+    }
+
+    /** (server 1.14) A text's new words (unless another device's edit came in meanwhile: its event is newer). */
+    suspend fun editText(item: Item, text: String) = withContext(Dispatchers.IO) {
+        val api = app.api ?: throw IllegalStateException("Not paired")
+        val updated = api.editText(item.id, text)
+        _state.update { s -> s.copy(items = s.items.map { if (it.id == updated.id && it.edited <= updated.edited) updated else it }) }
+        saveSoon()
     }
 
     /** The whole text of an item (lists and events cut long texts short). */

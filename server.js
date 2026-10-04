@@ -3191,7 +3191,17 @@ function webVersion() {
 
 // Every item change is sent with its full state: clients replace `delivered` wholesale on `update`.
 function broadcastUpdate(item) {
-  broadcast('update', { id: item.id, delivered: item.delivered || {}, pinned: Boolean(item.pinned), thumb: Boolean(item.thumb) });
+  const out = { id: item.id, delivered: item.delivered || {}, pinned: Boolean(item.pinned), thumb: Boolean(item.thumb) };
+  // (1.14.0) reactions (all of them: {} when none are left), and an edited text with its new words (cut as in lists)
+  out.reactions = item.reactions || {};
+  if (item.edited) {
+    out.edited = item.edited;
+    if (item.kind === 'text') {
+      const s = summary(item);
+      Object.assign(out, { text: s.text, truncated: Boolean(s.truncated) }, s.truncated ? { textLength: s.textLength } : {});
+    }
+  }
+  broadcast('update', out);
 }
 
 async function pushNtfy(item) {
@@ -3749,12 +3759,15 @@ async function deleteSome(req, res) {
 async function patchItem(req, res, [id]) {
   const item = findItem(id);
   if (!item) return send(res, 404, { error: 'Not found' });
-  const body = await readJson(req);
-  const unknown = Object.keys(body).filter(k => k !== 'pinned');
+  // (1.14.0: a text's words too, so as much as a text may hold)
+  const body = await readJson(req, { limit: MAX_TEXT + 64 * 1024 });
+  const unknown = Object.keys(body).filter(k => k !== 'pinned' && k !== 'text');
   if (unknown.length) throw httpError(400, `Can't change ${unknown.join(', ')}`);
-  if (typeof body.pinned !== 'boolean') throw httpError(400, 'Expected {"pinned": true|false}');
-  if (body.pinned) item.pinned = true;
-  else delete item.pinned;
+  if (!('pinned' in body) && !('text' in body)) throw httpError(400, 'Expected {"pinned": true|false} or {"text": "…"}');
+  if ('pinned' in body && typeof body.pinned !== 'boolean') throw httpError(400, 'Expected {"pinned": true|false}');
+  if ('text' in body) await editText(item, body.text);
+  if (body.pinned === true) item.pinned = true;
+  else if (body.pinned === false) delete item.pinned;
   itemChanged(item);
   broadcastUpdate(item);
   send(res, 200, summary(item));
@@ -3843,6 +3856,65 @@ async function linkOrCopy(from, to, size) {
   }
 }
 
+// (1.14.0) What a reply answers: that item's id with a short preview of it as it is now (so the reply still reads right
+// after that item is edited or deleted). Null for no reply; an id that isn't here any more keeps just the id.
+function replyRef(id) {
+  if (id == null || id === '') return null;
+  if (typeof id !== 'string' || !ITEM_ID.test(id)) throw httpError(400, 'reply must be a message id');
+  const src = findItem(id);
+  if (!src) return { id };
+  const ref = { id, kind: src.kind, from: src.from || null, device: src.device || null };
+  if (src.kind === 'text') ref.text = cutText(src.text, 140);
+  else ref.name = src.name;
+  return ref;
+}
+
+// (1.14.0) A text edited: the new words in place (a long one in data/texts, as when it was sent), marked `edited`. Any of
+// the owner's devices may edit (they're all the owner's). Nothing is delivered again, and nobody auto-copies it again.
+async function editText(item, text) {
+  if (item.kind !== 'text') throw httpError(400, 'Only texts can be edited');
+  if (typeof text !== 'string') throw httpError(400, 'Expected {"text": "..."}');
+  text = text.replace(/^\uFEFF/, '').toWellFormed();
+  if (!text.trim()) throw httpError(400, 'Nothing would be left: delete it instead');
+  if (Buffer.byteLength(text) > MAX_TEXT) throw httpError(413, 'Too large');
+  const before = item.textFile ? item.textLength : item.text.length;
+  if (text.length > before) await ensureSpace(Buffer.byteLength(text) - before);
+  if (text.length > INLINE_TEXT_LIMIT) {
+    await writeFileDurable(textPath(item.id), text);
+    Object.assign(item, { text: cutText(text, LIST_TEXT_LIMIT), textLength: text.length, textFile: true });
+  } else {
+    if (item.textFile) await fsp.rm(textPath(item.id), { force: true }).catch(() => {});
+    item.text = text;
+    delete item.textFile;
+    delete item.textLength;
+  }
+  item.edited = now();
+}
+
+// (1.14.0) Reactions: each device's own, any emoji (one short string), at most 20 kinds on a message.
+// PUT /api/items/{id}/reactions/{emoji} → this device's on; DELETE → off. 200 + the message; an `update` event.
+const MAX_REACTION_KINDS = 20;
+async function setReaction(req, res, [id, raw], url) {
+  const item = findItem(id);
+  if (!item) return send(res, 404, { error: 'Not found' });
+  let emoji = '';
+  try { emoji = decodeURIComponent(raw).normalize('NFC'); } catch {}
+  if (!emoji || emoji.length > 16 || /[\s<>\u0000-\u001f\u007f-\u009f]/.test(emoji)) throw httpError(400, 'A reaction is one emoji');
+  const who = deviceIdOf(req, url);
+  if (!who || !devices[who]) throw httpError(400, 'X-Beam-Device-Id is required');
+  const reactions = { ...(item.reactions || {}) };
+  const by = new Set(reactions[emoji] || []);
+  if (req.method === 'PUT') {
+    if (!reactions[emoji] && Object.keys(reactions).length >= MAX_REACTION_KINDS) throw httpError(409, 'That message has as many kinds of reactions as it can');
+    by.add(who);
+  } else by.delete(who);
+  if (by.size) reactions[emoji] = [...by]; else delete reactions[emoji];
+  if (Object.keys(reactions).length) item.reactions = reactions; else delete item.reactions;
+  itemChanged(item);
+  broadcastUpdate(item);
+  send(res, 200, summary(item));
+}
+
 function newItem(req, url, fields, to) {
   return { id: fields.id || newId(), ...fields, from: deviceIdOf(req, url), device: deviceNameOf(req, url) || nameOf(deviceIdOf(req, url)) || 'Unknown device', to, delivered: {}, ts: now() };
 }
@@ -3851,13 +3923,14 @@ async function postText(req, res, _m, url) {
   const type = String(req.headers['content-type'] || '');
   if (authOf(req).source === 'cookie' && !isJsonType(req)) throw httpError(415, 'Send JSON (Content-Type: application/json)');
   let text = (await readTextBody(req)).toString('utf8');
-  let bodyTo;
+  let bodyTo, bodyReply;
   if (type.includes('application/json')) {
     let body;
     try { body = JSON.parse(text); } catch { throw httpError(400, 'Invalid JSON'); }
     if (!isPlainObject(body)) throw httpError(400, 'Expected {"text": "..."}');
     text = body.text;
     bodyTo = body.to;
+    bodyReply = body.reply; // (1.14.0)
     if (typeof text !== 'string') throw httpError(400, 'Expected {"text": "..."}');
   } else if (type.includes('application/x-www-form-urlencoded')) {
     // `curl -d "hello"` sends raw text with this type; only unwrap a real `text=` field.
@@ -3869,6 +3942,8 @@ async function postText(req, res, _m, url) {
   const to = targetsFromRequest(req, url, bodyTo);
   await ensureSpace(Buffer.byteLength(text));
   const fields = { kind: 'text', text };
+  const reply = replyRef(bodyReply); // (1.14.0)
+  if (reply) fields.reply = reply;
   if (text.length > INLINE_TEXT_LIMIT) {
     fields.id = newId();
     await writeFileDurable(textPath(fields.id), text);
@@ -4620,6 +4695,7 @@ const FEATURES = [
   'stream-modes', 'items-since', 'gzip', 'live-download', 'big-chunks', 'clear-cache',
   'phone-notifications', 'remote-control', 'backups',
   ...(FAMILY_URL ? ['fast-links'] : []), // (1.13.0: Beam Family on this machine makes fast links of Beam's files)
+  'replies', 'reactions', 'edit', // (1.14.0)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -5926,6 +6002,8 @@ const routes = [
   ['POST', `/api/items/${ID}/ack`, ackItem],
   ['POST', `/api/items/${ID}/forward`, forwardItem],
   ['POST', `/api/items/${ID}/fastlink`, fastLinkItem],
+  ['PUT', `/api/items/${ID}/reactions/([^/]+)`, setReaction],
+  ['DELETE', `/api/items/${ID}/reactions/([^/]+)`, setReaction],
   ['PUT', `/api/items/${ID}/thumb`, putThumb],
   ['GET', `/api/items/${ID}/thumb`, getThumb],
   ['DELETE', `/api/items/${ID}`, deleteItem],

@@ -93,6 +93,11 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     /** Fast links (1.13): each `POST /api/items/{id}/fastlink` (item id to its hours). */
     val fastLinks = CopyOnWriteArrayList<Pair<String, Int>>()
 
+    /** (1.14) Each `POST /api/text` body; each reaction (item, emoji, on); each edit (item, its new words). */
+    val texts = CopyOnWriteArrayList<JSONObject>()
+    val reactionCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
+    val edits = CopyOnWriteArrayList<Pair<String, String>>()
+
     /** The item list (newest first), its cursor, and what a `since` request returns. */
     @Volatile var items: List<JSONObject> = emptyList()
     @Volatile var cursor = "c1"
@@ -290,6 +295,34 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
                 val link = JSONObject().put("id", "link0001").put("url", "https://family.example.ts.net:8443/f/" + "a".repeat(32))
                     .put("expires", System.currentTimeMillis() + hours * 3_600_000L)
                 json(ex, 201, JSONObject().put("link", link))
+            }
+            path == "/api/text" && method == "POST" -> {
+                val body = JSONObject(ex.requestBody.readBytes().decodeToString())
+                val to = body.optJSONArray("to") ?: JSONArray()
+                val known = (0 until devices.length()).map { devices.getJSONObject(it).optString("id") }.toSet()
+                if ((0 until to.length()).any { to.getString(it) !in known }) return json(ex, 400, JSONObject().put("error", "No such device"))
+                texts += body
+                val item = JSONObject().put("id", "t" + "%015d".format(texts.size)).put("kind", "text").put("text", body.optString("text"))
+                    .put("from", ex.requestHeaders.getFirst("X-Beam-Device-Id")).put("device", "Phone").put("to", body.optJSONArray("to") ?: JSONArray())
+                    .put("delivered", JSONObject()).put("ts", System.currentTimeMillis())
+                body.optString("reply").takeIf { it.isNotEmpty() }?.let { id ->
+                    val src = items.firstOrNull { it.optString("id") == id }
+                    item.put("reply", JSONObject().put("id", id).put("kind", "text").put("text", src?.optString("text")).put("from", src?.optString("from")))
+                }
+                json(ex, 201, item)
+            }
+            path.startsWith("/api/items/") && path.contains("/reactions/") && (method == "PUT" || method == "DELETE") -> {
+                val id = path.removePrefix("/api/items/").substringBefore("/reactions/")
+                reactionCalls += Triple(id, path.substringAfter("/reactions/"), method == "PUT")
+                json(ex, 200, JSONObject(items.firstOrNull { it.optString("id") == id }?.toString() ?: "{}"))
+            }
+            path.startsWith("/api/items/") && method == "PATCH" -> {
+                val id = path.removePrefix("/api/items/")
+                val body = JSONObject(ex.requestBody.readBytes().decodeToString())
+                if (body.has("text")) edits += id to body.getString("text")
+                val item = JSONObject(items.firstOrNull { it.optString("id") == id }?.toString() ?: "{}")
+                if (body.has("text")) item.put("text", body.getString("text")).put("edited", System.currentTimeMillis())
+                json(ex, 200, item)
             }
             path == "/api/login-requests" -> json(ex, 200, JSONObject().put("requests", JSONArray()))
             path == "/api/alerts" -> json(ex, 200, JSONObject().put("alerts", JSONArray()))

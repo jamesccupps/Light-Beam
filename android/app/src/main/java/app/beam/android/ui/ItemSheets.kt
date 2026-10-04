@@ -26,7 +26,11 @@ import kotlinx.coroutines.launch
 object ActionSheet {
     data class Entry(val icon: Int, val label: String, val action: () -> Unit)
 
-    fun show(activity: AppCompatActivity, title: CharSequence?, entries: List<Entry>): BottomSheetDialog {
+    /** [quick] (1.11): emoji in a row on top (those in [quickOn] stand out); a tap closes the sheet and calls [onQuick]. */
+    fun show(
+        activity: AppCompatActivity, title: CharSequence?, entries: List<Entry>,
+        quick: List<String> = emptyList(), quickOn: Set<String> = emptySet(), onQuick: (String) -> Unit = {},
+    ): BottomSheetDialog {
         val b = SheetActionsBinding.inflate(activity.layoutInflater)
         val dialog = BottomSheetDialog(activity)
         dialog.setContentView(b.root)
@@ -34,6 +38,22 @@ object ActionSheet {
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         b.title.text = title
         b.title.isVisible = !title.isNullOrBlank()
+        b.quick.isVisible = quick.isNotEmpty()
+        val tall = (48 * activity.resources.displayMetrics.density).toInt()
+        for (e in quick) {
+            b.quick.addView(TextView(activity).apply {
+                text = e
+                textSize = 24f
+                gravity = android.view.Gravity.CENTER
+                isSelected = e in quickOn
+                setBackgroundResource(R.drawable.quick_emoji_bg)
+                contentDescription = activity.getString(if (e in quickOn) R.string.react_off else R.string.react_on, e)
+                setOnClickListener {
+                    dialog.dismiss()
+                    onQuick(e)
+                }
+            }, android.widget.LinearLayout.LayoutParams(0, tall, 1f))
+        }
         for (e in entries) {
             val row = ItemActionBinding.inflate(LayoutInflater.from(activity), b.entries, false)
             row.action.text = e.label

@@ -4,18 +4,25 @@
 
 // ---------------------------------------------------------------- text
 
-async function sendText(text, conv = current) {
-  if (net.state === 'offline') { queueText(text, conv); return null; }
-  const draft = showSending(text, conv);
+async function sendText(text, conv = current, { reply = null } = {}) {
+  if (net.state === 'offline') { queueText(text, conv, { reply }); return null; }
+  const draft = showSending(text, conv, reply);
   try {
-    const item = await apiJson('api/text', jsonBody({ text, to: targetsOf(conv) }));
+    const item = await apiJson('api/text', jsonBody({ text, to: targetsOf(conv), ...(reply && { reply }) }));
     acceptOwnItem(item, draft);
     return item;
   } catch (err) {
     if (dropSending(draft)) refreshPending();
-    if (err.offline) { queueText(text, conv, { maybeSent: true }); return null; }
+    if (err.offline) { queueText(text, conv, { maybeSent: true, reply }); return null; }
     throw err;
   }
+}
+
+// (1.14.0) What a reply answers, for its bubble while it's on its way (the server keeps its own).
+function replyPreview(id) {
+  const src = id && itemMap.get(id);
+  if (!src) return id ? { id } : undefined;
+  return { id, kind: src.kind, from: src.from, ...(src.kind === 'text' ? { text: src.text.slice(0, 140) } : { name: src.name }) };
 }
 
 // An item this page just created: show it right away (the event for it may arrive before or after), in place of
@@ -35,9 +42,9 @@ function acceptOwnItem(item, draft = null) {
 // take most of a second to wake up.
 const sending = new Map(); // temporary id -> { id, conv, text, item }
 
-function showSending(text, conv) {
+function showSending(text, conv, reply = null) {
   const id = `s${randomId(6)}`;
-  const entry = { id, conv, text, item: normalize({ id, kind: 'text', text, from: me.id, to: targetsOf(conv), ts: Date.now(), sending: true }) };
+  const entry = { id, conv, text, item: normalize({ id, kind: 'text', text, from: me.id, to: targetsOf(conv), ts: Date.now(), sending: true, ...(reply && { reply: replyPreview(reply) }) }) };
   sending.set(id, entry);
   if (conv === current && !renderingPaused()) {
     renderThread({ scroll: 'bottom' });
@@ -70,16 +77,103 @@ async function sendComposer() {
   const box = $('#text');
   const text = box.value;
   const conv = current;
+  if (compose.edit) return saveEdit(text); // (1.14.0)
   if (!text.trim() || !await ensureSendable(conv)) return;
+  const reply = compose.reply;
   box.value = '';
   setDraft(conv, '');
   autosize();
+  endCompose();
   try {
-    await sendText(text, conv);
+    await sendText(text, conv, { reply });
   } catch (err) {
     if (current === conv && !box.value) { box.value = text; autosize(); }
     setDraft(conv, text);
     if (err.status !== 401 && !err.moved) toast(friendlyError(err), { error: true, ms: 5000 });
+  }
+}
+
+// ---------------------------------------------------------------- replying and editing (1.14.0)
+
+// Replying to a message, or changing the words of a text: a bar above the message box says which; × or Esc ends it.
+const compose = { reply: null, edit: null, draft: '' };
+
+function startReply(item) {
+  if (!serverHas('replies') || !canSendTo(current)) return;
+  if (compose.edit) endCompose();
+  compose.reply = item.id;
+  renderComposeBar();
+  $('#text').focus();
+}
+
+async function startEdit(item) {
+  if (!serverHas('edit') || item.kind !== 'text') return;
+  let text = view.fullText.get(item.id) || item.text;
+  if (item.truncated && !view.fullText.has(item.id)) {
+    try { text = await (await api(`api/items/${item.id}/text`)).text(); } catch (err) { toast(friendlyError(err), { error: true }); return; }
+  }
+  const box = $('#text');
+  if (!compose.edit) compose.draft = box.value; // (the draft comes back afterwards)
+  compose.reply = null;
+  compose.edit = item.id;
+  box.value = text;
+  autosize();
+  renderComposeBar();
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+}
+
+function endCompose() {
+  if (!compose.reply && !compose.edit) return;
+  if (compose.edit) { $('#text').value = compose.draft; autosize(); }
+  compose.reply = null;
+  compose.edit = null;
+  compose.draft = '';
+  renderComposeBar();
+}
+
+function renderComposeBar() {
+  const bar = $('#composeBar');
+  const id = compose.edit || compose.reply;
+  const item = id && itemMap.get(id);
+  if (!item) {
+    compose.reply = null;
+    compose.edit = null;
+    bar.hidden = true;
+    bar.replaceChildren();
+    return;
+  }
+  const what = item.kind === 'text' ? (view.fullText.get(item.id) || item.text).replace(/\s+/g, ' ').trim() : `📎 ${item.name}`;
+  const title = compose.edit ? 'Editing' : `Replying to ${item.from === me.id ? 'your message' : senderName(item)}`;
+  bar.replaceChildren(icon(compose.edit ? 'edit' : 'reply'),
+    el('span', { class: 'cb-text' }, el('strong', {}, title), ' ', el('span', { class: 'muted' }, what)),
+    el('button', { class: 'icon-btn small', type: 'button', title: 'Cancel (Esc)', 'aria-label': compose.edit ? 'Stop editing' : 'Don’t reply', onclick: () => { endCompose(); $('#text').focus(); } }, icon('x')));
+  bar.hidden = false;
+}
+
+// The new words of the text being edited (nothing changes when they're the same).
+async function saveEdit(text) {
+  const id = compose.edit;
+  const item = itemMap.get(id);
+  if (!item) { endCompose(); return; }
+  if (!text.trim()) { toast('Nothing would be left: delete the message instead', { error: true }); return; }
+  if (text === (view.fullText.get(id) || (item.truncated ? null : item.text))) { endCompose(); return; }
+  try {
+    const updated = await apiJson(`api/items/${id}`, jsonBody({ text }, 'PATCH'));
+    view.fullText.delete(id);
+    compose.edit = null; // (the box isn't given back its draft: the edit is done)
+    $('#text').value = compose.draft;
+    compose.draft = '';
+    autosize();
+    renderComposeBar();
+    // (unless another device's edit came in meanwhile: its event is newer)
+    if (!(itemMap.get(id)?.edited > updated.edited)) {
+      putItem(updated);
+      cache.putItem(itemMap.get(id));
+      replaceMsg(itemMap.get(id));
+    }
+  } catch (err) {
+    toast(friendlyError(err), { error: true });
   }
 }
 
@@ -151,8 +245,8 @@ async function discardOtherBeamOutbox() {
   if ($('#settingsDlg').open) renderSettings();
 }
 
-function queueText(text, conv, { maybeSent = false } = {}) {
-  const entry = { id: `o${randomId(6)}`, kind: 'text', text, conv, to: targetsOf(conv), created: Date.now(), deviceId: me.id, serverId: outboxBeam(), maybeSent };
+function queueText(text, conv, { maybeSent = false, reply = null } = {}) {
+  const entry = { id: `o${randomId(6)}`, kind: 'text', text, conv, to: targetsOf(conv), created: Date.now(), deviceId: me.id, serverId: outboxBeam(), maybeSent, ...(reply && { reply }) };
   addToOutbox(entry, 'You’re offline. It will be sent when Beam is back.');
 }
 
@@ -259,7 +353,7 @@ async function sendOutbox() {
       if (entry.kind === 'text') {
         // A request that failed half-way may have arrived after all: don't send it twice.
         const dup = entry.maybeSent && items.find(i => i.from === me.id && i.kind === 'text' && i.text === entry.text && i.ts >= entry.created - 2000);
-        if (!dup) acceptOwnItem(await apiJson('api/text', jsonBody({ text: entry.text, to: entry.to })));
+        if (!dup) acceptOwnItem(await apiJson('api/text', jsonBody({ text: entry.text, to: entry.to, ...(entry.reply && { reply: entry.reply }) })));
         markSent(entry);
         dropOutboxEntry(entry);
       } else {

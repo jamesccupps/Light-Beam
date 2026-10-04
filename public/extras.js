@@ -143,11 +143,11 @@ let menuReturnFocus = null;
 let lastPointer = 'mouse';
 window.addEventListener('pointerdown', e => { lastPointer = e.pointerType || 'mouse'; }, true);
 
-function openMenu(entries, at, { label = 'Actions' } = {}) {
+function openMenu(entries, at, { label = 'Actions', quick = null } = {}) {
   const menu = $('#menu');
   menuReturnFocus = document.activeElement;
   const buttons = [];
-  const nodes = [];
+  const nodes = quick ? [quick] : []; // (1.14.0: a row of quick reactions on top)
   for (const entry of entries) {
     if (!entry) continue;
     if (entry === 'sep') { if (nodes.length && !nodes.at(-1).classList.contains('sep')) nodes.push(el('div', { class: 'sep', role: 'separator' })); continue; }
@@ -216,22 +216,63 @@ function bindMenu() {
     e.preventDefault();
     // While picking several: the menu is for all of them (a message not picked yet is picked first).
     if (pick.on) { if (!pick.ids.has(item.id)) togglePick(item.id); pickMenu({ x: e.clientX, y: e.clientY }); return; }
-    openMenu(itemMenuEntries(item, e.target, node), { x: e.clientX, y: e.clientY }, { label: 'Message actions' });
+    openMenu(itemMenuEntries(item, e.target, node), { x: e.clientX, y: e.clientY }, { label: 'Message actions', quick: quickReactions(item) });
   });
 }
 
 function openItemMenu(item, anchor) {
   const node = view.nodes.get(`m:${item.id}`);
-  openMenu(itemMenuEntries(item, null, node), anchor, { label: 'Message actions' });
+  openMenu(itemMenuEntries(item, null, node), anchor, { label: 'Message actions', quick: quickReactions(item) });
+}
+
+// (1.14.0) Reactions: a row of quick ones on top of a message's menu; each device has its own, and a tap turns this
+// device's on or off (shown at once, then as the server has it).
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+function quickReactions(item) {
+  if (!serverHas('reactions') || !itemMap.has(item.id)) return null;
+  return el('div', { class: 'menu-quick', role: 'group', 'aria-label': 'React' }, ...QUICK_REACTIONS.map(emoji => {
+    const on = (item.reactions?.[emoji] || []).includes(me.id);
+    const b = el('button', { class: `quick-emoji${on ? ' on' : ''}`, type: 'button', 'aria-pressed': String(on), title: on ? `Take back ${emoji}` : `React ${emoji}` }, emoji);
+    b.addEventListener('click', () => { closeMenu(); toggleReaction(item, emoji); });
+    return b;
+  }));
+}
+
+async function toggleReaction(item, emoji) {
+  const on = !(item.reactions?.[emoji] || []).includes(me.id);
+  setMyReaction(item, emoji, on);
+  try {
+    // (the server's `update` event, which this device gets too, sets what's shown from then on: applying this answer
+    // could put back an older state when another device's reaction came in meanwhile)
+    await api(`api/items/${item.id}/reactions/${encodeURIComponent(emoji)}`, { method: on ? 'PUT' : 'DELETE' });
+  } catch (err) {
+    setMyReaction(item, emoji, !on); // (only this device's change goes back)
+    toast(friendlyError(err), { error: true });
+  }
+}
+
+function setMyReaction(item, emoji, on) {
+  const by = new Set(item.reactions?.[emoji] || []);
+  if (on) by.add(me.id); else by.delete(me.id);
+  const next = { ...(item.reactions || {}) };
+  if (by.size) next[emoji] = [...by]; else delete next[emoji];
+  if (Object.keys(next).length) item.reactions = next; else delete item.reactions;
+  dataVersion++;
+  cache.putItem(item);
+  replaceMsg(item);
 }
 
 function itemMenuEntries(item, target, node) {
   const e = [];
   const selected = node ? selectionIn(node) : '';
   const link = target?.closest?.('a[href]');
+  // (1.14.0) Reply first, as in any chat
+  if (serverHas('replies') && itemMap.has(item.id) && canSendTo(current)) e.push({ label: 'Reply', icon: 'reply', action: () => startReply(item) });
   if (selected) e.push({ label: 'Copy', icon: 'copy', hint: 'Ctrl+C', action: () => copyText(selected) });
   if (item.kind === 'text') {
     e.push({ label: selected ? 'Copy whole message' : 'Copy', icon: 'copy', action: () => copyItem(item) });
+    if (serverHas('edit') && itemMap.has(item.id)) e.push({ label: 'Edit', icon: 'edit', action: () => startEdit(item) }); // (1.14.0)
     if (link) {
       e.push({ label: 'Copy link', icon: 'link', action: () => copyText(link.href, 'Link copied') });
       e.push({ label: 'Open link', icon: 'open', action: () => openLink(link.href) });
@@ -858,6 +899,7 @@ function onKeydown(e) {
   if (e.key === 'Escape') {
     if (pick.on) { stopPicking(); return; }
     if (gallery.open) { closeGalleryByUser(); return; }
+    if (compose.reply || compose.edit) { endCompose(); $('#text').focus(); return; } // (1.14.0)
     if (!$('#threadSearch').hidden) { closeThreadSearch(); $('#text').focus(); return; }
     if (!$('#sideSearch').hidden) { closeSearch(); return; }
     if (NARROW.matches && $('#app').classList.contains('in-thread')) { $('#backBtn').click(); return; }

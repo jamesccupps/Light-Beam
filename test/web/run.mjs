@@ -23,6 +23,7 @@ import phoneTests from './tests-phone.mjs';
 import remoteTests from './tests-remote.mjs';
 import familyTests, { registerLink as familyLinkTests } from './tests-family.mjs';
 import galleryTests from './tests-gallery.mjs';
+import chatTests from './tests-chat.mjs';
 import shotTests from './tests-shots.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -35,7 +36,7 @@ const CDP_PORT = 8829;
 
 const tests = [];
 const test = (name, fn, options = {}) => tests.push({ name, fn, ...options });
-for (const register of [coreTests, uploadTests, signinTests, offlineTests, hostTests, featureTests, galleryTests, deviceTests, speedTests, phoneTests, remoteTests, familyTests, familyLinkTests]) register(test);
+for (const register of [coreTests, uploadTests, signinTests, offlineTests, hostTests, featureTests, galleryTests, chatTests, deviceTests, speedTests, phoneTests, remoteTests, familyTests, familyLinkTests]) register(test);
 if (args.includes('--shots')) shotTests(test);
 if (args.includes('--list')) { for (const t of tests) console.log(t.name); removeTmp(); process.exit(0); }
 
