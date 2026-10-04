@@ -13,11 +13,13 @@ import app.beam.android.core.str
 import app.beam.android.notify.Notifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONException
@@ -132,10 +134,13 @@ class Repository(private val app: BeamApp) {
         val api = app.api ?: return
         val request = refreshes.incrementAndGet()
         val seen = devicesEvents
-        val devices = api.devices()
         val start = _state.value
         val since = start.cursor.takeIf { !full && start.loaded && start.info?.lists("items-since") == true }
-        val page = api.itemsPage(since)
+        // (1.12.1) Both at once: one round trip instead of two.
+        val (devices, page) = runBlocking {
+            val items = async(Dispatchers.IO) { api.itemsPage(since) }
+            api.devices() to items.await()
+        }
         var gone: List<String> = emptyList()
         synchronized(refreshing) {
             if (request < landed || app.api !== api) return // a newer answer already landed, or this is another pairing

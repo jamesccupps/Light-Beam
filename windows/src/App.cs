@@ -101,6 +101,9 @@ namespace Beam
         bool dirty, trayDot, quitting, catchingUp, catchUpAgain, devicesLoaded;
         volatile bool uiResting;          // the progress timer is stopped (nothing moving): progress starts it again
         HashSet<string> liveDuringCatchUp; // items that came in live while a catch-up's item list was on its way
+        HashSet<string> goneDuringCatchUp; // ...and the ones deleted meanwhile (the list may still name them)
+        string itemsCursor;                // (1.11.1) where the item list stands: a catch-up asks only what changed since
+        int fullWanted, fullDone;          // a catch-up asks for the whole list while these differ (a `refresh`)
         readonly HashSet<string> receiving = new HashSet<string>();
         readonly HashSet<string> seenLive = new HashSet<string>();
         readonly HashSet<string> acking = new HashSet<string>();
@@ -343,6 +346,7 @@ namespace Beam
             // ...and what it said it can do: features come again with the new stream's hello and /api/info.
             serverFeatures.Clear();
             ServerInfo = null;
+            itemsCursor = null;
             Api = new Api(Cfg);
             SetConn(Conn.Connecting, "Connecting…");
             events = new EventStream(Api, Cfg.HeartbeatSec);
@@ -356,6 +360,7 @@ namespace Beam
         void StopSession()
         {
             session++;
+            itemsCursor = null;
             if (events != null) events.Stop();
             events = null;
             phone.Clear();
@@ -496,18 +501,37 @@ namespace Beam
                     }
                 }
                 liveDuringCatchUp = new HashSet<string>();
+                goneDuringCatchUp = new HashSet<string>();
+                // (1.11.1) Only what changed since the last catch-up (every 30 minutes and after every reconnect: a few
+                // KB instead of the whole list); the whole list the first time, after a `refresh` and whenever the
+                // server can't tell (it restarted meanwhile).
+                int wanted = fullWanted;
+                string since = wanted == fullDone && itemsCursor != null && ServerHas("items-since") ? itemsCursor : null;
                 var devTask = api.Devices();
-                var itemsTask = api.Items();
+                var itemsTask = api.ItemsSince(since);
                 var devices = await devTask;
-                var items = await itemsTask;
+                var page = await itemsTask;
                 if (api != Api || mine != session) return;
                 AdoptId(api.LastYou);
                 bool phoneBefore = PhoneNotificationsOn == true;
                 Devices = devices;
                 devicesLoaded = true;
                 PhoneSettingSeen(phoneBefore);
-                SetItems(items, liveDuringCatchUp);
+                if (page.Delta)
+                {
+                    ApplyDelta(page, goneDuringCatchUp);
+                    if (page.Items.Count > 0 || page.Deleted.Count > 0)
+                        Log.Write("Catch-up: " + page.Items.Count + " changed, " + page.Deleted.Count + " deleted since the last one (" + Items.Count + " items)");
+                }
+                else
+                {
+                    SetItems(page.Items, liveDuringCatchUp, goneDuringCatchUp);
+                    Log.Write("Catch-up: the whole list (" + Items.Count + " items)");
+                }
+                itemsCursor = page.Cursor;
+                fullDone = wanted;
                 liveDuringCatchUp = null;
+                goneDuringCatchUp = null;
                 var forMe = Items.Where(IsForMe).OrderBy(i => i.Ts).ToList();
                 if (!St.Initialized)
                 {
@@ -543,6 +567,7 @@ namespace Beam
             finally
             {
                 liveDuringCatchUp = null;
+                goneDuringCatchUp = null;
                 catchingUp = false;
                 if (catchUpAgain) { catchUpAgain = false; CatchUp(); }
             }
@@ -572,6 +597,7 @@ namespace Beam
                     break;
                 case "delete":
                     if (liveDuringCatchUp != null) liveDuringCatchUp.Remove(Json.Str(d, "id") ?? "");
+                    if (goneDuringCatchUp != null) goneDuringCatchUp.Add(Json.Str(d, "id") ?? "");
                     RemoveItem(Json.Str(d, "id"));
                     break;
                 case "update":
@@ -602,7 +628,8 @@ namespace Beam
                 case "notification-removed":
                     phone.OnRemoved(d);
                     break;
-                case "refresh": // devices were linked: senders/targets changed
+                case "refresh": // devices were linked: senders/targets changed (the whole list again)
+                    fullWanted++;
                     CatchUp();
                     break;
                 case "read":
@@ -1504,10 +1531,22 @@ namespace Beam
 
         // ------------------------------------------------------------------ item store
 
-        // The server's whole list (a catch-up). Items that came in live while it was on its way stay: the list was made
-        // before they existed.
-        void SetItems(List<Item> list, ICollection<string> cameLive)
+        // A delta (1.11.1): the deleted ones go, the changed and new ones replace theirs. What's left equals the whole
+        // list at that moment, plus what came in live since.
+        void ApplyDelta(ItemsPage page, ICollection<string> gone)
         {
+            var replaced = new HashSet<string>(page.Deleted);
+            foreach (var it in page.Items) replaced.Add(it.Id);
+            var list = Items.Where(i => !replaced.Contains(i.Id)).ToList();
+            list.AddRange(page.Items);
+            SetItems(list, null, gone);
+        }
+
+        // The server's whole list (a catch-up). Items that came in live while it was on its way stay: the list was made
+        // before they existed. (1.11.1) Items deleted meanwhile (gone) don't come back with it.
+        void SetItems(List<Item> list, ICollection<string> cameLive, ICollection<string> gone)
+        {
+            if (gone != null && gone.Count > 0) list = list.Where(i => !gone.Contains(i.Id)).ToList();
             var had = new Dictionary<string, Item>(byId);
             var listed = new HashSet<string>(list.Select(i => i.Id));
             if (cameLive != null)

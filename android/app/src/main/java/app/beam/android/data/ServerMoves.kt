@@ -110,7 +110,8 @@ class ServerMoves(private val app: BeamApp) {
         app.connection.restart()
     }
 
-    /** Remembers addresses the server advertises, for [rediscover]. */
+    /** Remembers addresses the server advertises, for [rediscover]. (One at a time: catch-up steps run side by side.) */
+    @Synchronized
     fun learn(vararg addresses: String?) {
         val current = app.prefs.baseUrl
         val add = addresses.mapNotNull { it?.let(Pairing::normalizeServer) }.filter { it != current }
@@ -119,7 +120,8 @@ class ServerMoves(private val app: BeamApp) {
 
     /**
      * After every connect: remember the server's id (apps paired before ids existed) and every address it
-     * is known by (API v3 `urls`), for finding it again after a move. Blocking.
+     * is known by (API v3 `urls`), for finding it again after a move. Blocking. (The signed-in `/api/info`'s
+     * addresses are learned by [BeamApp.refreshServerInfo], which asks it anyway.)
      */
     fun refreshHello() {
         val base = app.prefs.baseUrl ?: return
@@ -127,11 +129,6 @@ class ServerMoves(private val app: BeamApp) {
             val hello = SignInClient(base, app.http).hello()
             if (app.prefs.serverId == null) hello.serverId?.let { app.prefs.serverId = it }
             learn(*hello.urls.toTypedArray())
-        } catch (_: Exception) {
-        }
-        // (1.7.6, audit S-33) and from the signed-in /api/info: a later server leaves them out of /api/hello
-        try {
-            app.api?.info()?.urls?.let { learn(*it.toTypedArray()) }
         } catch (_: Exception) {
         }
     }
