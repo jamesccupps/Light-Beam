@@ -151,7 +151,13 @@ function createLinks(ctx) {
       for await (const piece of files().readFollowing(a, start, { isClosed: () => closed })) {
         if (closed) break;
         sent += piece.length;
-        if (!res.write(piece)) await new Promise(r => { res.once('drain', r); res.once('close', r); });
+        if (!res.write(piece)) {
+          await new Promise(r => {
+            const go = () => { res.off('drain', go); res.off('close', go); r(); };
+            res.once('drain', go);
+            res.once('close', go);
+          });
+        }
       }
     } catch (err) {
       log.info(`A fast link's download of ${a.name} stopped: ${err.message}`);

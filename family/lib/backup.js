@@ -4,8 +4,9 @@
 // - the database as a consistent snapshot, taken while the server runs (SQLite's VACUUM INTO: never a copy of the
 //   live file, which the write-ahead log keeps changing);
 // - control.key and vapid.json (the phones' push subscriptions are tied to that key), and the avatars;
-// - the files people sent and their thumbnails while they add up to at most `filesMB` (above that the database still
-//   lists them, and Beam Family shows them as gone after a restore).
+// - the files people sent and their thumbnails, as many as fit in `filesMB`, the smallest first (1.12.1: all or none
+//   before, so one big video left every photo out); one left out is still listed in the database, and Beam Family
+//   shows it as gone after a restore.
 // Restore: stop Beam Family, then `node family/server.js restore <backup> [--force]` (--force moves the current data
 // aside into a replaced-… folder; nothing is deleted).
 const fs = require('node:fs');
@@ -59,11 +60,17 @@ function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, 
         await fsp.rm(snapshot, { force: true });
         db.raw.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
         const [avatars, files, thumbs] = await Promise.all(['avatars', 'files', 'thumbs'].map(d => filesIn(path.join(dataDir, d))));
-        const sent = files.concat(thumbs).reduce((n, f) => n + f.size, 0);
-        const withFiles = sent <= filesMB * MB;
+        // (the smallest first: previews and photos before the big videos)
+        let room = filesMB * MB;
+        const fits = files.map(f => ({ ...f, sub: 'files' })).concat(thumbs.map(f => ({ ...f, sub: 'thumbs' })))
+          .sort((x, y) => x.size - y.size).filter(f => f.size <= room && ((room -= f.size), true));
+        const kept = new Set(fits.filter(f => f.sub === 'files').map(f => f.name));
+        const out = files.filter(f => !kept.has(f.name));
+        const outBytes = out.reduce((n, f) => n + f.size, 0);
+        const withFiles = !out.length;
         const writer = tar.createWriter(fs.createWriteStream(partial, { mode: 0o600 }));
         try {
-          await writer.addBuffer(MANIFEST, JSON.stringify({ format: 1, family: version, created: new Date().toISOString(), files: withFiles }, null, 2));
+          await writer.addBuffer(MANIFEST, JSON.stringify({ format: 1, family: version, created: new Date().toISOString(), files: withFiles, filesLeftOut: out.length }, null, 2));
           const st = await fsp.stat(snapshot);
           await writer.addFile('family.db', snapshot, st.size, st.mtimeMs);
           for (const key of ['control.key', 'vapid.json']) {
@@ -72,7 +79,7 @@ function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, 
           }
           const add = async (sub, list) => { for (const f of list) if (ENTRY.test(`${sub}/${f.name}`)) await writer.addFile(`${sub}/${f.name}`, f.file, f.size, f.mtime); };
           await add('avatars', avatars);
-          if (withFiles) { await add('files', files); await add('thumbs', thumbs); }
+          for (const f of fits) await add(f.sub, [f]);
           await writer.finish();
         } catch (err) {
           writer.abort(err);
@@ -80,8 +87,9 @@ function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, 
         }
         await fsp.rename(partial, file);
         const bytes = (await fsp.stat(file)).size;
-        last = { at: Date.now(), name, bytes, files: withFiles, why };
-        log.info(`Backed up Beam Family (${why}): ${name}, ${fmt(bytes)}${withFiles ? '' : `, without its ${fmt(sent)} of files`}, in ${backupDir}`);
+        last = { at: Date.now(), name, bytes, files: withFiles, filesLeftOut: out.length, why };
+        const without = out.length ? `, without ${out.length} of its ${files.length} files (${fmt(outBytes)}: backups hold ${fmt(filesMB * MB)} of files, the smallest first; BEAM_FAMILY_BACKUP_FILES_MB)` : '';
+        log.info(`Backed up Beam Family (${why}): ${name}, ${fmt(bytes)}${without}, in ${backupDir}`);
         const old = (await listBackups(backupDir)).slice(keep);
         for (const b of old) await fsp.rm(path.join(backupDir, b.name), { force: true });
         if (old.length) log.info(`Removed ${old.length} old backup${old.length > 1 ? 's' : ''} (the newest ${keep} are kept)`);

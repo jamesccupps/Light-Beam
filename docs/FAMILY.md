@@ -123,15 +123,16 @@ Settings (environment or `.env`):
 | `BEAM_FAMILY_DIRECT_PORTS` | `41700-41799` | (1.9) the UDP ports direct connections use |
 | `BEAM_FAMILY_FFMPEG` | `ffmpeg` on the PATH | (1.10) ffmpeg for videos that play everywhere (ffprobe next to it); `off`: videos play as they are |
 | `BEAM_FAMILY_BACKUP_DIR` | `backups` next to the data folder | **(1.8.1)** where its backups go (another drive or a NAS keeps them safe from a failing disk) |
-| `BEAM_FAMILY_BACKUP_HOURS`, `…_KEEP`, `…_FILES_MB` | `24`, `14`, `1024` | a backup that often (`0`: none), the newest kept, files in it up to that size |
+| `BEAM_FAMILY_BACKUP_HOURS`, `…_KEEP`, `…_FILES_MB` | `24`, `14`, `1024` | a backup that often (`0`: none), the newest kept, files in it up to that size (the smallest first) |
 
 It needs Node 22.13 or later (it uses the built-in `node:sqlite`). No other dependencies besides Beam's own
 (`qrcode`, for invite QR codes).
 
 **Backups (1.8.1).** Every day (`BEAM_FAMILY_BACKUP_HOURS`) Beam Family saves `family-backup-<UTC time>.tar.gz`: its
 database as a snapshot taken while it runs (SQLite's `VACUUM INTO`, never a copy of the live file), `control.key`,
-`vapid.json` (the phones' push subscriptions belong to it), the avatars, and the files and their previews while they
-add up to at most `BEAM_FAMILY_BACKUP_FILES_MB`. The newest 14 are kept. `node family/server.js backup` makes one now.
+`vapid.json` (the phones' push subscriptions belong to it), the avatars, and as many of the files and their previews
+as fit in `BEAM_FAMILY_BACKUP_FILES_MB`, the smallest first (1.12.1: photos before big videos; it was all or none).
+The log says how many were left out. The newest 14 are kept. `node family/server.js backup` makes one now.
 To restore one: `node family/server.js stop`, then `node family/server.js restore <backup> --force` (the data that was
 there moves to a `replaced-…` folder in the data folder, nothing is deleted), then start it again.
 
