@@ -299,6 +299,9 @@ tailscale funnel --bg --https=8443 http://127.0.0.1:8766    # optional: a public
   on your own Wi-Fi it stays inside the house; elsewhere it skips the public link's relay), else over https. Big
   uploads from the app go the same direct way. On Windows, devices on your own network need one firewall rule to
   connect directly (see [docs/FAMILY.md](docs/FAMILY.md)).
+- **Fast downloads, a gallery, several at once** (1.11): big files download from the chat over the same direct
+  connection as fast links, with progress and Stop; each conversation has a gallery of its photos, videos and files;
+  pick several messages or pictures to copy, download or delete them together.
 - **Videos that play everywhere** (1.10): a phone's HDR video can refuse to play on another phone (an iPhone, say). Like
   Google Photos, Beam Family keeps the original and makes a copy every phone and browser plays (H.264, standard
   color), with ffmpeg on your computer (the graphics card's encoder when it has one). The chat plays that copy, and so

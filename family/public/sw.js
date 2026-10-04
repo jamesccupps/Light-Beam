@@ -2,7 +2,7 @@
 // the app's own files kept for a quick start (the server is always asked first when it can be reached).
 
 const CACHE = 'family-v1';
-const SHELL = ['/', '/style.css', '/app.js', '/ui.js', '/api.js', '/store.js', '/text.js', '/emoji.js', '/uploads.js', '/direct.js', '/fastlinks.js', '/notify.js', '/nav.js', '/chat.js', '/sidebar.js', '/pages.js', '/icon.svg', '/manifest.webmanifest'];
+const SHELL = ['/', '/style.css', '/app.js', '/ui.js', '/api.js', '/store.js', '/text.js', '/emoji.js', '/uploads.js', '/direct.js', '/saving.js', '/downloads.js', '/gallery.js', '/fastlinks.js', '/notify.js', '/nav.js', '/chat.js', '/sidebar.js', '/pages.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {}).then(() => self.skipWaiting()));

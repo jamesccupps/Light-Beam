@@ -1159,6 +1159,46 @@ test('F-R (1.10.0): videos that play everywhere: a phone\'s HDR video gets an H.
   } finally { await s.stop(); }
 });
 
+test('F-S (1.11.0): a conversation\'s photos, videos and files for the gallery: newest first, page by page, the other files apart; not a deleted message\'s; only for who sees the conversation', async () => {
+  const s = await start('gallery', 8847);
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const upload = async (who, name, mime) => {
+      const data = Buffer.from(`${name} ${'x'.repeat(100)}`);
+      const id = (await call(s, 'POST', '/api/uploads', who, { name, size: data.length, mime })).json.id;
+      await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(who), 'Content-Type': 'application/octet-stream' }, body: data });
+      return id;
+    };
+    const one = await post(s, f.owner, f.general, 'Beach', { files: [await upload(f.owner, 'beach.jpg', 'image/jpeg'), await upload(f.owner, 'notes.pdf', 'application/pdf')] });
+    const two = await post(s, mary.who, f.general, 'Party', { files: [await upload(mary.who, 'party.mp4', 'video/mp4')] });
+    const three = await post(s, f.owner, f.general, 'Sunset', { files: [await upload(f.owner, 'sunset.png', 'image/png')] });
+    const gone = await post(s, f.owner, f.general, 'Oops', { files: [await upload(f.owner, 'oops.jpg', 'image/jpeg')] });
+    assert.equal((await call(s, 'DELETE', `/api/messages/${gone.id}`, f.owner)).status, 204);
+    // Photos and videos, newest first, with who sent each and when; a page at a time.
+    let r = await call(s, 'GET', `/api/channels/${f.general}/files`, mary.who);
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json.files.map(x => [x.name, x.message, x.author]), [['sunset.png', three.id, f.me.id], ['party.mp4', two.id, mary.id], ['beach.jpg', one.id, f.me.id]]);
+    assert.ok(r.json.files.every(x => x.at > 0 && x.url === `/api/files/${x.id}`));
+    assert.equal(r.json.next, null);
+    r = await call(s, 'GET', `/api/channels/${f.general}/files?limit=2`, mary.who);
+    assert.deepEqual([r.json.files.map(x => x.name), Boolean(r.json.next)], [['sunset.png', 'party.mp4'], true]);
+    r = await call(s, 'GET', `/api/channels/${f.general}/files?limit=2&before=${r.json.next}`, mary.who);
+    assert.deepEqual([r.json.files.map(x => x.name), r.json.next], [['beach.jpg'], null]);
+    assert.equal((await call(s, 'GET', `/api/channels/${f.general}/files?before=nonsense`, mary.who)).status, 400);
+    // The other files.
+    r = await call(s, 'GET', `/api/channels/${f.general}/files?kind=other`, mary.who);
+    assert.deepEqual(r.json.files.map(x => x.name), ['notes.pdf']);
+    // A direct message's files: only for the two in it.
+    const dm = (await call(s, 'POST', '/api/dms', f.owner, { people: [mary.id] })).json.channel.id;
+    await post(s, f.owner, dm, 'Just for you', { files: [await upload(f.owner, 'secret.jpg', 'image/jpeg')] });
+    assert.deepEqual((await call(s, 'GET', `/api/channels/${dm}/files`, mary.who)).json.files.map(x => x.name), ['secret.jpg']);
+    const bob = await join(s, f.owner, 'Bob');
+    assert.equal((await call(s, 'GET', `/api/channels/${dm}/files`, bob.who)).status, 404, 'not for someone else');
+    assert.equal((await call(s, 'GET', `/api/channels/${f.general}/files`)).status, 401, 'not without a sign-in');
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

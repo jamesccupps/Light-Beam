@@ -527,6 +527,128 @@ Robin ${sent}`);
     await iphone.waitFor(`/Safari’s own download/.test(document.querySelector('.link-progress .status')?.textContent || '')`, 5000, 'Safari’s own download on an iPhone');
   }, { timeout: 90000 });
 
+  test('family: a big file in the chat downloads over the direct connection: not over https, a panel with how far it got, the same bytes; a small one as before (1.11.0)', async ctx => {
+    const srv = await familyServer(ctx, { BEAM_FAMILY_STUN: 'local' });
+    const headers = { 'Tailscale-User-Login': OWNER, 'Tailscale-User-Name': 'Robin', 'X-Forwarded-For': '100.64.7.7' };
+    const up = async (name, data) => {
+      const id = (await srv.call(owner, 'POST', '/api/uploads', { name, size: data.length })).json.id;
+      for (let o = 0; o < data.length; o += 16 * 1024 * 1024) {
+        await fetch(`${srv.base}/api/uploads/${id}?offset=${o}`, { method: 'PUT', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: data.subarray(o, o + 16 * 1024 * 1024) });
+      }
+      return id;
+    };
+    const big = Buffer.alloc(24 * 1024 * 1024 + 5);
+    for (let i = 0; i < big.length; i += 4096) big[i] = (i / 4096) % 251;
+    const general = (await srv.call(owner, 'GET', '/api/bootstrap')).json.channels.find(c => c.name === 'general').id;
+    await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body: 'The backup', files: [await up('backup.bin', big)] });
+    await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body: 'A note', files: [await up('note.txt', Buffer.from('a small file'))] });
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    const dir = path.join(srv.data, 'robin-downloads');
+    fs.mkdirSync(dir, { recursive: true });
+    await robin.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelectorAll('.file-card').length === 2`, 10000, 'both files in the chat');
+    // (which files go over https)
+    const gets = [];
+    await robin.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/files/*', requestStage: 'Request' }] });
+    const paused = m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      gets.push(m.params.request.url);
+      robin.send('Fetch.continueRequest', { requestId: m.params.requestId }).catch(() => {});
+    };
+    robin.on(paused);
+    ctx.defer(() => robin.off(paused));
+    await robin.evaluate(`[...document.querySelectorAll('.file-card')].find(a => /backup\\.bin/.test(a.textContent)).click(); true`);
+    await robin.waitFor(`/^Done in .*: it’s in your downloads$/.test(document.querySelector('.downloads .dl-row .dl-status')?.textContent || '')`, 30000, 'downloaded directly, the panel says so');
+    eq(gets.filter(u => /\?download/.test(u)), [], 'not over https');
+    let saved = null;
+    for (let i = 0; i < 50 && !saved; i++) {
+      saved = fs.readdirSync(dir).find(n => n === 'backup.bin' && fs.statSync(path.join(dir, n)).size === big.length);
+      if (!saved) await sleep(200);
+    }
+    assert(saved, `in the downloads: ${fs.readdirSync(dir)}`);
+    assert(fs.readFileSync(path.join(dir, saved)).equals(big), 'the same bytes');
+    // A small file: the browser's own download, as before.
+    await robin.evaluate(`[...document.querySelectorAll('.file-card')].find(a => /note\\.txt/.test(a.textContent)).click(); true`);
+    for (let i = 0; i < 50 && !gets.some(u => /\?download/.test(u)); i++) await sleep(100);
+    eq(gets.filter(u => /\?download/.test(u)).length, 1, 'the small one over https');
+  }, { timeout: 90000 });
+
+  test('family: a conversation’s gallery: its photos newest first, one opens in the viewer, Select picks two and deletes their messages; the files on their own tab (1.11.0)', async ctx => {
+    const srv = await familyServer(ctx);
+    const headers = { 'Tailscale-User-Login': OWNER, 'Tailscale-User-Name': 'Robin', 'X-Forwarded-For': '100.64.7.7' };
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+    const up = async (name, data, mime) => {
+      const id = (await srv.call(owner, 'POST', '/api/uploads', { name, size: data.length, mime })).json.id;
+      await fetch(`${srv.base}/api/uploads/${id}?offset=0`, { method: 'PUT', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: data });
+      return id;
+    };
+    const general = (await srv.call(owner, 'GET', '/api/bootstrap')).json.channels.find(c => c.name === 'general').id;
+    for (const [body, name, data, mime] of [['Dog', 'dog.png', png, 'image/png'], ['Cat', 'cat.png', png, 'image/png'], ['Bird', 'bird.png', png, 'image/png'], ['Plans', 'plans.pdf', Buffer.from('%PDF-1.4 plans'), 'application/pdf']]) {
+      await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body, files: [await up(name, data, mime)] });
+    }
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'in #general');
+    await robin.evaluate(`document.querySelector('button[aria-label="Photos and files"]').click(); true`);
+    await robin.waitFor(`document.querySelectorAll('.panel .gal-tile').length === 3`, 5000, 'three photos in the gallery');
+    eq(await robin.evaluate(`[...document.querySelectorAll('.panel .gal-tile')].map(t => t.title)`), ['bird.png', 'cat.png', 'dog.png'], 'newest first');
+    // One opens in the viewer.
+    await robin.evaluate(`document.querySelector('.panel .gal-tile').click(); true`);
+    await robin.waitFor(`/bird\\.png · 1 of 3/.test(document.querySelector('.viewer .name')?.textContent || '')`, 3000, 'the viewer, with the others');
+    await robin.evaluate(`document.querySelector('.viewer button[aria-label="Close"]').click(); true`);
+    await robin.waitFor(`document.querySelector('.viewer') === null`, 3000, 'closed');
+    // Select two, Delete: asked first, then their messages go.
+    await robin.evaluate(`[...document.querySelectorAll('.panel .gal-tools button')].find(b => /Select/.test(b.textContent)).click(); true`);
+    await robin.evaluate(`(() => { const t = document.querySelectorAll('.panel .gal-tile'); t[0].click(); return true; })()`);
+    await robin.evaluate(`(() => { const t = document.querySelectorAll('.panel .gal-tile'); t[2].click(); return true; })()`);
+    await robin.waitFor(`/^2 selected$/.test(document.querySelector('.panel .gal-tools .grow')?.textContent || '')`, 3000, 'two selected');
+    await robin.evaluate(`[...document.querySelectorAll('.panel .gal-tools button')].find(b => /Delete/.test(b.textContent)).click(); true`);
+    await robin.waitFor(`/Delete these 2 messages/.test(document.querySelector('dialog[open] h2')?.textContent || '')`, 3000, 'asked first');
+    await robin.evaluate(`[...document.querySelectorAll('dialog[open] button')].find(b => b.textContent === 'Delete').click(); true`);
+    await robin.waitFor(`document.querySelectorAll('.panel .gal-tile').length === 1 && document.querySelector('.panel .gal-tile').title === 'cat.png'`, 5000, 'only the cat left');
+    const left = (await srv.call(owner, 'GET', `/api/channels/${general}/messages`)).json.messages.filter(m => m.files?.length).map(m => m.body);
+    eq(left.sort(), ['Cat', 'Plans'], 'their messages are gone');
+    // The files tab.
+    await robin.evaluate(`[...document.querySelectorAll('.panel .gal-tab')].find(b => b.textContent === 'Files').click(); true`);
+    await robin.waitFor(`/plans\\.pdf/.test(document.querySelector('.panel .gal-file')?.textContent || '')`, 3000, 'the file on its own tab');
+  }, { timeout: 90000 });
+
+  test('family: selecting several messages: Select in a message’s menu, taps pick and unpick, Delete asks and deletes them all; Escape stops (1.11.0)', async ctx => {
+    const srv = await familyServer(ctx);
+    const general = (await srv.call(owner, 'GET', '/api/bootstrap')).json.channels.find(c => c.name === 'general').id;
+    for (const body of ['One', 'Two', 'Three', 'Four']) await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body });
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`[...document.querySelectorAll('.msg')].some(m => /Four/.test(m.textContent))`, 10000, 'the messages');
+    const msg = text => `[...document.querySelectorAll('.msg[data-pickable]')].find(m => m.querySelector('.msg-body')?.textContent.trim() === '${text}')`;
+    await robin.evaluate(`${msg('One')}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 })); true`);
+    await robin.waitFor(`[...document.querySelectorAll('.menu button, .sheet button')].some(b => b.textContent.trim() === 'Select')`, 3000, 'Select in its menu');
+    await robin.evaluate(`[...document.querySelectorAll('.menu button, .sheet button')].find(b => b.textContent.trim() === 'Select').click(); true`);
+    await robin.waitFor(`document.querySelector('.main.selecting') !== null && /^1 selected$/.test(document.querySelector('.select-bar .grow')?.textContent || '')`, 3000, 'selecting, one picked');
+    eq(await robin.evaluate(`document.querySelector('.composer').hidden`), true, 'the bar instead of the composer');
+    for (const t of ['Two', 'Three', 'Two', 'Two']) await robin.evaluate(`${msg(t)}.click(); true`); // (Two: picked, unpicked, picked)
+    await robin.waitFor(`/^3 selected$/.test(document.querySelector('.select-bar .grow')?.textContent || '')`, 3000, 'three picked');
+    eq(await robin.evaluate(`[...document.querySelectorAll('.msg.selected')].map(m => m.querySelector('.msg-body').textContent.trim())`), ['One', 'Two', 'Three'], 'the right ones');
+    await robin.evaluate(`[...document.querySelectorAll('.select-bar button')].find(b => /Delete/.test(b.textContent)).click(); true`);
+    await robin.waitFor(`/Delete these 3 messages/.test(document.querySelector('dialog[open] h2')?.textContent || '')`, 3000, 'asked first');
+    await robin.evaluate(`[...document.querySelectorAll('dialog[open] button')].find(b => b.textContent === 'Delete').click(); true`);
+    await robin.waitFor(`document.querySelector('.main.selecting') === null && document.querySelector('.composer').hidden === false`, 5000, 'back to normal');
+    for (let i = 0; i < 30; i++) {
+      const left = (await srv.call(owner, 'GET', `/api/channels/${general}/messages`)).json.messages.map(m => m.body).filter(b => ['One', 'Two', 'Three', 'Four'].includes(b));
+      if (left.length === 1) break;
+      await sleep(100);
+    }
+    eq((await srv.call(owner, 'GET', `/api/channels/${general}/messages`)).json.messages.map(m => m.body).filter(b => ['One', 'Two', 'Three', 'Four'].includes(b)), ['Four'], 'the three are gone');
+    // Escape stops selecting.
+    await robin.evaluate(`${msg('Four')}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 })); true`);
+    await robin.waitFor(`[...document.querySelectorAll('.menu button, .sheet button')].some(b => b.textContent.trim() === 'Select')`, 3000, 'its menu');
+    await robin.evaluate(`[...document.querySelectorAll('.menu button, .sheet button')].find(b => b.textContent.trim() === 'Select').click(); true`);
+    await robin.waitFor(`document.querySelector('.main.selecting') !== null`, 3000, 'selecting');
+    await robin.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    await robin.waitFor(`document.querySelector('.main.selecting') === null`, 3000, 'Escape stopped it');
+  }, { timeout: 60000 });
+
   test('family: a big file goes up over a direct connection: no https pieces (1.9.0)', async ctx => {
     const srv = await familyServer(ctx, { BEAM_FAMILY_STUN: 'local' });
     const robin = await tailscalePage(ctx, OWNER, 'Robin');
