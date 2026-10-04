@@ -59,6 +59,16 @@ namespace Beam
         }
     }
 
+    // (1.11.1) One answer of GET /api/items: the whole list, or (Delta) what changed since a cursor: the changed and
+    // new items, and the ids deleted (some maybe never seen here).
+    class ItemsPage
+    {
+        public List<Item> Items = new List<Item>();
+        public List<string> Deleted = new List<string>();
+        public string Cursor;
+        public bool Delta;
+    }
+
     class Item
     {
         public string Id;
@@ -526,18 +536,24 @@ namespace Beam
             return Json.Bool(d, "passwordSet", password.Length > 0);
         }
 
-        public async Task<List<Item>> Items()
+        // GET /api/items; (1.11.1) with `since` (a cursor from an earlier answer, Beam 1.4 `items-since`) only what
+        // changed since then, unless the server can't tell (then the whole list, Delta false).
+        public async Task<ItemsPage> ItemsSince(string since)
         {
-            var d = Json.Obj(await Call(HttpMethod.Get, "/api/items", null, 60, CancellationToken.None).ConfigureAwait(false));
-            var list = new List<Item>();
+            string path = since == null ? "/api/items" : "/api/items?since=" + Uri.EscapeDataString(since);
+            var d = Json.Obj(await Call(HttpMethod.Get, path, null, 60, CancellationToken.None).ConfigureAwait(false));
+            var page = new ItemsPage();
+            page.Delta = since != null && Json.Bool(d, "delta", false);
+            page.Cursor = Json.Str(d, "cursor");
+            page.Deleted = Json.StrList(d, "deleted");
             var arr = Json.Get(d, "items") as object[];
             if (arr != null)
                 foreach (var o in arr)
                 {
                     var it = Item.Parse(Json.Obj(o));
-                    if (it != null) list.Add(it);
+                    if (it != null) page.Items.Add(it);
                 }
-            return list;
+            return page;
         }
 
         public async Task<Item> GetItem(string id)

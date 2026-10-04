@@ -39,6 +39,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -219,7 +220,9 @@ class BeamApp : Application() {
 
     /**
      * The event stream is open: catch up. Called on the stream's thread before any event is read; the
-     * refresh runs first so events apply to current data.
+     * refresh runs first so events apply to current data. (1.12.1) The rest goes side by side: what doesn't need
+     * the server's info at once, what does as soon as it's in (it was one request after another: ten of them,
+     * about a second on a slow link).
      */
     fun onConnected() {
         try {
@@ -228,26 +231,32 @@ class BeamApp : Application() {
         }
         inbox.catchUp()
         scope.launch(Dispatchers.IO) {
-            moves.refreshHello()
-            refreshServerInfo()
-            readMarkers.push()
-            if (repo.state.value.info?.has("read-markers") == true) {
-                runCatching { api?.meResult() }.getOrNull()?.let { me ->
-                    me.you?.let(repo::adoptYou)
-                    readMarkers.merge(me.read)
-                }
-            }
-            signIns.sync()
             outbox.flush()
             transfers.onConnected()
-            status.onConnected()
-            alerts.catchUp()
-            phone.onConnected()
-            remote.onConnected()
-            backups.onConnected()
+            val info = async { refreshServerInfo() }
+            step { moves.refreshHello() }
+            step { signIns.sync() }
+            info.await()
+            step { status.onConnected() }
+            step {
+                readMarkers.push()
+                if (repo.state.value.info?.has("read-markers") == true) {
+                    runCatching { api?.meResult() }.getOrNull()?.let { me ->
+                        me.you?.let(repo::adoptYou)
+                        readMarkers.merge(me.read)
+                    }
+                }
+            }
+            step { alerts.catchUp() }
+            step { phone.onConnected() }
+            step { remote.onConnected() }
+            step { backups.onConnected() }
         }
         updates.checkSoon()
     }
+
+    /** One step of the catch-up, beside the others: a failure stays its own. */
+    private fun CoroutineScope.step(block: () -> Unit) = launch { runCatching(block) }
 
     /** `/api/info`: what the server can do (API v3 features), its storage and addresses. Blocking. */
     fun refreshServerInfo() {
@@ -257,7 +266,9 @@ class BeamApp : Application() {
             val info = ServerInfo.parse(JSONObject(raw))
             prefs.serverInfoJson = raw
             repo.setInfo(info)
-            moves.learn(info.publicUrl)
+            // (1.7.6, audit S-33) also the addresses only the signed-in /api/info names (a later server leaves them
+            // out of /api/hello)
+            moves.learn(info.publicUrl, *info.urls.toTypedArray())
         } catch (_: Exception) {
         }
     }

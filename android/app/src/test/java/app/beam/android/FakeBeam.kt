@@ -61,6 +61,14 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     @Volatile var itemsDelayMs = 0L
 
     /**
+     * (1.12.1) A slow link: every request but the event stream answers [delayMs] later. [timeline]: each of those
+     * requests ("METHOD /path"), when it came and when it was answered; [streamsOpened]: when each stream opened.
+     */
+    @Volatile var delayMs = 0L
+    val timeline = CopyOnWriteArrayList<Triple<String, Long, Long>>()
+    val streamsOpened = CopyOnWriteArrayList<Long>()
+
+    /**
      * Server 1.5 `phone-notifications`: what the phone shares (key → body), its app icons, and its answers to
      * requests (request id → body). [instance] goes into the stream's `hello` (a new one: the server restarted).
      */
@@ -118,11 +126,15 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     init {
         server.executor = Executors.newCachedThreadPool { r -> Thread(r, "fake-beam").apply { isDaemon = true } }
         server.createContext("/") { ex ->
+            val came = System.currentTimeMillis()
+            val stream = ex.requestURI.path == "/api/events"
             try {
+                if (delayMs > 0 && !stream) Thread.sleep(delayMs)
                 handle(ex)
             } catch (_: IOException) {
             } finally {
                 ex.close()
+                if (!stream) timeline += Triple("${ex.requestMethod} ${ex.requestURI.path}", came, System.currentTimeMillis())
             }
         }
         server.start()
@@ -345,6 +357,7 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
         if ("phone-notifications" in features) hello.put("instance", instance)
         out.write("event: hello\ndata: $hello\n\n".toByteArray())
         out.flush()
+        streamsOpened += System.currentTimeMillis()
         streams += s
         try {
             var last = System.currentTimeMillis()
