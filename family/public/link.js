@@ -13,7 +13,7 @@
 // On an iPhone or iPad, Download is Safari's own download: an iPhone couldn't open what the service worker's stream
 // saved (even a plain H.264 video), and Safari had bugs there (fixed only in iOS 26).
 import { h, fill, formatSize, confirmDialog } from './ui.js';
-import { IOS, openSink, plainSave, receiveDirect, took } from './saving.js';
+import { IOS, openSink, plainSave, receiveResuming, took } from './saving.js';
 
 const token = location.pathname.split('/')[2] || '';
 const card = document.getElementById('card');
@@ -242,12 +242,26 @@ async function fastDownload() {
   }
 }
 
-async function receive(conn, sink, signal) {
-  const r = await receiveDirect(conn.pc, { op: 'get', offset: 0 }, info.size, sink, {
-    signal,
-    onProgress: (got, rate) => setStatus(`Downloading straight from the sender: ${formatSize(got)} of ${formatSize(info.size)} · ${formatSize(rate)}/s`, got / info.size),
-  });
-  setStatus(`Done: ${formatSize(r.got)} in ${took(r.seconds)}, straight from the sender (${formatSize(r.got / Math.max(r.seconds, 0.1))}/s).${sink.kind === 'worker' ? ' It’s in your downloads.' : ''}`, 1);
+// (1.15.1) A connection that drops goes on from where it got to: a new direct connection, else the public link from
+// that byte (it used to stop there).
+async function receive(first, sink, signal) {
+  let conn = first;
+  try {
+    const r = await receiveResuming({
+      pc: conn.pc,
+      connect: async () => { conn?.pc.close(); conn = null; conn = await connect(); return conn.pc; },
+      label: offset => ({ op: 'get', offset }),
+      url: fileUrl,
+      size: info.size,
+      sink,
+      signal,
+      onProgress: (got, rate, direct) => setStatus(`${direct ? 'Downloading straight from the sender' : 'Downloading through the public link'}: ${formatSize(got)} of ${formatSize(info.size)} · ${formatSize(rate)}/s`, got / info.size),
+      onResume: got => setStatus(`The connection dropped: going on from ${formatSize(got)}…`, got / info.size),
+    });
+    setStatus(`Done: ${formatSize(r.got)} in ${took(r.seconds)}${r.https ? '' : ', straight from the sender'} (${formatSize(r.got / Math.max(r.seconds, 0.1))}/s).${sink.kind === 'worker' ? ' It’s in your downloads.' : ''}`, 1);
+  } finally {
+    conn?.pc.close();
+  }
 }
 
 load();

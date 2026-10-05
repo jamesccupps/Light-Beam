@@ -4105,8 +4105,11 @@ function loadUploads() {
   }
 }
 
+// `offset` is where the next chunk goes (it moves when a chunk ends); `received` (1.15.1) is what has reached the
+// server, the chunk still arriving included: a download trailing the upload goes on from it after a blip instead of
+// waiting for the sender.
 function uploadInfo(u) {
-  return { id: u.id, name: u.name, size: u.size, offset: u.offset, chunkSize: CHUNK_SIZE, maxChunkSize: MAX_CHUNK };
+  return { id: u.id, name: u.name, size: u.size, offset: u.offset, received: Math.max(u.offset, u.received || 0), chunkSize: CHUNK_SIZE, maxChunkSize: MAX_CHUNK };
 }
 
 const uploadEvent = (u, offset = u.offset) => ({ id: u.id, name: u.name, size: u.size, offset, mime: u.mime, from: u.from, device: u.device, to: u.to });
@@ -4211,6 +4214,7 @@ async function putChunk(req, res, [id], url) {
       durable,
       onWritten: () => notifyUpload(upload),
       onData: received => {
+        upload.received = start + received;
         upload.lastByte = upload.touched = now();
         if (now() - (upload.lastEvent || 0) >= 1000) {
           upload.lastEvent = now();

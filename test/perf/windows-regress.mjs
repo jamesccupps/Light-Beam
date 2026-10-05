@@ -5,7 +5,7 @@
 // any check fails.
 //
 //   node test/perf/windows-regress.mjs [all|reconnect|restart|revoke|ack|doublepoke|nonbeam401|cancel-after-restart|cancel-live|lane
-//        |pause-full|retry-early|lost-finish|copy-image|copy-files|notify-open] [--exe <Beam.exe>]
+//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open] [--exe <Beam.exe>]
 //
 // Isolated like the other windows-* checks: a scratch server (this checkout's server.js) on 127.0.0.1:8805, the app
 // reaching it through a small TCP proxy on 8855 (so its connections can be dropped), a fake peer, and a copy of Beam.exe
@@ -123,6 +123,25 @@ class Run {
       if (res.status !== 200) throw new Error(`PUT at ${off}: ${res.status} ${JSON.stringify(d)}`);
       off = d.offset;
     }
+  }
+
+  // One PUT sent at a steady pace (bytes a second): the upload's `offset` moves only when it ends.
+  slowPut(id, data, from, to, perSecond) {
+    return new Promise((resolve, reject) => {
+      const req = http.request(`${this.base}/api/uploads/${id}?offset=${from}`, { method: 'PUT', agent: false,
+        headers: this.peerHeaders({ 'Content-Type': 'application/octet-stream', 'Content-Length': to - from }) },
+      res => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+      req.on('error', reject);
+      let off = from;
+      const next = () => {
+        if (off >= to) return req.end();
+        const n = Math.min(256 * 1024, to - off);
+        req.write(data.subarray(off, off + n));
+        off += n;
+        setTimeout(next, (1000 * n) / perSecond);
+      };
+      next();
+    });
   }
 
   async startBig(size, first) {
@@ -411,6 +430,26 @@ async function pauseFull(r) {
   r.check(r.count(/Couldn't save/, from) === 0, `no "Couldn't save"`);
 }
 
+// 1.15.1 ("the rest" #2): a blip in the middle of the sender's chunk while the file is saved as it arrives. The app
+// goes on at once: the upload's `received` is past what it has (its `offset` stays at the chunk's start, so the app
+// used to wait 15 s for a sender that was still sending).
+async function blipMidChunk(r) {
+  await r.setup();
+  const { id, data } = await r.startBig(64 * MB, 0);
+  const sending = r.slowPut(id, data, 0, 48 * MB, 4 * MB); // one chunk of 12 s
+  r.check(!!(await r.waitLog(new RegExp(`Saving ${id} while`), 0, 15000)), 'saving starts while the file arrives');
+  await r.waitFor(() => r.partSize() >= 8 * MB, 30000);
+  const from = r.logLines().length;
+  const had = r.partSize();
+  r.dropConnections(); // the app's only: the sender goes straight to the server
+  r.check(await r.waitFor(() => r.partSize() >= had + 4 * MB, 6000), `it goes on within seconds (had ${had}, now ${r.partSize()})`);
+  r.check(r.count(new RegExp(`down:${id}: waiting for the sender`), from) === 0, 'without waiting for the sender');
+  r.check((await sending) === 200, 'the chunk arrived whole');
+  await r.finishRest(id, data);
+  r.check(await r.waitFor(() => r.saved(data), 30000), 'the file is saved complete when the sender finishes');
+  r.check(await r.waitFor(() => r.delivered(id), 15000), 'and reported delivered');
+}
+
 // Re-review R2: Retry on a failed early download, then a catch-up before the sender finishes. The retry must keep
 // trailing its sender: a catch-up must not take it for a deleted item (cancel, mark handled, acknowledge unsaved).
 // The first try fails for a local reason (its partial file's path is taken by a folder), as "Couldn't save" would.
@@ -663,7 +702,7 @@ async function backups(r) {
 }
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
-  'pause-full': pauseFull, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups };
+  'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

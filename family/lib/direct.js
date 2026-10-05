@@ -155,7 +155,12 @@ function createDirect(ctx) {
   async function sendFile(peer, dc, req) {
     const a = peer.link ? ctx.links.attachmentOf(peer.link, req.file) : ctx.files.visibleAttachment(peer.user, String(req.file || ''));
     let pos = Math.max(0, Math.floor(Number(req.offset) || 0));
-    if (peer.link && !pos) ctx.links.mayStart(peer.link); // (1.15.0) a link with no downloads left starts none
+    // (1.15.0) a link with no downloads left starts none. (1.15.1) A new one counts as it starts, as over https; it
+    // counted once sent whole from byte 0, so one picked up again after a drop (from where it got to) never counted.
+    if (peer.link && !pos) {
+      ctx.links.mayStart(peer.link);
+      ctx.links.counted(peer.link);
+    }
     if (pos > a.size) throw httpError(416, 'That’s past the end of the file');
     let drained = null;
     dc.setBufferedAmountLowThreshold(LOW);
@@ -178,7 +183,6 @@ function createDirect(ctx) {
       return;
     }
     dc.sendMessage(JSON.stringify({ done: true, size: a.size })); // (the other end closes the channel once it has it all)
-    if (!pos) ctx.links?.counted(peer.link);
     if (sent >= LOGGED) log.info(`${who} downloaded ${a.name} directly ${pathOf(peer.pc)}: ${howItWent(sent, started, peer.pc)}`);
   }
 

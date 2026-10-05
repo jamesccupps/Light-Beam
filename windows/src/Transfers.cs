@@ -735,7 +735,9 @@ namespace Beam
             try
             {
                 var u = Json.Obj(await api().Call(HttpMethod.Get, "/api/uploads/" + job.Item.Id, null, 20, ct).ConfigureAwait(false));
-                offset = Json.Long(u, "offset", -1);
+                // What has reached the server, the sender's chunk in progress included (Beam 1.15.1+). `offset` stays
+                // at that chunk's start until it ends, so a blip mid-chunk used to park the download for 15 s.
+                offset = Json.Long(u, "received", Json.Long(u, "offset", -1));
             }
             catch (ApiException ex)
             {

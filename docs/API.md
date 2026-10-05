@@ -593,7 +593,9 @@ raw file bytes (not multipart) → `201` + Item.
    - → `200 { "offset": <new offset>, "done": false }`, then keep going
    - → `201 { "done": true, "item": Item }` after the last byte
    - A zero-byte file completes on a single `PUT ?offset=0` with an empty body.
-3. After a network error, `GET /api/uploads/{id}` → `{ "id", "name", "size", "offset" }` and resume from `offset`.
+3. After a network error, `GET /api/uploads/{id}` → `{ "id", "name", "size", "offset", "received" }` and resume from
+   `offset`. **(1.15.1)** `received` is what has reached the server, a chunk still arriving included (`offset` moves
+   only when a chunk ends): for downloads of a file still arriving, below.
    - A `PUT` with the wrong offset returns `409 { "error", "offset": <actual> }`. Resume from that.
    - **(1.4)** The server fsyncs an upload every 64 MB or 4 s, when a `PUT` breaks off and before it finishes, and
      after a crash or power cut it goes on from the last fsynced point (never from bytes that may not have reached
@@ -641,6 +643,9 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 - The server reads what arrived from its disk, so a slow download never slows the upload.
 - Apps that save received files automatically may start on the first `upload` event for them (the Windows app does for
   files of 32 MB or more).
+- **(1.15.1)** After a broken download of such a file, `GET /api/uploads/{id}` says how far the upload has got:
+  `received` past what you have means the sender is still sending, so go on at once; otherwise wait for the next
+  `upload` event (in background mode only the first one is urgent, so also look again now and then).
 
 ### Live events
 `GET /api/events?device=<id>&name=<uri-encoded name>&platform=<platform>` is a Server-Sent Events stream:
