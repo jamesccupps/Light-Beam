@@ -3155,7 +3155,9 @@ test('1.5 Notification limits: long fields are cut, bad ones refused, 16 KB bodi
     }
     const all = (await s.req('GET', '/api/phone/notifications', { headers: desk })).json.notifications;
     assert.equal(all.length, 100);
-    assert.equal(all.at(-1).id, 'ntphone0001/cap5', 'the five oldest were dropped');
+    // (which ones, not their order: two posted in the same millisecond sort either way; CI on Ubuntu, 2026-10-05)
+    const kept = new Set(all.map(n => n.id));
+    assert.ok([0, 1, 2, 3, 4].every(i => !kept.has('ntphone0001/cap' + i)) && [5, 6, 104].every(i => kept.has('ntphone0001/cap' + i)), 'the five oldest were dropped');
     await waitFor(() => ev.events.filter(e => e.event === 'notification-removed' && /\/cap[0-4]$/.test(e.data.id)).length === 5, 2000);
     ev.close();
   } finally { await s.stop(); }
