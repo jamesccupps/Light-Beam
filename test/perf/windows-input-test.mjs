@@ -7,8 +7,9 @@
 // no SendInput in the binary; checked below) into a temp folder and runs it. The test records INPUT structures and
 // asserts them exactly: several monitors with mixed DPI, scancodes, extended keys, AltGr, Unicode text, release-all,
 // rate caps, plus the session policy and peer checks, signed updates (1.7.3), the remote-control banner's place
-// (RcBannerPlace.cs, 1.7.4) and fitting the PC to the viewer (RcDisplay.cs, 1.8: /define:NO_REAL_DISPLAY leaves out
-// everything that could change a real screen; checked below too). Exits 1 if anything fails.
+// (RcBannerPlace.cs, 1.7.4), fitting the PC to the viewer (RcDisplay.cs, 1.8: /define:NO_REAL_DISPLAY leaves out
+// everything that could change a real screen; checked below too) and keyboard and mouse across PCs (KvmGeometry.cs,
+// 1.12). Exits 1 if anything fails.
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -43,7 +44,7 @@ try {
   const build = spawnSync(csc, ['/nologo', '/target:exe', '/platform:anycpu', '/langversion:5', '/codepage:65001', '/define:NO_REAL_INPUT;NO_REAL_DISPLAY',
     `/out:${exe}`, '/r:System.dll', '/r:System.Core.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll',
     path.join(HERE, 'windows-input-test.cs'), path.join(ROOT, 'windows', 'src', 'InputInjector.cs'), path.join(ROOT, 'windows', 'src', 'RcPolicy.cs'),
-    path.join(ROOT, 'windows', 'src', 'UpdateSignature.cs'), path.join(ROOT, 'windows', 'src', 'RcBannerPlace.cs'), path.join(ROOT, 'windows', 'src', 'RcDisplay.cs'), vectors],
+    path.join(ROOT, 'windows', 'src', 'UpdateSignature.cs'), path.join(ROOT, 'windows', 'src', 'RcBannerPlace.cs'), path.join(ROOT, 'windows', 'src', 'RcDisplay.cs'), path.join(ROOT, 'windows', 'src', 'KvmGeometry.cs'), vectors],
   { encoding: 'utf8', windowsHide: true });
   if (build.status !== 0) throw new Error('Build failed:\n' + build.stdout + build.stderr);
   // The binary must not even contain SendInput (nor the backend that calls it), nor anything that changes a screen.

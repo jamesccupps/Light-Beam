@@ -34,6 +34,9 @@ namespace Beam
         public bool PhonePopupText = true;     // phone notification balloons show the message (off: app and count only)
         public bool AllowRemoteControl;        // Beam 1.6 "Allow remote control": off by default, turned on only at this PC
         public string RcBannerSpot;            // Beam 1.7.4: where the remote-control banner was put ("screen|fx|fy", RcBannerPlace)
+        public bool RcKvmBannerHidden;         // Beam 1.12: a kvm session's banner folded into the tray (chosen at this PC)
+        public bool KvmOn;                     // Beam 1.12: this PC's keyboard and mouse go over to the PCs beside it (KvmController)
+        public List<string> KvmLeft = new List<string>(); // ...the PCs to its left, nearest first (device ids)
         public string RcDisplayRestore;        // Beam 1.8: a screen fitted to a viewer, as it was ("device|w|h|hz|percent", RcDisplay)
         public string InstallId;               // Beam 1.8.1: this install's own id (its settings backups on the server go by it)
         public bool RestoreChecked;            // ...and an earlier install's backup was looked for (offered once)
@@ -198,6 +201,9 @@ namespace Beam
                 c.PhonePopupText = Json.Bool(d, "phonePopupText", true);
                 c.AllowRemoteControl = Json.Bool(d, "allowRemoteControl", false);
                 c.RcBannerSpot = Json.Str(d, "rcBannerSpot");
+                c.RcKvmBannerHidden = Json.Bool(d, "rcKvmBannerHidden", false);
+                c.KvmOn = Json.Bool(d, "kvmOn", false);
+                c.KvmLeft = Json.StrList(d, "kvmLeft").Where(ValidId).Distinct().Take(KvmController.MaxPcs).ToList();
                 c.RcDisplayRestore = Json.Str(d, "rcDisplayRestore");
                 c.InstallId = Json.Str(d, "installId");
                 c.RestoreChecked = Json.Bool(d, "restoreChecked", false);
@@ -340,6 +346,9 @@ namespace Beam
                 d["phonePopupText"] = PhonePopupText;
                 d["allowRemoteControl"] = AllowRemoteControl;
                 if (!string.IsNullOrEmpty(RcBannerSpot)) d["rcBannerSpot"] = RcBannerSpot; else d.Remove("rcBannerSpot");
+                if (RcKvmBannerHidden) d["rcKvmBannerHidden"] = true; else d.Remove("rcKvmBannerHidden");
+                d["kvmOn"] = KvmOn;
+                d["kvmLeft"] = KvmLeft.ToArray();
                 if (!string.IsNullOrEmpty(RcDisplayRestore)) d["rcDisplayRestore"] = RcDisplayRestore; else d.Remove("rcDisplayRestore");
                 d["installId"] = InstallId;
                 d["restoreChecked"] = RestoreChecked;

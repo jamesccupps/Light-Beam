@@ -78,6 +78,7 @@ namespace Beam
         readonly StatusReporter status;
         readonly Ringer ringer;
         public RemoteControl Rc;          // Beam 1.6: this PC being controlled from another device
+        public KvmController Kvm;         // Beam 1.12: this PC's keyboard and mouse working the PCs beside it
         public SettingsBackups Backups;   // Beam 1.8.1: this PC's settings kept on the server too, and put back
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
         FamilyWindow family;                     // (1.10) Beam Family in a window of its own
@@ -154,6 +155,7 @@ namespace Beam
             status = new StatusReporter(this);
             ringer = new Ringer(this);
             Rc = new RemoteControl(this);
+            Kvm = new KvmController(this);
             Backups = new SettingsBackups(this);
 
             up = new Uploader(() => Api, j => { var s = j.State; Post(() => OnUploadChanged(j, s)); }, j => { });
@@ -280,7 +282,7 @@ namespace Beam
             foreach (var kv in Summaries()) unread += kv.Value.Unread;
             bool dot = unread > 0;
             if (dot != trayDot) SetTrayIcon(dot);
-            string rc = Rc != null ? Rc.Status : null;
+            string rc = (Rc != null ? Rc.Status : null) ?? (Kvm != null ? Kvm.Status : null);
             string text = rc != null ? "Beam – " + rc : "Beam – " + ConnText + (unread > 0 ? " · " + unread + " unread" : "");
             tray.Text = text.Length > 63 ? text.Substring(0, 63) : text;
         }
@@ -342,6 +344,7 @@ namespace Beam
         {
             if (events != null) events.Stop();
             if (Rc != null) Rc.Reset("this PC's sign-in or server changed");
+            if (Kvm != null) Kvm.Stop("this PC's sign-in or server changed"); // (the new stream's hello starts it again)
             phone.Clear(); // a new sign-in or server: what the old one sent goes
             // ...and what it said it can do: features come again with the new stream's hello and /api/info.
             serverFeatures.Clear();
@@ -373,6 +376,7 @@ namespace Beam
             updateTimer.Stop();
             foreach (var f in approvals.Values.ToList()) f.Close();
             Rc.Reset("signed out");
+            Kvm.Stop("signed out");
             CloseRemoteViews();
             CloseFamily();
             foreach (var j in Uploads.ToList()) up.Cancel(j);
@@ -656,6 +660,7 @@ namespace Beam
                     ServerApi = (int)Json.Long(d, "api", ServerApi);
                     serverFeatures.Clear();
                     foreach (var f in Json.StrList(d, "features")) serverFeatures.Add(f);
+                    Kvm.Apply("Beam's stream"); // (1.12: on with a server that knows kvm sessions)
                     if (events != null) events.SetStream(Json.Str(d, "stream"), (int)Json.Long(d, "ping", 0));
                     modeSent = Json.Str(d, "mode") ?? "foreground"; // a new stream: the mode it was opened in
                     if (liveViews > 0) PokeMode("foreground"); // a new stream while the menu or picker is open
@@ -699,7 +704,9 @@ namespace Beam
                 case "rc-signal":
                 case "rc-end":
                 case "rc-disable":
-                    Rc.OnEvent(name, d);
+                    // (1.12: this PC's own kvm sessions with the PCs beside it, as the viewer, go to Kvm)
+                    if ((name == "rc-signal" || name == "rc-end") && Kvm.Owns(Json.Str(d, "id"))) Kvm.OnEvent(name, d);
+                    else Rc.OnEvent(name, d);
                     break;
             }
         }
@@ -1112,6 +1119,9 @@ namespace Beam
             Log.Write("Switched to a device token for this PC");
             if (main != null) main.IdentityChanged();
             foreach (var w in remoteViews.Values) w.CookieAgain();
+            // (1.12) The stream again with the new sign-in, as after a renewal: a remote control viewer's events go only
+            // to the streams of the sign-in that started its session (this PC's keyboard-and-mouse links are one).
+            if (events != null) events.Kick();
         }
 
         // Beam 1.6: a sign-in that config.json once kept in clear (before 1.6, or the installer's) is replaced, once, after
@@ -1457,9 +1467,10 @@ namespace Beam
         {
             var u = pendingUpdate;
             if (u == null || updating || quitting || Api == null) return;
-            if (TransfersBusy() || Rc.Active || remoteViews.Count > 0)
+            if (TransfersBusy() || Rc.HoldsUpdate || Kvm.Away || remoteViews.Count > 0)
             {
-                Log.Write("Update " + u.Version + " waits until " + (Rc.Active ? "the remote control session ends" : remoteViews.Count > 0 ? "the remote control windows close" : "transfers finish"));
+                Log.Write("Update " + u.Version + " waits until " + (Rc.HoldsUpdate ? (Rc.Kvm ? "the keyboard and mouse of " + Rc.ViewerName + " go back to it" : "the remote control session ends")
+                    : Kvm.Away ? "this PC's keyboard and mouse are back from the PC beside it" : remoteViews.Count > 0 ? "the remote control windows close" : "transfers finish"));
                 SetUpdateState("waiting", u.Version, null);
                 updateRetryTimer.Interval = 30000;
                 updateRetryTimer.Start();
@@ -1481,7 +1492,7 @@ namespace Beam
             {
                 Log.Write("Downloading update " + u.Version);
                 await Updater.Download(Api, u, exe, CancellationToken.None);
-                if (TransfersBusy() || Rc.Active || remoteViews.Count > 0) { updating = false; SetUpdateState("waiting", u.Version, null); updateRetryTimer.Interval = 30000; updateRetryTimer.Start(); return; }
+                if (TransfersBusy() || Rc.HoldsUpdate || Kvm.Away || remoteViews.Count > 0) { updating = false; SetUpdateState("waiting", u.Version, null); updateRetryTimer.Interval = 30000; updateRetryTimer.Start(); return; }
                 string error;
                 if (!Updater.Swap(exe, out error)) throw new IOException("the new version couldn't be put in place (" + error + ")");
                 Log.Write("Update " + u.Version + " verified and in place; handing over");
@@ -2688,6 +2699,7 @@ namespace Beam
             if (o.TestClickBalloon && Cfg.CustomPath) notifier.ClickLastForTest();
             if (o.TestEventName != null && Cfg.CustomPath) OnEvent(o.TestEventName, o.TestEventData ?? "{}");
             if (o.TestRc != null && Cfg.CustomPath) Rc.TestCommand(o.TestRc);
+            if (o.TestKvm != null && Cfg.CustomPath) Kvm.TestCommand(o.TestKvm);
             if (o.TestBackups != null && Cfg.CustomPath) Backups.TestCommand(o.TestBackups);
             if (o.TestBridge != null && Cfg.CustomPath) TestBridge(o.TestBridge);
             if (o.TestOpenRemote != null && Cfg.CustomPath) { string err = OpenRemote(o.TestOpenRemote); if (err != null) Log.Write("Remote control: (test) " + err); }
@@ -3067,7 +3079,14 @@ namespace Beam
                 allow.Tag = "rc";
                 menu.Items.Add(allow);
                 if (Cfg.AllowRemoteControl) menu.Items.Add("Remote control devices…", null, (s, e) => ShowRcAllow(null));
-                if (Rc.Active) menu.Items.Add("Stop remote control (" + Rc.ViewerName + ")", null, (s, e) => Rc.Stop("the tray menu"));
+                if (Rc.Active && Rc.Kvm)
+                {
+                    // (1.12) Another PC's keyboard and mouse can reach this one: back to it, the banner, Stop.
+                    if (Rc.KvmHere) menu.Items.Add("Back to " + Rc.ViewerName, null, (s, e) => Rc.KvmBack("the tray menu"));
+                    menu.Items.Add(Rc.KvmBannerShown ? "Hide the banner" : "Show the banner", null, (s, e) => Rc.KvmBanner(!Rc.KvmBannerShown, "the tray menu"));
+                    menu.Items.Add("Stop " + Rc.ViewerName + "'s keyboard and mouse", null, (s, e) => Rc.Stop("the tray menu"));
+                }
+                else if (Rc.Active) menu.Items.Add("Stop remote control (" + Rc.ViewerName + ")", null, (s, e) => Rc.Stop("the tray menu"));
                 if (Cfg.AllowRemoteControl && RemoteControl.InRemoteDesktop)
                 {
                     // Beam 1.7.5: hand a Remote Desktop session back to this PC's own screen, for Beam's control.
@@ -3075,6 +3094,21 @@ namespace Beam
                     back.ToolTipText = "Moves this session onto the PC's own screen so Beam's remote control can take over. Windows asks for administrator rights; Remote Desktop closes.";
                     menu.Items.Add(back);
                 }
+            }
+            if (ServerHas("kvm"))
+            {
+                // (1.12) This PC's keyboard and mouse on the PCs beside it: on or off, how each one is, which ones.
+                var kvm = new ToolStripMenuItem("Keyboard and mouse across PCs");
+                kvm.Tag = "kvm";
+                var kvmOn = new ToolStripMenuItem("On", null, (s, e) => Kvm.Toggle("tray menu"));
+                kvmOn.Checked = Cfg.KvmOn;
+                kvm.DropDownItems.Add(kvmOn);
+                var states = Kvm.LinkStates();
+                if (states.Count > 0) kvm.DropDownItems.Add(new ToolStripSeparator());
+                foreach (var kv in states) kvm.DropDownItems.Add(new ToolStripMenuItem(kv.Key + " · " + kv.Value) { Enabled = false });
+                kvm.DropDownItems.Add(new ToolStripSeparator());
+                kvm.DropDownItems.Add(new ToolStripMenuItem("Choose the PCs…", null, (s, e) => Kvm.ShowSettings()));
+                menu.Items.Add(kvm);
             }
             var phoneOn = PhoneNotificationsOn;
             if (phoneOn.HasValue)
@@ -3118,6 +3152,7 @@ namespace Beam
             {
                 if (main != null && !main.IsDisposed) main.SaveBounds();
                 ringer.Stop("quitting");
+                Kvm.Quit();
                 Rc.Quit();
                 foreach (var w in remoteViews.Values.ToList()) { try { w.CloseForGood(); } catch { } }
                 status.Stop();

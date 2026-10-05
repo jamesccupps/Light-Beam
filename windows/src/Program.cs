@@ -45,6 +45,7 @@ namespace Beam
         public string TestEventName, TestEventData; // tests: an event as if it came on the stream
         public string TestRc;        // tests: remote control ("allow[:ids]", "off", "devices:ids", "repin:id", "lock:on|off", "kill", "stop", "probe")
         public string TestBackups;   // tests (1.8.1): settings backups ("check", "send", "choices", "answer:restore|skip", "state")
+        public string TestKvm;       // tests (1.12): keyboard and mouse across PCs ("on:ids", "off", "edge[:h]", "move:dx,dy", "btn:b:down|up", "wheel:d", "key:vk,scan,ext:down|up", "where")
         public string TestBridge;    // tests: a host bridge message as if the chat page sent it (the reply goes to beam.log)
         public string TestOpenRemote; // tests: the viewer window for that device, as the page's "Control" opens it
         public string TestFamily;    // tests (1.10): the Family window "minimize", "restore" or "close", as the user would
@@ -93,6 +94,7 @@ namespace Beam
                 else if (lower == "--test-event" && i + 2 < args.Length) { o.TestEventName = args[++i]; o.TestEventData = args[++i]; }
                 else if (lower == "--test-rc" && more) o.TestRc = args[++i];
                 else if (lower == "--test-backups" && more) o.TestBackups = args[++i];
+                else if (lower == "--test-kvm" && more) o.TestKvm = args[++i];
                 else if (lower == "--test-bridge" && more) o.TestBridge = args[++i];
                 else if (lower == "--test-open-remote" && more) o.TestOpenRemote = args[++i];
                 else if (lower == "--test-family" && more) o.TestFamily = args[++i];
@@ -151,6 +153,7 @@ namespace Beam
             if (TestEventName != null) { list.Add("--test-event"); list.Add(TestEventName); list.Add(TestEventData ?? "{}"); }
             if (TestRc != null) { list.Add("--test-rc"); list.Add(TestRc); }
             if (TestBackups != null) { list.Add("--test-backups"); list.Add(TestBackups); }
+            if (TestKvm != null) { list.Add("--test-kvm"); list.Add(TestKvm); }
             if (TestBridge != null) { list.Add("--test-bridge"); list.Add(TestBridge); }
             if (TestOpenRemote != null) { list.Add("--test-open-remote"); list.Add(TestOpenRemote); }
             if (TestFamily != null) { list.Add("--test-family"); list.Add(TestFamily); }
@@ -261,7 +264,7 @@ namespace Beam
             if (!opts.Send && !opts.Quit && !opts.Background && !opts.Settings && !opts.Approve && !opts.AddDevice
                 && !opts.PickClipboard && !opts.Screenshot && !opts.CopyLatest && !opts.Hide && !opts.TestPoke && opts.TestMode == null && opts.Updated == null
                 && opts.TestTransfer == null && opts.TestPhone == null && !opts.TestClickBalloon && opts.TestEventName == null
-                && opts.TestRc == null && opts.TestBackups == null && opts.TestBridge == null && opts.TestOpenRemote == null) opts.Show = true;
+                && opts.TestRc == null && opts.TestBackups == null && opts.TestKvm == null && opts.TestBridge == null && opts.TestOpenRemote == null) opts.Show = true;
             for (int i = 0; i < 6; i++)
             {
                 if (IpcServer.Send(PipeName(), opts.ToArgs(), 1000)) return 0;
