@@ -25,6 +25,8 @@
     <string name="password_hint">Sign-in password (optional)</string>
     <string name="device_name_hint">This device\'s name</string>
     <string name="pair_button">Sign in</string>
+    <string name="pair_link_confirm_title">Sign in to this Beam?</string>
+    <string name="pair_link_confirm">This link signs this phone in to the Beam server at %1$s. Continue only if that\'s your own Beam.</string>
     <string name="pair_scan_prompt">Point the camera at the pairing QR code</string>
     <string name="paste">Paste</string>
     <string name="pair_enter_address">Enter your Beam server\'s address, or paste a pairing link.</string>

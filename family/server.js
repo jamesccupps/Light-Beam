@@ -98,9 +98,12 @@ const log = createLogger();
 // ---------------------------------------------------------------- the server
 
 function serve() {
-  for (const d of [DATA_DIR, ...Object.values(DIR)]) fs.mkdirSync(d, { recursive: true });
+  // (audit S-5) The data folder made private before the rest is made in it (they inherit that), each 0700 as Beam's.
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(DIR.logs, { recursive: true, mode: 0o700 });
   log.setFile(path.join(DIR.logs, 'family.log'));
-  makePrivate(DATA_DIR, { log, env, label: 'family data folder' });
+  makePrivate(DATA_DIR, { log, env, label: 'family data folder', child: DIR.logs });
+  for (const d of Object.values(DIR)) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
   if (fs.existsSync(FILE.stop)) fs.rmSync(FILE.stop, { force: true });
   let db;
   try {

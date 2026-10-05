@@ -161,12 +161,15 @@ namespace Beam
             }
         }
 
+        const int MaxEventChars = 1 << 20; // the server's own events stay far below this
+
         async Task Read(Stream stream, CancellationToken token)
         {
             using (var reader = new StreamReader(stream, new UTF8Encoding(false)))
             {
                 string evName = null;
                 var data = new StringBuilder();
+                bool tooBig = false; // (audit X-4) an event over MaxEventChars is dropped, not collected without a limit
                 while (!token.IsCancellationRequested)
                 {
                     string line = await reader.ReadLineAsync().ConfigureAwait(false);
@@ -174,13 +177,15 @@ namespace Beam
                     lock (sync) sinceActivity.Restart();
                     if (line.Length == 0)
                     {
-                        if (data.Length > 0 && Received != null)
+                        if (tooBig) Log.Write("Events: dropped a \"" + (evName ?? "message") + "\" event over " + (MaxEventChars >> 20) + " MB");
+                        else if (data.Length > 0 && Received != null)
                         {
                             try { Received(evName ?? "message", data.ToString()); }
                             catch (Exception ex) { Log.Error("Events: handler", ex); }
                         }
                         evName = null;
                         data.Clear();
+                        tooBig = false;
                         continue;
                     }
                     if (line[0] == ':') continue;
@@ -189,8 +194,9 @@ namespace Beam
                     string value = colon < 0 ? "" : line.Substring(colon + 1);
                     if (value.StartsWith(" ")) value = value.Substring(1);
                     if (field == "event") evName = value;
-                    else if (field == "data")
+                    else if (field == "data" && !tooBig)
                     {
+                        if (data.Length + value.Length + 1 > MaxEventChars) { tooBig = true; data.Clear(); continue; }
                         if (data.Length > 0) data.Append('\n');
                         data.Append(value);
                     }

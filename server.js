@@ -258,6 +258,7 @@ function httpError(status, message, extra) {
 }
 
 function parseCookies(req) {
+  if (req.beamCookies) return req.beamCookies; // (audit P-3) once per request
   const out = {};
   for (const part of String(req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
@@ -265,7 +266,7 @@ function parseCookies(req) {
     const value = part.slice(i + 1).trim();
     try { out[part.slice(0, i).trim()] = decodeURIComponent(value); } catch { out[part.slice(0, i).trim()] = value; }
   }
-  return out;
+  return (req.beamCookies = out);
 }
 
 async function rmQuiet(file) {
@@ -588,7 +589,7 @@ function ensureDataDirs() {
 // Groups beyond this account, by their SDDL abbreviation: Everyone, Authenticated Users, Users, Interactive,
 // Anonymous, Guests.
 // The data folder only this account can open (lib/private-dir.js).
-const makeDataPrivate = () => makePrivate(DATA_DIR, { log, env });
+const makeDataPrivate = () => makePrivate(DATA_DIR, { log, env, child: DIR.files }); // (audit S-5: a subfolder checked too)
 
 function openData() {
   ensureDataDirs();
@@ -1313,6 +1314,7 @@ function touchDevice(req, url) {
 }
 
 // A browser and a Beam app on the same machine are one device: the browser is merged into the app.
+const unmergedNoted = new Set(); // (audit S-2) "old>new" device pairs already logged as not a reinstall
 function linkSameMachine(device) {
   if (!device.machine || device.temporary) return device; // a borrowed browser stays separate and temporary
   const recent = d => now() - d.lastSeen < 14 * 86400e3;
@@ -1330,11 +1332,17 @@ function linkSameMachine(device) {
     // A reinstalled (or re-paired) app comes back with a new id: an older app of the same kind on this machine
     // whose app isn't connected any more is that same device, so its history moves to the new id. A browser tab
     // still open as the old app doesn't count, and neither does an app of another user account on this machine.
+    // (audit S-2) Only when both apps say which account they're for (X-Beam-Profile) and it's the same one: an app that
+    // never said could be another Windows account's. Such a near miss is logged rather than merged.
     if (GUI_PLATFORMS.has(device.platform)) {
-      const otherAccount = d => Boolean(d.profile && device.profile && d.profile !== device.profile);
-      const replaced = Object.values(devices).filter(d =>
-        sameMachine(d) && d.platform === device.platform && !appOnline(d.id) && d.firstSeen < device.firstSeen && !otherAccount(d));
-      for (const old of replaced) mergeDevice(old.id, device.id, 'reinstalled app');
+      const looksReplaced = d => sameMachine(d) && d.platform === device.platform && !appOnline(d.id) && d.firstSeen < device.firstSeen;
+      for (const old of Object.values(devices).filter(looksReplaced)) {
+        if (old.profile && device.profile && old.profile === device.profile) mergeDevice(old.id, device.id, 'reinstalled app');
+        else if ((!old.profile || !device.profile) && !unmergedNoted.has(`${old.id}>${device.id}`)) {
+          unmergedNoted.add(`${old.id}>${device.id}`); // (once per run: this runs on every request)
+          log.info(`Didn't take "${old.name}" over as a reinstall of "${device.name}": ${device.profile ? 'the older app' : 'the new app'} didn't say which Windows account it's for (remove the old device by hand if it's this one)`);
+        }
+      }
     }
   }
   return device;
@@ -3378,10 +3386,13 @@ function enforceMaxItems(keepId) {
   const max = setting('maxItems');
   if (!(max > 0) || items.length <= max) return;
   const excess = items.length - max;
+  // (audit P-1) "delivered" worked out once per item, not in the comparator (O(n log n) allocating calls at 100,000)
   const candidates = items
     .filter(i => !i.pinned && i.id !== keepId)
-    .sort((a, b) => (isDelivered(b) - isDelivered(a)) || (a.ts - b.ts))
-    .slice(0, excess);
+    .map(i => ({ i, delivered: isDelivered(i) }))
+    .sort((a, b) => (b.delivered - a.delivered) || (a.i.ts - b.i.ts))
+    .slice(0, excess)
+    .map(x => x.i);
   const gone = new Set(candidates.map(i => i.id));
   if (gone.size && removeItems(i => gone.has(i.id))) {
     log.info(`Removed the ${gone.size} oldest item${gone.size > 1 ? 's' : ''} to stay under the limit of ${max} items`);
@@ -3451,9 +3462,10 @@ function reconcileFiles() {
   const knownThumbs = new Set(items.filter(i => i.thumb).map(i => i.id));
   let moved = 0;
   const present = new Map(); // folder -> the names in it (checked instead of one stat per item)
+  const unreadable = new Set(); // (audit B-6) folders that couldn't be listed: their items stay
   for (const [dir, keep] of [[DIR.files, known], [DIR.texts, knownTexts], [DIR.thumbs, knownThumbs]]) {
     let names = [];
-    try { names = fs.readdirSync(dir); } catch {}
+    try { names = fs.readdirSync(dir); } catch (err) { unreadable.add(dir); log.error(`Couldn't list ${dir} (${err.code || err.message}): keeping the items whose files are in it`); }
     present.set(dir, new Set(names));
     for (const name of names) {
       if (keep.has(name) || name.endsWith('.tmp')) continue;
@@ -3463,17 +3475,18 @@ function reconcileFiles() {
   }
   if (moved) log.warn(`Moved ${moved} file${moved > 1 ? 's' : ''} that no item refers to into ${DIR.orphaned} (${dataHealth.itemsSource === 'file' ? 'probably left over from an interrupted upload' : 'items.json had to be recovered'}). Delete them once you don't need them.`);
   const fileItems = items.filter(i => i.kind === 'file');
-  const missing = fileItems.filter(i => !present.get(DIR.files).has(i.id));
-  const missingTexts = items.filter(i => i.textFile && !present.get(DIR.texts).has(`${i.id}.txt`));
-  if (missing.length && missing.length === fileItems.length && fileItems.length > 1) {
-    log.error(`None of the ${fileItems.length} stored files are in ${DIR.files}. Is the data volume mounted? Keeping their entries.`);
+  const missing = unreadable.has(DIR.files) ? [] : fileItems.filter(i => !present.get(DIR.files).has(i.id));
+  const missingTexts = unreadable.has(DIR.texts) ? [] : items.filter(i => i.textFile && !present.get(DIR.texts).has(`${i.id}.txt`));
+  // (audit B-6: also a single file item, which the guard used to miss)
+  if (missing.length && missing.length === fileItems.length) {
+    log.error(`None of the ${fileItems.length} stored file${fileItems.length > 1 ? 's are' : ' is'} in ${DIR.files}. Is the data volume mounted? Keeping ${fileItems.length > 1 ? 'their entries' : 'its entry'}.`);
   } else if (missing.length || missingTexts.length) {
     const gone = new Set([...missing, ...missingTexts]);
     items = items.filter(i => !gone.has(i));
     log.warn(`Removed ${gone.size} item${gone.size > 1 ? 's' : ''} whose file is missing`);
     itemsRewritten();
   }
-  for (const item of items.filter(i => i.thumb && !present.get(DIR.thumbs).has(i.id))) {
+  for (const item of items.filter(i => i.thumb && !unreadable.has(DIR.thumbs) && !present.get(DIR.thumbs).has(i.id))) {
     delete item.thumb;
     itemChanged(item);
   }
@@ -3900,6 +3913,7 @@ async function setReaction(req, res, [id, raw], url) {
   let emoji = '';
   try { emoji = decodeURIComponent(raw).normalize('NFC'); } catch {}
   if (!emoji || emoji.length > 16 || /[\s<>\u0000-\u001f\u007f-\u009f]/.test(emoji)) throw httpError(400, 'A reaction is one emoji');
+  if (['__proto__', 'constructor', 'prototype'].includes(emoji)) throw httpError(400, 'A reaction is one emoji'); // (audit B-10: keys of every object)
   const who = deviceIdOf(req, url);
   if (!who || !devices[who]) throw httpError(400, 'X-Beam-Device-Id is required');
   const reactions = { ...(item.reactions || {}) };
@@ -4319,10 +4333,12 @@ async function serveLive(req, res, upload, url) {
     res.flushHeaders(); // the client learns the size (and that it's coming) before the first byte has arrived
     if (!url.searchParams.has('inline') && !/^bytes=[1-9]/.test(req.headers.range || '')) noteDownload(req, url, { id, kind: 'file', name, size });
     let grew = now();
+    let known = 0; // (audit P-2) the size last seen on disk: looked at again only once it has been read up to
     // The client can leave during any await below: check after each one, or the loop would wait for a 'drain' or
     // 'close' that already happened and keep the file open for good.
     while (pos <= end && !res.destroyed) {
-      const available = Math.min((await fh.stat()).size, end + 1);
+      if (pos >= known) known = (await fh.stat()).size;
+      const available = Math.min(known, end + 1);
       if (res.destroyed) break;
       if (available > pos) {
         const chunk = Buffer.allocUnsafe(Math.min(LIVE_READ, available - pos));
@@ -4864,9 +4880,11 @@ function deleteBlockedNode(req, res, [node]) {
   send(res, 200, publicSettings());
 }
 
-function getLogs(req, res, _m, url) {
+// (audit B-3/S-3) The activity log names devices, accounts, addresses and file names: a lasting sign-in only, as backups.
+async function getLogs(req, res, _m, url) {
+  if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read the activity log');
   const lines = Math.min(5000, Math.max(1, Number(url.searchParams.get('lines')) || 200));
-  send(res, 200, { lines: log.tail(lines) });
+  send(res, 200, { lines: await log.tail(lines) });
 }
 
 // ---------------------------------------------------------------- sign-in: password
@@ -5157,8 +5175,9 @@ async function answerLoginRequest(req, res, [action], url) {
 
 // ---------------------------------------------------------------- sign-in: automatic
 
-// Signs in a browser or app without any key when Tailscale vouches for one of the owner's accounts, or (browsers
-// only) when a Beam app is connected from the very same machine right now.
+// Signs in a browser or app without any key when Tailscale vouches for one of the owner's accounts. (audit S-1: until
+// 1.14.3 also a browser while a Beam app was connected from the same machine; with Beam on 127.0.0.1 that was every
+// local process and account. Such a browser asks for approval now, which the app on that PC can give.)
 async function autoPair(req, res) {
   if (crossSiteBrowser(req)) return send(res, 403, { error: 'Blocked a cross-site sign-in', reason: 'csrf' });
   const body = await readJson(req, { limit: 4096, optional: true });
@@ -5182,19 +5201,11 @@ async function autoPair(req, res) {
       via = 'tailscale';
     } else reason = 'not-owner';
   }
-  let app = null;
-  if (!via && client === 'web' && reason !== 'blocked' && !nodeBlocked(null, clientIp(req))) {
-    const machine = machineOf(req);
-    app = machine && Object.values(devices).find(d => APP_PLATFORMS.has(d.platform) && d.machine === machine && appOnline(d.id));
-    if (app) via = 'machine';
-    else if (reason === 'no-identity') reason = 'no-app';
-  }
   if (!via) {
     const messages = {
       'no-identity': 'Tailscale didn’t say who this is', 'not-owner': 'This Tailscale account isn’t one of this Beam’s owners',
       disabled: 'Signing in with Tailscale is turned off', 'whois-mismatch': 'Tailscale gave conflicting answers about this device',
       'whois-unavailable': 'Tailscale couldn’t confirm who this is right now',
-      'no-app': 'No Beam app is running on this device',
       blocked: 'This device was removed from Beam, so it can’t sign in automatically. Use the password or approve it from another device.',
     };
     return send(res, 403, { error: messages[reason], reason });
@@ -5223,10 +5234,10 @@ async function autoPair(req, res) {
     device: deviceId || null, via: via === 'tailscale' ? 'tailscale' : 'autopair', platform: signInPlatform(req, url, body), claimed,
     keyHash: deviceId && key && devices[deviceId]?.keyHash === key ? key : null,
   });
-  log.info(`Signed in ${deviceId ? `"${nameOf(deviceId)}"` : 'a browser'} automatically (${via === 'tailscale' ? `Tailscale account ${identity.login}` : `the ${app.name} app is on the same machine`}) from ${describeWhereSync(req)}`);
+  log.info(`Signed in ${deviceId ? `"${nameOf(deviceId)}"` : 'a browser'} automatically (Tailscale account ${identity.login}) from ${describeWhereSync(req)}`);
   withdrawRequestsOf(deviceId);
   if (client === 'app') return send(res, 200, { key: token, server: (await publicBase()) || originOf(req), via, you: deviceId });
-  send(res, 200, { device: app?.name || nameOf(deviceId) || null, via }, { 'Set-Cookie': authCookie(req, token) });
+  send(res, 200, { device: nameOf(deviceId) || null, via }, { 'Set-Cookie': authCookie(req, token) });
 }
 
 // POST /api/clear-cache: the page asks for this after a 401 it has confirmed came from its own Beam (same serverId)
@@ -5597,12 +5608,12 @@ const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.
 // Everything a Beam is, as a .tar.gz: the key, server id, settings, sign-ins, devices, items and their files.
 // Leaves out unfinished uploads, logs and temporary files. items.json comes last and lists only the items whose
 // content made it into the archive, so the snapshot is consistent even while the server keeps running.
-async function writeExport(out, state) {
+async function writeExport(out, state, extra = {}) {
   const writer = tar.createWriter(out);
   try {
     const manifest = {
       format: 1, beam: VERSION, api: API_VERSION, serverId: state.serverId, created: new Date().toISOString(),
-      items: state.items.length, devices: Object.keys(state.devices).length,
+      items: state.items.length, devices: Object.keys(state.devices).length, ...extra,
     };
     await writer.addBuffer('beam-export.json', JSON.stringify(manifest, null, 2));
     await writer.addBuffer('key', state.key + '\n');
@@ -5673,14 +5684,16 @@ async function exportApi(req, res, _m, url) {
 // ---------------------------------------------------------------- backups of this server (1.8.1)
 
 // An export every BACKUP_HOURS into BACKUP_DIR as beam-backup-<UTC time>.tar.gz; the newest BACKUP_KEEP of that name
-// are kept (nothing else in the folder is touched). Item files go in while they add up to at most BACKUP_FILES:
-// items expire anyway, and the key, sign-ins, devices, their apps' settings and the server's own are what a backup is
-// for; above that, the items that are files stay out. To restore one: stop Beam, then
+// are kept (nothing else in the folder is touched). Item files go in while they add up to at most BACKUP_FILES, the
+// smallest first (audit B-1: it used to be all or none, so with a big storage cap usually none): items expire anyway,
+// and the key, sign-ins, devices, their apps' settings and the server's own are what a backup is for. A file left out
+// isn't in the backup's item list (Beam has no "file gone" state: the same as a file cleared for space). To restore one: stop Beam, then
 // `node server.js import <backup> --force` (the data folder's contents are moved aside, not deleted).
 const BACKUP_NAME = /^beam-backup-\d{8}-\d{6}\.tar\.gz$/;
 let backupTimer = null;
 let backupRun = null;  // the backup being written
-let lastBackup = null; // { at, name, bytes, files, why } or { at, error, why }
+let lastBackup = null; // { at, name, bytes, files, filesLeftOut, why } or { at, error, why }
+let backupDirPrivate = false; // (audit B-2) made private once per run, like the data folder
 
 async function listBackups() {
   let names = [];
@@ -5701,15 +5714,22 @@ function backupNow(why) {
     const partial = `${file}.partial`;
     try {
       await fsp.mkdir(BACKUP_DIR, { recursive: true });
+      if (!backupDirPrivate) { backupDirPrivate = true; makePrivate(BACKUP_DIR, { log, env, label: 'backups folder' }); }
       const state = snapshotState();
-      const fileBytes = state.items.filter(i => i.kind === 'file').reduce((n, i) => n + (i.size || 0), 0);
-      const files = fileBytes <= BACKUP_FILES;
-      if (!files) state.items = state.items.filter(i => i.kind !== 'file');
-      await writeExport(fs.createWriteStream(partial, { mode: 0o600 }), state);
+      const fileItems = state.items.filter(i => i.kind === 'file');
+      let room = BACKUP_FILES;
+      const fit = new Set(fileItems.slice().sort((a, b) => (a.size || 0) - (b.size || 0))
+        .filter(i => (i.size || 0) <= room && ((room -= i.size || 0), true)).map(i => i.id));
+      const leftOut = fileItems.filter(i => !fit.has(i.id));
+      if (leftOut.length) state.items = state.items.filter(i => i.kind !== 'file' || fit.has(i.id));
+      await writeExport(fs.createWriteStream(partial, { mode: 0o600 }), state, { filesLeftOut: leftOut.length });
       await fsp.rename(partial, file);
       const bytes = (await fsp.stat(file)).size;
-      lastBackup = { at: now(), name, bytes, files, why };
-      log.info(`Backed up this Beam (${why}): ${name}, ${formatSize(bytes)}${files ? '' : `, without its ${formatSize(fileBytes)} of files`}, in ${BACKUP_DIR}`);
+      const files = !leftOut.length; // (every file in it: what 1.8.1's `files` meant)
+      lastBackup = { at: now(), name, bytes, files, filesLeftOut: leftOut.length, why };
+      const outBytes = leftOut.reduce((n, i) => n + (i.size || 0), 0);
+      const without = leftOut.length ? `, without ${leftOut.length} of its ${fileItems.length} files (${formatSize(outBytes)}: backups hold ${formatSize(BACKUP_FILES)} of files, the smallest first; BEAM_BACKUP_FILES_MB)` : '';
+      log.info(`Backed up this Beam (${why}): ${name}, ${formatSize(bytes)}${without}, in ${BACKUP_DIR}`);
       const old = (await listBackups()).slice(BACKUP_KEEP);
       for (const b of old) await rmQuiet(path.join(BACKUP_DIR, b.name));
       if (old.length) log.info(`Removed ${old.length} old backup${old.length > 1 ? 's' : ''} (the newest ${BACKUP_KEEP} are kept)`);
@@ -5923,7 +5943,8 @@ function watchLoop() {
 }
 
 function getMetrics(req, res) {
-  if (authOf(req).role !== 'owner') throw httpError(403, 'Only an owner can read the metrics');
+  // (audit B-3) a lasting sign-in, as backups and the activity log (every sign-in is an owner today: `role` can't tell)
+  if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read the metrics');
   const ms = ns => (Number.isFinite(ns) && loopHist?.count ? Math.round(ns / 1e4) / 100 : null);
   const loop = { utilization: Math.round(performance.eventLoopUtilization().utilization * 1e4) / 1e4, since: loopSince || null, p50: ms(loopHist?.percentile(50)), p99: ms(loopHist?.percentile(99)), max: ms(loopHist?.max) };
   watchLoop();
@@ -6624,6 +6645,9 @@ async function commandMovedTo(target, flags) {
 }
 
 async function commandStop() {
+  // Written first, even when no server answers: a supervisor waiting to restart a crashed server sees it and stays
+  // stopped. The supervisor clears it when it starts. (Audit B-5 suggested removing it when nothing runs: that would
+  // let such a supervisor start Beam again.)
   try { fs.writeFileSync(FILE.stop, String(now())); } catch {}
   if (!(await runningServer())) {
     console.log('Beam is not running (the supervisor, if any, will not restart it).');

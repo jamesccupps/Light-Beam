@@ -89,7 +89,8 @@ class ServerMoves(private val app: BeamApp) {
         }
         val serverId = there.serverId ?: return null
         if (expected == null || serverId != expected) return null
-        if (there.api >= 3 && !Proof.matches(secret, serverId, nonce, there.proof)) return null
+        // (audit X-1) The proof always: the id is public, and `api` is whatever the answer says.
+        if (!Proof.matches(secret, serverId, nonce, there.proof)) return null
         return there
     }
 

@@ -77,7 +77,8 @@ function createFiles(ctx) {
     return Object.assign(out, ctx.media?.stateOf(a, out.url));
   }
 
-  const storageUsed = () => db.get('SELECT coalesce(sum(size), 0) n FROM attachments').n;
+  // (audit §5.1) the "plays everywhere" copies (play/) take room too
+  const storageUsed = () => db.get('SELECT coalesce(sum(size), 0) + coalesce(sum(play_size), 0) n FROM attachments').n;
 
   // The attachment if this person may see it: they sent it, or it's in a conversation they see.
   function visibleAttachment(user, id) {

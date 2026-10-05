@@ -386,7 +386,7 @@ function backupRows() {
   const last = b.last;
   const every = b.hours ? `A backup of this Beam every ${b.hours} h, into ${b.dir}; the newest ${b.keep} are kept. ` : 'Automatic backups are off (BEAM_BACKUP_HOURS=0). ';
   const lastText = last?.error ? `The last one failed: ${last.error}`
-    : last?.name ? `The last: ${timeAgo(last.at)} (${formatSize(last.bytes)}${last.files === false ? ', without the files sent' : ''}).` : 'None yet.';
+    : last?.name ? `The last: ${timeAgo(last.at)} (${formatSize(last.bytes)}${last.filesLeftOut ? `, without ${plural(last.filesLeftOut, 'file')} (the biggest)` : last.files === false ? ', without the files sent' : ''}).` : 'None yet.';
   const busy = b.running || b.busy;
   return [
     head,

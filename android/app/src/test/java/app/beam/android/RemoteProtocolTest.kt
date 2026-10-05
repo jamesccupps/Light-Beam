@@ -219,17 +219,11 @@ class RemoteProtocolTest {
         assertEquals(app.repo.me, ended.optString("from"))
         assertTrue(app.remote.controlling(PC).isEmpty())
 
-        // A browser signed in automatically because Beam runs on this phone may not start a session (server 1.6's
-        // eligibility: `sign-in`); the page's traded sign-in above could.
+        // (audit S-1, server 1.14.3) A browser isn't signed in automatically because Beam runs on this phone any more
+        // (it was, and then couldn't start a session: server 1.6's eligibility); the page's traded sign-in above could.
         val autoReq = Request.Builder().url("$base/api/autopair")
             .post(JSONObject().put("deviceId", "autobrowser01").toString().toRequestBody(BeamApi.JSON)).build()
-        val auto = page.newCall(autoReq).execute().use { res ->
-            assertEquals(200, res.code)
-            Regex("beam_key=([^;]+)").find(res.headers("Set-Cookie").joinToString(" "))!!.groupValues[1]
-        }
-        val (autoCode, autoBody) = asPage(base, auto, "POST", "/api/rc/sessions", JSONObject().put("device", PC))
-        assertEquals(autoBody.toString(), 403, autoCode)
-        assertEquals("sign-in", autoBody.optString("reason"))
+        page.newCall(autoReq).execute().use { res -> assertEquals(403, res.code) }
 
         // The viewer closes: the page's sign-in goes; the app's own is untouched; no sign-in in the server's log.
         app.remote.closing()

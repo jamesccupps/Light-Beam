@@ -13,6 +13,7 @@ const fs = require('node:fs');
 const fsp = fs.promises;
 const path = require('node:path');
 const tar = require('../../lib/tar');
+const { makePrivate } = require('../../lib/private-dir');
 
 const NAME = /^family-backup-\d{8}-\d{6}\.tar\.gz$/;
 const MANIFEST = 'family-backup.json';
@@ -43,6 +44,7 @@ async function filesIn(dir) {
 }
 
 function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, log }) {
+  let madePrivate = false;
   let timer = null;
   let running = null;
   let last = null;
@@ -57,6 +59,8 @@ function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, 
       const snapshot = path.join(backupDir, `.family-snapshot-${process.pid}.db`);
       try {
         await fsp.mkdir(backupDir, { recursive: true });
+        // (audit B-2) a backup holds the database and the control key: the folder only this account opens, once per run
+        if (!madePrivate) { madePrivate = true; makePrivate(backupDir, { log, label: 'backups folder' }); }
         await fsp.rm(snapshot, { force: true });
         db.raw.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
         const [avatars, files, thumbs] = await Promise.all(['avatars', 'files', 'thumbs'].map(d => filesIn(path.join(dataDir, d))));

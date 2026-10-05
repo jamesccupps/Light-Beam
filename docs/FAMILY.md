@@ -126,7 +126,7 @@ Settings (environment or `.env`):
 | `BEAM_FAMILY_NAME` | `Family` | the first space's name (rename it later in the app) |
 | `BEAM_FAMILY_OWNER` | the machine's Tailscale user | whose first visit over Tailscale sets them up as the owner |
 | `BEAM_FAMILY_MAX_UPLOAD_MB` | `2048` | the largest file |
-| `BEAM_FAMILY_MAX_STORAGE_GB` | `100` | all files together; when full, uploads are refused (nothing is ever deleted to make room) |
+| `BEAM_FAMILY_MAX_STORAGE_GB` | `100` | all files together, with the videos' "plays everywhere" copies (1.14.3); when full, uploads are refused (nothing is ever deleted to make room) |
 | `BEAM_FAMILY_STUN` | Google's and Cloudflare's | (1.9) STUN servers direct connections find their way with (they see addresses, never files); `local`: the same network only; `off`: no direct connections |
 | `BEAM_FAMILY_DIRECT_PORTS` | `41700-41799` | (1.9) the UDP ports direct connections use |
 | `BEAM_FAMILY_FFMPEG` | `ffmpeg` on the PATH | (1.10) ffmpeg for videos that play everywhere (ffprobe next to it); `off`: videos play as they are |
@@ -206,7 +206,9 @@ are the browser's (the browser itself when it can't show one).
 - Passwords: scrypt (N=2^15, r=8, p=1), at least 10 characters (1.7.3; was 8), not a well-known one, not a run along
   the keyboard or the alphabet, not one or two characters over and over. At most 4 are checked at once (a crowd waits
   its turn; past 200 waiting: "try again"). Sign-in: 10 tries per address per 10 minutes (the address Funnel saw: the
-  last `X-Forwarded-For` entry; checked first, so a held-back address doesn't use up the rest), 120 a minute in all;
+  last `X-Forwarded-For` entry; checked first, so a held-back address doesn't use up the rest), 120 a minute in all
+  (1.14.3: addresses with a live session have 60 a minute of their own, so a flood from elsewhere can't lock the family
+  out);
   wrong passwords count per name *and* address (10 an hour), so guessing at someone's name from elsewhere can't lock
   them out (1.7.3: it was 20 per name per hour from anywhere), plus 200 an hour per name from everywhere, which an
   address with a live session for that person doesn't hit. Checking the current password when changing it counts the
@@ -261,7 +263,13 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   inline (`?download`: "<name> (plays everywhere).mp4"). A copy made or failed sends `msg-edit` for its message.
   `PUT /api/files/:id/thumb?w=&h=`, `GET /api/files/:id[?download]`, `GET /api/files/:id/thumb`,
   `GET /api/people/:id/avatar`.
-- Push: `GET /api/push` (VAPID key), `PUT /api/push {endpoint, keys}`, `DELETE /api/push {endpoint}`.
+- Push: `GET /api/push` (VAPID key), `PUT /api/push {endpoint, keys}`, `DELETE /api/push {endpoint}`. (1.14.3) An
+  address stays with the person who registered it: another's `PUT` of it is `409` unless it has been failing (the page
+  then subscribes again for a fresh address).
+- Files: `Range: bytes=-` is no range (the whole file). A fast link's file still arriving answers ranges from a byte
+  to the end (`bytes=N-`) only; another kind is `416` until the file is all there (1.14.3).
+- A database made by a newer Beam Family is refused at start (a setup problem: the supervisor doesn't retry), never
+  used half-understood (1.14.3).
 
 ## Tests
 

@@ -146,7 +146,12 @@ function createLinks(ctx) {
       if (!req.headers.range || /^bytes=0-/.test(String(req.headers.range))) counted(l);
       return sendFile(req, res, files().filePath(a.id), { type, etag: `"${a.id}.${a.size}"`, headers });
     }
-    // Still arriving: from the start (or a part from N on), followed until it's all there.
+    // Still arriving: from the start (or a part from N on), followed until it's all there. (audit B-11) Another kind of
+    // range (bounded, or from the end) can't be answered yet: 416, not the whole file as if it had been.
+    if (req.headers.range && !range && String(req.headers.range).trim() !== 'bytes=-') {
+      res.writeHead(416, { ...BASE_HEADERS, 'Content-Range': `bytes */${a.size}`, 'Cache-Control': 'no-store' });
+      return res.end();
+    }
     const start = range ? Number(range[1]) : 0;
     if (start >= a.size) throw httpError(416, 'That’s past the end of the file');
     res.writeHead(start ? 206 : 200, {

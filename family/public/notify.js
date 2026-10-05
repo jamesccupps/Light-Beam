@@ -33,7 +33,15 @@ export async function enablePush() {
   const key = Uint8Array.from(atob(state.pushKey.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
   if (sub && !sameKey(sub.options?.applicationServerKey, key)) { await sub.unsubscribe(); sub = null; }
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-  await api('/api/push', { method: 'PUT', body: sub.toJSON() });
+  try {
+    await api('/api/push', { method: 'PUT', body: sub.toJSON() });
+  } catch (err) {
+    // (audit S-7) This browser's address is still another member's (their sign-in ran out here): a fresh one.
+    if (err.status !== 409) throw err;
+    await sub.unsubscribe();
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    await api('/api/push', { method: 'PUT', body: sub.toJSON() });
+  }
 }
 
 function sameKey(a, b) {

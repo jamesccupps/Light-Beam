@@ -23,8 +23,8 @@ android {
         applicationId = "app.beam.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 19
-        versionName = "1.12.1"
+        versionCode = 20
+        versionName = "1.12.2"
     }
 
     signingConfigs {
@@ -148,4 +148,14 @@ val publishApk by tasks.registering {
         File(distDir, "beam.apk.json").writeText("{\"version\": \"$name\", \"versionCode\": $code}\n")
         logger.lifecycle("Published Beam $name ($code) to ${target.canonicalPath}")
     }
+}
+
+// (audit T-1) Skips said out loud: without scratch servers the integration tests skip themselves, and such a run looks
+// as green as a full one. `node scripts/dev/android-full.mjs` runs them, and fails on a skip that shouldn't be.
+tasks.withType<Test>().configureEach {
+    afterSuite(KotlinClosure2<TestDescriptor, TestResult, Unit>({ suite, result ->
+        if (suite.parent == null && result.skippedTestCount > 0) {
+            logger.lifecycle("\n${result.skippedTestCount} of ${result.testCount} tests SKIPPED: the integration tests need scratch servers (node scripts/dev/android-full.mjs runs them)\n")
+        }
+    }))
 }

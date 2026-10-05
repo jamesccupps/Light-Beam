@@ -84,6 +84,7 @@ namespace Beam
         public List<string> To = new List<string>();
         public Dictionary<string, long> Delivered = new Dictionary<string, long>();
         public long Ts;
+        public long Edited; // (1.14 edit) when its words last changed, 0 if never
 
         public bool IsFile { get { return Kind == "file"; } }
         public bool IsText { get { return Kind == "text"; } }
@@ -105,6 +106,7 @@ namespace Beam
             it.To = Json.StrList(d, "to");
             it.Delivered = Json.LongMap(d, "delivered");
             it.Ts = Json.Long(d, "ts", 0);
+            it.Edited = Json.Long(d, "edited", 0);
             return it.Id == null ? null : it;
         }
     }
@@ -428,9 +430,11 @@ namespace Beam
         {
             string id = Json.Str(hello, "serverId");
             if (string.IsNullOrEmpty(serverId) || id != serverId) return false;
-            if (Json.Long(hello, "api", 2) < 3) return true; // older servers can't prove anything; the id has to do
+            // (audit X-1) The proof always: the id is public (any hello names it), and `api` is whatever the answer says.
             string proof = Json.Str(hello, "proof");
-            return proof != null && secret != null && nonce != null && string.Equals(proof, Proof(secret, serverId, nonce), StringComparison.OrdinalIgnoreCase);
+            bool proven = proof != null && secret != null && nonce != null && string.Equals(proof, Proof(secret, serverId, nonce), StringComparison.OrdinalIgnoreCase);
+            if (!proven) Log.Write("A server answering with our Beam's id couldn't prove it holds this PC's sign-in; ignored");
+            return proven;
         }
 
         // POST /api/autopair (API v3): signed in by Tailscale identity. Returns { key, server, via } or throws (403 if not allowed).
@@ -554,6 +558,12 @@ namespace Beam
                     if (it != null) page.Items.Add(it);
                 }
             return page;
+        }
+
+        // GET /api/pair: a single-use pairing key (15 minutes), to open Beam in this PC's browser signed in (audit S-1).
+        public async Task<string> PairKey()
+        {
+            return Json.Str(Json.Obj(await Call(HttpMethod.Get, "/api/pair").ConfigureAwait(false)), "key");
         }
 
         public async Task<Item> GetItem(string id)

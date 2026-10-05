@@ -226,14 +226,13 @@ if ($Server) {
   }
 
   # Sign the app in to this server. It keeps the identity the command-line tool had on this PC, so
-  # conversations with this PC carry over. (It swaps the key for a device token of its own at its first start.)
+  # conversations with this PC carry over. (audit I-1) With a pairing key (single use, 15 minutes), never the master
+  # key: its first request makes the pairing key its own sign-in, which it swaps for a sealed device token of its own.
   if (-not (Test-Path $appConfig)) {
-    $keyFile = Join-Path $dataDir 'key'
-    $key = Get-EnvSetting 'BEAM_KEY'
-    if (-not $key) {
-      if (-not (Test-Path $keyFile)) { throw "No key in $keyFile. Is BEAM_DATA right?" }
-      $key = (Get-Content $keyFile -Raw).Trim()
-    }
+    $pairOut = (& $node $serverJs pair 2>&1 | Out-String)
+    $key = if ($pairOut -match '[?&]key=(bp_[A-Za-z0-9_-]+)') { $Matches[1] } else { $null }
+    if (-not $key) { throw "Couldn't make a pairing key for the app (node server.js pair said: $($pairOut.Trim()))" }
+    if ($NoLaunch) { 'Start the Beam app within 15 minutes: its first sign-in is a pairing key that runs out then (after that, sign it in from the app).' }
     $old = if (Test-Path $cliConfig) { Get-Content $cliConfig -Raw | ConvertFrom-Json } else { $null }
     $deviceId = if ($old -and $old.deviceId) { $old.deviceId } else { [guid]::NewGuid().ToString('N') }
     $deviceName = if ($Name) { $Name } elseif ($old -and $old.device) { $old.device } else { $env:COMPUTERNAME }

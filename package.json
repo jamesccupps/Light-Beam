@@ -1,6 +1,6 @@
 {
   "name": "beam",
-  "version": "1.14.2",
+  "version": "1.14.3",
   "private": true,
   "license": "MIT",
   "repository": "github:jamesccupps/Light-Beam",
@@ -17,8 +17,11 @@
   "engines": {
     "node": ">=20.12"
   },
+  "engines-note": "Beam's server runs on Node 20.12+; Beam Family (family/server.js) needs 22.13+ for node:sqlite.",
   "dependencies": {
-    "node-datachannel": "^0.33.4",
     "qrcode": "^1.5.4"
+  },
+  "optionalDependencies": {
+    "node-datachannel": "^0.33.4"
   }
 }

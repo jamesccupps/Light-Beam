@@ -23,7 +23,8 @@ const HELP = `Beam: send text, clipboard contents and files between your devices
 Getting connected:
   beam login [address]                             sign in: automatically over Tailscale, else by approving
                                                    a code on a signed-in device (--password to use the password)
-  beam setup <pairing-link> [--name "My Laptop"]   sign in with a pairing link instead
+  beam setup [pairing-link] [--name "My Laptop"]   sign in with a pairing link instead (without the link, beam
+                                                    asks for it: it then stays out of your shell history)
   beam status                                      server, sign-in and storage details
 
 Sending:
@@ -71,7 +72,15 @@ function saveConfig(changes) {
   const saved = readConfigFile();
   if (!saved) return false; // configured through the environment: nothing to update
   fs.writeFileSync(CONFIG_FILE, JSON.stringify({ ...saved, ...changes }, null, 2) + '\n', { mode: 0o600 });
+  keepPrivate();
   return true;
+}
+
+// (audit C-5) The mode above applies only when the file is created: an older file, a hand edit or a restored
+// dotfile keeps looser permissions. It holds the sign-in, so make it this user's alone on every save.
+function keepPrivate() {
+  if (IS_WIN) return; // (Windows: the profile folder's own permissions)
+  try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
 }
 
 function loadConfig() {
@@ -150,9 +159,11 @@ async function verifyServer(base, cfg) {
   const tid = crypto.createHash('sha256').update(h1).digest('hex').slice(0, 16);
   const hello = await (await fetch(`${base}/api/hello?nonce=${nonce}&tid=${tid}`, { signal: AbortSignal.timeout(15_000) })).json();
   if (!hello.beam || !cfg.serverId || hello.serverId !== cfg.serverId) return null;
-  if (hello.api >= 3) {
-    const expected = crypto.createHmac('sha256', h1).update(`${hello.serverId}:${nonce}`).digest('hex');
-    if (hello.proof !== expected) return null;
+  // (audit X-1) The proof always: the id is public, and `api` is whatever the answer says.
+  const expected = crypto.createHmac('sha256', h1).update(`${hello.serverId}:${nonce}`).digest('hex');
+  if (hello.proof !== expected) {
+    console.error(`beam: ${base} answers with this Beam's id but can't prove it holds this sign-in; ignored.`);
+    return null;
   }
   return hello;
 }
@@ -261,6 +272,13 @@ async function fullText(cfg, item) {
 function safeName(name) {
   let out = String(name).split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, '_').replace(/^[\s.]+|[\s.]+$/g, '') || 'file';
   if (/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(out)) out = '_' + out;
+  // (audit C-6) at most 200 bytes, as the server keeps names (some file systems refuse longer ones); the extension stays
+  if (Buffer.byteLength(out) > 200) {
+    const ext = path.extname(out).slice(0, 20);
+    let base = out.slice(0, out.length - path.extname(out).length);
+    while (base && Buffer.byteLength(base + ext) > 200) base = base.slice(0, -1);
+    out = (base.replace(/[\s.]+$/, '') || 'file') + ext;
+  }
   return out;
 }
 
@@ -498,7 +516,8 @@ async function discover() {
     const base = `https://${p.DNSName.replace(/\.$/, '')}`;
     try {
       const hello = await (await fetch(`${base}/api/hello`, { signal: AbortSignal.timeout(4000) })).json();
-      return hello.beam ? { base: (hello.movedTo || base).replace(/\/+$/, ''), hello } : null;
+      // (audit C-4) the peer's own address: an unproven `movedTo` in a hello isn't followed from here
+      return hello.beam ? { base, hello } : null;
     } catch {
       return null;
     }
@@ -514,6 +533,7 @@ async function saveSignIn(cfg, base, key, serverUrl, name) {
   if (me.you) next.deviceId = me.you;
   next.serverId = (await (await fetch(`${next.url}/api/hello`)).json().catch(() => ({}))).serverId;
   await fsp.writeFile(CONFIG_FILE, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
+  keepPrivate();
   return next;
 }
 
@@ -573,8 +593,24 @@ async function login(cfg, address, opt) {
 
 // ---------------------------------------------------------------- commands
 
+// (audit C-3) The link from the input: typed or pasted at a prompt, or piped in (beam setup < link.txt).
+async function readLink() {
+  if (!process.stdin.isTTY) {
+    let text = '';
+    for await (const chunk of process.stdin) { text += chunk; if (text.length > 8192) break; }
+    return text.trim().split(/\s+/)[0] || '';
+  }
+  const rl = require('node:readline').createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return (await new Promise(resolve => rl.question('Pairing link: ', resolve))).trim();
+  } finally {
+    rl.close();
+  }
+}
+
 async function setup(cfg, link, opt) {
-  if (!link) throw new Error('Usage: beam setup "<pairing link>" [--name "My Laptop"]   (or just: beam login)');
+  if (!link) link = await readLink();
+  if (!link) throw new Error('Usage: beam setup ["<pairing link>"] [--name "My Laptop"]   (or just: beam login)');
   let url;
   try { url = new URL(link); } catch { throw new Error('That doesn\'t look like a pairing link. It should start with http:// or https://'); }
   const key = url.searchParams.get('key');
@@ -772,6 +808,8 @@ async function listen(cfg, opt) {
   async function receive(item, { clipboard = true } = {}) {
     if (seen.has(item.id)) return;
     seen.add(item.id);
+    // (audit C-6) a listener that runs for months: the newest 10,000 are enough to skip repeats (a Set keeps its order)
+    if (seen.size > 10_000) for (const id of seen) { seen.delete(id); if (seen.size <= 9_000) break; }
     if (!isFor(cfg, item)) return;
     if (item.kind === 'text') {
       const text = await fullText(cfg, item);

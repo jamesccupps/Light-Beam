@@ -79,7 +79,8 @@ self.addEventListener('push', e => {
       renotify: true,
       icon: '/icon-192.png',
       badge: '/badge-96.png',
-      data: { url: d.url || '/' },
+      // (audit X-6) only a page of this site (as the page's own handler checks), never another address
+      data: { url: typeof d.url === 'string' && /^\/(?![/\\])/.test(d.url) ? d.url : '/' },
       timestamp: Date.now(),
     });
   })());
