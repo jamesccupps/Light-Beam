@@ -928,17 +928,41 @@ test('F-O (1.8.4): a page opened again finds the files it left unsent (only oneâ
 
 // (1.9.0) A direct connection the way a browser makes one (node-datachannel standing in for it): the offer with its
 // candidates to POST /api/direct, the answer back, then a data channel per transfer.
+// (2026-10-05, the Light Beam audit's F-Q/F-X on 1 vCPU) Unlike a browser, node-datachannel making the offer can lose a
+// race on a busy single core: the server's connectivity checks are already in, so ICE and DTLS finish inside
+// setRemoteDescription before it has kept the answer's fingerprint ("certificate verify failed"), the connection fails
+// and the next candidate throws "Got a remote candidate without ICE transport" (pinned to one core: 294 tries in 300).
+// The server's end can't meet it (a browser has no answer to check with yet), so such a try is simply made again.
 async function directConnect(srv, who, route = '/api/direct') {
+  for (let attempt = 1; ; attempt++) {
+    const conn = await directTry(srv, who, route);
+    if (!conn.lost) return conn;
+    if (attempt === 5) throw conn.lost;
+    console.log(`      (a direct connection lost the setup race, try ${attempt}: ${conn.lost.message})`);
+  }
+}
+
+async function directTry(srv, who, route) {
   const ndc = require('node-datachannel');
   const pc = new ndc.PeerConnection('test', { iceServers: [] });
   const keep = new Set(); // (an unreferenced channel is closed when it's garbage-collected)
+  // (listened for before the channel starts it: it can be over within a millisecond, and then every connection
+  // waited out the 3 s)
+  const gathered = new Promise(r => { pc.onGatheringStateChange(st => { if (st === 'complete') r(); }); setTimeout(r, 3000); });
   const ctl = pc.createDataChannel('beam');
   keep.add(ctl);
-  await new Promise(r => { pc.onGatheringStateChange(st => { if (st === 'complete') r(); }); setTimeout(r, 3000); });
+  await gathered;
   const r = await call(srv, 'POST', route, who, { sdp: pc.localDescription().sdp });
   if (r.status !== 200) { pc.close(); return { status: r.status, error: r.json?.error }; }
-  pc.setRemoteDescription(r.json.sdp, 'answer');
-  await new Promise((res, rej) => { if (ctl.isOpen()) res(); ctl.onOpen(res); setTimeout(() => rej(new Error('no direct connection came up')), 10000); });
+  const failed = new Promise(res => pc.onStateChange(st => { if (st === 'failed' || st === 'closed') res(); }));
+  try {
+    pc.setRemoteDescription(r.json.sdp, 'answer');
+  } catch (err) {
+    pc.close();
+    return { lost: err };
+  }
+  const up = await new Promise((res, rej) => { if (ctl.isOpen()) res(true); ctl.onOpen(() => res(true)); failed.then(() => res(false)); setTimeout(() => rej(new Error('no direct connection came up')), 10000); });
+  if (!up) { pc.close(); return { lost: new Error('it failed as it came up') }; }
   const channel = label => { const dc = pc.createDataChannel(JSON.stringify(label)); keep.add(dc); return dc; };
   const answerOf = (dc, onBinary) => new Promise((res, rej) => {
     dc.onMessage(m => {

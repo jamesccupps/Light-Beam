@@ -138,6 +138,9 @@ export default function register(test) {
   test('background mode: a poke that gets no answer (network error, 502) is retried after a pause, not at once', async ctx => {
     const page = await ctx.signedIn();
     await page.waitFor(`live.stream !== '' && live.mode === 'foreground'`, 8000, 'stream id');
+    // (a service worker taking the page over later hides its requests from the interception: on a slow machine that
+    // was during the first round, and the second counted 0 pokes; the Light Beam audit, 2026-10-05)
+    await page.waitFor(`navigator.serviceWorker.ready.then(() => Boolean(navigator.serviceWorker.controller))`, 15000, 'the service worker in charge');
     for (const [how, fail] of [['network error', 'fail'], ['502 from a proxy', '502']]) {
       let pokes = 0;
       const onPaused = m => {

@@ -258,12 +258,13 @@ export default function register(test) {
     eq(await t2.evaluate(`idbGetAll('outbox').then(l => l.length)`), 0, 'nothing left queued');
   });
 
-  test('signed in to another Beam by itself (this PC’s Beam app is signed in there): the history is replaced, what was queued stays for its Beam (Settings says so) and gets there later', async ctx => {
+  // (Until 1.14.3 the Beam app on this PC, signed in to the other Beam, signed the page in there by itself; since the
+  // audit's S-1 the page asks like any browser and gets approved. This test still expected the old way: the Light
+  // Beam audit's full run found it, 2026-10-05.)
+  test('signed in to another Beam (asked there and approved): the history is replaced, what was queued stays for its Beam (Settings says so) and gets there later', async ctx => {
     const proxy = await ctx.prefixProxy(8826, 8821, '');
     ctx.defer(() => proxy.stop());
-    // This browser and the Beam app run on one machine: they come from the same address.
-    const xff = ctx.nextIp();
-    const page = await ctx.signedIn({ base: proxy.base, xff });
+    const page = await ctx.signedIn({ base: proxy.base });
     const meId = await page.evaluate('me.id');
     const ownId = (await (await fetch(`${ctx.srv.base}/api/hello`)).json()).serverId;
     const textsOn = async srv => (await (await fetch(`${srv.base}/api/items`, { headers: { Authorization: `Bearer ${srv.key}` } })).json()).items.map(i => i.text || '');
@@ -278,18 +279,17 @@ export default function register(test) {
     await page.evaluate(`sendText('written while its Beam was down', 'all').then(() => true)`);
     await page.waitFor(`(cache.flushPending(), idbGetAll('outbox').then(l => l.length === 1))`, 5000, 'queued');
     await page.goto('about:blank');
-    // A fresh Beam answers at the address, and the Beam app on this PC is signed in there and online.
+    // A fresh Beam answers at the address: the sign-in page asks it, and it's approved there.
     const other = await ctx.startServer(8822);
     ctx.defer(() => other.stop());
     const otherId = other.hello.serverId;
-    const app = other.device(`win${ctx.uid()}${ctx.uid()}`, 'This PC', 'windows', xff);
-    await app.me();
-    const appOffline = app.online();
-    ctx.defer(() => appOffline());
-    await ctx.sleep(300);
     proxy.upstream = 8822;
     await page.goto(`${proxy.base}/`);
-    await page.waitFor(`typeof paired !== 'undefined' && paired && cache.owner === '${otherId}'`, 15000, 'signed in to the other Beam by itself');
+    await page.waitFor(`typeof paired !== 'undefined' && !paired && Boolean(pendingLogin?.code)`, 15000, 'asking the other Beam');
+    const code = await page.evaluate('pendingLogin.code');
+    const approved = await fetch(`${other.base}/api/login-requests/approve`, { method: 'POST', headers: { Authorization: `Bearer ${other.key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+    eq(approved.status, 200, 'approved there');
+    await page.waitFor(`typeof paired !== 'undefined' && paired && cache.owner === '${otherId}'`, 15000, 'signed in to the other Beam');
     await ctx.sleep(1000);
     eq(await page.evaluate(`idbGetAll('outbox').then(l => [items.some(i => i.text === 'history on its Beam'), outbox.size, l.length])`), [false, 0, 1], 'the old history is gone, its outbox stored, out of sight');
     eq((await textsOn(other)).filter(t => /written while/.test(t)), [], 'not sent to the other Beam');
@@ -297,7 +297,6 @@ export default function register(test) {
     await page.waitFor(`$('#settingsDlg').open && /1 unsent message for another Beam server/.test($('#settingsDlg').textContent)`, 5000, 'Settings → This device says so');
     await page.evaluate(`$('#settingsDlg').close(); true`);
     // Its Beam is back, and this browser signs in there again: the message goes out.
-    appOffline();
     await page.goto('about:blank');
     proxy.upstream = 8821;
     await page.goto(await ctx.keyLink(ctx.srv, proxy.base));
@@ -347,7 +346,9 @@ export default function register(test) {
     await page.evaluate(`caches.open('beam-share').then(c => c.put(new Request('share/x'), new Response('shared secret', { headers: { 'X-Kind': 'text' } }))).then(() => true)`);
     await page.evaluate(`outboxStore.put({ id: 'otest', kind: 'text', text: 'queued secret', conv: '${phone.id}', to: ['${phone.id}'], created: Date.now(), deviceId: me.id }).then(() => true)`);
     await page.waitFor(`(cache.flushPending(), idbGetAll('items').then(l => l.length >= 5))`, 5000, 'saved');
-    // The server is down (a 502): offline mode, the saved history opens and stays.
+    // The server is down (a 502): offline mode, the saved history opens and stays. (The page comes from the service
+    // worker then, so it must be in charge first: on a slow machine it wasn't yet; the Light Beam audit, 2026-10-05.)
+    await page.waitFor(`navigator.serviceWorker.ready.then(() => Boolean(navigator.serviceWorker.controller))`, 15000, 'the service worker in charge');
     proxy.mode = '502';
     proxy.resetAll();
     await page.reload();
@@ -370,7 +371,9 @@ export default function register(test) {
     eq([r.saved, r.meta, r.cursor, r.queued, r.share, r.inMemory, r.onPage], [0, false, '', 0, false, 0, 0], 'nothing of it is left');
     assert(r.shownFor >= 0 && r.shownFor < 1500, `the saved history showed for a moment at most (${r.shownFor} ms)`);
     for (let n = 0; n < 50 && !cleared.length; n++) await ctx.sleep(100);
-    eq(cleared, [204], 'the browser’s HTTP cache too (thumbnails, files viewed inline)');
+    // (Two at most: on a busy machine a second 401 from the start-up can come after the first wipe is done, and the
+    // wipe that follows finds nothing and asks again. Seen pinned to one CPU core, 2026-10-05.)
+    assert(cleared.length >= 1 && cleared.length <= 2 && cleared.every(s => s === 204), `the browser’s HTTP cache too (thumbnails, files viewed inline): ${JSON.stringify(cleared)}`);
   });
 
   test('sign-in page: asks only while visible, withdraws when hidden, "new code" after two renewals', async ctx => {
