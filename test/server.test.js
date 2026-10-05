@@ -1258,7 +1258,8 @@ test('C6: session sign-ins end with the browser and after 12 h idle; their devic
 function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (entry.name === 'logs' || entry.name === 'server.pid') continue;
+    // (the server may be running: its half-written .tmp files are renamed away at any moment, and aren't state)
+    if (entry.name === 'logs' || entry.name === 'server.pid' || entry.name.endsWith('.tmp')) continue;
     const a = path.join(src, entry.name);
     const b = path.join(dest, entry.name);
     entry.isDirectory() ? copyDir(a, b) : fs.copyFileSync(a, b);
