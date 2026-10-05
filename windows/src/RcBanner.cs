@@ -8,7 +8,8 @@
 // that grows back under the mouse. Stop stays where it is through all of that. RcBannerPlace has the geometry.
 // Beam 1.12, a kvm session (another device's own keyboard and mouse, all day): "Robin Laptop's keyboard and mouse ·
 // Hide · Stop". Hide folds it into Beam's icon in the taskbar corner (the user: "make the banner able to be hidden"),
-// whose menu then shows the session (Show the banner, Back, Stop); folded, it still counts as up.
+// whose menu then shows the session (Show the banner, Back, Stop); folded, it still counts as up. Beam 1.12.1 (the
+// user found no Hide: the banner had shrunk): its pill keeps Hide too, "Beam · Hide · Stop".
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -31,7 +32,7 @@ namespace Beam
         readonly Stopwatch shown = new Stopwatch();
         readonly ToolTip tip;
         readonly Timer shrink = new Timer(), grow = new Timer();
-        Rectangle stopRect, hideRect;                  // hideRect: empty unless a kvm banner shows it whole
+        Rectangle stopRect, hideRect;                  // hideRect: empty unless it's a kvm banner
         Size full, pill;
         int stopW, hideW;
         Point home;                                    // where it belongs (KeepOnTop puts it back there)
@@ -97,10 +98,10 @@ namespace Beam
             return new Rectangle(size.Width - stopW - Ui.S(6), Ui.S(6), stopW, size.Height - Ui.S(12));
         }
 
-        // A kvm banner's Hide, just left of Stop, while it shows whole.
-        Rectangle HideIn(Size size, Rectangle stop)
+        // A kvm banner's Hide, just left of Stop (whole or the pill).
+        Rectangle HideIn(Rectangle stop)
         {
-            return onHide == null || size != full ? Rectangle.Empty : new Rectangle(stop.X - hideW - Ui.S(6), stop.Y, hideW, stop.Height);
+            return onHide == null ? Rectangle.Empty : new Rectangle(stop.X - hideW - Ui.S(6), stop.Y, hideW, stop.Height);
         }
 
         // foldedNow: a kvm banner its PC chose to keep folded into the tray (it's up, not on the screen).
@@ -114,10 +115,10 @@ namespace Beam
             int textW = Math.Min(Ui.Width(label, Ui.Bold), Ui.S(720));
             int buttons = stopW + Ui.S(6) + (hideW > 0 ? hideW + Ui.S(6) : 0);
             full = new Size(Math.Max(Ui.S(200), Math.Min(narrowest, pad + textW + Ui.S(14) + buttons)), h);
-            pill = new Size(pad + Ui.S(16) + Ui.Width(Short, Ui.Bold) + Ui.S(14) + stopW + Ui.S(6), h);
+            pill = new Size(pad + Ui.S(16) + Ui.Width(Short, Ui.Bold) + Ui.S(14) + buttons, h);
             Size = full;
             stopRect = StopIn(full);
-            hideRect = HideIn(full, stopRect);
+            hideRect = HideIn(stopRect);
             var stopCentre = new Point(stopRect.X + stopRect.Width / 2, stopRect.Y + stopRect.Height / 2);
             Point? saved = RcBannerPlace.FromSpot(app.Cfg.RcBannerSpot, full, stopCentre, areas);
             if (saved != null) Location = saved.Value;
@@ -209,7 +210,7 @@ namespace Beam
 
         // ------------------------------------------------------------------ the pill
 
-        // The whole banner or the pill; the right end (Stop) stays where it is. (Hide shows on the whole banner only.)
+        // The whole banner or the pill; the right end (Stop, and a kvm banner's Hide) stays where it is.
         void SetCompact(bool on)
         {
             if (on == compact || IsDisposed) return;
@@ -218,7 +219,7 @@ namespace Beam
             var at = RcBannerPlace.Resize(Bounds, size.Width, Areas());
             Bounds = new Rectangle(at, size);
             stopRect = StopIn(size);
-            hideRect = HideIn(size, stopRect);
+            hideRect = HideIn(stopRect);
             SetShape();
             home = Location;
             Invalidate();
@@ -399,17 +400,14 @@ namespace Beam
             var g = e.Graphics;
             g.Clear(Back);
             int pad = Ui.S(16);
+            int right = hideRect.IsEmpty ? stopRect.Left : hideRect.Left;
             if (compact)
             {
                 int dot = Ui.S(8);
                 Ui.FillCircle(g, Fore, new Rectangle(pad, (Height - dot) / 2, dot, dot));
-                Ui.Text(g, Short, Ui.Bold, new Rectangle(pad + Ui.S(16), 0, stopRect.Left - pad - Ui.S(16) - Ui.S(6), Height), Fore, Ui.Line);
+                Ui.Text(g, Short, Ui.Bold, new Rectangle(pad + Ui.S(16), 0, right - pad - Ui.S(16) - Ui.S(6), Height), Fore, Ui.Line);
             }
-            else
-            {
-                int right = hideRect.IsEmpty ? stopRect.Left : hideRect.Left;
-                Ui.Text(g, label, Ui.Bold, new Rectangle(pad, 0, right - pad - Ui.S(10), Height), Fore, Ui.Line);
-            }
+            else Ui.Text(g, label, Ui.Bold, new Rectangle(pad, 0, right - pad - Ui.S(10), Height), Fore, Ui.Line);
             if (!hideRect.IsEmpty)
             {
                 // Hide: quieter than Stop (an outline), the same shape.

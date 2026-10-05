@@ -69,10 +69,21 @@ namespace Beam
             return a == "ARM64" ? "arm64" : "x64";
         }
 
+        const string HostingModeVar = "COREWEBVIEW2_FORCED_HOSTING_MODE";
+
         // Extracts WebView2Loader.dll for this process's architecture (once per loader version).
         static void PrepareLoader(Config cfg)
         {
             if (loaderReady) return;
+            // Beam 1.12.1: every web view hosted "window to visual" (the user's Office Desktop froze for 5 minutes, until
+            // its own mouse moved, after its chat window opened during a keyboard-and-mouse session). Hosted windowed (the
+            // default), a web view's window is a child of ours from the browser's process, which ties that process's
+            // input queue to our UI thread's (as AttachThreadInput does), and our UI thread also injects the viewer's
+            // input: they can hang each other. Window to visual draws the page into our own window: no shared queue.
+            // (Set before any web view starts; a value set from outside wins.)
+            if (string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable(HostingModeVar)))
+                System.Environment.SetEnvironmentVariable(HostingModeVar, "COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL");
+            Log.Write("WebView2: hosting mode " + System.Environment.GetEnvironmentVariable(HostingModeVar));
             string arch = Arch();
             byte[] bytes = Embedded.Resource("Beam.webview2." + arch + ".WebView2Loader.dll");
             if (bytes == null) throw new FileNotFoundException("WebView2Loader.dll for " + arch + " isn't embedded in this build");

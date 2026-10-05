@@ -9,6 +9,9 @@
 // LocalAPI whose own addresses are this PC's real Tailscale addresses (the two pages really connect over WebRTC here),
 // the PC's fake `tailscale` CLI, and --config instances (quiet, off-screen windows, no hotkeys, the test clipboard).
 // Nothing real is moved, clicked or typed. A kvm session captures nothing, so no "sharing your screen" bar appears.
+// 1.12.1 (the user's first day: Office Desktop froze once its chat window opened mid-session): the PC's chat window opens
+// during the session with no window of another process inside Beam's (web views hosted window to visual, so no input
+// queue shared with WebView2's processes), and the banner's pill keeps Hide.
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -90,6 +93,41 @@ async function waitInput(pred, from, ms = 8000) {
   }
   return null;
 }
+// The windows of other processes inside a process's own windows (a web view hosted windowed puts WebView2's there,
+// which attaches its input queue to the app's UI thread), as "class (pid)"; null when PowerShell couldn't tell.
+// Read-only: it enumerates windows and asks which process owns each.
+fs.writeFileSync(dir('child-windows.ps1'), `param([int]$ProcessId)
+Add-Type @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public static class KvmTestWins {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc p, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc p, IntPtr l);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  public static List<string> Foreign(uint pid) {
+    var found = new List<string>();
+    EnumWindows((top, l) => {
+      uint p; GetWindowThreadProcessId(top, out p);
+      if (p == pid) EnumChildWindows(top, (c, l2) => {
+        uint cp; GetWindowThreadProcessId(c, out cp);
+        if (cp != pid) { var s = new StringBuilder(256); GetClassName(c, s, 256); found.Add(s + " (" + cp + ")"); }
+        return true;
+      }, IntPtr.Zero);
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+}
+'@
+"windows: " + ([KvmTestWins]::Foreign([uint32]$ProcessId) -join ', ')
+`);
+function foreignChildren(pid) {
+  const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', dir('child-windows.ps1'), '-ProcessId', String(pid)], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  const m = /^windows: (.*)$/m.exec(r.stdout || '');
+  return m ? m[1].split(', ').filter(Boolean) : null;
+}
+
 // Where the laptop's pointer is (--test-kvm where): { here, x, y } or { on, screen, w, h, scale, x, y }.
 async function where() {
   const n = lines(inst.laptop).length;
@@ -190,6 +228,16 @@ try {
   let st = await pcState();
   check(!!st && /kvm live, not here, banner shown, update may go/.test(st), `SHOP: live, the pointer not there, an update may go (${st})`);
 
+  // (1.12.1) Shop's chat window opened during the session (the user's Office Desktop froze for 5 minutes then): its web
+  // views hold no window of another process (hosted window to visual), so no input queue is shared with WebView2's.
+  forward(inst.pc, []);
+  check(!!(await waitLog(inst.pc, /Perf: open \w+: (page loaded|bridge ready)/, 0, 20000)), 'SHOP\'s chat window opens during the session');
+  check(count(inst.pc, /WebView2: hosting mode COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL/) >= 1, 'SHOP hosts its web views window to visual');
+  for (const [who, i] of [['SHOP', inst.pc], ['the laptop', inst.laptop]]) {
+    const foreign = foreignChildren(i.proc.pid);
+    check(foreign !== null && foreign.length === 0, `${who}'s windows hold no window of another process (${foreign === null ? 'not readable' : foreign.join(', ') || 'none'})`);
+  }
+
   // 2. Over the edge: onto Shop's main screen at its right edge, at the same height.
   fs.rmSync(path.join(inst.pc.dir, 'rc-input.jsonl'), { force: true });
   nl = lines(inst.laptop).length;
@@ -250,6 +298,11 @@ try {
   rc('kvmback');
   // (the name, not "Shop's": Light Beam's copy turns "Shop's" into "Shop's" but the name's "SHOP" into "SHOP")
   check(!!(await waitLog(inst.laptop, new RegExp(`Keyboard and mouse: back on this PC \\(Back, from ${inst.pc.name}'s tray\\)`), nl, 5000)), 'SHOP\'s tray: Back brings the pointer home');
+  // (1.12.1) Shrunk to its pill after 5 s, it still has Hide (the user found none: Hide was on the whole banner only).
+  n = lines(inst.pc).length;
+  rc('banner');
+  const pill = await waitLog(inst.pc, /\(test\) banner (pill|full|folded) at /, n, 5000);
+  check(!!pill && / banner pill at /.test(pill) && /, hide yes$/.test(pill), `Shop's banner as a pill keeps Hide (${pill ? pill.replace(/^.*\(test\) /, '') : 'no answer'})`);
   n = lines(inst.pc).length;
   rc('banner:hide');
   check(!!(await waitLog(inst.pc, /the keyboard-and-mouse banner is folded into the tray \(the banner's Hide\)/, n, 5000)), 'SHOP\'s banner: Hide folds it into the tray');
