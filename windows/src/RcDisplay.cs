@@ -134,6 +134,8 @@ namespace Beam
         public int Percent;             // the scaling wanted (Apply clamps it to what Windows allows at that mode)
         public int Vw, Vh;
         public double Dpr;
+        public bool Scale;              // (1.11.4) the viewer's scaling too; else the screen's own, as near as that mode allows
+        public bool Changed;            // Apply changed the resolution or the scaling
         public SavedDisplay Original;   // what the screen had before the first fit of the session
     }
 
@@ -154,7 +156,7 @@ namespace Beam
         public bool Fitted { get { return original != null; } }
 
         // UI thread, reads only. Null: nothing to do here (no modes, or the screen can't be read).
-        public DisplayPlan Plan(string device, int vw, int vh, double dpr)
+        public DisplayPlan Plan(string device, int vw, int vh, double dpr, bool scale)
         {
             if (string.IsNullOrEmpty(device)) return null;
             var now = backend.Current(device);
@@ -167,6 +169,7 @@ namespace Beam
             plan.Vw = vw;
             plan.Vh = vh;
             plan.Dpr = dpr;
+            plan.Scale = scale;
             plan.Percent = DisplayFit.Scale(pick.Value, vw, vh, dpr, 500);
             if (original != null && original.Device == device) plan.Original = original;
             else
@@ -195,12 +198,20 @@ namespace Beam
             }
             var dpi = backend.Dpi(plan.Device);
             string scale = "";
+            bool scaled = false;
             if (dpi != null)
             {
-                int want = DisplayFit.Scale(plan.Mode, plan.Vw, plan.Vh, plan.Dpr, dpi.Max);
+                // (1.11.4) Without the viewer's "Bigger text": the screen's own scaling, unless that mode can't have it.
+                int own = plan.Original != null && plan.Original.Percent > 0 ? plan.Original.Percent : dpi.Current;
+                int want = plan.Scale ? DisplayFit.Scale(plan.Mode, plan.Vw, plan.Vh, plan.Dpr, dpi.Max) : Math.Max(100, Math.Min(own, dpi.Max));
                 if (want != dpi.Current && !backend.SetDpi(plan.Device, want)) scale = " (Windows kept its scaling)";
-                else scale = " at " + want + "%";
+                else
+                {
+                    scaled = want != dpi.Current;
+                    scale = " at " + want + "%" + (plan.Scale ? "" : want == own ? " (its own scaling)" : " (its own " + own + "% doesn't go at this size)");
+                }
             }
+            plan.Changed = moved || scaled;
             log("fitted to the viewer: " + plan.Mode + scale + (moved ? "" : " (the same size)") + "; it was " + Describe(plan.Original));
             return null;
         }

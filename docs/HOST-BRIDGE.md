@@ -401,10 +401,15 @@ retransmits).
     applies at once, on the same connection (a codec change re-offers with the same `o=` id). 0 and `auto` leave it to
     the PC. `vw` × `vh` is the viewer's picture area in physical pixels, zoom included: the picture is sent no
     larger. Auto: sharp text while the screen is still, smooth motion while it's busy, Data saver on mobile data.
-  - `{ t: "fit", on: true, w, h, dpr }` fits the PC's screen to the viewer's picture area (physical pixels) and
-    scaling: the monitor's best mode, and the display scaling to match; `{ t: "fit", on: false }` puts it back, as
-    does the session's end. The PC answers `{ t: "display", monitors, monitor, fitted, note? }` with the new sizes
-    (input maps to them; the viewer holds input until it comes, 6 s at most).
+  - `{ t: "fit", on: true, w, h, dpr, scale }` fits the PC's screen to the viewer's picture area (physical pixels):
+    the monitor's best mode; `{ t: "fit", on: false }` puts it back, as does the session's end. The PC answers
+    `{ t: "display", monitors, monitor, fitted, note? }` with the new sizes (input maps to them; the viewer holds input
+    until it comes, 6 s at most). **(1.11.4, caps `fit-scale`)** The display scaling changes to match the viewer's
+    only with `scale: true` (the viewer's "Bigger text", off by default: a change of scaling froze apps on the PC for a
+    second and closed one); otherwise the screen keeps its own (or the nearest that mode allows). Before 1.11.4 the
+    scaling always changed. After any change it makes, the PC captures its screen again on the same connection (Windows'
+    sharing bar is then drawn for the new scaling; it stayed cut off), and a capture that ends within 6 s of a display
+    change starts again once, instead of ending the session as Windows' Stop sharing.
   - `{ t: "video", on }`: the viewer can or can't be seen; no frames while it can't.
   - The PC's `stats` add `srcW`, `srcH` (its screen), `down` (how much smaller it's sent), `profile`, `auto`, `maxFps`,
     `maxKbps`, `avail` (the network's estimate, kbps), `lost` (%), `rtt` (ms) and `video`.

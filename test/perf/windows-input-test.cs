@@ -645,11 +645,11 @@ namespace Beam
                 var fake = new FakeDisplay();
                 var lines = new List<string>();
                 var d = new RcDisplay(fake, lines.Add);
-                var plan = d.Plan("DISPLAY1", 1920, 1200, 1.25);
+                var plan = d.Plan("DISPLAY1", 1920, 1200, 1.25, true);
                 Check(plan != null && plan.Mode.W == 1920 && plan.Mode.H == 1200 && plan.Original.Mode.W == 2560 && plan.Original.Percent == 150, "the plan: 1920×1200 (this screen has it: the exact size), the original (2560×1440 at 150%) noted first");
                 d.Begin(plan);
                 Check(d.Apply(plan) == null && fake.Now.W == 1920 && fake.Now.H == 1200 && fake.Percent == 125, "applied: 1920×1200 at 125% (" + fake.State + ")");
-                var again = d.Plan("DISPLAY1", 2340, 1080, 2.75);
+                var again = d.Plan("DISPLAY1", 2340, 1080, 2.75, true);
                 Check(again != null && again.Original == plan.Original, "a second fit in the session keeps the first original");
                 Check(d.Fitted && d.Undo(d.Original, "test") && fake.Now.W == 2560 && fake.Now.H == 1440 && fake.Percent == 150, "undone: 2560×1440 at 150% again (" + fake.State + ")");
                 d.End();
@@ -657,25 +657,48 @@ namespace Beam
 
                 var phone = new FakeDisplay();
                 var dp = new RcDisplay(phone, null);
-                var pp = dp.Plan("DISPLAY1", 2340, 1080, 2.75);
+                var pp = dp.Plan("DISPLAY1", 2340, 1080, 2.75, true);
                 dp.Begin(pp);
                 dp.Apply(pp);
                 Check(phone.Now.W == 1920 && phone.Percent == 175, "a phone: 1920×1080 at 175%, the most Windows allows there (" + phone.State + ")");
                 var same = new FakeDisplay();
                 var ds = new RcDisplay(same, null);
-                var ps = ds.Plan("DISPLAY1", 2560, 1440, 1.5);
+                var ps = ds.Plan("DISPLAY1", 2560, 1440, 1.5, true);
                 ds.Begin(ps);
                 ds.Apply(ps);
                 Check(same.Calls.Count == 0, "already the right size and scaling: nothing changes (" + same.State + ")");
                 var moved = new FakeDisplay();
                 moved.Saved = new DisplayMode(1920, 1080, 60); // (Windows' saved mode isn't what was on screen)
                 var dm = new RcDisplay(moved, null);
-                var pm = dm.Plan("DISPLAY1", 1280, 720, 1.0);
+                var pm = dm.Plan("DISPLAY1", 1280, 720, 1.0, true);
                 dm.Begin(pm);
                 dm.Apply(pm);
                 Check(dm.Undo(dm.Original, "test") && moved.Now.W == 2560 && moved.Now.H == 1440, "Windows' saved mode was another: back to the original size all the same (" + moved.State + ")");
+
+                // 1.11.4: without the viewer's "Bigger text" the scaling stays the screen's own (150% here), or the
+                // nearest that size allows; nothing at all changes when the size is right already.
+                var own = new FakeDisplay();
+                var ownLines = new List<string>();
+                var dn = new RcDisplay(own, ownLines.Add);
+                var pn = dn.Plan("DISPLAY1", 1920, 1200, 1.25, false);
+                dn.Begin(pn);
+                Check(dn.Apply(pn) == null && own.Now.W == 1920 && own.Now.H == 1200 && own.Percent == 150 && pn.Changed, "without Bigger text: 1920×1200, its own 150% kept (" + own.State + ")");
+                Check(ownLines.Count == 1 && ownLines[0].StartsWith("fitted to the viewer: 1920×1200 at 150% (its own scaling); it was 2560×1440 at 150%"), "...the log says so: " + string.Join(" / ", ownLines));
+                var small = new FakeDisplay();
+                var smallLines = new List<string>();
+                var dsm = new RcDisplay(small, smallLines.Add);
+                var psm = dsm.Plan("DISPLAY1", 1280, 720, 1.0, false);
+                dsm.Begin(psm);
+                dsm.Apply(psm);
+                Check(small.Now.W == 1280 && small.Percent == 125 && smallLines.Count == 1 && smallLines[0].Contains("at 125% (its own 150% doesn't go at this size)"), "...a size that can't have 150%: the nearest it allows, 125% (" + small.State + ")");
+                var right = new FakeDisplay();
+                var dr = new RcDisplay(right, null);
+                var pr = dr.Plan("DISPLAY1", 2560, 1440, 2.0, false);
+                dr.Begin(pr);
+                dr.Apply(pr);
+                Check(right.Calls.Count == 0 && !pr.Changed, "...the right size already: nothing changes, whatever the viewer's own scaling (" + right.State + ")");
             }
-            Section("fitting the PC to the viewer: its size and scaling, noted and put back (1.8)", b0);
+            Section("fitting the PC to the viewer: its size and scaling, noted and put back (1.8; its scaling only with Bigger text, 1.11.4)", b0);
 
             Console.WriteLine();
             Console.WriteLine(failures == 0 ? "All " + passed + " checks passed." : failures + " of " + (passed + failures) + " checks FAILED.");

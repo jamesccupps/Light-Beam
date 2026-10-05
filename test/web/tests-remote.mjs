@@ -564,7 +564,7 @@ export default function register(test) {
   }, { requires: FEATURE, timeout: 90000 });
 
   test('remote control 1.8: the picture’s settings (applied at once, kept per PC), fitting the PC to this screen (input waits, then maps to its new size; off puts it back), no frames while hidden, frames shown as they come', async ctx => {
-    const pc = await fakePc(ctx, { caps: ['fit', 'settings', 'video'] });
+    const pc = await fakePc(ctx, { caps: ['fit', 'fit-scale', 'settings', 'video'] });
     const page = await viewer(ctx, pc.id);
     await live(page, pc);
     // Right after the PC's hello: the settings (Auto), the fit (a desktop: on unless turned off) and visible.
@@ -581,6 +581,7 @@ export default function register(test) {
     eq([s.mode, s.size, s.fps, s.kbps, s.codec, s.net, s.vw, s.vh], ['auto', 'auto', 0, 0, 'auto', '', area[0], area[1]], 'the settings: Auto, with the picture area in physical pixels');
     const fit = ctl.find(m => m.t === 'fit');
     eq([fit.on, fit.w, fit.h, fit.dpr], [true, ...area], 'Fit the PC to this screen: this area and scaling');
+    eq(fit.scale, false, '...its own scaling kept (no "Bigger text", 1.11.4)');
     eq(ctl.find(m => m.t === 'video').on, true, 'visible');
     // The PC's new sizes: input maps to them.
     await page.waitFor(`rc.fitted && !rc.fitting && rc.monitors[0].w === 1920 && rc.monitors[0].h === 1080`, 5000, 'fitted: 1920×1080');
@@ -603,6 +604,9 @@ export default function register(test) {
     const last = (await rec(pc, 'ctl')).filter(m => m.t === 'settings').at(-1);
     eq([last.mode, last.fps, last.kbps, last.codec], ['motion', 30, 10000, 'h264'], 'the settings, as chosen');
     await page.waitFor(`!rcUi.details.hidden && /Mode/.test(rcUi.details.textContent) && /1920×1080/.test(rcUi.details.textContent)`, 5000, 'the details (the fitted screen in them)');
+    // 1.11.4: "Bigger text" asks for the PC's scaling too.
+    await page.evaluate(`[...document.querySelectorAll('#genBody label.check')].find(l => /^Bigger text/.test(l.textContent)).querySelector('input').click(); true`);
+    await pc.page.waitFor(`fakePc.rec.ctl.filter(m => m.t === 'fit').at(-1)?.scale === true`, 5000, 'a fit with the scaling (Bigger text)');
     // Fit off: asked for, and the PC's own sizes come back.
     await page.evaluate(`[...document.querySelectorAll('#genBody label.check')].find(l => /^Fit /.test(l.textContent)).querySelector('input').click(); $('#genDlg').close(); true`);
     await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'fit' && m.on === false)`, 5000, 'fit off');
@@ -613,7 +617,7 @@ export default function register(test) {
     await ctx.setHidden(page, false);
     await pc.page.waitFor(`fakePc.rec.ctl.filter(m => m.t === 'video').at(-1)?.on === true`, 5000, 'video on again');
     // Kept for this PC on this device: the next session starts with them.
-    eq(await page.evaluate(`JSON.parse(localStorage.getItem('beam.rc.pic.${pc.id}'))`), { mode: 'motion', size: 'auto', fps: 30, kbps: 10000, codec: 'h264', fitPc: false, details: true }, 'kept for this PC');
+    eq(await page.evaluate(`JSON.parse(localStorage.getItem('beam.rc.pic.${pc.id}'))`), { mode: 'motion', size: 'auto', fps: 30, kbps: 10000, codec: 'h264', fitPc: false, fitScale: true, details: true }, 'kept for this PC');
     const n0 = (await rec(pc, 'ctl')).length;
     await page.evaluate('location.reload(); true');
     await live(page, pc);
