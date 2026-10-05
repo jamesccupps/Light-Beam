@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { assert, eq, readZip } from './harness.mjs';
-import { dev, PNG_1PX } from './tests-core.mjs';
+import { dev } from './tests-core.mjs';
 
 const MB = 1024 * 1024;
 const upState = `[...uploads.values()].map(u => u.state).join(',')`;

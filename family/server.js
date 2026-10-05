@@ -30,6 +30,7 @@ const { createPush } = require('./lib/push');
 const { createDirect } = require('./lib/direct');
 const { createLinks } = require('./lib/links');
 const { createMedia } = require('./lib/media');
+const { createClean } = require('./lib/clean');
 const { createBackups, restoreBackup } = require('./lib/backup');
 
 const env = process.env;
@@ -48,7 +49,7 @@ const FILE = {
   control: path.join(DATA_DIR, 'control.key'),
   stop: path.join(DATA_DIR, 'stop'),
 };
-const DIR = { logs: path.join(DATA_DIR, 'logs'), files: path.join(DATA_DIR, 'files'), uploads: path.join(DATA_DIR, 'uploads'), thumbs: path.join(DATA_DIR, 'thumbs'), avatars: path.join(DATA_DIR, 'avatars'), play: path.join(DATA_DIR, 'play') };
+const DIR = { logs: path.join(DATA_DIR, 'logs'), files: path.join(DATA_DIR, 'files'), uploads: path.join(DATA_DIR, 'uploads'), thumbs: path.join(DATA_DIR, 'thumbs'), avatars: path.join(DATA_DIR, 'avatars'), play: path.join(DATA_DIR, 'play'), clean: path.join(DATA_DIR, 'clean') };
 // "41700-41799" → [41700, 41799]; anything else (or "any"): null, any port.
 function portRange(value) {
   const m = /^(\d{4,5})-(\d{4,5})$/.exec(String(value).trim());
@@ -149,6 +150,7 @@ function serve() {
   ctx.direct = createDirect(ctx);
   ctx.links = createLinks(ctx);
   ctx.media = createMedia(ctx);
+  ctx.clean = createClean(ctx); // (1.15.0) copies without location data, for fast links
   const router = createRouter([...ctx.people.routes, ...ctx.chat.routes, ...ctx.files.routes, ...ctx.push.routes, ...ctx.direct.routes, ...ctx.links.routes, ...ctx.media.routes]);
 
   // (1.13.0) Beam (the server on this machine) shares one of its files by a fast link, for its apps' "Fast link": the
@@ -159,9 +161,11 @@ function serve() {
     if (!owner) throw httpError(409, 'Beam Family has no owner yet: open it once over Tailscale');
     if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) throw httpError(400, 'Expected {"path", "name", "size", "mime", "hours"}');
     const hours = body.hours === undefined ? 24 : Math.round(Number(body.hours));
-    ctx.links.checkNew(owner, hours); // (before anything is adopted for a link that can't be made)
+    // (1.15.0) the same choices as Family's own: at most so many downloads, and without location data
+    const options = ctx.links.optionsOf(body);
+    ctx.links.checkNew(owner, hours, options, { name: body.name, mime: body.mime }); // (before anything is adopted for a link that can't be made)
     const a = await ctx.files.adoptFile({ path: body.path, name: body.name, size: Number(body.size), mime: body.mime, owner, link: body.link !== false });
-    return { link: ctx.links.createFor(a, owner, hours) };
+    return { link: ctx.links.createFor(a, owner, hours, options) };
   }
   const serveStatic = createStatic(path.join(__dirname, 'public'));
   const backups = backupsOf(db);

@@ -16,7 +16,6 @@
 // plays as it is), 'failed'.
 
 const { spawn, execFile } = require('node:child_process');
-const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -278,6 +277,7 @@ function createMedia(ctx) {
   return {
     start, stop, add, forget, stateOf, sendPlay, isVideo,
     enabled: () => Boolean(tools),
+    ffmpeg: () => tools?.ffmpeg || null, // (1.15.0, lib/clean.js: a video's copy without location data)
     routes: [['GET', '/api/files/:id/play', playFile]],
   };
 }

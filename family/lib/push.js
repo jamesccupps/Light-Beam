@@ -4,7 +4,6 @@
 // for that browser alone (RFC 8291, aes128gcm): the push service carries it without being able to read it.
 
 const fs = require('node:fs');
-const path = require('node:path');
 const crypto = require('node:crypto');
 const { newId } = require('./ids');
 const { httpError, send, readJson } = require('./http');

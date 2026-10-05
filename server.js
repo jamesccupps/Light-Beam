@@ -13,7 +13,7 @@ const net = require('node:net');
 const zlib = require('node:zlib');
 const dgram = require('node:dgram');
 const crypto = require('node:crypto');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { promisify } = require('node:util');
@@ -3819,7 +3819,8 @@ async function forwardItem(req, res, [id], url) {
 // (1.13.0) "Fast link" on a file in Beam's chat (the user: "Make a fast link" from Beam's own apps): Beam Family, on this
 // machine, makes it, since Beam isn't reachable from the internet and Family's public link is. Family takes the file as
 // a second name for it (a hard link: no copy on the same drive) and answers with a link anyone can use without signing
-// in until it runs out; its page says it's from Family's owner. POST /api/items/:id/fastlink { hours } → 201 { link }.
+// in until it runs out; its page says it's from Family's owner. POST /api/items/:id/fastlink { hours, maxDownloads?,
+// removeLocation? } → 201 { link } (1.15.0: at most so many downloads; a copy without location data, Family's choices).
 async function fastLinkItem(req, res, [id], url) {
   if (!FAMILY_URL) throw httpError(404, 'Fast links need Beam Family on this server (BEAM_FAMILY_URL)');
   const item = findItem(id);
@@ -3839,7 +3840,8 @@ async function fastLinkItem(req, res, [id], url) {
     r = await fetch(`${FAMILY_LOCAL}/api/admin/fastlink`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Family-Control': control },
-      body: JSON.stringify({ path: file, name: item.name, size: item.size, mime: item.mime, hours }),
+      body: JSON.stringify({ path: file, name: item.name, size: item.size, mime: item.mime, hours,
+        ...(body?.maxDownloads != null && { maxDownloads: body.maxDownloads }), ...(body?.removeLocation === true && { removeLocation: true }) }),
       signal: AbortSignal.timeout(30_000),
     });
   } catch {
@@ -3850,7 +3852,8 @@ async function fastLinkItem(req, res, [id], url) {
     // (404: a Beam Family before 1.13 or another key; its own errors pass on: no owner yet, the 50 links, storage)
     throw httpError(r.ok || r.status === 404 || r.status >= 500 ? 503 : r.status, r.status === 404 ? 'Beam Family on this machine needs version 1.13 or later' : answer.error || `Beam Family answered ${r.status}`);
   }
-  log.info(`${whoName(deviceIdOf(req, url))} made a fast link to ${item.name} (through Beam Family, ${hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`})`);
+  const extras = [answer.link.maxDownloads ? `at most ${answer.link.maxDownloads} download${answer.link.maxDownloads > 1 ? 's' : ''}` : '', answer.link.removeLocation ? 'without location data' : ''].filter(Boolean);
+  log.info(`${whoName(deviceIdOf(req, url))} made a fast link to ${item.name} (through Beam Family, ${hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`}${extras.length ? `, ${extras.join(', ')}` : ''})`);
   send(res, 201, { link: answer.link });
 }
 

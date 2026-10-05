@@ -334,6 +334,10 @@ tailscale funnel --bg --https=8443 http://127.0.0.1:8766    # optional: a public
 - **Fast links from Beam's own chat too** (1.13): "Fast link…" on a file there (browsers, the Windows app, the Android
   app) makes the same kind of link through Beam Family on the same machine, from the file itself (no copy on the same
   drive); its page says it's from Family's owner.
+- **Fast links that stop, or leave the location behind** (1.15): when you make one you can have it stop after one, 3
+  or 10 downloads (a download that's picked up again isn't a new one), and share a photo or video without where it was
+  taken: Beam Family makes a copy without the location and the camera's other notes (JPEG and PNG photos, and videos
+  when ffmpeg is set up), and the link only ever sends that copy (over https: never the original).
 - **Fast downloads, a gallery, several at once** (1.11): big files download from the chat over the same direct
   connection as fast links, with progress and Stop; each conversation has a gallery of its photos, videos and files;
   pick several messages or pictures to copy, download or delete them together.

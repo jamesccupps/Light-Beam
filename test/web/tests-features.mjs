@@ -162,7 +162,7 @@ export default function register(test) {
   });
 
   test('paste: Office text+picture pastes the text; Ctrl+V outside a field asks before sending', async ctx => {
-    const { page, phone } = await withPhone(ctx, []);
+    const { page } = await withPhone(ctx, []);
     const r = await page.evaluate(`(() => {
       const box = $('#text'); box.focus();
       const dt = new DataTransfer(); dt.setData('text/plain', 'Q3 total\\t41,200');

@@ -1,6 +1,6 @@
 {
   "name": "beam",
-  "version": "1.14.3",
+  "version": "1.15.0",
   "private": true,
   "license": "MIT",
   "repository": "github:jamesccupps/Light-Beam",
@@ -12,7 +12,8 @@
   "scripts": {
     "start": "node server.js",
     "backup": "node server.js export",
-    "test": "node test/server.test.js"
+    "test": "node test/server.test.js",
+    "lint": "eslint ."
   },
   "engines": {
     "node": ">=20.12"
@@ -23,5 +24,10 @@
   },
   "optionalDependencies": {
     "node-datachannel": "^0.33.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.12.0",
+    "globals": "^17.13.0"
   }
 }

@@ -12,6 +12,7 @@ import androidx.test.core.app.ApplicationProvider
 import app.beam.android.core.Device
 import app.beam.android.core.Item
 import app.beam.android.core.Pairing
+import app.beam.android.ui.FastLinks
 import app.beam.android.ui.ThreadActivity
 import org.json.JSONArray
 import org.junit.After
@@ -142,6 +143,34 @@ class FastLink113Test {
         }
         assertEquals(listOf("l000000000000001" to 168), f.fastLinks.toList())
         assertEquals("copied at once", url, app.getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.text?.toString())
+        assertEquals("no limit, nothing taken out: neither asked", listOf(false, false), f.fastLinkBodies.single().let { listOf(it.has("maxDownloads"), it.has("removeLocation")) })
+    }
+
+    @Test
+    fun aPhotosFastLinkCanStopAfterSomeDownloadsAndGoWithoutItsLocation() {
+        val photo = Item("l000000000000003", "file", null, false, 0, "beach.jpg", 2000, "image/jpeg", desk, "Desk", listOf(me()), emptyMap(), now - 20_000)
+        val f = online(listOf("stream-modes", "forward", "fast-links"), photo, file("l000000000000004", "notes.bin", 10_000))
+        val a = openThread()
+        menu(a, "beach.jpg").first { it.text.toString() == "Fast link" }.performClick()
+        idle(300)
+        val choose = ShadowDialog.getLatestDialog() as AlertDialog
+        val root = choose.window!!.decorView
+        root.findViewWithTag<android.widget.Spinner>(FastLinks.TAG_LIMIT).setSelection(2) // 3 downloads
+        root.findViewWithTag<android.widget.CheckBox>(FastLinks.TAG_LOCATION).isChecked = true
+        choose.getButton(DialogInterface.BUTTON_POSITIVE).performClick()
+        idleUntil("the link shown") {
+            (ShadowDialog.getLatestDialog() as? AlertDialog)?.findViewById<TextView>(android.R.id.message)?.text?.contains("without its location data") == true
+        }
+        val body = f.fastLinkBodies.single()
+        assertEquals(listOf(3, true), listOf(body.optInt("maxDownloads"), body.optBoolean("removeLocation")))
+        val message = (ShadowDialog.getLatestDialog() as AlertDialog).findViewById<TextView>(android.R.id.message)!!.text.toString()
+        assertTrue(message, message.contains("It stops after 3 downloads."))
+        ShadowDialog.getLatestDialog().dismiss()
+        // A file that isn't a photo or video isn't offered that
+        menu(a, "notes.bin").first { it.text.toString() == "Fast link" }.performClick()
+        idle(300)
+        assertEquals(null, (ShadowDialog.getLatestDialog() as AlertDialog).window!!.decorView.findViewWithTag<android.widget.CheckBox>(FastLinks.TAG_LOCATION))
+        ShadowDialog.getLatestDialog().dismiss()
     }
 
     @Test

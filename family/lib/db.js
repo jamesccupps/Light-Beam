@@ -205,6 +205,14 @@ const MIGRATIONS = [
   ALTER TABLE attachments ADD COLUMN play TEXT;
   ALTER TABLE attachments ADD COLUMN play_size INTEGER;
   `,
+  // v5 (1.15.0): a fast link's most downloads (null: no limit) and whether it shares the copy without location data;
+  // that copy's state (null, working, ready, failed) and size (lib/clean.js).
+  `
+  ALTER TABLE links ADD COLUMN max_downloads INTEGER;
+  ALTER TABLE links ADD COLUMN clean INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE attachments ADD COLUMN clean TEXT;
+  ALTER TABLE attachments ADD COLUMN clean_size INTEGER;
+  `,
 ];
 
 function openDb(file) {

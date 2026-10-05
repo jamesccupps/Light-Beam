@@ -155,6 +155,7 @@ function createDirect(ctx) {
   async function sendFile(peer, dc, req) {
     const a = peer.link ? ctx.links.attachmentOf(peer.link, req.file) : ctx.files.visibleAttachment(peer.user, String(req.file || ''));
     let pos = Math.max(0, Math.floor(Number(req.offset) || 0));
+    if (peer.link && !pos) ctx.links.mayStart(peer.link); // (1.15.0) a link with no downloads left starts none
     if (pos > a.size) throw httpError(416, 'That’s past the end of the file');
     let drained = null;
     dc.setBufferedAmountLowThreshold(LOW);

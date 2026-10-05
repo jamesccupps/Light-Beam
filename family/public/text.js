@@ -75,7 +75,8 @@ export function renderBody(body) {
   return frag;
 }
 
-// Only emoji (up to 27): shown big, as in other chat apps.
+// Only emoji (up to 27): shown big, as in other chat apps. (The joiner, variation selector and keycap on their own.)
+// eslint-disable-next-line no-misleading-character-class
 const EMOJI_ONLY = /^(?:[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}‍️⃣\s]|[#*0-9]️?⃣)+$/u;
 export function isJumbo(body) {
   if (!body || body.length > 200 || !EMOJI_ONLY.test(body) || !/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(body)) return false;

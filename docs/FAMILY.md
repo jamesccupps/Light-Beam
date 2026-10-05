@@ -251,9 +251,18 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   ours); then a data channel per transfer, labelled `{"op":"get","file","offset"}` (binary from the offset on, then
   `{"done":true,"size"}`; a file still arriving is followed) or `{"op":"put","upload","offset"}` (binary in; `{"offset"}`
   each 2 MB kept, then `{"done":true}`); `{"error"}` and closed when something's wrong.
-- Fast links (1.9): `POST /api/files/:id/links {hours}` → `{link: {id, url, expires}}` (the url only now),
+- Fast links (1.9): `POST /api/files/:id/links {hours, maxDownloads?, removeLocation?}` → `{link: {id, url, expires,
+  maxDownloads, removeLocation}}` (the url only now). (1.15.0) `maxDownloads` 1–1000 (none: until it runs out): a new
+  download past it is `410` (one picked up again with a range from a byte isn't new; a direct one counts as it starts);
+  `removeLocation` (JPEG and PNG photos; videos when ffmpeg is there; `400` for other kinds, `409` while the file is
+  still arriving) shares a copy without location data, made once per file in `clean/` (`lib/clean.js`: a JPEG's
+  Exif/XMP/IPTC blocks and comments go, its orientation kept in a small Exif of its own, nothing after the picture; a
+  PNG's text/time/Exif chunks; a video copied by ffmpeg without metadata or data tracks) and counted in the storage;
+  such a link is https only (`direct` is `null`, its `direct` endpoint `403`), plays only a version made without
+  metadata, and its info says `cleaning` (`working`, `ready`, `failed`; the file is `503` until ready),
   `GET /api/files/:id/links`, `DELETE /api/links/:id`; for anyone with the link: `GET /f/:token` (the page),
-  `GET /api/links/:token` (name, size, mime, received, from, expires, preview, direct), `GET /api/links/:token/file`
+  `GET /api/links/:token` (name, size, mime, received, from, expires, preview, direct; 1.15.0: maxDownloads,
+  downloadsLeft, usedUp; removeLocation, cleaning), `GET /api/links/:token/file`
   (https, Range, follows an upload), `GET /api/links/:token/preview`, `POST /api/links/:token/direct {sdp}`.
 - The gallery (1.11): `GET /api/channels/:id/files?kind=media|other&before=<next>&limit=` → `{files: [attachment +
   message, author, at], next}` (newest first; only files that have all come in, in messages still there).

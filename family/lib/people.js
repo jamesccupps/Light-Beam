@@ -195,7 +195,7 @@ function createPeople(ctx) {
     let base = (config.publicUrl || '').replace(/\/+$/, '');
     if (!base && req) {
       const proxied = auth.fromLoopback(req) && (req.headers['x-forwarded-for'] || req.headers['tailscale-user-login']);
-      const host = String(req.headers.host || '').replace(/[^A-Za-z0-9.:\-\[\]]/g, '');
+      const host = String(req.headers.host || '').replace(/[^A-Za-z0-9.:\-[\]]/g, '');
       if (host) base = `${proxied && !/^(127\.|localhost|\[::1\])/.test(host) ? 'https' : 'http'}://${host}`;
     }
     return `${base}/join/${code}`;

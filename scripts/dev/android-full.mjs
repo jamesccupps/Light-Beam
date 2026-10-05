@@ -53,6 +53,8 @@ function skippedTests() {
   return out;
 }
 
+// (no old reports: a run that stops before the tests mustn't read the last one's)
+fs.rmSync(path.join(ANDROID, 'app', 'build', 'test-results', 'testDebugUnitTest'), { recursive: true, force: true });
 const a = startServer(8811, 'a');
 const b = startServer(8812, 'b');
 let code = 1;

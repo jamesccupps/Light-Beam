@@ -820,6 +820,21 @@ export function registerLink(test) {
     eq([info.name, info.size, info.received, info.from, Math.round((info.expires - Date.now()) / 3600e3)], ['trip.bin', bytes.length, bytes.length, 'Robin', 168], 'the file, from Family’s owner, for a week');
     assert(Buffer.from(await (await fetch(`${fam.base}/api/links/${token}/file`)).arrayBuffer()).equals(bytes), 'the same bytes, without an account');
     assert(/made a fast link to trip\.bin \(through Beam Family, 7 days\)/.test(beam.log || ''), 'Beam’s log says so');
+    // (1.15.0) Family's other choices from Beam's chat: one download, then it's used up; a file that isn't a photo or a
+    // video isn't offered "without location data".
+    await page.evaluate(`$('#genDlg').close(); true`);
+    await page.evaluate(`${entry(fileId)}.action()`);
+    await page.waitFor(`$('#genDlg').open && Boolean($('#genDlg select'))`, 3000, 'the dialog again');
+    eq(await page.evaluate(`$('#genDlg input[type=checkbox]') === null`), true, 'no "without location data" for a file that isn’t a photo or video');
+    await page.evaluate(`const s = $('#genDlg select'); s.value = '1'; s.dispatchEvent(new Event('change')); [...$$('#genFoot button')].find(b => /Make the link/.test(b.textContent)).click(); true`);
+    await page.waitFor(`/\\/f\\/[A-Za-z0-9_-]{32}$/.test($('#genDlg .fl-url')?.value || '') && $('#genDlg .fl-url').value !== '${url}'`, 8000, 'the second link');
+    const once = (await page.evaluate(`$('#genDlg .fl-url').value`)).split('/f/')[1];
+    assert(/or one download/.test(await page.evaluate(`$('#genDlg').textContent`)), 'it says it stops after one download');
+    eq((await (await fetch(`${fam.base}/api/links/${once}`)).json()).maxDownloads, 1, 'Family made it with one download');
+    const first = await fetch(`${fam.base}/api/links/${once}/file`);
+    await first.arrayBuffer();
+    eq(first.status, 200, 'one download');
+    eq((await fetch(`${fam.base}/api/links/${once}/file`)).status, 410, 'then it is used up');
     // A Beam without Beam Family doesn't offer it.
     const plain = await ctx.signedIn();
     await plain.waitFor(`typeof server !== 'undefined' && Boolean(server.info)`, 10000, 'info loaded');

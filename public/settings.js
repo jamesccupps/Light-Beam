@@ -141,7 +141,9 @@ function sectionPc() {
   return [
     el('h4', {}, 'Receiving'),
     toggle('Copy received text to the clipboard', s.autoCopy, v => set({ autoCopy: v })),
-    toggle('Let received text appear in clipboard history (Win+V)', s.clipboardHistory, v => set({ clipboardHistory: v }), { disabled: !s.autoCopy }),
+    toggle('Let received text appear in clipboard history (Win+V)', s.clipboardHistory, v => set({ clipboardHistory: v }), { disabled: !s.autoCopy,
+      // (1.15.0, the audit's X-5: said rather than changed)
+      hint: 'On: it’s kept in Win+V history and, if Windows’ cloud clipboard is on, synced to your Microsoft account like anything else you copy. Off: it stays out of both.' }),
     'autoOpenLinks' in s && toggle('Open links sent to this PC automatically', s.autoOpenLinks, v => set({ autoOpenLinks: v }), { hint: 'A message that’s just one web link, sent to this PC itself (not to all devices), opens in your default browser. Links more than 10 minutes old (say, after the PC was off) don’t.' }),
     // The app owns this PC's switch (null: the server is older than 1.5).
     typeof s.phoneNotifications === 'boolean' && toggle('Show phone notifications on this PC', s.phoneNotifications, (v, box) => set({ phoneNotifications: v }, box),

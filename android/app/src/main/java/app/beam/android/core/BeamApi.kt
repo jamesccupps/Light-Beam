@@ -271,8 +271,11 @@ class BeamApi(
      * `POST /api/items/{id}/fastlink { hours }` (server 1.13 `fast-links`): a link anyone can download the file with
      * until it runs out, made by Beam Family on the server's machine → its `{ url, expires, … }`.
      */
-    fun fastLink(id: String, hours: Int): JSONObject {
-        val body = JSONObject().put("hours", hours).toString().toRequestBody(JSON)
+    fun fastLink(id: String, hours: Int, maxDownloads: Int = 0, removeLocation: Boolean = false): JSONObject {
+        // (server 1.15: at most so many downloads; a copy without location data)
+        val body = JSONObject().put("hours", hours)
+            .apply { if (maxDownloads > 0) put("maxDownloads", maxDownloads); if (removeLocation) put("removeLocation", true) }
+            .toString().toRequestBody(JSON)
         return json(request(url("/api/items/$id/fastlink")).post(body).build()).getJSONObject("link")
     }
 
