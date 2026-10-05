@@ -4480,6 +4480,12 @@ test('AUD (audit 2026-10-04): reactions can’t be object keys; a reinstall need
     } catch (err) {
       failed++;
       console.log(`FAIL  ${t.name}\n      ${String(err.stack || err).split('\n').slice(0, 6).join('\n      ')}`);
+      // (in GitHub Actions also an annotation: on the run's page and through the API, without the logs' sign-in)
+      if (process.env.GITHUB_ACTIONS === 'true') {
+        const data = s => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+        const prop = s => data(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+        console.log(`::error title=${prop(t.name.slice(0, 200))}::${data(String(err.stack || err).split('\n').slice(0, 8).join('\n'))}`);
+      }
     }
     for (const c of children) try { c.kill(); } catch {}
   }
