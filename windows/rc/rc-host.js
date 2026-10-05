@@ -26,7 +26,10 @@
   let settings = { mode: 'text', size: 'auto', vw: 0, vh: 0, fps: 0, kbps: 0, codec: 'auto', net: '' };
   let autoPick = 'text', busyTicks = 0, calmTicks = 0, videoOn = true, src = { w: 0, h: 0 }, codecsKey = '';
   let pendingRemote = [], outCands = [], candTimer = 0, restartTimer = 0, statsTimer = 0, prev = null, lastSelected = null;
-  let codecNow = null, encoderNow = null, ended = false, candidatesIn = 0, candidatesAdded = 0;
+  let codecNow = null, encoderNow = null, ended = false, candidatesIn = 0, candidatesAdded = 0, recapturing = null;
+  // Windows' "Stop sharing", or a display change that ended the capture: Beam tells them apart (1.11.4: the second
+  // starts again).
+  const onTrackEnded = () => { if (!ended) post({ t: 'ended', reason: 'stopped-sharing' }); };
 
   // The profile now: the viewer's mode (Auto's pick), with its overrides.
   function profile() {
@@ -109,7 +112,7 @@
     }
     track = stream.getVideoTracks()[0];
     track.contentHint = profile().hint;
-    track.onended = () => { if (!ended) post({ t: 'ended', reason: 'stopped-sharing' }); }; // Windows' "Stop sharing"
+    track.onended = onTrackEnded;
     const size = await frameSize(stream); // getSettings() reports the constraint's maximum, not the screen
     src = { w: size.w, h: size.h };
     post({ t: 'captured', w: size.w, h: size.h });
@@ -127,6 +130,41 @@
       v.srcObject = s;
       v.play().catch(() => {});
     });
+  }
+
+  // (1.11.4) A fresh capture of the same screen in place of the old one, on the same connection (replaceTrack: no new
+  // offer): after a display change, which can end the capture and leaves Windows' sharing bar drawn for the old
+  // scaling; the new capture comes with a new bar. Beam's gate allows it as it did the first (the session is on).
+  function recapture() {
+    if (recapturing || ended || !stream) return recapturing;
+    recapturing = (async () => {
+      let late = false, timer = 0, s;
+      const capture = navigator.mediaDevices.getDisplayMedia({ video: constraints(), audio: false });
+      capture.then(x => { if (late || ended) x.getTracks().forEach(t => t.stop()); }, () => {});
+      try {
+        s = await Promise.race([capture, new Promise(res => { timer = setTimeout(() => res('timeout'), 5000); })]);
+      } catch (e) {
+        clearTimeout(timer);
+        if (!ended) post({ t: 'ended', reason: 'capture-' + (e && e.name || 'error') + '-again' });
+        return;
+      }
+      clearTimeout(timer);
+      if (s === 'timeout') { late = true; if (!ended) post({ t: 'ended', reason: 'capture-timeout-again' }); return; }
+      if (ended) return;
+      const old = stream;
+      const t = s.getVideoTracks()[0];
+      t.contentHint = profile().hint;
+      t.onended = onTrackEnded;
+      try { if (tr) await tr.sender.replaceTrack(t); } catch (e) { log('replace track: ' + e.name); }
+      stream = s;
+      track = t;
+      if (old) old.getTracks().forEach(x => { x.onended = null; x.stop(); });
+      const size = await frameSize(s);
+      src = { w: size.w, h: size.h };
+      post({ t: 'recaptured', w: size.w, h: size.h });
+      await applyProfile();
+    })().finally(() => { recapturing = null; });
+    return recapturing;
   }
 
   // Tests: a capture attempt with no session; Beam's gate must refuse it.
@@ -483,6 +521,7 @@
         battery = !!m.on;
         if (battery && !h264First && codecNow && codecNow.toLowerCase() !== 'h264') renegotiate('on battery: switching to H.264').catch(() => {});
         break;
+      case 'recapture': recapture(); break;
       case 'end': end(m.reason); break;
     }
   });

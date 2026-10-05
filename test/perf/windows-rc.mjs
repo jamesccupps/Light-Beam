@@ -530,7 +530,7 @@ try {
   check(!!verifiedLine, 'connected, and the peer passed the check (its address is the attested one, its node the pinned one)');
   const hello = await waitCtl('hello', t0, 10000);
   check(!!hello && hello.role === 'host' && Array.isArray(hello.monitors) && hello.monitors.length > 0, `the viewer got the host's hello (${hello ? hello.monitors.length + ' screen(s)' : 'none'})`);
-  check(!!hello && JSON.stringify(hello.caps) === '["fit","settings","video"]' && hello.fitted === false, `...saying what 1.8 adds (${hello ? JSON.stringify(hello.caps) : '-'})`);
+  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video"]' && hello.fitted === false, `...saying what 1.8 adds (and 1.11.4's fit-scale) (${hello ? JSON.stringify(hello.caps) : '-'})`);
   {
     // 1.6.1: where the cursor is, when it's on the shared screen (this machine's real cursor: wherever it happens to be).
     const hm = hello && (hello.monitors.find(m => m.id === hello.monitor) || hello.monitors[0]);
@@ -657,11 +657,18 @@ try {
   const st18 = await waitCtl('stats', Date.now(), 5000, m => m.profile === 'saver');
   check(!!st18 && st18.srcW > 0 && st18.down >= 1 && st18.maxFps === 15, `the stats say so, with the screen's size and how much smaller it goes (${st18 ? st18.srcW + '×' + st18.srcH + ', 1/' + st18.down + ', ' + st18.w + '×' + st18.h : 'none'})`);
   t1 = Date.now();
-  await send('ctl', { t: 'fit', on: true, w: 1920, h: 1200, dpr: 1.25 });
+  await send('ctl', { t: 'fit', on: true, w: 1920, h: 1200, dpr: 1.25, scale: true });
   const disp = await waitCtl('display', t1, 6000);
   check(!!disp && disp.fitted === true && Array.isArray(disp.monitors), `Fit: the PC answers with its screens (${disp ? 'fitted ' + disp.fitted : 'no answer'})`);
   check(!!(await waitLog(/the shared screen fitted to the viewer: 1920×1200 at 125%; it was 2560×1440 at 150%$/, from, 3000)), '...its made-up screen went to 1920×1200 at 125% (from 2560×1440 at 150%)');
   check(String(readConfig().rcDisplayRestore || '').endsWith('|2560|1440|60|150'), `...the original noted in config.json (${readConfig().rcDisplayRestore})`);
+  // 1.11.4: after a change it makes, the PC captures again (Windows' sharing bar drawn for the new scaling); a capture
+  // that ends just after a display change starts again once (it ended the session as Stop sharing); a second one ends.
+  check(!!(await waitLog(/capturing again \(this screen changed\)$/, from, 3000)) && !!(await waitLog(/capturing \d+×\d+ again$/, from, 8000)), '...and it captures its screen again (1.11.4)');
+  const te = logLines().length;
+  rc('trackended');
+  check(!!(await waitLog(/capturing again \(the capture ended as the display changed\)$/, te, 3000)) && !!(await waitLog(/capturing \d+×\d+ again$/, te, 8000)), 'a capture that ends just after a display change starts again (1.11.4)');
+  check(count(/stopped controlling this PC/, te) === 0, '...and the session goes on');
   t1 = Date.now();
   await send('ctl', { t: 'fit', on: false });
   const back = await waitCtl('display', t1, 6000);
@@ -674,8 +681,9 @@ try {
   await send('ctl', { t: 'video', on: true });
   check(!!(await waitCtl('stats', Date.now(), 5000, m => m.video === true)), '...seen again: frames again');
   await send('ctl', { t: 'settings', mode: 'text', size: 'auto', vw: 0, vh: 0, fps: 0, kbps: 0, codec: 'auto', net: '' });
+  const fitFrom = logLines().length;
   await send('ctl', { t: 'fit', on: true, w: 1280, h: 720, dpr: 1 }); // (left fitted: the session's end puts it back)
-  check(!!(await waitLog(/the shared screen fitted to the viewer: 1280×720 at 100%/, from, 6000)), 'fitted again (to 1280×720 at 100%), for the end of the session to put back');
+  check(!!(await waitLog(/the shared screen fitted to the viewer: 1280×720 at 125% \(its own 150% doesn't go at this size\); it was 2560×1440 at 150%$/, fitFrom, 6000)), 'fitted again without "Bigger text" (1.11.4): 1280×720, its own scaling as near as that size allows (125%), for the end of the session to put back');
   await send('ctl', { t: 'lock' });
   check(!!(await waitLog(/Test Phone locks this PC/, from, 4000)) && !!(await waitLog(/a test instance doesn't really lock/, from, 1000)), 'the viewer\'s Lock action (a test instance doesn\'t lock)');
   // While it's being controlled, nothing on this PC widens access to Beam (the viewer could click it): turning it on,
@@ -786,6 +794,17 @@ try {
   const killed = await viewerEvents.wait('rc-end', d => d.id === sid2, 8000);
   check(!!killed && killed.reason === 'stopped' && !!(await waitLog(/Remote control: kill switch \(test\)/, from, 2000)), 'the kill switch ends it at once');
   check(!!(await waitLog(/capture stopped|capture host closed$/, from, 12000)), '...and the capture stops');
+  await endViewer();
+
+  // 8b. (1.11.4) Windows' Stop sharing with no display change lately ends it, as before (one just after a change starts
+  // the capture again instead: checked in 7).
+  from = logLines().length;
+  r = await startSession();
+  check(!!(await waitLog(/Test Phone is controlling this PC \(peer/, from, 15000)), 'another session, live');
+  const sid3 = live.id;
+  rc('trackended:stale');
+  const shared = await viewerEvents.wait('rc-end', d => d.id === sid3, 8000);
+  check(!!shared && !!(await waitLog(/stopped controlling this PC after \d+ s \(Stop sharing on Windows' sharing bar\)/, from, 3000)), 'Windows\' Stop sharing with no display change lately: it ends, as before (1.11.4)');
   await endViewer();
 
   // 9. The lease: a server restart forgets sessions; the PC's next lease (every 3 s here) gets 404 and it ends.

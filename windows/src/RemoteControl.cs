@@ -61,6 +61,7 @@ namespace Beam
         public string PathKey;           // (1.11) how Tailscale reaches the viewer, as last told to it
         public DateTime PathNext;        // ...when to ask Tailscale again
         public bool PathChecking;
+        public long RestartedFor;        // (1.11.4) the display change a capture that ended was started again for
 
         public string Label
         {
@@ -72,12 +73,14 @@ namespace Beam
         }
     }
 
-    // The viewer's picture area in physical pixels, and its own scaling.
+    // The viewer's picture area in physical pixels, and its own scaling. Scale (1.11.4): the viewer's "Bigger text", the
+    // only way this PC's scaling changes too (it froze apps here for a second at each change, and closed one).
     class RcFitWish
     {
         public int W, H;
         public double Dpr;
-        public string Key { get { return W + "x" + H + "@" + Dpr.ToString("0.###", CultureInfo.InvariantCulture); } }
+        public bool Scale;
+        public string Key { get { return W + "x" + H + "@" + Dpr.ToString("0.###", CultureInfo.InvariantCulture) + (Scale ? "+scale" : ""); } }
     }
 
     class RemoteControl
@@ -122,6 +125,37 @@ namespace Beam
             flushTimer.Tick += (s, e) => { flushTimer.Stop(); if (injector != null) { injector.Flush(); if (injector.HasPending) flushTimer.Start(); } };
             ReadLockState();
             SystemEvents.PowerModeChanged += OnPower;
+            SystemEvents.DisplaySettingsChanged += OnDisplaySettings;
+        }
+
+        // ------------------------------------------------------------------ display changes (1.11.4)
+
+        // When this PC's display last changed (UTC ticks): a fit here, or Windows (another resolution or scaling). A
+        // capture that ends within a few seconds of one is the change's doing, not Windows' Stop sharing: it starts
+        // again, once per change (a second end is a real Stop sharing).
+        long displayChanged;
+        const int DisplayChangeWindowMs = 6000;
+
+        void NoteDisplayChange() { Interlocked.Exchange(ref displayChanged, DateTime.UtcNow.Ticks); }
+
+        void OnDisplaySettings(object sender, EventArgs e) { NoteDisplayChange(); }
+
+        bool CaptureEndIsTheDisplays(RcSession s)
+        {
+            long at = Interlocked.Read(ref displayChanged);
+            if (at == 0 || s.RestartedFor == at || (DateTime.UtcNow.Ticks - at) / TimeSpan.TicksPerMillisecond > DisplayChangeWindowMs) return false;
+            s.RestartedFor = at;
+            return true;
+        }
+
+        // The capture page takes a fresh capture of the same screen on the same connection (rc-host.js recapture).
+        void CaptureAgain(RcSession s, string why)
+        {
+            if (current != s || s.Host == null || s.State == RcState.Ended) return;
+            Log.Write("Remote control: capturing again (" + why + ")");
+            var m = new Dictionary<string, object>();
+            m["t"] = "recapture";
+            s.Host.Post(m);
         }
 
         // ------------------------------------------------------------------ what others see
@@ -534,9 +568,13 @@ namespace Beam
                     string codec = Json.Str(m, "codec"), enc = Json.Str(m, "encoder");
                     if (codec != null && codec + "/" + enc != s.Codec) { s.Codec = codec + "/" + enc; Log.Write("Remote control: video " + codec + (enc != null ? " (" + enc + ")" : "")); }
                     break;
+                case "recaptured":
+                    Log.Write("Remote control: capturing " + Json.Long(m, "w", 0) + "×" + Json.Long(m, "h", 0) + " again");
+                    break;
                 case "ended":
                     string reason = Json.Str(m, "reason") ?? "";
-                    if (reason == "stopped-sharing") End(s, "stopped", "Stop sharing on Windows' sharing bar");
+                    if (reason == "stopped-sharing" && CaptureEndIsTheDisplays(s)) CaptureAgain(s, "the capture ended as the display changed");
+                    else if (reason == "stopped-sharing") End(s, "stopped", "Stop sharing on Windows' sharing bar");
                     else if (reason == "connection") End(s, "failed", "the connection failed");
                     else End(s, "failed", "the screen capture failed (" + reason + ")");
                     break;
@@ -648,7 +686,7 @@ namespace Beam
             var layout = DesktopLayout.Current();
             hello["monitors"] = MonitorList(layout);
             hello["monitor"] = s.Screen;
-            hello["caps"] = new object[] { "fit", "settings", "video" }; // Beam 1.8: what this PC does besides 1.6's
+            hello["caps"] = new object[] { "fit", "fit-scale", "settings", "video" }; // Beam 1.8: what this PC does besides 1.6's (fit-scale: 1.11.4)
             hello["fitted"] = display.Fitted;
             // Where this PC's cursor is, when it's on the shared screen: a phone's trackpad pointer starts there (1.6.1).
             var cursor = CursorOn(layout, s.Screen);
@@ -795,6 +833,7 @@ namespace Beam
                 wish.W = (int)w;
                 wish.H = (int)h;
                 wish.Dpr = dpr;
+                wish.Scale = Json.Bool(m, "scale", false);
                 s.Fit = wish;
             }
             FitNow(s);
@@ -814,15 +853,21 @@ namespace Beam
                     s.FitDone = key;
                     s.FitNote = null;
                     await displayGate.WaitAsync();
+                    bool changed = false;
                     try
                     {
                         if (current != s || s.State == RcState.Ended) break;
-                        if (wish == null) await UndoDisplay("the viewer turned Fit off");
-                        else await ApplyFit(s, wish);
+                        NoteDisplayChange();
+                        if (wish == null) changed = await UndoDisplay("the viewer turned Fit off");
+                        else changed = await ApplyFit(s, wish);
+                        if (changed) NoteDisplayChange();
                     }
                     catch (Exception ex) { Log.Error("Remote control: fitting the screen", ex); s.FitNote = "Beam couldn't change this screen"; }
                     finally { displayGate.Release(); }
                     if (current == s) SendDisplay(s);
+                    // (1.11.4) The capture again after a change: Windows' sharing bar is drawn for the new scaling (it
+                    // stayed as it was, cut off), and a capture the change ended goes on.
+                    if (changed) CaptureAgain(s, "this screen changed");
                 }
             }
             finally { s.Fitting = false; }
@@ -830,13 +875,15 @@ namespace Beam
 
         // (inside displayGate) A screen fitted before goes back first; the original is written down before anything
         // changes, so a Beam that is ended meanwhile puts it back at its next start.
-        async Task ApplyFit(RcSession s, RcFitWish wish)
+        // Whether the screen changed.
+        async Task<bool> ApplyFit(RcSession s, RcFitWish wish)
         {
             var sc = DesktopLayout.Current().Screen(s.Screen);
-            if (sc == null) { s.FitNote = "Beam can't find this screen"; return; }
-            if (display.Fitted && !string.Equals(display.Original.Device, sc.Device, StringComparison.OrdinalIgnoreCase)) await UndoDisplay("another screen is shared now");
-            var plan = display.Plan(sc.Device, wish.W, wish.H, wish.Dpr);
-            if (plan == null) { s.FitNote = "Windows didn't say which sizes this screen can have"; return; }
+            if (sc == null) { s.FitNote = "Beam can't find this screen"; return false; }
+            bool changed = false;
+            if (display.Fitted && !string.Equals(display.Original.Device, sc.Device, StringComparison.OrdinalIgnoreCase)) changed = await UndoDisplay("another screen is shared now");
+            var plan = display.Plan(sc.Device, wish.W, wish.H, wish.Dpr, wish.Scale);
+            if (plan == null) { s.FitNote = "Windows didn't say which sizes this screen can have"; return changed; }
             if (!display.Fitted)
             {
                 var left = SavedDisplay.Parse(app.Cfg.RcDisplayRestore); // (not put back yet: that one is the real original)
@@ -849,17 +896,20 @@ namespace Beam
             if (s.FitNote != null) Log.Write("Remote control: " + s.FitNote);
             await Task.Delay(300); // Windows tells every window first; then the new size is read
             if (injector != null) injector.LayoutChanged();
+            return changed || plan.Changed;
         }
 
         // (inside displayGate) The fitted screen as it was. If Windows refuses, the config keeps it for the next start.
-        async Task UndoDisplay(string why)
+        // Whether anything was fitted.
+        async Task<bool> UndoDisplay(string why)
         {
             var saved = display.Original;
-            if (saved == null) return;
+            if (saved == null) return false;
             bool ok = await Task.Run(() => display.Undo(saved, why));
             display.End();
             if (ok) { app.Cfg.RcDisplayRestore = null; app.Cfg.Save(); }
             if (injector != null) injector.LayoutChanged();
+            return true;
         }
 
         async void RestoreDisplay(string why)
@@ -1088,6 +1138,7 @@ namespace Beam
                 display.End();
             }
             SystemEvents.PowerModeChanged -= OnPower;
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettings;
             RcHost.CloseAll();
             UnregisterKillSwitch();
             window.DestroyHandle();
@@ -1296,6 +1347,14 @@ namespace Beam
                 case "off": SetOff("test"); break;
                 case "lock": TestLock(arg == "on"); break;
                 case "kill": KillSwitch("test"); break;
+                case "trackended": // as if the capture page's track ended just after a display change; :stale = with none lately
+                    if (current == null || current.Host == null) { Log.Write("Remote control: (test) no capture"); break; }
+                    if (arg == "stale") Interlocked.Exchange(ref displayChanged, 0); else NoteDisplayChange();
+                    var te = new Dictionary<string, object>();
+                    te["t"] = "ended";
+                    te["reason"] = "stopped-sharing";
+                    OnPage(current, current.Host, te);
+                    break;
                 case "stop":
                     if (current != null && current.Banner != null) current.Banner.ClickStopForTest();
                     else Log.Write("Remote control: (test) no banner to click");

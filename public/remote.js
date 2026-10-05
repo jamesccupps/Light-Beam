@@ -2251,7 +2251,7 @@ function rcLoadPic() {
   const p = store.json(`beam.rc.pic.${RC_ID}`, null);
   const q = p && typeof p === 'object' ? p : {};
   const one = key => (RC_PIC[key].some(([v]) => v === q[key]) ? q[key] : RC_PIC[key][0][0]);
-  return { mode: one('mode'), size: one('size'), fps: one('fps'), kbps: one('kbps'), codec: one('codec'), fitPc: typeof q.fitPc === 'boolean' ? q.fitPc : null, details: q.details === true };
+  return { mode: one('mode'), size: one('size'), fps: one('fps'), kbps: one('kbps'), codec: one('codec'), fitPc: typeof q.fitPc === 'boolean' ? q.fitPc : null, fitScale: q.fitScale === true, details: q.details === true };
 }
 const rcPicLabel = (key, v) => RC_PIC[key].find(([x]) => x === v)?.[1] || String(v);
 const rcFitOn = () => rc.pic.fitPc ?? !rcPhone();
@@ -2259,7 +2259,7 @@ const rcFitOn = () => rc.pic.fitPc ?? !rcPhone();
 function rcSetPic(key, value) {
   rc.pic[key] = value;
   store.setJson(`beam.rc.pic.${RC_ID}`, rc.pic);
-  if (key === 'fitPc') rcSendFit();
+  if (key === 'fitPc' || key === 'fitScale') rcSendFit();
   else if (key !== 'details') rcSendPic();
   rcRenderBar();
   rcRenderDetails();
@@ -2300,8 +2300,9 @@ function rcPicSoon() {
   rcTimer('pic', () => { rcSendFit(); rcSendPic(); }, 1200);
 }
 
-// Fit the PC to this screen: it takes the size its monitor has that suits this picture area best, and the scaling that
-// shows its interface at the size of this device's own; both go back when the session ends or Fit is turned off.
+// Fit the PC to this screen: it takes the size its monitor has that suits this picture area best (and, with "Bigger text"
+// on, 1.11.4, the scaling that shows its interface at the size of this device's own: off by default, since a change of
+// scaling freezes apps there for a moment and closed one); it goes back when the session ends or Fit is turned off.
 function rcSendFit() {
   if (!rc.verified || !rc.hostHello || !rc.caps.includes('fit')) return;
   if (!rcFitOn()) {
@@ -2310,8 +2311,9 @@ function rcSendFit() {
   }
   const a = rcArea(false);
   if (!a || a.w < 200 || a.h < 200) return;
-  const key = `${a.w}x${a.h}@${a.dpr}`;
-  if (key === rc.fitSent || !rcSend('ctl', { t: 'fit', on: true, w: a.w, h: a.h, dpr: a.dpr })) return;
+  const scale = rc.pic.fitScale === true;
+  const key = `${a.w}x${a.h}@${a.dpr}${scale ? '+scale' : ''}`;
+  if (key === rc.fitSent || !rcSend('ctl', { t: 'fit', on: true, w: a.w, h: a.h, dpr: a.dpr, scale })) return;
   rc.fitSent = key;
   rc.fitting = true; // (input waits for the PC's new sizes)
   rcRelease();
@@ -2342,8 +2344,12 @@ function rcShowSettings() {
   const body = [
     rc.caps.includes('fit')
       ? toggle(`Fit ${n} to this screen`, rcFitOn(), v => rcSetPic('fitPc', v),
-        { hint: `${n}’s resolution and display scaling change to suit this screen, and go back when you disconnect. Its own monitor shows the change too.` })
+        { hint: `${n}’s resolution changes to suit this screen, and goes back when you disconnect. Its own monitor shows the change too.` })
       : note(`Fitting ${n} to this screen needs Beam 1.8 or later on it.`),
+    rc.caps.includes('fit') && (rc.caps.includes('fit-scale')
+      ? toggle('Bigger text: change its scaling too', rc.pic.fitScale === true, v => rcSetPic('fitScale', v),
+        { hint: `With Fit on, ${n}’s display scaling changes too, so its text shows at the size of this device’s own. Some apps on ${n} freeze for a moment, or close, when its scaling changes.` })
+      : note(`On ${n}’s Beam (before 1.11.4) Fit changes its scaling too.`)),
     field('Quality', radios),
     full && pick('size', 'Picture size', RC_PIC.size, rc.pic.size),
     full && pick('fps', 'Frame rate', RC_PIC.fps, rc.pic.fps),
