@@ -113,8 +113,18 @@ async function wsConn(wsUrl) {
       m.error ? reject(new Error(m.error.message)) : resolve(m.result);
     } else if (m.method) for (const l of listeners) l(m);
   });
+  // (a browser that went away: every call waiting on it fails at once, instead of the run waiting for good)
+  let gone = null;
+  const lost = () => {
+    gone ||= new Error('the browser closed its connection');
+    for (const { reject } of pending.values()) reject(gone);
+    pending.clear();
+  };
+  ws.addEventListener('close', lost);
+  ws.addEventListener('error', lost);
   return {
     send: (method, params = {}) => new Promise((resolve, reject) => {
+      if (gone) return reject(gone);
       const i = ++id;
       pending.set(i, { resolve, reject });
       ws.send(JSON.stringify({ id: i, method, params }));
