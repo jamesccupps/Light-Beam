@@ -213,6 +213,9 @@ try {
   rc(`allow:${laptopId}`);
   check(!!(await waitLog(inst.pc, /Remote control: allowed on this PC \(test\), for KVM Test Laptop$/, n, 8000)), 'SHOP allows the laptop (at SHOP)');
   await sleep(1500);
+  // (1.12.3) SHOP has text on its clipboard before the laptop turns this on: it must stay off the laptop's clipboard
+  // until the pointer has been there (it was taken as SHOP connected: an overflowed "the pointer just left it").
+  fs.writeFileSync(path.join(inst.pc.dir, 'clipboard-in.txt'), 'shop clip from before');
   let nl = lines(inst.laptop).length;
   n = lines(inst.pc).length;
   kvm(`on:${pcId}`);
@@ -224,6 +227,10 @@ try {
   const ready = await waitLog(inst.laptop, /Keyboard and mouse: KVM Test SHOP is ready \(/, nl, 30000);
   check(!!ready, `the laptop checked its peer and has Shop's screens: ${ready ? ready.replace(/.*is ready /, '') : 'not ready'}`);
   check(count(inst.pc, /a screen capture was allowed/, n) === 0 && count(inst.pc, /Remote control: capturing/, n) === 0, 'nothing was captured');
+  await sleep(1500); // (Shop's clipboard goes to the laptop as the sync starts)
+  let lapClipNow = null;
+  try { lapClipNow = fs.readFileSync(path.join(inst.laptop.dir, 'clipboard.txt'), 'utf8'); } catch {}
+  check(lapClipNow !== 'shop clip from before' && count(inst.laptop, /clipboard text is on this PC's clipboard/, nl) === 0, `Shop's clipboard text stays off the laptop's as it connects (${lapClipNow === null ? 'nothing there' : JSON.stringify(lapClipNow)})`);
   const sessions = (await api('/api/rc/sessions')).sessions || [];
   check(sessions.length === 1 && sessions[0].kind === 'kvm' && sessions[0].state === 'live' && sessions[0].host === pcId && sessions[0].viewer === laptopId, 'the server lists one live kvm session');
   let st = await pcState();

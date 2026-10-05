@@ -741,6 +741,22 @@ namespace Beam
                 var gap = new KvmDesk(new[] { ks(0, 0, 0, 1920, 1080, true, 1), ks(1, 2000, 0, 1920, 1080, false, 1) });
                 var stop = gap.Move(new KvmPoint(0, 1915, 500), 30, 0);
                 Check(stop.Exit == 0 && stop.At.Screen == 0 && stop.At.X == 1919, "a gap to the next screen: stopped at the edge, not out of the PC");
+                // (1.12.3) The user's laptop screen is taller than its dock monitor: at its corners above and below the
+                // monitor Windows stops the pointer at its left edge, and that isn't a way out (it went over to SHOP);
+                // the dock monitor's own left edge is.
+                var tall = new KvmDesk(new[] { ks(0, 0, 0, 2880, 1800, true, 2.0), ks(1, -1920, 360, 1920, 1080, false, 1.0) });
+                Check(!tall.OpenSide(-1, 0, 100) && !tall.OpenSide(-1, 0, 1700) && !tall.OpenSide(-1, 0, 900), "a laptop screen taller than its dock monitor: its left edge isn't a way out, above, beside or below the monitor");
+                Check(tall.OpenSide(-1, -1920, 400) && tall.OpenSide(-1, -1920, 1400), "...the dock monitor's left edge is, top to bottom");
+                Check(tall.MainOn(-1).Id == 1, "...and the pointer comes back onto the dock monitor");
+                // The same on a PC beside: the taller of two monitors side by side, at a height its neighbour doesn't
+                // reach, stops the pointer at its edge (as Windows does there) instead of leaving past the neighbour.
+                var pair = new KvmDesk(new[] { ks(0, 0, 0, 1920, 1080, true, 1), ks(1, -2560, 200, 2560, 800, false, 1) });
+                var corner = pair.Move(new KvmPoint(0, 3, 50), -20, 0);
+                Check(corner.Exit == 0 && corner.At.Screen == 0 && corner.At.X == 0, "a PC's taller monitor above its neighbour's top: stopped at its edge, not out past the neighbour (" + corner.Exit + ", " + corner.At.Screen + " " + corner.At.X + ")");
+                var through = pair.Move(new KvmPoint(0, 3, 500), -20, 0);
+                Check(through.Exit == 0 && through.At.Screen == 1, "...beside the neighbour: into it");
+                var outside = pair.Move(new KvmPoint(1, -2555, 500), -20, 0);
+                Check(outside.Exit == -1, "...and out of that PC by the neighbour's own left edge");
                 // The pointer keeps its speed across scalings (150% here, 100% there: two thirds as many pixels), fractions carried.
                 var carry = new KvmCarry();
                 int ox, oy, sum = 0;

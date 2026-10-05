@@ -45,7 +45,9 @@ namespace Beam
         public int Fails;
         public string Why;                   // what happened last (the tray, beam.log)
         public string ClipHad;               // the clipboard text it has from here, or gave here (\n line ends)
-        public long LeftAt = long.MinValue;  // (clock ms) when the pointer last left it
+        // (1.12.3) -1: never. long.MinValue overflowed "now - it" into "it just left": each PC's clipboard text went onto
+        // this PC's clipboard as the PC connected.
+        public long LeftAt = -1;             // (clock ms) when the pointer last left it
         public readonly Queue<Dictionary<string, object>> Signals = new Queue<Dictionary<string, object>>();
         public bool Signalling;
 
@@ -1034,7 +1036,7 @@ namespace Beam
         {
             text = Norm(text);
             if (string.IsNullOrEmpty(text) || Encoding.UTF8.GetByteCount(text) > MaxClip) return;
-            bool recent = AwayOn(l) || clock.ElapsedMilliseconds - l.LeftAt < ClipAfterMs;
+            bool recent = AwayOn(l) || (l.LeftAt >= 0 && clock.ElapsedMilliseconds - l.LeftAt < ClipAfterMs);
             if (!recent || text == l.ClipHad) { l.ClipHad = text; return; }
             l.ClipHad = text;
             if (!ClipPayload.SetRemoteText(text, app.Cfg.ClipboardHistory)) return;

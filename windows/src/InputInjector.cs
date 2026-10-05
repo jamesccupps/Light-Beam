@@ -767,13 +767,16 @@ namespace Beam
         static int ownLevel = -1;
 
         // The foreground window's process runs at a higher integrity level (as administrator): Windows silently drops
-        // input injected into it (UIPI). A process that can't even be opened counts as one.
+        // input injected into it (UIPI). A process that can't even be opened counts as one. (1.12.3) Only a window that
+        // can be seen: a hidden one isn't in front of anything (the user's Desktop had the GameInput service's hidden
+        // window as its foreground; the viewer held every click as "an administrator window is in front", so nothing
+        // could be clicked to bring a window forward again).
         public static bool ForegroundElevated()
         {
             try
             {
                 IntPtr w = GetForegroundWindow();
-                if (w == IntPtr.Zero) return false;
+                if (w == IntPtr.Zero || !IsWindowVisible(w) || Cloaked(w)) return false;
                 uint pid;
                 GetWindowThreadProcessId(w, out pid);
                 if (pid == 0 || pid == (uint)Process.GetCurrentProcess().Id) return false;
@@ -851,7 +854,16 @@ namespace Beam
             catch { return false; }
         }
 
+        // A window the compositor hides (a suspended app's, one on another virtual desktop) though Windows calls it visible.
+        static bool Cloaked(IntPtr w)
+        {
+            try { int c; return DwmGetWindowAttribute(w, 14 /* DWMWA_CLOAKED */, out c, 4) == 0 && c != 0; }
+            catch { return false; }
+        }
+
         [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
         [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint MapVirtualKeyEx(uint code, uint mapType, IntPtr layout);
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
