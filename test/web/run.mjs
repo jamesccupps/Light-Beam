@@ -6,6 +6,10 @@
 //   node test/web/run.mjs --only upload   run tests whose name matches /upload/i (a regular expression)
 //   node test/web/run.mjs --shots         also save screenshots to test/web/shots/
 //   node test/web/run.mjs --list          list the tests
+//
+// The browser: Edge, Chrome or Chromium where they usually are (cdp.mjs), or BEAM_TEST_BROWSER=<path>; extra flags in
+// BEAM_TEST_BROWSER_ARGS (as root, --no-sandbox and --disable-dev-shm-usage go in by themselves). Chromium as Linux
+// distributions ship it plays no H.264, so the one test that needs it says so and passes.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

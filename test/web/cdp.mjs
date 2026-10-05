@@ -12,25 +12,44 @@ export function guard(u) {
   if (x.hostname !== '127.0.0.1' || !/^88(2\d)$/.test(x.port)) throw new Error(`refusing non-scratch url ${u}`);
 }
 
+// Where Edge, Chrome or Chromium usually are on Windows, Linux and macOS (BEAM_TEST_BROWSER names another).
 const BROWSERS = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/microsoft-edge',
+  '/usr/bin/google-chrome', '/opt/google/chrome/chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium',
+  '/usr/bin/microsoft-edge',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
 ];
 
-// Starts a headless browser on `port` unless one already answers there. Returns a stop() function.
+// Starts a headless browser on `port` unless one already answers there. Returns a stop() function. A browser that
+// doesn't start ends the run at once with what it said (the Light Beam audit, 2026-10-05: as root it got "fetch
+// failed" in each of 128 tests instead).
 export async function launchBrowser(port, profileDir) {
   try { await fetch(`http://127.0.0.1:${port}/json/version`); return { stop: async () => {} }; } catch {}
   const exe = process.env.BEAM_TEST_BROWSER || BROWSERS.find(p => fs.existsSync(p));
-  if (!exe) throw new Error('No Edge/Chrome found (set BEAM_TEST_BROWSER)');
+  if (!exe) throw new Error('No Edge, Chrome or Chromium found (set BEAM_TEST_BROWSER to one)');
   fs.mkdirSync(profileDir, { recursive: true });
+  // As root (most containers) Chrome starts only without its sandbox, and a container's small /dev/shm can crash it.
+  // BEAM_TEST_BROWSER_ARGS adds any other flags.
+  const extra = [...(process.getuid?.() === 0 ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
+    ...(process.env.BEAM_TEST_BROWSER_ARGS || '').split(/\s+/).filter(Boolean)];
   const child = spawn(exe, [`--headless=new`, `--remote-debugging-port=${port}`, '--remote-allow-origins=*', `--user-data-dir=${profileDir}`,
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync', '--disable-background-networking',
-    '--disable-component-update', 'about:blank'], { stdio: 'ignore' });
-  const exited = new Promise(r => child.once('exit', r));
-  for (let i = 0; i < 100; i++) {
-    try { await fetch(`http://127.0.0.1:${port}/json/version`); break; } catch { await sleep(100); }
+    '--disable-component-update', ...extra, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let said = '';
+  let gone = 0;
+  child.stderr.on('data', d => { said = (said + d).slice(-2000); });
+  child.once('error', err => { said += err.message; gone ||= Date.now(); });
+  const exited = new Promise(r => child.once('exit', () => { gone ||= Date.now(); r(); }));
+  for (const end = Date.now() + 20000; ;) {
+    try { await fetch(`http://127.0.0.1:${port}/json/version`); break; } catch {}
+    if (Date.now() > end || (gone && Date.now() - gone > 2000)) {
+      child.kill();
+      throw new Error(`The browser didn't start (${exe}${gone ? `, which ended with ${child.exitCode ?? child.signalCode}` : ''})${said.trim() ? `:\n${said.trim()}` : ''}`);
+    }
+    await sleep(100);
   }
   // stop(): asks the browser to quit (so it lets go of its profile), then makes sure it has.
   return {

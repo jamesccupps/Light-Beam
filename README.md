@@ -612,8 +612,9 @@ app in [docs/HOST-BRIDGE.md](docs/HOST-BRIDGE.md).
 ```bash
 node test/server.test.js        # the server (about 4 minutes; scratch servers on ports 8791–8799)
 node test/family.test.js        # Beam Family (seconds; ports 8841–8849)
-node test/web/run.mjs           # the web apps in headless Edge or Chrome (about 10 minutes; ports 8821–8829;
-                                # it looks in the usual Windows places, or set BEAM_TEST_BROWSER to the browser)
+node test/web/run.mjs           # the web apps in headless Edge, Chrome or Chromium (about 10 minutes; ports 8821–8829;
+                                # it looks where they usually are on Windows, Linux and macOS, or set BEAM_TEST_BROWSER;
+                                # BEAM_TEST_BROWSER_ARGS adds flags, and as root --no-sandbox goes in by itself)
 ```
 
 Speed budgets live in `test/perf/`, and the Android unit tests run with `gradlew testDebugUnitTest` in `android/`.

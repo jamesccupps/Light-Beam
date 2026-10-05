@@ -513,6 +513,12 @@ Robin ${sent}`);
 
   test('family: a phone’s HDR video plays everywhere: the chat’s viewer and a fast link’s page play its H.264 copy, which can be downloaded too; on an iPhone Download is Safari’s own (1.10.0)', async ctx => {
     if (!FFMPEG) { console.log('    (no ffmpeg here: set BEAM_TEST_FFMPEG to run this one)'); return; }
+    // (Chromium as Linux distributions ship it has no H.264: the Light Beam audit, 2026-10-05)
+    const probe = await ctx.browser.newPage();
+    if (!(await probe.evaluate(`document.createElement('video').canPlayType('video/mp4; codecs="avc1.640028"') !== ''`))) {
+      console.log('    (this browser plays no H.264, like Chromium without its codecs: run this one in Edge or Chrome)');
+      return;
+    }
     const srv = await familyServer(ctx, { BEAM_FAMILY_FFMPEG: FFMPEG, BEAM_FAMILY_STUN: 'local' });
     // A phone's HDR video (10-bit, HLG, BT.2020) and its preview.
     const dir = path.join(srv.data, 'made');
