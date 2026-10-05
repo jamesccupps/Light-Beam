@@ -143,6 +143,9 @@ namespace Beam
             menu.Closed += (s, e) => LiveViewClosed();
             tray.ContextMenuStrip = menu;
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ToggleMain(); };
+            // (1.12.3) Built at the press too: WinForms places the menu from its size before Opening, so the first one
+            // (still empty) went to the corner of the screen, its submenus off it (the user: "it shows in the corner").
+            tray.MouseDown += (s, e) => { if (e.Button == MouseButtons.Right) { BuildMenu(); menu.PerformLayout(); } };
             tray.Visible = !cfg.Quiet;
             notifier = new Notifier(tray, () => ShowMain(null, null), cfg.Quiet);
             notifier.OpenItem = OpenItem;

@@ -60,11 +60,16 @@ namespace Beam
 
         KvmScreen Main { get { return Screens.FirstOrDefault(s => s.Primary) ?? Screens.FirstOrDefault(s => s.X == 0 && s.Y == 0) ?? Screens[0]; } }
 
-        // Whether nothing of this PC lies beyond x on that side (-1 left, +1 right) at this height: there, the pointer
-        // leaves the PC.
+        // Whether the pointer leaves this PC at x on that side (-1 left, +1 right) at this height: nothing of this PC lies
+        // beyond x at that height, and no screen of it stands wholly beyond the screen it's on. (1.12.3: the laptop's own
+        // screen and its dock monitor differ in height; at the screen's corners above and below the monitor Windows stops
+        // the pointer at its inner edge, and that was taken for a way out: the pointer went over to SHOP. A TV above a
+        // monitor isn't wholly beside it: the monitor's own edge stays a way out.)
         public bool OpenSide(int side, int x, int y)
         {
-            return !Screens.Any(s => y >= s.Y && y < s.Bottom && (side < 0 ? s.X < x : s.Right > x + 1));
+            if (Screens.Any(s => y >= s.Y && y < s.Bottom && (side < 0 ? s.X < x : s.Right > x + 1))) return false;
+            var on = At(x, y);
+            return on == null || !Screens.Any(s => s != on && (side < 0 ? s.Right <= on.X : s.X >= on.Right));
         }
 
         bool Open(KvmScreen s, int side) { return OpenSide(side, side < 0 ? s.X : s.Right - 1, s.Y + s.H / 2); }
