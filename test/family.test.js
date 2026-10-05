@@ -1328,6 +1328,103 @@ test('F-V (audit 2026-10-04): the storage cap counts the play copies; a push add
   assert.ok(err && /made by a newer Beam Family/.test(err.message), `refused: ${err?.message.slice(0, 300)}`);
 });
 
+// A tiny JPEG (16×16, made by ffmpeg) for F-W: hex, not base64 (the publish script refuses token-shaped text).
+const TINY_JPEG =
+  'ffd8ffe000104a46494600010200000100010000fffe00104c61766336322e32382e31303300ffdb004300080a0a0b0a0b0d0d0d0d0d0d' +
+  '100f101010101010101010101012121215151512121210101212141415151717171515151517171919191e1e1c1c2323242b2b33ffc400' +
+  '6f000101000000000000000000000000000005060101010100000000000000000000000000060300100003000202010402030100000000' +
+  '00000102030411120500132131064241322314221100010402010402030100000000000000010203041105122131001413061541233242' +
+  'ffc00011080010001003011200021200031200ffda000c03010002110311003f009938d7e97a1c4a4acf2b5e4990691a3a90b52949a860' +
+  '1082275d381f9123646bca1c99e1f67d260aff00bb1e4250c7c766e48e07a4934e4dfd8bc79199f63f1bd6cebc5382c463a5bbed931999' +
+  '25408a7d09750073d10b051fe01b2361cd1aece613e4b2d89a2237897df22cec95aef5e6d5a88eae06c2cdd74ef4794b9a8ca21d4b67ea' +
+  '9b88886a09a537e6385c7d777fdae928be2909a15b2ae19269dc07d9161b5e45192119495b69294a130d412a50290e870152d292414849' +
+  '501cdf6af6fd9a7d5fb095f1e329c1689eb4652401a67d357e0a0cc070aeec9ff4073d72d8f04fb263e6f79977c64c4c89f1d699674af2' +
+  'fe07d9422fe937f27d8f82f0594c84b4eb265c89015d7dce29d3c6f545c2a23a0e845d0bed262be3b062443218cc4698502d4db696ec5e' +
+  'd4094c85d5d9ae3f1dda2456a5bb9975eddc563bc2f08171cf5c7f2810fe8d8586ff0060036b49e79ebdd3e39223c95e51a94f3501dc80' +
+  '887d2f2d21c6bc604d6ab2da97b037d13439e7bfffd9';
+
+test('F-W (1.15.0): a fast link can stop after some downloads (one picked up again isn’t a new one), and share a photo without its location data (its orientation kept, nothing after the picture, never the original); not for a file it can’t clean or one still arriving', async () => {
+  const { cleanJpeg, exifOrientation } = require(path.join(ROOT, 'family', 'lib', 'clean.js'));
+  const s = await start('fast-115', 8848);
+  try {
+    const f = await family(s);
+    const up = async (name, data, mime, { send = true, part = data.length } = {}) => {
+      const id = (await call(s, 'POST', '/api/uploads', f.owner, { name, size: data.length, mime })).json.id;
+      await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(f.owner), 'Content-Type': 'application/octet-stream' }, body: data.subarray(0, part) });
+      if (send) await post(s, f.owner, f.general, '', { files: [id] });
+      return id;
+    };
+    const tokenOf = url => url.split('/f/')[1];
+    const get = (t, headers = {}) => s.req('GET', `/api/links/${t}/file`, { headers, raw: true });
+
+    // At most 2 downloads: the third is refused; one picked up again (a range from N) goes on.
+    const data = crypto.randomBytes(5000);
+    const fileId = await up('notes.bin', data, 'application/octet-stream');
+    let r = await call(s, 'POST', `/api/files/${fileId}/links`, f.owner, { hours: 1, maxDownloads: 2 });
+    assert.equal(r.status, 201, r.body);
+    assert.deepEqual([r.json.link.maxDownloads, r.json.link.removeLocation], [2, false]);
+    const tok = tokenOf(r.json.link.url);
+    assert.equal((await get(tok)).status, 200);
+    assert.equal((await call(s, 'GET', `/api/links/${tok}`)).json.downloadsLeft, 1);
+    assert.equal((await get(tok)).status, 200);
+    const spent = (await call(s, 'GET', `/api/links/${tok}`)).json;
+    assert.deepEqual([spent.usedUp, spent.downloadsLeft], [true, 0]);
+    assert.equal((await get(tok)).status, 410, 'a third download: used up');
+    r = await get(tok, { Range: 'bytes=1000-' });
+    assert.deepEqual([r.status, r.body.length], [206, 4000], 'one picked up again goes on');
+    assert.equal((await call(s, 'POST', `/api/files/${fileId}/links`, f.owner, { hours: 1, maxDownloads: 5000 })).status, 400, 'at most 1,000');
+
+    // A photo with an Exif (orientation 6 and a place), XMP, IPTC, a comment, and a motion photo's video after it.
+    const seg = (marker, payload) => { const h = Buffer.alloc(4); h.writeUInt16BE(marker, 0); h.writeUInt16BE(payload.length + 2, 2); return Buffer.concat([h, payload]); };
+    const desc = Buffer.from('Home: 51.5007N 0.1246W\0', 'latin1');
+    const tiff = Buffer.alloc(38);
+    tiff.write('MM', 0, 'latin1'); tiff.writeUInt16BE(42, 2); tiff.writeUInt32BE(8, 4); tiff.writeUInt16BE(2, 8);
+    tiff.writeUInt16BE(0x010e, 10); tiff.writeUInt16BE(2, 12); tiff.writeUInt32BE(desc.length, 14); tiff.writeUInt32BE(38, 18);
+    tiff.writeUInt16BE(0x0112, 22); tiff.writeUInt16BE(3, 24); tiff.writeUInt32BE(1, 26); tiff.writeUInt16BE(6, 30);
+    const base = Buffer.from(TINY_JPEG, 'hex');
+    const photo = Buffer.concat([base.subarray(0, 20),
+      seg(0xffe1, Buffer.concat([Buffer.from('Exif\0\0', 'latin1'), tiff, desc])),
+      seg(0xffe1, Buffer.from('http://ns.adobe.com/xap/1.0/\0<x:xmpmeta><exif:GPSLatitude>51,30.04N</exif:GPSLatitude></x:xmpmeta>', 'latin1')),
+      seg(0xffed, Buffer.from('Photoshop 3.0\u00008BIM IPTC city London', 'latin1')),
+      seg(0xfffe, Buffer.from('Taken at home', 'latin1')),
+      base.subarray(20), Buffer.from('....ftypmp42 MOTION PHOTO VIDEO', 'latin1')]);
+    const photoId = await up('beach.jpg', photo, 'image/jpeg');
+    r = await call(s, 'POST', `/api/files/${photoId}/links`, f.owner, { hours: 1, removeLocation: true });
+    assert.equal(r.status, 201, r.body);
+    assert.equal(r.json.link.removeLocation, true);
+    const ptok = tokenOf(r.json.link.url);
+    const ready = await waitFor(async () => { const i = (await call(s, 'GET', `/api/links/${ptok}`)).json; return i.cleaning === 'ready' && i; }, 5000);
+    assert.equal(ready.direct, null, 'https only (a direct connection would read the original)');
+    const clean = (await get(ptok)).body;
+    assert.equal(clean.length, ready.size, "its size is the copy's");
+    const text = clean.toString('latin1');
+    for (const gone of ['51.5007', 'xap/1.0', 'GPSLatitude', '8BIM', 'Taken at home', 'MOTION']) assert.ok(!text.includes(gone), `no ${gone}`);
+    assert.deepEqual([clean.readUInt16BE(0), clean.readUInt16BE(clean.length - 2)], [0xffd8, 0xffd9], 'a JPEG, ending with its picture');
+    const app1 = clean.indexOf(Buffer.from([0xff, 0xe1]));
+    assert.equal(exifOrientation(clean.subarray(app1 + 4, app1 + 2 + clean.readUInt16BE(app1 + 2))), 6, 'the orientation stays');
+    assert.ok(cleanJpeg(clean).equals(clean), 'and it is a whole JPEG (cleaning it again changes nothing)');
+    assert.equal((await s.req('POST', `/api/links/${ptok}/direct`, { headers: { 'Content-Type': 'application/json' }, body: '{"sdp":"x"}' })).status, 403);
+
+    // A PNG's text chunks go too.
+    const chunk = (type, body) => { const c = Buffer.alloc(12 + body.length); c.writeUInt32BE(body.length, 0); c.write(type, 4, 'latin1'); body.copy(c, 8); return c; };
+    const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', Buffer.alloc(13, 1)), chunk('tEXt', Buffer.from('Comment\0Location: home', 'latin1')),
+      chunk('IDAT', Buffer.alloc(20, 2)), chunk('IEND', Buffer.alloc(0))]);
+    const pngId = await up('shot.png', png, 'image/png');
+    const pt = tokenOf((await call(s, 'POST', `/api/files/${pngId}/links`, f.owner, { hours: 1, removeLocation: true })).json.link.url);
+    await waitFor(async () => (await call(s, 'GET', `/api/links/${pt}`)).json.cleaning === 'ready', 5000);
+    const cleanPng = (await get(pt)).body.toString('latin1');
+    assert.ok(cleanPng.includes('IHDR') && cleanPng.includes('IDAT') && !cleanPng.includes('tEXt') && !cleanPng.includes('Location'), 'the PNG without its text');
+
+    // Not for a kind it can't clean (a text file; a video, with no ffmpeg here), nor a file still arriving.
+    const txtId = await up('notes.txt', Buffer.from('hello'), 'text/plain');
+    assert.equal((await call(s, 'POST', `/api/files/${txtId}/links`, f.owner, { hours: 1, removeLocation: true })).status, 400);
+    const vidId = await up('clip.mp4', crypto.randomBytes(2000), 'video/mp4');
+    assert.equal((await call(s, 'POST', `/api/files/${vidId}/links`, f.owner, { hours: 1, removeLocation: true })).status, 400, 'a video needs ffmpeg');
+    const arrivingId = await up('later.jpg', photo, 'image/jpeg', { send: false, part: 300 });
+    assert.equal((await call(s, 'POST', `/api/files/${arrivingId}/links`, f.owner, { hours: 1, removeLocation: true })).status, 409, 'not until it is all here');
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

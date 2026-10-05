@@ -519,6 +519,15 @@
     <string name="fast_link_week">For a week</string>
     <string name="fast_link_make">Make the link</string>
     <string name="fast_link_copied">Link copied</string>
+    <string name="fast_link_stop_after">Stop after</string>
+    <string name="fast_link_limit_none">No limit</string>
+    <string name="fast_link_limit_one">One download</string>
+    <string name="fast_link_limit_3">3 downloads</string>
+    <string name="fast_link_limit_10">10 downloads</string>
+    <string name="fast_link_no_location">Take out where it was taken (location data) and the camera\'s other notes</string>
+    <string name="fast_link_made_one">It stops after one download.</string>
+    <string name="fast_link_made_many">It stops after %1$d downloads.</string>
+    <string name="fast_link_made_location">It\'s shared without its location data.</string>
     <string name="fast_link_made">%1$s\n\nAnyone with this link can download the file, without Beam or signing in, until %2$s. It\'s copied.</string>
     <!-- (1.12) The home-screen widget. -->
     <string name="widget_description">The last thing you received, and quick sends</string>

@@ -1,0 +1,28 @@
+# The lint and the server and Beam Family test suites on every push and pull request (1.15.0, the audit's D-3).
+# The browser, Windows and Android suites need a desktop browser, Windows and its WebView2, or the Android SDK: they
+# stay runs by hand before a release (scripts/dev/android-full.mjs for Android). Changes to docs alone don't run it.
+name: CI
+
+on:
+  push:
+    paths-ignore: ['**/*.md', 'docs/**', 'opensource/**']
+  pull_request:
+    paths-ignore: ['**/*.md', 'docs/**', 'opensource/**']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Lint
+        run: npx eslint .
+      - name: Server tests
+        run: node test/server.test.js
+      - name: Beam Family tests
+        run: node test/family.test.js

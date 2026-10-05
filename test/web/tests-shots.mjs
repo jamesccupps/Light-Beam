@@ -1,6 +1,5 @@
 // Screenshots of the main screens (only with --shots): desktop and phone, light and dark, host mode.
 import path from 'node:path';
-import { fakeHostScript } from './harness.mjs';
 import { hostPage } from './tests-host.mjs';
 
 export default function register(test) {

@@ -22,20 +22,19 @@ let info = null;
 let running = null;   // the direct download going on: { stop() }
 let already = '';     // 'background' once the browser's downloads have it, 'done' once a direct download finished
 
-function toast(text) {
-  const el = document.getElementById('toast');
-  el.textContent = text;
-  el.hidden = false;
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { el.hidden = true; }, 4000);
-}
-
 async function load() {
   let res;
   try { res = await fetch(`/api/links/${token}`, { cache: 'no-store' }); } catch { return problem('Can’t reach it right now. Check the connection and try again.'); }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) return problem(data.error || 'This link doesn’t work any more.');
   info = data;
+  // (1.15.0) used up: nothing more to download; a copy without location data still being made: wait for it
+  if (info.usedUp) return problem('It was downloaded as many times as its sender allowed.', 'This link has been used up');
+  if (info.cleaning === 'failed') return problem('Its sender asked for it without location data, and that copy couldn’t be made.');
+  if (info.cleaning === 'working') {
+    fill(card, h('h1', { class: 'link-name' }, info.name), h('p', { class: 'muted' }, 'Getting it ready: taking out where it was taken (location data)…'));
+    return setTimeout(load, 2000);
+  }
   render();
   if (info.received < info.size && !running) setTimeout(refresh, 3000);
   if (info.play === 'working') setTimeout(watchPlay, 5000);
@@ -98,8 +97,8 @@ async function refresh() {
 
 const arrivingText = () => (info.received < info.size ? `Still arriving at the other end: ${formatSize(info.received)} of ${formatSize(info.size)} so far. It can be downloaded already: it follows as it comes.` : '');
 
-function problem(text) {
-  fill(card, h('h1', {}, 'This link doesn’t work'), h('p', { class: 'muted' }, text));
+function problem(text, title = 'This link doesn’t work') {
+  fill(card, h('h1', {}, title), h('p', { class: 'muted' }, text));
 }
 
 function render() {
@@ -107,7 +106,8 @@ function render() {
   fill(card,
     h('div', { class: 'link-media' }, mediaEl()),
     h('h1', { class: 'link-name' }, info.name),
-    h('p', { class: 'muted' }, `${formatSize(info.size)} · from ${info.from} · until ${expires}`),
+    h('p', { class: 'muted' }, `${formatSize(info.size)} · from ${info.from} · until ${expires}${info.maxDownloads ? ` · ${info.downloadsLeft === 1 ? 'one download left' : `${info.downloadsLeft} downloads left`}` : ''}`),
+    info.removeLocation ? h('p', { class: 'muted small' }, 'Shared without its location data.') : null,
     h('p', { class: 'muted small arriving' }, arrivingText()),
     h('div', { class: 'link-actions' },
       h('button', { class: 'btn primary', type: 'button', id: 'get', onclick: onDownload }, 'Download'),

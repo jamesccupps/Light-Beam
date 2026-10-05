@@ -314,15 +314,20 @@ function itemMenuEntries(item, target, node) {
 // Beam Family on the server's machine makes it (its public link is reachable from anywhere; Beam isn't), from the file
 // itself (no copy on the same drive); its page says it's from Family's owner.
 const FAST_LINK_HOURS = [[1, 'An hour'], [24, 'A day'], [24 * 7, 'A week']];
+// (1.15.0) how many downloads before it stops, and (photos, videos) without the location data: Beam Family's choices
+const FAST_LINK_LIMITS = [[0, 'No limit'], [1, 'One download'], [3, '3 downloads'], [10, '10 downloads']];
+const mayLoseLocation = item => /^(image\/(jpeg|png)|video\/)/i.test(item.mime || '') || /\.(jpe?g|png|mp4|m4v|mov|3gp|mkv|webm)$/i.test(item.name || '');
 
 function fastLinkDialog(item) {
   let hours = 24;
+  let maxDownloads = 0;
+  let removeLocation = false;
   const make = el('button', { class: 'btn primary', type: 'button' }, 'Make the link');
   make.addEventListener('click', async () => {
     make.disabled = true;
     make.textContent = 'Making it…';
     try {
-      const { link } = await apiJson(`api/items/${item.id}/fastlink`, jsonBody({ hours }));
+      const { link } = await apiJson(`api/items/${item.id}/fastlink`, jsonBody({ hours, ...(maxDownloads && { maxDownloads }), ...(removeLocation && { removeLocation }) }));
       showFastLink(item, link);
     } catch (err) {
       make.disabled = false;
@@ -338,7 +343,13 @@ function fastLinkDialog(item) {
       el('p', { class: 'muted small' }, 'Anyone with the link can download it, without Beam or signing in, until it runs out. Beam Family on your server shares it, from where the file already is.'),
       el('div', { class: 'fl-hours', role: 'radiogroup', 'aria-label': 'How long it works' }, ...FAST_LINK_HOURS.map(([n, label]) =>
         el('label', { class: 'check' }, el('input', { type: 'radio', name: 'flHours', value: String(n), checked: n === hours, onchange: () => { hours = n; } }), el('span', {}, label)))),
-    ],
+      el('label', { class: 'fl-limit small' }, 'Stop after ',
+        el('select', { 'aria-label': 'How many downloads', onchange: e => { maxDownloads = Number(e.target.value); } },
+          ...FAST_LINK_LIMITS.map(([n, label]) => el('option', { value: String(n), selected: n === maxDownloads }, label)))),
+      mayLoseLocation(item) && el('label', { class: 'check small' },
+        el('input', { type: 'checkbox', onchange: e => { removeLocation = e.target.checked; } }),
+        el('span', {}, 'Take out where it was taken (location data) and the camera’s other notes')),
+    ].filter(Boolean),
     buttons: [el('button', { class: 'btn ghost', type: 'button', onclick: () => $('#genDlg').close('cancel') }, 'Cancel'), make],
   });
 }
@@ -350,7 +361,7 @@ function showFastLink(item, link) {
   openDialog({
     title: 'Fast link',
     className: 'fastlink-dlg',
-    body: [el('p', {}, el('strong', {}, item.name)), box, el('p', { class: 'muted small' }, `It works until ${until} for anyone who has it. Send it however you like.`)],
+    body: [el('p', {}, el('strong', {}, item.name)), box, el('p', { class: 'muted small' }, `It works until ${until}${link.maxDownloads ? ` or ${link.maxDownloads === 1 ? 'one download' : `${link.maxDownloads} downloads`}` : ''} for anyone who has it${link.removeLocation ? ', without its location data' : ''}. Send it however you like.`)],
     buttons: [
       navigator.share && el('button', { class: 'btn', type: 'button', onclick: () => navigator.share({ title: item.name, url: link.url }).catch(() => {}) }, 'Share'),
       el('button', { class: 'btn primary', type: 'button', onclick: () => copyText(link.url, 'Link copied') }, 'Copy'),

@@ -103,6 +103,8 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
 
     /** Fast links (1.13): each `POST /api/items/{id}/fastlink` (item id to its hours). */
     val fastLinks = CopyOnWriteArrayList<Pair<String, Int>>()
+    /** (1.13.0) each fast link request's body (its download limit, whether without location data) */
+    val fastLinkBodies = CopyOnWriteArrayList<JSONObject>()
 
     /** (1.14) Each `POST /api/text` body; each reaction (item, emoji, on); each edit (item, its new words). */
     val texts = CopyOnWriteArrayList<JSONObject>()
@@ -305,10 +307,13 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
             }
             path.startsWith("/api/items/") && path.endsWith("/fastlink") && method == "POST" -> {
                 val id = path.removePrefix("/api/items/").removeSuffix("/fastlink")
-                val hours = JSONObject(ex.requestBody.readBytes().decodeToString()).optInt("hours", 24)
+                val body = JSONObject(ex.requestBody.readBytes().decodeToString())
+                val hours = body.optInt("hours", 24)
                 fastLinks += id to hours
+                fastLinkBodies += body
                 val link = JSONObject().put("id", "link0001").put("url", "https://family.example.ts.net:8443/f/" + "a".repeat(32))
                     .put("expires", System.currentTimeMillis() + hours * 3_600_000L)
+                    .put("maxDownloads", body.optInt("maxDownloads", 0).takeIf { it > 0 } ?: JSONObject.NULL).put("removeLocation", body.optBoolean("removeLocation"))
                 json(ex, 201, JSONObject().put("link", link))
             }
             path == "/api/text" && method == "POST" -> {

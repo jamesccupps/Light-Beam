@@ -396,10 +396,13 @@ class Repository(private val app: BeamApp) {
     }
 
     /** A fast link for a file (server 1.13 `fast-links`) → its address and when it stops working. */
-    suspend fun fastLink(item: Item, hours: Int): Pair<String, Long> = withContext(Dispatchers.IO) {
+    /** A fast link made (server 1.15 also says its download limit and whether it shares a copy without location data). */
+    data class FastLinkMade(val url: String, val expires: Long, val maxDownloads: Int, val removeLocation: Boolean)
+
+    suspend fun fastLink(item: Item, hours: Int, maxDownloads: Int = 0, removeLocation: Boolean = false): FastLinkMade = withContext(Dispatchers.IO) {
         val api = app.api ?: throw IllegalStateException("Not paired")
-        val link = api.fastLink(item.id, hours)
-        link.getString("url") to link.optLong("expires")
+        val link = api.fastLink(item.id, hours, maxDownloads, removeLocation)
+        FastLinkMade(link.getString("url"), link.optLong("expires"), link.optInt("maxDownloads", 0), link.optBoolean("removeLocation", false))
     }
 
     /**

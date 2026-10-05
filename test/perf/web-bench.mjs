@@ -473,7 +473,7 @@ async function main() {
       const s = await p.evaluate(`({ fires: __perf.timerFires, timers: { ...__perf.timers }, rafs: __perf.rafs, observers: { ...__perf.observers },
         anims: document.getAnimations().filter(a => a.playState === 'running').map(a => {
           const t = a.effect?.target; const timing = a.effect?.getComputedTiming?.() || {};
-          return (a.animationName || a.transitionProperty || a.constructor.name) + (timing.iterations === Infinity ? ' (infinite)' : '') + ' on ' + (t ? (t.id ? '#' + t.id : t.tagName?.toLowerCase() + (t.className && typeof t.className === 'string' ? '.' + t.className.trim().replace(/\s+/g, '.') : '')) : '?') + (a.effect?.pseudoElement || '');
+          return (a.animationName || a.transitionProperty || a.constructor.name) + (timing.iterations === Infinity ? ' (infinite)' : '') + ' on ' + (t ? (t.id ? '#' + t.id : t.tagName?.toLowerCase() + (t.className && typeof t.className === 'string' ? '.' + t.className.trim().replace(/\\s+/g, '.') : '')) : '?') + (a.effect?.pseudoElement || '');
         }) })`);
       const perMin = x => r1(x * 60 / IDLE_SECS);
       rows.push({

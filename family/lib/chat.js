@@ -36,7 +36,9 @@ function cleanTopic(topic) {
   return s;
 }
 
-// A reaction: one emoji (flags, keycaps, skin tones and ZWJ sequences included), nothing else.
+// A reaction: one emoji (flags, keycaps, skin tones and ZWJ sequences included), nothing else. (The joiner, the
+// variation selector and the keycap are each listed on their own: lint's "combined character" is meant.)
+// eslint-disable-next-line no-misleading-character-class
 const EMOJI_CHARS = /^[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}‍️⃣#*0-9\u{e0020}-\u{e007f}]+$/u;
 const EMOJI_BASE = /[\p{Extended_Pictographic}\p{Regional_Indicator}⃣]/u;
 function cleanEmoji(e) {

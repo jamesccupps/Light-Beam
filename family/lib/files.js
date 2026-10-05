@@ -78,7 +78,7 @@ function createFiles(ctx) {
   }
 
   // (audit §5.1) the "plays everywhere" copies (play/) take room too
-  const storageUsed = () => db.get('SELECT coalesce(sum(size), 0) + coalesce(sum(play_size), 0) n FROM attachments').n;
+  const storageUsed = () => db.get('SELECT coalesce(sum(size), 0) + coalesce(sum(play_size), 0) + coalesce(sum(clean_size), 0) n FROM attachments').n;
 
   // The attachment if this person may see it: they sent it, or it's in a conversation they see.
   function visibleAttachment(user, id) {
@@ -374,7 +374,7 @@ function createFiles(ctx) {
   }
 
   async function removeStored(a) {
-    await Promise.all([filePath(a.id), partPath(a.id), thumbPath(a.id)].map(f => fsp.rm(f, { force: true })).concat(ctx.media?.forget(a.id) || []));
+    await Promise.all([filePath(a.id), partPath(a.id), thumbPath(a.id)].map(f => fsp.rm(f, { force: true })).concat(ctx.media?.forget(a.id) || [], ctx.clean?.forget(a.id) || []));
   }
 
   // Files uploaded but never sent go after a day, counted from the last piece that came (1.7.2: from the start, so a
