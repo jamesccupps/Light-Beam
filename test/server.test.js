@@ -971,7 +971,8 @@ test('A20: --supervise restarts a crashed server and `stop` ends it cleanly', as
   const s = await startServer('supervise', 8791, { args: ['--supervise'] });
   try {
     const pid1 = Number(fs.readFileSync(path.join(s.data, 'server.pid'), 'utf8'));
-    process.kill(pid1);
+    // a crash: SIGKILL (SIGTERM, process.kill's default, is a clean stop on Linux, which the supervisor rightly lets go)
+    process.kill(pid1, 'SIGKILL');
     await waitFor(async () => {
       try { const pid = Number(fs.readFileSync(path.join(s.data, 'server.pid'), 'utf8')); return pid !== pid1 && (await s.req('GET', '/api/hello')).status === 200; } catch { return false; }
     }, 10000);
