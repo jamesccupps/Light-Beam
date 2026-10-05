@@ -245,6 +245,23 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Dragging a file out of Beam's chat** on a PC that is being controlled copies it instead (paste it with
   Ctrl+V): a drag there would freeze the session.
 
+**Keyboard and mouse across PCs** (Beam 1.16, Windows app 1.12: one PC's own keyboard and mouse on the PCs beside it)
+
+- On the PC whose keyboard and mouse you use: tray → **Keyboard and mouse across PCs → Choose the PCs…**: up to three
+  of your PCs to its left, nearest first, and **On**. Each of those PCs needs "Allow remote control" on with this PC
+  ticked (that's only ever set at that PC).
+- Move the pointer off the left edge of this PC's screens and it carries on onto the next PC's main screen at the same
+  height, across its screens as Windows arranges them there (a TV above a monitor is reached from that PC's monitor),
+  and on to the next PC. Keys, clicks, the wheel and copied text go along; text copied there comes back.
+- **Back:** move the pointer back over the edge (worked out on this PC, so it works even if the other PC stops
+  answering), or that PC's tray → **Back to *this PC***. It also comes back by itself when a PC stops answering for a
+  second and a half, or this PC locks. Ctrl+Alt+Del always stays on this PC.
+- Each PC shows a banner, "*this PC*'s keyboard and mouse · Hide · Stop": **Hide** folds it into that PC's tray, which
+  then shows it (Show the banner, Back, Stop), and it stays folded next time. Stop there ends it until you turn it off
+  and on here.
+- Nothing is seen or recorded: it's a remote control session with no picture, directly between the PCs over
+  Tailscale. **Limits:** not onto a locked PC; no dragging files between PCs yet; only PCs to the left for now.
+
 **Windows app** (`Beam.exe`, one self-updating file)
 
 - It lives in the system tray; click the icon to show or hide the chat window. Run a downloaded `Beam.exe` once and it

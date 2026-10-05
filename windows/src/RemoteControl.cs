@@ -62,6 +62,8 @@ namespace Beam
         public DateTime PathNext;        // ...when to ask Tailscale again
         public bool PathChecking;
         public long RestartedFor;        // (1.11.4) the display change a capture that ended was started again for
+        public bool Kvm;                 // (1.12) the viewer's own keyboard and mouse work this PC: no capture, no picture
+        public bool Here;                // ...and its pointer is on this PC now (the viewer says)
 
         public string Label
         {
@@ -171,11 +173,18 @@ namespace Beam
             {
                 var s = current;
                 if (s == null || s.State == RcState.Checking) return null;
+                if (s.Kvm) return RcPolicy.DisplayName(s.ViewerName) + (s.State == RcState.Live ? "'s keyboard and mouse can reach this PC" : "'s keyboard and mouse are connecting");
                 return RcPolicy.DisplayName(s.ViewerName) + (s.State == RcState.Live ? " is controlling this PC" : " is connecting to this PC");
             }
         }
 
         public string ViewerName { get { return current != null ? RcPolicy.DisplayName(current.ViewerName) : null; } }
+
+        // (1.12) A kvm session can last all day: an update waits only while the viewer's pointer is on this PC.
+        public bool Kvm { get { return current != null && current.Kvm; } }
+        public bool KvmHere { get { var s = current; return s != null && s.Kvm && s.Here && s.State == RcState.Live; } }
+        public bool HoldsUpdate { get { var s = current; return s != null && (!s.Kvm || s.Here); } }
+        public bool KvmBannerShown { get { var s = current; return s != null && s.Kvm && s.Banner != null && s.Banner.IsShown; } }
 
         // ------------------------------------------------------------------ the switch and the list
 
@@ -335,7 +344,9 @@ namespace Beam
             facts.Ip6 = RcPolicy.IsTailscaleIp(ip6) ? ip6 : null;
             string refusal = RcPolicy.Refusal(facts);
             if (refusal == null && !Listed(from)) refusal = NotListed;
-            Log.Write("Remote control: " + name + " asks to control this PC (from " + (node ?? "a Tailscale machine") + ", " + (facts.Ip4 ?? facts.Ip6 ?? "no Tailscale address") + ")");
+            bool kvm = Json.Str(d, "kind") == "kvm"; // (1.12) its own keyboard and mouse: the same checks, no capture
+            Log.Write("Remote control: " + name + (kvm ? " asks to share its keyboard and mouse with this PC" : " asks to control this PC") +
+                " (from " + (node ?? "a Tailscale machine") + ", " + (facts.Ip4 ?? facts.Ip6 ?? "no Tailscale address") + ")");
             if (refusal != null) { Refuse(id, app.Api, name, refusal, refusal == NotListed ? "not-listed" : RcPolicy.EndReason(refusal)); return; }
             if (current != null) End(current, null, "the same device asked again"); // its page reloaded: the server ended the old one
             var s = new RcSession();
@@ -346,6 +357,7 @@ namespace Beam
             s.Ip6 = facts.Ip6;
             s.ServerNode = node;
             s.Api = app.Api;
+            s.Kvm = kvm;
             s.State = RcState.Checking;
             current = s;
             app.MarkChanged();
@@ -371,16 +383,18 @@ namespace Beam
             s.CheckedIp = ip;
             s.Machine = check.Name;
             s.StableId = check.StableId;
-            // No banner, no session.
+            // No banner, no session. (1.12: a kvm session's can be folded into the tray, which then shows it, as chosen at
+            // this PC; it stays "up".)
             RegisterKillSwitch();
             try
             {
-                s.Banner = new RcBanner(app, s.Label, () => Stop("the banner's Stop"));
-                s.Banner.ShowBanner(DesktopLayout.Current().Primary);
+                s.Banner = kvm ? new RcBanner(app, s.Label, () => Stop("the banner's Stop"), RcPolicy.DisplayName(s.ViewerName), () => KvmBanner(false, "the banner's Hide"))
+                    : new RcBanner(app, s.Label, () => Stop("the banner's Stop"));
+                s.Banner.ShowBanner(DesktopLayout.Current().Primary, kvm && app.Cfg.RcKvmBannerHidden);
             }
             catch (Exception ex) { Log.Error("Remote control: the banner", ex); }
             if (s.Banner == null || !s.Banner.Up) { End(s, "failed", "the banner couldn't be shown"); return; }
-            Log.Write("Remote control: banner up: " + s.Label + " is controlling this PC");
+            Log.Write("Remote control: banner up: " + s.Label + (kvm ? " shares its keyboard and mouse" + (s.Banner.IsShown ? "" : " (folded into the tray, as chosen at this PC)") : " is controlling this PC"));
             if (testClickOnShow) { testClickOnShow = false; s.Banner.ClickStopForTest(); } // must be ignored (the 500 ms guard)
             s.State = RcState.Starting;
             app.MarkChanged();
@@ -481,12 +495,14 @@ namespace Beam
         async void StartHost(RcSession s, DesktopLayout layout)
         {
             if (current != s || s.State == RcState.Ended) return;
-            var host = RcHost.For(app.Cfg, layout.SourceName(s.Screen), app.DevTools, () => CaptureAllowed(s));
+            // (a kvm session's page never captures: the gate refuses it whatever happens)
+            var host = RcHost.For(app.Cfg, layout.SourceName(s.Screen), app.DevTools, () => !s.Kvm && CaptureAllowed(s));
             s.Host = host;
             s.Verified = false;
             host.Message += (h, m) => OnPage(s, h, m);
             if (injector == null) injector = NewInjector();
             injector.Screen = s.Screen;
+            injector.AnyScreen = s.Kvm; // (the viewer's pointer goes over all of this PC's screens)
             injector.NewConnection();
             try { await host.Start(); }
             catch (Exception ex)
@@ -496,7 +512,8 @@ namespace Beam
                 return;
             }
             if (current != s || s.Host != host) { var ignored = host.Close(); return; }
-            Log.Write("Remote control: capture host " + (host.Reused ? "reused" : "up") + " (WebView2 " + host.RuntimeVersion + ", " + layout.SourceName(s.Screen) + ")");
+            Log.Write("Remote control: " + (s.Kvm ? "its page (no capture: keyboard and mouse only) is " : "capture host ") + (host.Reused ? "reused" : "up") +
+                " (WebView2 " + host.RuntimeVersion + (s.Kvm ? "" : ", " + layout.SourceName(s.Screen)) + ")");
             // A capture that hangs (a wrong source name hangs silently) or never connects ends the session.
             var started = DateTime.Now;
             var watch = new Timer();
@@ -505,8 +522,8 @@ namespace Beam
             {
                 if (current != s || s.Host != host || s.State == RcState.Ended) { watch.Stop(); watch.Dispose(); return; }
                 double secs = (DateTime.Now - started).TotalSeconds;
-                if (!host.Captured && secs > 10) { watch.Stop(); watch.Dispose(); End(s, "failed", "the screen capture didn't start"); }
-                else if (host.Captured && !s.Verified && secs > 45) { watch.Stop(); watch.Dispose(); End(s, "failed", "the viewer didn't connect"); }
+                if (!s.Kvm && !host.Captured && secs > 10) { watch.Stop(); watch.Dispose(); End(s, "failed", "the screen capture didn't start"); }
+                else if ((host.Captured || s.Kvm) && !s.Verified && secs > 45) { watch.Stop(); watch.Dispose(); End(s, "failed", "the viewer didn't connect"); }
                 else if (s.Verified) { watch.Stop(); watch.Dispose(); }
             };
             watch.Start();
@@ -596,6 +613,7 @@ namespace Beam
             c["battery"] = OnBattery();
             if (s.Settings != null) c["settings"] = s.Settings; // (a new capture page after a switch of screens: as before)
             c["video"] = !s.VideoOff;
+            if (s.Kvm) c["kvm"] = true; // (1.12: no capture at all)
             return c;
         }
 
@@ -686,8 +704,10 @@ namespace Beam
             var layout = DesktopLayout.Current();
             hello["monitors"] = MonitorList(layout);
             hello["monitor"] = s.Screen;
-            hello["caps"] = new object[] { "fit", "fit-scale", "settings", "video" }; // Beam 1.8: what this PC does besides 1.6's (fit-scale: 1.11.4)
-            hello["fitted"] = display.Fitted;
+            // Beam 1.8: what this PC does besides 1.6's (fit-scale: 1.11.4). A kvm session (1.12): input on any of its
+            // screens (`mv`, `btn` and `wheel` say which in `m`), "kvm-back", and nothing about a picture.
+            hello["caps"] = s.Kvm ? new object[] { "kvm" } : new object[] { "fit", "fit-scale", "settings", "video" };
+            if (!s.Kvm) hello["fitted"] = display.Fitted;
             // Where this PC's cursor is, when it's on the shared screen: a phone's trackpad pointer starts there (1.6.1).
             var cursor = CursorOn(layout, s.Screen);
             if (cursor != null) hello["cursor"] = cursor;
@@ -701,9 +721,18 @@ namespace Beam
             {
                 s.LiveSince = DateTime.Now;
                 s.PathNext = DateTime.Now.AddSeconds(2); // (1.11) the path, once it has settled a little
-                KeepAwake(true);
-                Log.Write("Remote control: " + s.ViewerName + " is controlling this PC (peer " + remote + " is " + s.Machine + ", checked)");
-                app.Notify(RcPolicy.DisplayName(s.ViewerName) + " is controlling this PC", "Stop it with the banner at the top of the screen, or " + KillKeys + ".");
+                if (s.Kvm)
+                {
+                    // (all day: this PC sleeps and its screen turns off as usual, and the viewer's input wakes it; no
+                    // balloon each time the link comes up, the banner or the tray says it)
+                    Log.Write("Remote control: " + s.ViewerName + "'s keyboard and mouse can reach this PC (peer " + remote + " is " + s.Machine + ", checked)");
+                }
+                else
+                {
+                    KeepAwake(true);
+                    Log.Write("Remote control: " + s.ViewerName + " is controlling this PC (peer " + remote + " is " + s.Machine + ", checked)");
+                    app.Notify(RcPolicy.DisplayName(s.ViewerName) + " is controlling this PC", "Stop it with the banner at the top of the screen, or " + KillKeys + ".");
+                }
             }
             else Log.Write("Remote control: connected again (screen " + (s.Screen + 1) + ")");
             app.MarkChanged();
@@ -743,11 +772,19 @@ namespace Beam
         void OnViewerCtl(RcSession s, Dictionary<string, object> m)
         {
             if (m == null) return;
-            switch (Json.Str(m, "t"))
+            string t = Json.Str(m, "t");
+            if (s.Kvm && (t == "quality" || t == "monitor" || t == "fit" || t == "settings" || t == "video")) return; // (no picture)
+            switch (t)
             {
                 case "pong":
                     s.LastPong = DateTime.Now;
                     break;
+                case "kvm": // (1.12) the viewer's pointer came onto this PC, or left it
+                {
+                    bool here = s.Kvm && Json.Bool(m, "here", false);
+                    if (here != s.Here) { s.Here = here; app.MarkChanged(); }
+                    break;
+                }
                 case "quality":
                 {
                     string mode = Json.Str(m, "mode") == "motion" ? "motion" : "text";
@@ -1060,6 +1097,31 @@ namespace Beam
             if (current != null) End(current, "stopped", "the kill switch");
         }
 
+        // (1.12) "Back to Robin Laptop" (the tray, while its pointer is here): the viewer's keyboard and mouse go back to
+        // its own screen. The session goes on.
+        public void KvmBack(string from)
+        {
+            var s = current;
+            if (s == null || !s.Kvm || !s.Verified) return;
+            var m = new Dictionary<string, object>();
+            m["t"] = "kvm-back";
+            SendCtl(s, m);
+            Log.Write("Remote control: " + s.ViewerName + "'s keyboard and mouse go back to it (" + from + ")");
+        }
+
+        // (1.12) A kvm session's banner shown, or folded into the tray (which then shows the session); chosen at this PC
+        // and kept for the next session.
+        public void KvmBanner(bool show, string from)
+        {
+            var s = current;
+            if (s == null || !s.Kvm || s.Banner == null) return;
+            s.Banner.SetShown(show);
+            app.Cfg.RcKvmBannerHidden = !show;
+            app.Cfg.Save();
+            Log.Write("Remote control: the keyboard-and-mouse banner is " + (show ? "shown" : "folded into the tray") + " (" + from + ")");
+            app.MarkChanged();
+        }
+
         // Ends a session here: the viewer hears `bye`, the server `/end` (with reason; null when it already knows), and
         // everything held is let go.
         void End(RcSession s, string reason, string why)
@@ -1088,7 +1150,9 @@ namespace Beam
                 flushTimer.Stop();
             }
             if (reason != null) PostEnd(s.Id, s.Api, reason);
-            if (live) Log.Write("Remote control: " + s.ViewerName + " stopped controlling this PC after " + Duration(DateTime.Now - s.LiveSince) + " (" + why + ")");
+            s.Here = false;
+            if (live && s.Kvm) Log.Write("Remote control: " + s.ViewerName + "'s keyboard and mouse stopped reaching this PC after " + Duration(DateTime.Now - s.LiveSince) + " (" + why + ")");
+            else if (live) Log.Write("Remote control: " + s.ViewerName + " stopped controlling this PC after " + Duration(DateTime.Now - s.LiveSince) + " (" + why + ")");
             else Log.Write("Remote control: " + s.ViewerName + "'s request ended before it was live (" + why + ")");
             app.MarkChanged();
         }
@@ -1252,6 +1316,7 @@ namespace Beam
                     break;
             }
             LockChanged(before);
+            if (app.Kvm != null) app.Kvm.OnSessionChange(what); // (1.12: this PC's keyboard and mouse come back from the PCs beside it)
         }
 
         // Tests: as if Windows locked or unlocked this session.
@@ -1274,6 +1339,10 @@ namespace Beam
         public void OnDisplayChange()
         {
             if (injector != null) injector.LayoutChanged();
+            // (1.12) A kvm viewer works out where its pointer is on this PC's screens: it hears when they change.
+            var s = current;
+            if (s != null && s.Kvm && s.Verified) SendDisplay(s);
+            if (app.Kvm != null) app.Kvm.OnDisplayChange();
         }
 
         // ------------------------------------------------------------------ clipboard (text, opt-in per session)
@@ -1370,6 +1439,13 @@ namespace Beam
                 case "banner": // banner[:info|drag:x,y|jump:x,y|hover:on|off|top] (RcBanner.TestCommand)
                     if (current != null && current.Banner != null) current.Banner.TestCommand(arg);
                     else Log.Write("Remote control: (test) no banner");
+                    break;
+                case "kvmback": KvmBack("test"); break;                        // (1.12) as the tray's "Back to …"
+                case "kvmbanner": KvmBanner(arg != "hide", "test"); break;      // kvmbanner:show|hide
+                case "kvmstate": // the kvm session as this PC sees it
+                    Log.Write("Remote control: (test) kvm " + (current == null || !current.Kvm ? "none" : (current.State == RcState.Live ? "live" : "connecting") +
+                        (current.Here ? ", here" : ", not here") + ", banner " + (current.Banner != null && current.Banner.IsShown ? "shown" : "folded") +
+                        ", update " + (HoldsUpdate ? "waits" : "may go")));
                     break;
                 case "closeviews": app.CloseRemoteViewsForTest(); break;
                 case "viewmsg": app.RemoteViewsForTest(arg ?? "{}"); break;

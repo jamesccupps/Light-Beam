@@ -2555,6 +2555,11 @@ function dropPhoneNotes(phone) {
 // - both must be sign-ins the user made on purpose (rcIneligible), and with Tailscale, owners' machines.
 
 const RC_MIN_VERSION = '1.6.0';
+// (1.16) A session's kind: `view` (the screen, with the mouse and keyboard on it) or `kvm` (another PC's own keyboard
+// and mouse, no picture: the viewer's pointer crosses over the edge of its own screen). A kvm session never takes the
+// place of someone viewing the PC (busy); someone viewing it ends a kvm session (busy), whose app asks again later.
+const RC_KINDS = new Set(['view', 'kvm']);
+const RC_KVM_MIN_VERSION = '1.12.0'; // the Beam app for Windows that takes a kvm session
 // The PC leases every 30 s; a session whose lease is this late ends.
 const RC_LEASE_MS = FAST_TIMEOUTS && env.BEAM_TEST_RC_LEASE_MS ? Number(env.BEAM_TEST_RC_LEASE_MS) : 90_000;
 const RC_SDP_MAX = 64 * 1024;
@@ -2714,7 +2719,7 @@ async function rcBind(device, req, url) {
   }
 }
 
-const rcSessionList = () => [...rcSessions.values()].map(x => ({ id: x.id, host: x.host, viewer: x.viewer, since: x.since, state: x.state }));
+const rcSessionList = () => [...rcSessions.values()].map(x => ({ id: x.id, host: x.host, viewer: x.viewer, since: x.since, state: x.state, kind: x.kind }));
 
 // rc-sessions, for every device's UI ("Desktop is being controlled from Robin Laptop · End"): not urgent (a
 // background stream holds only the latest), and never to session-only sign-ins.
@@ -2774,9 +2779,15 @@ function endRcSession(session, reason, by = null, detail = '') {
   sendToPc(session.host, 'rc-end', data);
   sendToViewer(session, 'rc-end', data);
   const how = (by ? `${reason}, by ${whoName(by)}` : reason) + (detail ? `: ${detail}` : '');
-  log.info(session.state === 'live'
-    ? `${whoName(session.viewer)} stopped controlling ${nameOf(session.host)} after ${rcDuration(now() - session.liveSince)} (${how})`
-    : `${whoName(session.viewer)}'s request to control ${nameOf(session.host)} ended (${how})`);
+  if (session.kind === 'kvm') {
+    log.info(session.state === 'live'
+      ? `${whoName(session.viewer)}'s keyboard and mouse stopped reaching ${nameOf(session.host)} after ${rcDuration(now() - session.liveSince)} (${how})`
+      : `${whoName(session.viewer)}'s request to share its keyboard and mouse with ${nameOf(session.host)} ended (${how})`);
+  } else {
+    log.info(session.state === 'live'
+      ? `${whoName(session.viewer)} stopped controlling ${nameOf(session.host)} after ${rcDuration(now() - session.liveSince)} (${how})`
+      : `${whoName(session.viewer)}'s request to control ${nameOf(session.host)} ended (${how})`);
+  }
   broadcastRcSessions();
 }
 
@@ -2806,7 +2817,7 @@ function rcLive(session) {
   if (session.state === 'live') return;
   session.state = 'live';
   session.liveSince = now();
-  log.info(`${whoName(session.viewer)} is controlling ${nameOf(session.host)}`);
+  log.info(session.kind === 'kvm' ? `${whoName(session.viewer)}'s keyboard and mouse can reach ${nameOf(session.host)}` : `${whoName(session.viewer)} is controlling ${nameOf(session.host)}`);
   broadcastRcSessions();
 }
 
@@ -2874,7 +2885,8 @@ function rcNotAllowed(pc) {
   return `Remote control is off on ${pc.name} ("Allow remote control" is turned on at that PC)`;
 }
 
-// POST /api/rc/sessions { device }: the caller (the viewer) asks to see and control that PC.
+// POST /api/rc/sessions { device, kind? }: the caller (the viewer) asks to see and control that PC, or (kind kvm, 1.16)
+// to work it with the viewer's own keyboard and mouse.
 async function startRemoteControl(req, res, _m, url) {
   const me = rcCaller(req, url);
   const why = rcIneligible(req, url);
@@ -2885,6 +2897,8 @@ async function startRemoteControl(req, res, _m, url) {
   rcStarts.hit(me);
   const body = await readJson(req);
   if (typeof body.device !== 'string' || !body.device) throw httpError(400, 'Expected {"device": "<the PC\'s device id>"}');
+  if (body.kind !== undefined && !RC_KINDS.has(body.kind)) throw httpError(400, 'kind must be view or kvm');
+  const kind = body.kind === 'kvm' ? 'kvm' : 'view';
   const pc = devices[resolveAlias(body.device)];
   if (!pc) throw httpError(404, 'No such device');
   const viewer = devices[me];
@@ -2893,10 +2907,18 @@ async function startRemoteControl(req, res, _m, url) {
   const check = () => {
     if (pc.id === me) throw rcRefused(me, pc, 'self', "A device can't control itself");
     if (!rcAllowed(pc)) throw rcRefused(me, pc, 'not-allowed', rcNotAllowed(pc));
+    if (kind === 'kvm' && !versionAtLeast(pc.appVersion, RC_KVM_MIN_VERSION)) {
+      throw rcRefused(me, pc, 'old-app', `${pc.name} needs the Beam app ${RC_KVM_MIN_VERSION} or later to take another device's keyboard and mouse`);
+    }
     if (pc.status?.locked === true) throw rcRefused(me, pc, 'locked', `${pc.name} is locked: use Remote Desktop`);
     if (!appOnline(pc.id)) throw rcRefused(me, pc, 'offline', `${pc.name} isn't connected to Beam right now`);
     const running = [...rcSessions.values()].find(x => x.host === pc.id);
-    if (running && running.viewer !== me) throw rcRefused(me, pc, 'busy', `${pc.name} is being controlled from ${whoName(running.viewer)}`);
+    // What makes way: the same viewer's own session of the same kind (it reloaded, or its link came back), and a kvm
+    // session for anyone viewing the PC. A kvm session never ends someone viewing it.
+    if (running && !(running.viewer === me && running.kind === kind) && !(kind === 'view' && running.kind === 'kvm')) {
+      throw rcRefused(me, pc, 'busy', running.kind === 'kvm' ? `${pc.name} is using ${whoName(running.viewer)}'s keyboard and mouse`
+        : `${pc.name} is being controlled from ${whoName(running.viewer)}`);
+    }
     return running;
   };
   check();
@@ -2913,10 +2935,12 @@ async function startRemoteControl(req, res, _m, url) {
   if (!rcOwnerOk(you.user)) throw rcRefused(me, pc, 'not-owner', `This device's Tailscale account (${you.user}) isn't one of this Beam's owners`, 403);
   if (!host) throw rcRefused(me, pc, 'no-tailscale', `${pc.name} has no Tailscale address the server knows`);
   if (!rcOwnerOk(host.user)) throw rcRefused(me, pc, 'not-owner', `${pc.name}'s Tailscale account (${host.user}) isn't one of this Beam's owners`);
-  if (running) endRcSession(running, 'stopped', me); // the same viewer again (it reloaded): the old session makes way
+  // The same viewer again (it reloaded) makes way; a kvm session makes way for someone viewing the PC (busy: its app
+  // asks again later).
+  if (running) endRcSession(running, running.kind === 'kvm' && kind === 'view' ? 'busy' : 'stopped', me);
   const id = crypto.randomBytes(8).toString('hex');
   const session = {
-    id, host: pc.id, viewer: me, viewerKey: rcCredKey(auth, machine, profileOf(req, url)),
+    id, kind, host: pc.id, viewer: me, viewerKey: rcCredKey(auth, machine, profileOf(req, url)),
     since: now(), state: 'requested', liveSince: 0, signals: 0, bytes: 0, timer: null,
   };
   // by: the name the viewer chose for itself. viewer.node, .user and .ip: what Tailscale and the request confirm.
@@ -2924,12 +2948,14 @@ async function startRemoteControl(req, res, _m, url) {
   session.request = {
     id, from: me, by: nameOf(me), at: session.since,
     viewer: { ip: tailscale.isTailscaleIp(ip) ? ip : you.ip4 || you.ip6, ip4: you.ip4, ip6: you.ip6, node: you.node, user: you.user, platform: viewer.platform || null },
+    ...(kind === 'kvm' && { kind }),
   };
   rcSessions.set(id, session);
   armRcLease(session);
   rcStats.started++;
   sendToPc(pc.id, 'rc-request', session.request);
-  log.info(`${whoName(me)} asked to control ${pc.name} (from ${you.node || 'a Tailscale machine'}, ${session.request.viewer.ip}${you.user ? `, ${you.user}` : ''})`);
+  const where = `from ${you.node || 'a Tailscale machine'}, ${session.request.viewer.ip}${you.user ? `, ${you.user}` : ''}`;
+  log.info(kind === 'kvm' ? `${whoName(me)} asked to share its keyboard and mouse with ${pc.name} (${where})` : `${whoName(me)} asked to control ${pc.name} (${where})`);
   broadcastRcSessions();
   send(res, 201, { id, host: { id: pc.id, name: pc.name, ip4: host.ip4, ip6: host.ip6 }, you: { ip4: you.ip4, ip6: you.ip6 } });
 }
@@ -4719,6 +4745,7 @@ const FEATURES = [
   'phone-notifications', 'remote-control', 'backups',
   ...(FAMILY_URL ? ['fast-links'] : []), // (1.13.0: Beam Family on this machine makes fast links of Beam's files)
   'replies', 'reactions', 'edit', // (1.14.0)
+  'kvm', // (1.16.0: a remote control session of kind kvm, a PC's keyboard and mouse shared with another)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).

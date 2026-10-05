@@ -889,11 +889,11 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
 
 | Method & path | Who | Result |
 |---|---|---|
-| `POST /api/rc/sessions` | the viewer | `{ "device": "<PC id>" }` → `201 { "id", "host": { "id", "name", "ip4", "ip6" }, "you": { "ip4", "ip6" } }`; event `rc-request` to the PC. Other fields in the body are ignored |
+| `POST /api/rc/sessions` | the viewer | `{ "device": "<PC id>", "kind"? }` → `201 { "id", "host": { "id", "name", "ip4", "ip6" }, "you": { "ip4", "ip6" } }`; event `rc-request` to the PC. `kind` (1.16): `view` (the default) or `kvm` (below; another value is `400`). Other fields in the body are ignored |
 | `POST /api/rc/sessions/{id}/signal` | either party | `{ "kind": "offer"\|"answer"\|"candidates"\|"restart", "sdp"?, "candidates"? }` → `204`; event `rc-signal` to the other party only |
 | `POST /api/rc/sessions/{id}/lease` | the PC | → `200 { "ok": true }`. `410 { "reason" }` once the session has ended, `404` when the server doesn't know it (it restarted): end the session then |
 | `POST /api/rc/sessions/{id}/end` | either party, or any other signed-in device | `{ "reason"?, "detail"? }` → `204` (also for a session that has just ended); event `rc-end` to both parties. `detail` (1.7.3, from a party only): why its own check hung up, for the server's log, as kinds only (anything shaped like an address is left out), e.g. "the connection went to no address (prflx candidate)" |
-| `GET /api/rc/sessions` | any signed-in device | `{ "sessions": [{ "id", "host", "viewer", "since", "state" }] }` |
+| `GET /api/rc/sessions` | any signed-in device | `{ "sessions": [{ "id", "host", "viewer", "since", "state", "kind" }] }` (`kind` 1.16) |
 | `POST /api/rc/disable` | any signed-in device | `{ "device": "<PC id>" }` → `202`; event `rc-disable` to the PC; its sessions end (`revoked`) |
 
 - **Sessions:**
@@ -909,13 +909,24 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
      - `self`: it's the device itself;
      - `not-allowed`: not a Windows PC with Beam 1.6+, its switch is off or not tied to its app, or it was turned
        off from elsewhere;
+     - `old-app` (1.16, kind `kvm`): the PC's app is older than 1.12;
      - `locked`;
      - `offline`: the PC's app has no open event stream;
      - `busy`: another device controls it;
   5. `401`: the viewer was signed out or removed while the server looked up the addresses;
   6. `409 no-tailscale`, `403 not-owner` (this device's machine) or `409 not-owner` (the PC's).
 
-  The same viewer asking again (after a reload) replaces its own session; the old one ends `stopped`.
+  The same viewer asking again (after a reload) replaces its own session of the same kind; the old one ends `stopped`.
+- **Keyboard and mouse (kind `kvm`, 1.16; feature `kvm`).** Another PC's own keyboard and mouse work this PC: its
+  pointer comes over the edge of its own screen (the Windows app 1.12's "Keyboard and mouse across PCs"). The same
+  rules as above, the same signalling and channels, and **no picture**: the PC captures nothing. Its banner can be
+  folded into its tray there.
+  - The PC needs the Beam app 1.12 or later (`409 old-app`). `rc-request` carries `"kind": "kvm"`.
+  - A kvm session never takes the place of someone viewing the PC: it gets `409 busy`. Someone asking to view the PC
+    ends a kvm session (`rc-end` reason `busy`, `from`/`by` the one viewing); the viewer's app asks again later. The
+    same viewer's kvm request again replaces its own kvm session.
+  - The log says "… asked to share its keyboard and mouse with …", "…'s keyboard and mouse can reach …" and "…'s keyboard
+    and mouse stopped reaching … after …".
 - **Signals:** the PC offers (`offer`) and the viewer answers (`answer`). Both trickle `candidates` and may ask for an
   ICE restart (`restart`, no payload).
   - The viewer sends nothing before the PC has accepted (its first lease or signal): `409 { "reason": "waiting" }`.

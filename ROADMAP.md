@@ -20,6 +20,9 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Several at once** (Beam 1.12, the Android app 1.9, Beam Family 1.11): select several messages, photos or files to
   copy, share, save, forward or delete them together (the Windows app copies them as files and drags them out
   together; Android shares them into any app in one go), and a gallery of each conversation's photos, videos and files.
+- **A shared mouse and keyboard** (Beam 1.16, the Windows app 1.12): one PC's own keyboard and mouse work the PCs beside
+  it; the pointer crosses over the edge of its screens, with the keyboard and copied text, and comes back the same way
+  (or by itself if a PC stops answering).
 
 ## Next
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;
@@ -31,7 +34,7 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   (servers signing their requests), big files going direct.
 - **Remote control, further:** a Lowest delay mode (measured end to end), capture straight into the hardware encoder,
   decoding on the phone with WebCodecs, the cursor drawn on the viewing device, full-colour text, sound.
-- **A shared mouse and keyboard** between computers (KVM).
+- **The shared mouse and keyboard, further:** PCs on any side (a drag-to-arrange page), dragging files between them.
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
 - **Builds and releases** with GitHub Actions.
 

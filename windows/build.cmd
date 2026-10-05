@@ -52,6 +52,8 @@ if errorlevel 1 (
   /resource:"%WV%\arm64\WebView2Loader.dll",Beam.webview2.arm64.WebView2Loader.dll ^
   /resource:"%HERE%rc\rc-host.html",Beam.rc.rc-host.html ^
   /resource:"%HERE%rc\rc-host.js",Beam.rc.rc-host.js ^
+  /resource:"%HERE%rc\kvm-link.html",Beam.rc.kvm-link.html ^
+  /resource:"%HERE%rc\kvm-link.js",Beam.rc.kvm-link.js ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
   /r:System.Net.Http.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Security.dll ^
   /r:"%WV%\Microsoft.Web.WebView2.Core.dll" /r:"%WV%\Microsoft.Web.WebView2.WinForms.dll" ^

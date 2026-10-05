@@ -271,13 +271,18 @@ async function loadRcSessions() {
   try { onRcSessions(await apiJson('api/rc/sessions')); } catch {}
 }
 
+// What a session line says. (1.16) A kvm session is another device's own keyboard and mouse working the PC (no picture).
+const rcLineText = s => (s.kind === 'kvm'
+  ? (s.state === 'live' ? `Using ${nameOf(s.viewer)}’s keyboard and mouse` : `${nameOf(s.viewer)}’s keyboard and mouse are connecting`)
+  : s.state === 'live' ? `Being controlled from ${nameOf(s.viewer)}` : `${nameOf(s.viewer)} is connecting to control it`);
+
 // Settings → Devices, under a PC: who controls it (End), and turning remote control off. Never on: that's only at
 // the PC itself.
 function rcDeviceRows(d) {
   if (!rcFeature() || !d) return [];
   if (rcTurningOff.has(d.id) && d.status?.remoteControl !== true) rcTurningOff.delete(d.id);
   const out = (rcSessionList || []).filter(x => x.host === d.id).map(s => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'),
-    el('span', {}, s.state === 'live' ? `Being controlled from ${nameOf(s.viewer)}` : `${nameOf(s.viewer)} is connecting to control it`), ' · ',
+    el('span', {}, rcLineText(s)), ' · ',
     el('button', { class: 'linkish', type: 'button', onclick: () => endRcFromHere(s, d) }, 'End')));
   if (d.status?.remoteControl === true) {
     out.push(rcTurningOff.has(d.id) ? el('p', { class: 'muted small' }, `Turning off remote control on ${d.name}…`)
@@ -327,7 +332,7 @@ function rcPcRows(s) {
       : note('Off. To let your devices control this PC, turn on “Allow remote control” in Beam’s menu in the taskbar corner (it asks you to confirm).'),
     allowed && field('Can be controlled from', el('p', { class: 'small rc-allowed' }, allowed.length ? allowed.map(x => cleanName(x.name) || nameOf(x.id)).join(', ') : 'No device yet'),
       note('The list is changed in Beam’s own settings on this PC: tray → Remote control devices…')),
-    ...mine.map(x => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'), el('span', {}, `Being controlled from ${nameOf(x.viewer)}`), ' · ',
+    ...mine.map(x => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'), el('span', {}, rcLineText(x)), ' · ',
       el('button', { class: 'linkish', type: 'button', onclick: () => endRcFromHere(x, { name: 'this PC' }) }, 'End'))),
   ].filter(Boolean);
 }

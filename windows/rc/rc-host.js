@@ -4,6 +4,8 @@
 // which decides: Beam checks the peer before anything flows (`verified`), injects the input, owns the clipboard and
 // talks to the server. This page can't reach the network itself (its CSP has no connect-src; ICE only) and keeps
 // nothing: no frames, no input.
+// (1.12) A kvm session (another PC's own keyboard and mouse working this one) captures nothing: the same connection
+// with its three channels, and no picture at all.
 'use strict';
 (function () {
   const post = m => window.chrome.webview.postMessage(m);
@@ -26,7 +28,7 @@
   let settings = { mode: 'text', size: 'auto', vw: 0, vh: 0, fps: 0, kbps: 0, codec: 'auto', net: '' };
   let autoPick = 'text', busyTicks = 0, calmTicks = 0, videoOn = true, src = { w: 0, h: 0 }, codecsKey = '';
   let pendingRemote = [], outCands = [], candTimer = 0, restartTimer = 0, statsTimer = 0, prev = null, lastSelected = null;
-  let codecNow = null, encoderNow = null, ended = false, candidatesIn = 0, candidatesAdded = 0, recapturing = null;
+  let codecNow = null, encoderNow = null, ended = false, candidatesIn = 0, candidatesAdded = 0, recapturing = null, kvm = false;
   // Windows' "Stop sharing", or a display change that ended the capture: Beam tells them apart (1.11.4: the second
   // starts again).
   const onTrackEnded = () => { if (!ended) post({ t: 'ended', reason: 'stopped-sharing' }); };
@@ -93,6 +95,7 @@
   window.rcStart = async function (c) {
     if (cfg) return;
     cfg = c;
+    if (c.kvm === true) { kvm = true; await connect(); return; } // (no capture, ever)
     if (c.settings && typeof c.settings === 'object') takeSettings(c.settings); // (a new page after a switch of screens)
     else settings.mode = c.mode === 'motion' ? 'motion' : 'text';
     videoOn = c.video !== false;
@@ -195,14 +198,17 @@
     ch.ctl.onmessage = e => onCtl(e.data);
     ch.in.onmessage = e => { if (verified && typeof e.data === 'string' && e.data.length <= 16384) post({ t: 'in', d: e.data }); };
     ch.mv.onmessage = e => { if (verified && typeof e.data === 'string' && e.data.length <= 512) post({ t: 'mv', d: e.data }); };
-    const p = profile();
-    // No video until Beam has checked the peer: the encoding starts inactive.
-    tr = pc.addTransceiver(track, { direction: 'sendonly', streams: [stream], sendEncodings: [{ active: false, maxBitrate: p.kbps * 1000, maxFramerate: p.fps, scaleResolutionDownBy: downscale(p) }] });
-    applyCodecs();
+    if (!kvm) {
+      const p = profile();
+      // No video until Beam has checked the peer: the encoding starts inactive.
+      tr = pc.addTransceiver(track, { direction: 'sendonly', streams: [stream], sendEncodings: [{ active: false, maxBitrate: p.kbps * 1000, maxFramerate: p.fps, scaleResolutionDownBy: downscale(p) }] });
+      applyCodecs();
+    }
     pc.onicecandidate = e => queueCandidate(e.candidate ? e.candidate.toJSON() : { candidate: '', sdpMid: null, sdpMLineIndex: null });
     pc.onconnectionstatechange = onState;
     try {
-      const ice = tr.sender.transport && tr.sender.transport.iceTransport;
+      // (kvm: the stats tick looks at the pair every 2 s instead)
+      const ice = tr && tr.sender.transport && tr.sender.transport.iceTransport;
       if (ice) ice.onselectedcandidatepairchange = () => { if (pc && pc.connectionState === 'connected') reportSelected(); };
     } catch (e) { }
     await offer(false);

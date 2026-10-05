@@ -376,6 +376,7 @@ namespace Beam
         readonly Bucket inBucket = new Bucket(InRate), mvBucket = new Bucket(MvRate);
 
         public int Screen;                     // the screen being captured (ScreenInfo.Id): coordinates are within it
+        public bool AnyScreen;                 // (1.12) a kvm session: a point names its screen (`m`), any of this PC's
         public long Injected, Dropped;
         public Action<string> Note;            // rare events for beam.log (never keys or text)
         public Func<KeyDef, int> VirtualKeyOf;  // the virtual key a key makes in this PC's layout now (Win+L by key, any layout)
@@ -462,7 +463,7 @@ namespace Beam
                 lastMv = n;
             }
             object scr;
-            if (m.TryGetValue("m", out scr) && scr != null && Long(m, "m", -1) != Screen) { Dropped++; return; } // a screen switch
+            if (!AnyScreen && m.TryGetValue("m", out scr) && scr != null && Long(m, "m", -1) != Screen) { Dropped++; return; } // a screen switch
             if (!mvBucket.Take(clock())) { Dropped++; return; }
             InputRecord r;
             if (!PointRecord(m, out r)) { Dropped++; return; }
@@ -544,14 +545,16 @@ namespace Beam
 
         static double Clamp(double v, double max) { return v > max ? max : v < -max ? -max : v; }
 
-        // A move to (x, y) on the captured screen, clamped to it.
+        // A move to (x, y) on the captured screen, clamped to it. (AnyScreen: on the screen `m` names; one this PC
+        // doesn't have now is dropped.)
         bool PointRecord(Dictionary<string, object> m, out InputRecord r)
         {
             r = new InputRecord();
             double x = Num(m, "x"), y = Num(m, "y");
             if (double.IsNaN(x) || double.IsNaN(y) || Math.Abs(x) > 1e6 || Math.Abs(y) > 1e6) return false;
             var l = Layout;
-            var s = l != null ? l.Screen(Screen) ?? l.Primary : null;
+            long named = AnyScreen ? Long(m, "m", -1) : -1;
+            var s = l == null ? null : named >= 0 ? (named < 64 ? l.Screen((int)named) : null) : l.Screen(Screen) ?? l.Primary;
             if (s == null || l.W <= 0 || l.H <= 0) return false;
             int px = Math.Max(0, Math.Min(s.W - 1, (int)Math.Floor(x)));
             int py = Math.Max(0, Math.Min(s.H - 1, (int)Math.Floor(y)));

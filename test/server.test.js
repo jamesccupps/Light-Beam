@@ -4054,6 +4054,63 @@ test('1.6 Remote control: only the PC ends with "not-listed"; from anyone else i
   } finally { await t.stop(); }
 });
 
+test('1.16 Keyboard and mouse (kind kvm): a 1.12 PC only; kvm never ends a view, a view ends kvm (busy); the same viewer\'s kvm again replaces its own', async () => {
+  const t = await rcSetup('rc-kvm');
+  try {
+    const { s, pc, laptop, phone, other, status, rc } = t;
+    await status(pc, { remoteControl: true, locked: false });
+    const pcEv = await openEvents(s.port, pc, '/api/events?mode=background');
+    const lapEv = await openEvents(s.port, laptop, '/api/events?mode=background');
+    for (const e of [pcEv, lapEv]) await e.wait('hello');
+    const kvm = h => rc('POST', 'sessions', h, { device: 'rcdesk00001', kind: 'kvm' });
+    const view = h => rc('POST', 'sessions', h, { device: 'rcdesk00001' });
+    assert.equal((await rc('POST', 'sessions', laptop, { device: 'rcdesk00001', kind: 'screen' })).status, 400);
+    let r = await kvm(laptop);
+    assert.deepEqual([r.status, r.json.reason], [409, 'old-app'], 'a 1.6 PC takes no kvm session');
+    assert.match(r.json.error, /Desktop needs the Beam app 1\.12\.0 or later/);
+    const pc12 = { ...pc, 'X-Beam-App-Version': '1.12.0' }; // (its requests say which app it runs)
+    await s.req('GET', '/api/me', { headers: pc12 });
+    r = await kvm(laptop);
+    assert.equal(r.status, 201, r.body);
+    const first = r.json.id;
+    assert.equal((await pcEv.wait('rc-request', d => d.id === first, 1000)).data.kind, 'kvm', 'the PC hears which kind');
+    assert.deepEqual((await rc('GET', 'sessions', phone)).json.sessions.map(x => [x.id, x.kind]), [[first, 'kvm']]);
+    assert.equal((await rc('POST', `sessions/${first}/lease`, pc12)).status, 200);
+    // The same viewer's link again: its old session makes way.
+    r = await kvm(laptop);
+    assert.equal(r.status, 201, r.body);
+    const second = r.json.id;
+    assert.equal((await lapEv.wait('rc-end', d => d.id === first, 1000)).data.reason, 'stopped');
+    // Someone viewing the PC ends the kvm session (busy, by them); a kvm request meanwhile is refused.
+    r = await view(phone);
+    assert.equal(r.status, 201, r.body);
+    const viewing = r.json.id;
+    assert.deepEqual((await lapEv.wait('rc-end', d => d.id === second, 1000)).data, { id: second, reason: 'busy', from: 'rcphone0001', by: 'Pixel' });
+    r = await kvm(laptop);
+    assert.deepEqual([r.status, r.json.reason], [409, 'busy']);
+    assert.match(r.json.error, /Desktop is being controlled from Pixel/);
+    assert.equal((await rc('POST', `sessions/${viewing}/end`, phone)).status, 204);
+    // Another device's kvm doesn't end the laptop's; the laptop's own view does.
+    r = await kvm(laptop);
+    assert.equal(r.status, 201, r.body);
+    const third = r.json.id;
+    r = await kvm(other);
+    assert.deepEqual([r.status, r.json.reason], [409, 'busy']);
+    assert.match(r.json.error, /Desktop is using Robin Laptop's keyboard and mouse/);
+    r = await view(laptop);
+    assert.equal(r.status, 201, r.body);
+    assert.equal((await lapEv.wait('rc-end', d => d.id === third, 1000)).data.reason, 'busy');
+    assert.equal((await rc('POST', `sessions/${r.json.id}/end`, laptop)).status, 204);
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('kvm'));
+    assert.match(s.out, /Robin Laptop asked to share its keyboard and mouse with Desktop \(from robin-laptop, 100\.64\.91\.2, robin@example\.com\)/);
+    assert.match(s.out, /Robin Laptop's keyboard and mouse can reach Desktop/);
+    assert.match(s.out, /Robin Laptop's keyboard and mouse stopped reaching Desktop after \d+ s \(stopped, by Robin Laptop\)/);
+    assert.match(s.out, /Robin Laptop's request to share its keyboard and mouse with Desktop ended \(busy, by Pixel\)/);
+    pcEv.close();
+    lapEv.close();
+  } finally { await t.stop(); }
+});
+
 test('1.6 Remote control ends on sign-out-others ("revoked"), a move and a shutdown ("server")', async () => {
   for (const [label, trigger, reason] of [
     ['sign-out-others', t => post(t.s, '/api/security/sign-out-others', {}, t.phone), 'revoked'],

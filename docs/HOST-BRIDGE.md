@@ -422,6 +422,26 @@ retransmits).
     relay region, e.g. `"nyc"`). Sent when it changes; asked 2, 10 and 30 s into the session, then every 30 s.
   - (The viewer, web 1.14.2) It measures each frame's way from the PC's screen to its own (requestVideoFrameCallback's
     `expectedDisplayTime - captureTime`) and shows the lag: that plus half the round trip.
+- **1.12, a kvm session (`rc-request` with `kind: "kvm"`; the PC's hello `caps: ["kvm"]`):** another PC's own keyboard
+  and mouse (the Windows app's "Keyboard and mouse across PCs": its pointer comes over the edge of its own screens).
+  - **No picture:** the PC captures nothing (its capture gate refuses it whatever happens) and offers only the three
+    channels; no "sharing your screen" bar. `quality`, `settings`, `fit`, `video` and `monitor` are ignored.
+  - **Any of its screens:** `mv`, `btn` and `wheel` carry `m`, the screen (an `id` of the hello's `monitors`), and the
+    point within it; a screen the PC doesn't have now is dropped. `btn` and `wheel` carry their point too (a click
+    lands where the pointer is even when an unordered `mv` arrives late). The PC sends `{ t: "display", monitors,
+    monitor, fitted }` when its screens change.
+  - **`{ t: "kvm", here }`** from the viewer: its pointer came onto this PC, or left it (the PC's tray offers "Back to
+    <viewer>" while it's here, and an update there waits only while it's here). On leaving, the viewer also sends
+    `{ t: "release" }`.
+  - **`{ t: "kvm-back" }`** from the PC: its tray's "Back to <viewer>"; the viewer's pointer goes back to its own screen.
+  - **Clipboard:** the viewer turns it on at once. Its clipboard text goes over when its pointer does (if the PC doesn't
+    have it yet); the PC's comes back while the pointer is there (or just left), never the text the PC had before.
+  - **Pings:** the viewer's page pings every 500 ms (the PC's page answers at once); without an answer for 1.5 s, or
+    the PC's own pings (every 2 s) missing for 6 s, the viewer takes its keyboard and mouse back.
+  - **The banner** says "<viewer>'s keyboard and mouse · Hide · Stop"; Hide folds it into the PC's tray (remembered
+    there), which then shows the session (Show the banner, Back, Stop). It still counts as up.
+  - The PC doesn't keep itself awake for a kvm session (it lasts all day): its screen sleeps as usual, and the viewer's
+    input wakes it.
 - **Screens:** `{ t: "monitor", id }` restarts the capture as a new connection. The new `offer` has a different SDP
   `o=` session id, so the viewer answers it with a fresh RTCPeerConnection. An offer with the same `o=` id is a
   renegotiation on the same connection: an ICE restart (after `restart`, or 3 s of `disconnected`), or a switch to
