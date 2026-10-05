@@ -93,10 +93,11 @@ namespace Beam
         readonly App app;
         RcSession current;
         readonly HashSet<string> finished = new HashSet<string>();   // sessions handled here (the server may repeat a request)
-        readonly Timer tick, leaseTimer, flushTimer;
+        readonly Timer tick, leaseTimer;
+        readonly System.Threading.Timer flush;     // (1.12.1) a held-back ControlLeft (AltGr), off the UI thread like the input
         readonly RcWindow window;
         Hotkeys killKeys;
-        InputInjector injector;
+        volatile InputInjector injector;
         bool lockFlag, onConsole = true, testLock;
         bool awake;
         bool closing;
@@ -122,9 +123,8 @@ namespace Beam
             leaseTimer = new Timer();
             leaseTimer.Interval = Math.Max(1, app.Cfg.CustomPath && app.Cfg.TestRcLeaseSec > 0 ? app.Cfg.TestRcLeaseSec : 30) * 1000;
             leaseTimer.Tick += (s, e) => { if (current != null) { var ignored = Lease(current); } };
-            flushTimer = new Timer();
-            flushTimer.Interval = InputInjector.AltGrWindowMs + 10;
-            flushTimer.Tick += (s, e) => { flushTimer.Stop(); if (injector != null) { injector.Flush(); if (injector.HasPending) flushTimer.Start(); } };
+            flush = new System.Threading.Timer(o => FlushInput(), null, Timeout.Infinite, Timeout.Infinite);
+            RcHost.Ui = a => app.Post(a);
             ReadLockState();
             SystemEvents.PowerModeChanged += OnPower;
             SystemEvents.DisplaySettingsChanged += OnDisplaySettings;
@@ -496,10 +496,22 @@ namespace Beam
         {
             if (current != s || s.State == RcState.Ended) return;
             // (a kvm session's page never captures: the gate refuses it whatever happens)
-            var host = RcHost.For(app.Cfg, layout.SourceName(s.Screen), app.DevTools, () => !s.Kvm && CaptureAllowed(s));
+            // (1.12.1) The host lives on its own thread (RcThread): the gate is asked there (it reads this session's state,
+            // no windows), the viewer's input goes from it to OnInput there, everything else comes to OnPage here.
+            RcHost host;
+            try { host = await RcHost.ForAsync(app.Cfg, layout.SourceName(s.Screen), app.DevTools, () => !s.Kvm && CaptureAllowed(s)); }
+            catch (Exception ex)
+            {
+                Log.Error("Remote control: the capture host", ex);
+                if (current == s) End(s, "failed", "the capture host didn't start");
+                return;
+            }
+            if (current != s || s.State == RcState.Ended) { var ignored = host.Close(); return; }
             s.Host = host;
             s.Verified = false;
+            host.InputAllowed = false;
             host.Message += (h, m) => OnPage(s, h, m);
+            host.Input = m => OnInput(host, m);
             if (injector == null) injector = NewInjector();
             injector.Screen = s.Screen;
             injector.AnyScreen = s.Kvm; // (the viewer's pointer goes over all of this PC's screens)
@@ -547,6 +559,33 @@ namespace Beam
             return inj;
         }
 
+        // (1.12.1) The viewer's input (`in`, `mv`), on the page's own thread: it never waits for the UI thread, which a
+        // click from the viewer on one of Beam's own windows holds in Windows' modal loop until the button is up (a title
+        // bar's buttons track the mouse; that button-up only ever came through here: the user's Camera and Shop Desktop
+        // stayed stuck until their own mouse was clicked). Nothing before the peer check, nothing after the end (Stop).
+        void OnInput(RcHost host, Dictionary<string, object> m)
+        {
+            var inj = injector;
+            if (inj == null || host == null || !host.InputAllowed) return;
+            var msg = Json.ParseObject(Json.Str(m, "d"));
+            if (msg == null) return;
+            inj.Handle(msg);
+            if (inj.HasPending) flush.Change(InputInjector.AltGrWindowMs + 10, Timeout.Infinite);
+        }
+
+        // (a thread-pool timer: a ControlLeft held back for AltGr goes even while the UI thread is held)
+        void FlushInput()
+        {
+            var inj = injector;
+            if (inj == null) return;
+            try
+            {
+                inj.Flush();
+                if (inj.HasPending) flush.Change(InputInjector.AltGrWindowMs + 10, Timeout.Infinite);
+            }
+            catch (Exception ex) { Log.Error("Remote control: the held-back key", ex); }
+        }
+
         // What the capture page says (already checked to come from this session's own page).
         void OnPage(RcSession s, RcHost host, Dictionary<string, object> m)
         {
@@ -572,11 +611,7 @@ namespace Beam
                     break;
                 case "in":
                 case "mv":
-                    if (!s.Verified) return; // nothing before the peer check
-                    var msg = Json.ParseObject(Json.Str(m, "d"));
-                    if (msg == null) return;
-                    injector.Handle(msg);
-                    if (injector.HasPending && !flushTimer.Enabled) flushTimer.Start();
+                    OnInput(host, m); // (the page's own come through RcHost.Input, on its thread)
                     break;
                 case "ctl":
                     if (s.Verified) OnViewerCtl(s, Json.ParseObject(Json.Str(m, "d")));
@@ -695,6 +730,7 @@ namespace Beam
             if (why != null) { End(s, "failed", "the connection's peer failed the check: " + why + " (a " + (Json.Str(m, "type") ?? "?") + " candidate)"); return; }
             if (s.Verified) return; // a new path to the same peer (an ICE restart)
             s.Verified = true;
+            if (host != null) host.InputAllowed = true; // (OnInput, on the page's thread, takes input from now on)
             s.LastPong = DateTime.Now;
             var hello = new Dictionary<string, object>();
             hello["t"] = "hello";
@@ -804,6 +840,7 @@ namespace Beam
                     var old = s.Host;
                     s.Host = null;
                     s.Verified = false;
+                    if (old != null) old.InputAllowed = false;
                     if (injector != null) injector.ReleaseAll("another screen");
                     s.Screen = id;
                     if (old != null) { var closing2 = old.End("monitor"); }
@@ -1131,8 +1168,9 @@ namespace Beam
             s.State = RcState.Ended;
             Finished(s.Id);
             if (current == s) current = null;
-            if (injector != null) injector.ReleaseAll("the session ended");
             var host = s.Host;
+            if (host != null) host.InputAllowed = false;
+            if (injector != null) injector.Stop("the session ended"); // (no input after this, even one on its way: the lock)
             s.Host = null;
             if (host != null)
             {
@@ -1147,7 +1185,7 @@ namespace Beam
                 UnregisterKillSwitch();
                 leaseTimer.Stop();
                 tick.Stop();
-                flushTimer.Stop();
+                flush.Change(Timeout.Infinite, Timeout.Infinite);
             }
             if (reason != null) PostEnd(s.Id, s.Api, reason);
             s.Here = false;
@@ -1440,6 +1478,16 @@ namespace Beam
                     if (current != null && current.Banner != null) current.Banner.TestCommand(arg);
                     else Log.Write("Remote control: (test) no banner");
                     break;
+                case "uiblock": // (1.12.1) the UI thread held a while, as Windows' modal loop holds it while a title bar button is pressed
+                {
+                    int ms;
+                    if (!int.TryParse(arg ?? "", out ms)) ms = 3000;
+                    ms = Math.Max(0, Math.Min(ms, 15000));
+                    Log.Write("Remote control: (test) the UI thread is held for " + ms + " ms");
+                    Thread.Sleep(ms);
+                    Log.Write("Remote control: (test) the UI thread is free again");
+                    break;
+                }
                 case "kvmback": KvmBack("test"); break;                        // (1.12) as the tray's "Back to …"
                 case "kvmbanner": KvmBanner(arg != "hide", "test"); break;      // kvmbanner:show|hide
                 case "kvmstate": // the kvm session as this PC sees it

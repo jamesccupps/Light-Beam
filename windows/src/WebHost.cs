@@ -70,9 +70,15 @@ namespace Beam
         }
 
         const string HostingModeVar = "COREWEBVIEW2_FORCED_HOSTING_MODE";
+        static readonly object loaderGate = new object(); // (1.12.1: the capture hosts start on a thread of their own)
 
         // Extracts WebView2Loader.dll for this process's architecture (once per loader version).
         static void PrepareLoader(Config cfg)
+        {
+            lock (loaderGate) PrepareLoaderLocked(cfg);
+        }
+
+        static void PrepareLoaderLocked(Config cfg)
         {
             if (loaderReady) return;
             // Beam 1.12.1: every web view hosted "window to visual" (the user's Office Desktop froze for 5 minutes, until
