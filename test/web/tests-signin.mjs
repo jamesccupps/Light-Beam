@@ -479,7 +479,7 @@ export default function register(test) {
     await admin.post('/api/password', { password: '' });
   });
 
-  test('the sign-in page signs in by itself once a Beam app runs on the same machine', async ctx => {
+  test('a Beam app running on the same machine doesn\'t sign the sign-in page in by itself any more (audit S-1): it asks like any browser', async ctx => {
     // No X-Forwarded-For: this browser is on the server machine itself, like the app below.
     const page = await ctx.browser.newPage({});
     await page.goto(`${ctx.srv.base}/`);
@@ -488,7 +488,9 @@ export default function register(test) {
     delete app.headers['X-Forwarded-For'];
     const stop = app.online();
     ctx.defer(stop);
-    await page.waitFor(`paired && !$('#app').hidden`, 25000, 'signed in automatically');
+    await new Promise(r => setTimeout(r, 1000));
+    eq(await page.evaluate('tryAutopair()'), false, 'no automatic sign-in for being on the same machine');
+    eq(await page.evaluate(`[paired, !$('#lock').hidden]`), [false, true], 'still the sign-in page');
   }, { timeout: 60000 });
 
   test('signed out elsewhere: the page explains and shows the sign-in screen', async ctx => {

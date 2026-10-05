@@ -31,6 +31,10 @@ function createPeople(ctx) {
     WHERE u.name = ? COLLATE NOCASE AND s.ip = ? AND s.expires_at > ?`, name, ip, now()));
   // (every sign-in costs a deliberately slow password check: many addresses at once can't keep the server busy)
   const signinAll = auth.createLimiter({ limit: 120, windowMs: 60e3 });
+  // (audit S-8) Addresses with a live session (the family's own) have a budget of their own: a flood from unknown
+  // addresses can use up signinAll, but not lock out the people who live here.
+  const signinKnown = auth.createLimiter({ limit: 60, windowMs: 60e3 });
+  const knownAddress = ip => Boolean(db.get('SELECT 1 FROM sessions WHERE ip = ? AND expires_at > ?', ip, now()));
   const inviteByIp = auth.createLimiter({ limit: 20, windowMs: 10 * 60e3 });
 
   const getUser = id => (isId(id) ? db.get('SELECT * FROM users WHERE id = ?', id) : null);
@@ -150,8 +154,11 @@ function createPeople(ctx) {
     const nameIp = `${name}|${ip}`;
     const nameHeld = () => failByNameIp.blocked(nameIp) || (failByName.blocked(name) && !sessionFrom(name, ip));
     // (per address first: an address that is already held back mustn't use up everyone's budget; 1.7.2)
-    if (!signinByIp.hit(ip) || !signinAll.hit('all') || (name && nameHeld())) {
-      const wait = Math.max(signinAll.wait('all'), signinByIp.wait(ip), name ? Math.max(failByNameIp.wait(nameIp), failByName.wait(name)) : 0);
+    const known = knownAddress(ip);
+    const budget = known ? signinKnown : signinAll;
+    const budgetKey = known ? 'known' : 'all';
+    if (!signinByIp.hit(ip) || !budget.hit(budgetKey) || (name && nameHeld())) {
+      const wait = Math.max(budget.wait(budgetKey), signinByIp.wait(ip), name ? Math.max(failByNameIp.wait(nameIp), failByName.wait(name)) : 0);
       throw httpError(429, `Too many tries: wait ${wait > 90 ? `${Math.ceil(wait / 60)} minutes` : `${wait} seconds`}`, { retryAfter: wait });
     }
     const user = name ? db.get('SELECT * FROM users WHERE name = ? COLLATE NOCASE', name) : null;

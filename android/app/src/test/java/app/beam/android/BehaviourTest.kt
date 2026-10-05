@@ -496,7 +496,9 @@ class BehaviourTest {
     @Test
     fun reportsItsStatusRingsAndHearsAlerts() {
         needServer()
-        assumeTrue("Beam server 1.3", offMain { SignInClient(url).hello() }.version.let { it >= "1.3" })
+        // (numbers, not text: "1.14.2" < "1.3" as text, so this skipped itself on every server since 1.10)
+        val v = offMain { SignInClient(url).hello() }.version.split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+        assumeTrue("Beam server 1.3", (v.getOrElse(0) { 0 } to v.getOrElse(1) { 0 }).let { (major, minor) -> major > 1 || (major == 1 && minor >= 3) })
         val bm = app.getSystemService(android.os.BatteryManager::class.java)
         shadowOf(bm).setIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY, 80)
         shadowOf(bm).setIsCharging(false)

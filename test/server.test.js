@@ -601,7 +601,8 @@ test('A7: BEAM_TRUSTED_PROXIES, Tailscale linking, v4/v6 of one machine, reinsta
   try {
     const K = s.key;
     // a second hop through a trusted Docker proxy: the address before it is the client
-    const phoneApp = await openEvents(s.port, app(K, 'phoneapp001', 'Pixel', 'android', from('100.64.20.20, 172.17.0.1')));
+    const phoneProfile = { 'X-Beam-Profile': 'cdcdcdcdcdcdcdcd' }; // (audit S-2: a reinstall merge needs both apps' account)
+    const phoneApp = await openEvents(s.port, app(K, 'phoneapp001', 'Pixel', 'android', { ...from('100.64.20.20, 172.17.0.1'), ...phoneProfile }));
     await phoneApp.wait('hello');
     await sleep(300);
     let r = await s.req('GET', '/api/me', { headers: { ...cookie(K, 'phonebrow01', { 'X-Beam-Platform': 'web' }), ...from('fd7a:115c:a1e0::20') } });
@@ -611,8 +612,8 @@ test('A7: BEAM_TRUSTED_PROXIES, Tailscale linking, v4/v6 of one machine, reinsta
     await tab.wait('hello');
     phoneApp.close();
     await sleep(300);
-    await s.req('GET', '/api/me', { headers: app(K, 'phoneapp002', 'Pixel', 'android', from('100.64.20.20')) });
-    r = await s.req('GET', '/api/devices', { headers: app(K, 'phoneapp002', 'Pixel', 'android', from('100.64.20.20')) });
+    await s.req('GET', '/api/me', { headers: app(K, 'phoneapp002', 'Pixel', 'android', { ...from('100.64.20.20'), ...phoneProfile }) });
+    r = await s.req('GET', '/api/devices', { headers: app(K, 'phoneapp002', 'Pixel', 'android', { ...from('100.64.20.20'), ...phoneProfile }) });
     assert.deepEqual(r.json.devices.filter(d => d.name === 'Pixel').map(d => d.id), ['phoneapp002'], 'old app merged despite the open tab');
     await s.req('GET', '/api/me', { headers: app(K, 'cli00000001', 'cli', 'cli', from('100.64.20.20')) });
     await s.req('GET', '/api/me', { headers: app(K, 'cli00000002', 'cli', 'cli', from('100.64.20.20')) });
@@ -1525,12 +1526,13 @@ test('1.7.3: a revoked migration sign-in never comes back; one answer for a move
     // device was merged into another first (two ids from this machine: the older goes into the newer) and that one
     // is removed.
     for (const [id, merge] of [['migdev00001', null], ['migdev00002', 'migdev00003']]) {
-      const net = merge ? {} : from('100.64.73.1');
+      // (the merge case: two apps of the same Windows account, as a reinstall needs since audit S-2)
+      const net = merge ? { 'X-Beam-Profile': 'a1a1a1a1a1a1a1a1' } : from('100.64.73.1');
       let r = await s.req('GET', '/api/me', { headers: { ...app(K, id, 'Mig'), ...net } });
       const t1 = r.headers['x-beam-token'];
       assert.ok(t1?.startsWith('bt_'), `${id}: offered its own sign-in`);
       assert.equal((await s.req('GET', '/api/me', { headers: { ...app(t1, id), ...net } })).status, 200);
-      if (merge) assert.equal((await s.req('GET', '/api/me', { headers: app(K, merge, 'Mig 2') })).json.you, merge);
+      if (merge) assert.equal((await s.req('GET', '/api/me', { headers: { ...app(K, merge, 'Mig 2'), ...net } })).json.you, merge);
       assert.equal((await s.req('DELETE', `/api/devices/${merge || id}`, { headers: admin })).status, 204);
       r = await s.req('GET', '/api/me', { headers: { ...app(K, id, 'Mig'), ...net } });
       assert.ok(r.headers['x-beam-token'] && r.headers['x-beam-token'] !== t1, `${id}: a new value`);
@@ -1877,6 +1879,18 @@ test('A21 CLI: follows a move only when the new server proves it holds the key',
     r = await cli(['devices'], { home });
     assert.notEqual(r.code, 0);
     assert.equal(cliConfig(home).url, `http://127.0.0.1:${old.port}`, 'did not follow the impostor');
+    // (audit X-1) one that answers with the id and an `api` too old to prove anything: still not followed
+    const serverId = fs.readFileSync(path.join(old.data, 'server-id'), 'utf8').trim();
+    const oldApi = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ beam: true, serverId, api: 2 })); });
+    await new Promise(ok => oldApi.listen(8797, '127.0.0.1', ok));
+    try {
+      await runNode(['moved-to', '--clear'], serverEnv(8792, old.dir));
+      await runNode(['moved-to', 'http://127.0.0.1:8797', '--force'], serverEnv(8792, old.dir));
+      r = await cli(['devices'], { home });
+      assert.notEqual(r.code, 0);
+      assert.equal(cliConfig(home).url, `http://127.0.0.1:${old.port}`, 'did not follow a server claiming an old api without the proof');
+      assert.match(r.out, /answers with this Beam's id but can't prove it holds this sign-in/);
+    } finally { oldApi.close(); }
     await runNode(['moved-to', '--clear'], serverEnv(8792, old.dir));
     await runNode(['moved-to', `http://127.0.0.1:${neu.port}`], serverEnv(8792, old.dir));
     r = await cli(['devices'], { home });
@@ -3806,11 +3820,11 @@ test('1.6 Remote control is for an app\'s own sign-in or a browser signed in wit
     const tsBrowser = { Cookie: `__Host-beam_key=${hostCookieValue(tsWeb)}; beam_device_id=rctsweb0001`, ...sameOrigin, ...viaServe(RC_NET.laptop.ip4, RC_USER) };
     assert.equal((await s.req('GET', '/api/me', { headers: tsBrowser })).headers['x-beam-you'], 'rclaptop001', 'linked to the laptop app');
     await refused(tsBrowser, 'a browser signed in by Tailscale identity, merged into an app');
-    // Signed in because a Beam app runs on the same machine, even naming the app's id; and a link made from that.
+    // (audit S-1) A browser on the same machine as a running Beam app isn't signed in by that alone, even naming the
+    // app's id. A browser sign-in traded on (here the Tailscale one's) still can't control a PC.
     const ap = await post(s, '/api/autopair', { client: 'web', deviceId: 'rclaptop001' }, { ...sameOrigin, ...from(RC_NET.laptop.ip4) });
-    assert.deepEqual([ap.status, ap.json.via], [200, 'machine']);
-    await refused({ Cookie: `beam_key=${cookieValue(ap)}; beam_device_id=rclaptop001`, ...sameOrigin, 'X-Beam-Platform': 'windows', ...from(RC_NET.laptop.ip4) }, 'same-machine autopair');
-    const linked = await post(s, '/api/login', { secret: cookieValue(ap) }, { ...sameOrigin, Cookie: 'beam_device_id=rclinked001' });
+    assert.deepEqual([ap.status, ap.json.reason], [403, 'no-identity'], 'same-machine autopair: refused');
+    const linked = await post(s, '/api/login', { secret: hostCookieValue(tsWeb) }, { ...sameOrigin, Cookie: 'beam_device_id=rclinked001' });
     assert.equal(linked.status, 204);
     await refused({ Cookie: `beam_key=${cookieValue(linked)}; beam_device_id=rclinked001`, ...sameOrigin, ...from('100.64.91.79') }, 'a link made from it');
     // The CLI, even with a pairing link.
@@ -4306,7 +4320,7 @@ test('1.6 Remote control: signing out one sign-in ends only the sessions it take
 test('1.8.1 Backups: each app keeps its settings here (one per install, the newest three; not for a session-only sign-in), a reinstalled app finds the old install’s; the server backs itself up (now, listed, the newest kept, big files left out) and a backup imports', async () => {
   const dir = path.join(TMP, 'bk-dir');
   fs.rmSync(dir, { recursive: true, force: true });
-  const env = { BEAM_BACKUP_DIR: dir, BEAM_BACKUP_KEEP: '2', BEAM_BACKUP_FILES_MB: '0' };
+  const env = { BEAM_BACKUP_DIR: dir, BEAM_BACKUP_KEEP: '2', BEAM_BACKUP_FILES_MB: '1' };
   const t = await rcSetup('backups', { env });
   try {
     const { s, phone } = t;
@@ -4345,13 +4359,14 @@ test('1.8.1 Backups: each app keeps its settings here (one per install, the newe
     assert.deepEqual((await get(newApp)).json.backups.map(x => x.install), ['inst-new-0001', 'inst-old-0001'], '...next to its own');
     for (const i of [2, 3]) await put(newApp, { install: `inst-new-000${i}`, app: 'windows', settings: { n: i } });
     assert.deepEqual((await get(newApp)).json.backups.map(x => x.install), ['inst-new-0003', 'inst-new-0002', 'inst-new-0001'], 'the newest three installs');
-    // The server's own backups: one now (a file item over BEAM_BACKUP_FILES_MB stays out), one with the command, one
-    // more; the newest two are kept.
-    await upload(s, phone, 'photo.jpg', Buffer.alloc(2048, 7));
+    // The server's own backups: one now (the files that fit in BEAM_BACKUP_FILES_MB go in, the smallest first: audit
+    // B-1, it was all or none), one with the command, one more; the newest two are kept.
+    const small = await upload(s, phone, 'photo.jpg', Buffer.alloc(2048, 7));
+    const big = await upload(s, phone, 'video.mp4', Buffer.alloc(2 * 1024 * 1024, 8));
     let r = await s.req('POST', '/api/backups', { headers: phone });
     assert.equal(r.status, 201, r.body);
-    assert.ok(/^beam-backup-\d{8}-\d{6}\.tar\.gz$/.test(r.json.last.name) && r.json.last.files === false && r.json.dir === dir, `a backup now, without the file: ${JSON.stringify(r.json.last)}`);
-    assert.match(s.out, /Backed up this Beam \(asked by Pixel\): beam-backup-.*, without its 2\.0 KB of files/);
+    assert.ok(/^beam-backup-\d{8}-\d{6}\.tar\.gz$/.test(r.json.last.name) && r.json.last.files === false && r.json.last.filesLeftOut === 1 && r.json.dir === dir, `a backup now, without the big file: ${JSON.stringify(r.json.last)}`);
+    assert.match(s.out, /Backed up this Beam \(asked by Pixel\): beam-backup-.*, without 1 of its 2 files \(2\.0 MB: backups hold 1\.0 MB of files, the smallest first/);
     await sleep(1100);
     const cli = await runNode(['backup'], serverEnv(8791, s.dir, { ...t.env }));
     assert.equal(cli.code, 0, cli.out);
@@ -4363,6 +4378,12 @@ test('1.8.1 Backups: each app keeps its settings here (one per install, the newe
     assert.deepEqual(fs.readdirSync(dir).filter(n => !n.startsWith('.')).length, 2, '...and only they are in the folder');
     assert.match(s.out, /Removed 1 old backup \(the newest 2 are kept\)/);
     assert.equal((await s.req('GET', '/api/backups', { headers: cookie(session, 'bksession01') })).status, 403, 'not for a session-only sign-in');
+    // (audit B-3/S-3) the metrics and the activity log: the same rule as backups
+    assert.equal((await s.req('GET', '/api/metrics', { headers: cookie(session, 'bksession01') })).status, 403, 'metrics: not for a session-only sign-in');
+    assert.equal((await s.req('GET', '/api/logs', { headers: cookie(session, 'bksession01') })).status, 403, 'the activity log: not for a session-only sign-in');
+    assert.equal((await s.req('GET', '/api/metrics', { headers: phone })).status, 200, 'metrics for a lasting sign-in');
+    const logLines = (await s.req('GET', '/api/logs?lines=5', { headers: phone })).json.lines;
+    assert.ok(logLines.length === 5 && /Backed up this Beam/.test(logLines.join('\n')), `the activity log's newest lines: ${JSON.stringify(logLines)}`);
     // It imports (the existing import) into an empty data folder: the apps' settings backups come along.
     const into = path.join(TMP, 'bk-restore');
     fs.rmSync(into, { recursive: true, force: true });
@@ -4370,7 +4391,78 @@ test('1.8.1 Backups: each app keeps its settings here (one per install, the newe
     assert.equal(imp.code, 0, imp.out);
     const restored = JSON.parse(fs.readFileSync(path.join(into, 'data', 'devices.json'), 'utf8'));
     assert.deepEqual(restored.bknew000001.backups.map(x => x.install), ['inst-new-0003', 'inst-new-0002', 'inst-new-0001'], 'the apps’ backups are in it');
+    const restoredItems = JSON.parse(fs.readFileSync(path.join(into, 'data', 'items.json'), 'utf8'));
+    assert.ok(restoredItems.some(i => i.id === small.id) && !restoredItems.some(i => i.id === big.id), 'the small file is in it, the big one isn\'t');
+    assert.ok(fs.existsSync(path.join(into, 'data', 'files', small.id)), "...with the small file's bytes");
   } finally { await t.stop(); }
+});
+
+test('AUD (audit 2026-10-04): reactions can’t be object keys; a reinstall needs both apps’ account; a lone missing file is kept; a huge tar header is a damaged archive; `pair` makes the installer a pairing key that signs an app in', async () => {
+  let s = await startServer('aud', 8791);
+  try {
+    const K = s.key;
+    const phone = app(K, 'audphone001', 'Phone', 'android', from('100.64.70.1'));
+    // B-10
+    const t = await post(s, '/api/text', { text: 'react to me', to: [] }, phone);
+    for (const bad of ['__proto__', 'constructor', 'prototype']) {
+      const r = await s.req('PUT', `/api/items/${t.json.id}/reactions/${encodeURIComponent(bad)}`, { headers: phone });
+      assert.equal(r.status, 400, `a reaction called ${bad}: ${r.status} ${r.body}`);
+    }
+    assert.equal((await s.req('PUT', `/api/items/${t.json.id}/reactions/${encodeURIComponent('👍')}`, { headers: phone })).status, 200, 'an emoji still works');
+    // S-2: an older app that never said its account isn't taken over by a new one on the same machine
+    assert.equal((await s.req('GET', '/api/me', { headers: app(K, 'audpcold001', 'Office PC', 'windows', from('100.64.70.2')) })).status, 200);
+    await sleep(50);
+    assert.equal((await s.req('GET', '/api/me', { headers: app(K, 'audpcnew001', 'Office PC', 'windows', { ...from('100.64.70.2'), 'X-Beam-Profile': 'abababababababab' }) })).status, 200);
+    const pcs = (await s.req('GET', '/api/devices', { headers: phone })).json.devices.filter(d => d.name === 'Office PC').map(d => d.id).sort();
+    assert.deepEqual(pcs, ['audpcnew001', 'audpcold001'], 'not merged');
+    await waitFor(() => /Didn't take "Office PC" over as a reinstall of "Office PC": the older app didn't say which Windows account it's for/.test(s.out), 3000);
+    // B-6: the only file item, its file gone at the next start: kept (is the volume there?), not dropped
+    const file = await upload(s, phone, 'only.bin', Buffer.alloc(1000, 3));
+    await s.stop();
+    fs.rmSync(path.join(s.data, 'files', file.id), { force: true });
+    s = await startServer('aud', 8791, { keep: true });
+    const listed = (await s.req('GET', '/api/items', { headers: phone })).json.items.map(i => i.id);
+    assert.ok(listed.includes(file.id), 'the lone file item is kept');
+    assert.match(s.out, /None of the 1 stored file is in .*Keeping its entry/);
+  } finally { await s.stop(); }
+
+  // S-11: a tar header extension far past anything real is a damaged archive (not a 2 MB allocation)
+  const header = Buffer.alloc(512);
+  header.write('PaxHeaders/x', 0, 'latin1');
+  header.write('0000644\0', 100, 'latin1');
+  header.write('0000000\0', 108, 'latin1');
+  header.write('0000000\0', 116, 'latin1');
+  header.write((2 * 1024 * 1024).toString(8).padStart(11, '0') + '\0', 124, 'latin1');
+  header.write('00000000000\0', 136, 'latin1');
+  header.write('x', 156, 'latin1');
+  header.write('ustar\u000000', 257, 'latin1');
+  header.fill(' ', 148, 156);
+  let sum = 0;
+  for (const b of header) sum += b;
+  header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 'latin1');
+  const crafted = path.join(TMP, 'aud-huge-header.tar.gz');
+  fs.writeFileSync(crafted, zlib.gzipSync(Buffer.concat([header, Buffer.alloc(1024)])));
+  const into = path.join(TMP, 'aud-import');
+  fs.rmSync(into, { recursive: true, force: true });
+  const imp = await runNode(['import', crafted], serverEnv(8792, into));
+  assert.notEqual(imp.code, 0, imp.out);
+  assert.match(imp.out, /a header extension is too big/);
+
+  // I-1: `node server.js pair` (the installer's way, the server stopped) makes a pairing key; an app signing in with it
+  // keeps it as its own sign-in
+  const pairDir = path.join(TMP, 'aud-pair');
+  fs.rmSync(pairDir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(pairDir, 'data'), { recursive: true });
+  const made = await runNode(['pair'], serverEnv(8793, pairDir));
+  assert.equal(made.code, 0, made.out);
+  const pairKey = /[?&]key=(bp_[A-Za-z0-9_-]+)/.exec(made.out)?.[1];
+  assert.ok(pairKey, `a pairing key in what pair printed: ${made.out.slice(0, 200)}`);
+  const p = await startServer('aud-pair', 8793, { keep: true });
+  try {
+    const pcApp = app(pairKey, 'audinstall01', 'New PC', 'windows', { ...from('100.64.70.3'), 'X-Beam-Profile': 'efefefefefefefef' });
+    assert.equal((await p.req('GET', '/api/me', { headers: pcApp })).status, 200, 'the app signs in with the pairing key');
+    assert.equal((await p.req('GET', '/api/me', { headers: pcApp })).status, 200, '...and keeps it as its sign-in');
+  } finally { await p.stop(); }
 });
 
 // ---------------------------------------------------------------- runner

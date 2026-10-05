@@ -522,7 +522,8 @@ class BeamApi(
     /** API v3 hands a device that still uses the master key its own token; the app switches to it. */
     fun noticeToken(res: Response) {
         val token = res.header("X-Beam-Token")?.trim()
-        if (!token.isNullOrEmpty() && token != key) onToken?.invoke(token)
+        // (audit C-7) only in a device token's shape, as the CLI checks
+        if (!token.isNullOrEmpty() && token != key && DEVICE_TOKEN.matches(token)) onToken?.invoke(token)
         val you = res.header("X-Beam-You")?.trim()
         if (!you.isNullOrEmpty() && you != deviceId) onYou?.invoke(you)
     }
@@ -554,6 +555,9 @@ class BeamApi(
         }
 
         val JSON = "application/json; charset=utf-8".toMediaType()
+
+        /** (audit C-7) A device token's shape (bt_…): the only kind of X-Beam-Token the app switches to. */
+        val DEVICE_TOKEN = Regex("^bt_[A-Za-z0-9_-]+$")
         val OCTET = "application/octet-stream".toMediaType()
         val JPEG = "image/jpeg".toMediaType()
         val PNG = "image/png".toMediaType()

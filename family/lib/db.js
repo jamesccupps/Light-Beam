@@ -215,6 +215,12 @@ function openDb(file) {
   db.exec('PRAGMA busy_timeout = 5000');
 
   const version = db.prepare('PRAGMA user_version').get().user_version;
+  // (audit B-9) A database from a newer Beam Family: this one doesn't know its newest columns. Refuse rather than fail
+  // later on whatever query touches them.
+  if (version > MIGRATIONS.length) {
+    db.close();
+    throw new Error(`it was made by a newer Beam Family (database version ${version}; this one knows up to ${MIGRATIONS.length}). Run the newer version, or restore a backup this one made`);
+  }
   for (let v = version; v < MIGRATIONS.length; v++) {
     db.exec('BEGIN IMMEDIATE');
     try {

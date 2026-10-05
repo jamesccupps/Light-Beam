@@ -185,12 +185,25 @@ namespace Beam
             if (!Ui.TestOffscreen) { form.Activate(); Native.SetForegroundWindow(form.Handle); }
         }
 
+        static bool SafeExists(string folder)
+        {
+            try { return System.IO.Directory.Exists(folder); } catch { return false; }
+        }
+
         public void Apply(BackupChoice c)
         {
             var s = c.Settings;
             var apply = new Dictionary<string, object>();
             foreach (var k in Keys) if (s.ContainsKey(k) && s[k] != null) apply[k] = s[k];
             if (!c.Here) apply.Remove("deviceName"); // (another PC's name stays its own)
+            // (audit B-12) ...and its folders only where this PC has them (D:\Beam on a PC without a D: would make every
+            // automatic save fail); otherwise this PC keeps its own.
+            if (!c.Here)
+                foreach (var k in new[] { "saveFolder", "outboxFolder" })
+                {
+                    string f = apply.ContainsKey(k) ? (Json.Str(apply, k) ?? "").Trim() : "";
+                    if (f.Length > 0 && !SafeExists(f)) { apply.Remove(k); Log.Write("Settings backup: kept this PC's " + k + " (" + f + " isn't here)"); }
+                }
             string err = app.ApplySettings(apply);
             var hk = Json.Obj(Json.Get(s, "hotkeys"));
             bool keys = false;

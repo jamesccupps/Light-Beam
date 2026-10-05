@@ -443,13 +443,35 @@ namespace Beam
             return "To " + FileUtil.SafeName(deviceName);
         }
 
+        // (audit X-3) Each device's folder (folder name -> device id): "To <name>", or with the end of its id when another
+        // device's name makes the same folder (two "Laptop"s; "Office PC" and "Office:PC"), or when the name would take
+        // the folder for everyone. A folder that used to be shared then sends nothing (TargetOf: null), never a guess.
+        Dictionary<string, string> Folders()
+        {
+            var byName = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var d in app.Devices)
+            {
+                if (d.Id == app.Me) continue;
+                string n = FolderName(d.Name);
+                List<string> ids;
+                if (!byName.TryGetValue(n, out ids)) byName[n] = ids = new List<string>();
+                ids.Add(d.Id);
+            }
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in byName)
+            {
+                bool clash = kv.Value.Count > 1 || string.Equals(kv.Key, AllFolder, StringComparison.OrdinalIgnoreCase);
+                foreach (var id in kv.Value) map[clash ? kv.Key + " (" + (id.Length > 6 ? id.Substring(id.Length - 6) : id) + ")" : kv.Key] = id;
+            }
+            return map;
+        }
+
         public void EnsureFolders()
         {
             try
             {
                 Directory.CreateDirectory(Path.Combine(Root, AllFolder));
-                foreach (var d in app.Devices)
-                    if (d.Id != app.Me) Directory.CreateDirectory(Path.Combine(Root, FolderName(d.Name)));
+                foreach (var folder in Folders().Keys) Directory.CreateDirectory(Path.Combine(Root, folder));
             }
             catch (Exception ex) { Log.Error("Outbox folders", ex); }
         }
@@ -482,9 +504,8 @@ namespace Beam
         {
             string folder = Path.GetFileName(Path.GetDirectoryName(entry));
             if (string.Equals(folder, AllFolder, StringComparison.OrdinalIgnoreCase)) return "*";
-            foreach (var d in app.Devices)
-                if (d.Id != app.Me && string.Equals(folder, FolderName(d.Name), StringComparison.OrdinalIgnoreCase)) return d.Id;
-            return null;
+            string id;
+            return folder != null && Folders().TryGetValue(folder, out id) ? id : null;
         }
 
         static bool Ignored(string file)

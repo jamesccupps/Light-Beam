@@ -103,7 +103,10 @@ function cookie(name, value, { maxAge, secure }) {
 function createRouter(routes) {
   const compiled = routes.map(([method, pattern, handler]) => {
     const names = [];
-    const re = new RegExp('^' + pattern.replace(/:([a-z]+)/gi, (_, name) => { names.push(name); return '([^/]+)'; }) + '$');
+    // (audit B-8) everything but the :name parts is literal (a '.' in a route mustn't match any character)
+    const re = new RegExp('^' + pattern.split(/(:[a-z]+)/i).map(part => (/^:[a-z]+$/i.test(part)
+      ? (names.push(part.slice(1)), '([^/]+)')
+      : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))).join('') + '$');
     return { method, re, names, handler };
   });
   return function match(method, pathname) {
@@ -207,7 +210,8 @@ async function sendFile(req, res, file, { type, headers = {}, size = null, etag 
     res.writeHead(304, base);
     return res.end();
   }
-  const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
+  let range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
+  if (range && range[1] === '' && range[2] === '') range = null; // (audit B-11) "bytes=-" is no range: the whole file
   let start = 0;
   let end = total - 1;
   if (range && total > 0) {

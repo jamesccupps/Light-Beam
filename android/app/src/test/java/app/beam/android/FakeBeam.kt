@@ -57,6 +57,9 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     @Volatile var serverId = "fakebeam01"
     @Volatile var serverIdIn401 = true
 
+    /** The api its `/api/hello` claims (audit X-1: an old one proves nothing, and the app mustn't take it on trust). */
+    @Volatile var helloApi = 3
+
     /** How long `GET /api/items` takes to answer; the answer itself is made when the request arrives (a slow link). */
     @Volatile var itemsDelayMs = 0L
 
@@ -191,7 +194,7 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
             return json(ex, forced, error)
         }
         when {
-            path == "/api/hello" -> json(ex, 200, JSONObject().put("beam", true).put("version", "1.4.0").put("serverId", serverId).put("api", 3))
+            path == "/api/hello" -> json(ex, 200, JSONObject().put("beam", true).put("version", "1.4.0").put("serverId", serverId).put("api", helloApi))
             path == "/api/info" -> json(ex, 200, JSONObject().put("version", "1.4.0").put("api", 3).put("features", JSONArray(features)))
             path == "/api/me" -> json(ex, 200, JSONObject().put("ok", true).put("you", ex.requestHeaders.getFirst("X-Beam-Device-Id")).put("read", JSONObject()))
             path == "/api/devices" -> json(ex, 200, JSONObject().put("devices", devices).put("you", ex.requestHeaders.getFirst("X-Beam-Device-Id")))

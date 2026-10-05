@@ -388,8 +388,8 @@ function createChat(ctx) {
   }
 
   // Mentions in a text: people in the channel (by <@id>), and whether it says @everyone.
-  function mentionsIn(body, c) {
-    const allowed = new Set(audience(c));
+  function mentionsIn(body, c, members = audience(c)) {
+    const allowed = new Set(members);
     const ids = new Set();
     for (const m of body.matchAll(MENTION)) if (allowed.has(m[1])) ids.add(m[1]);
     return { ids: [...ids], everyone: EVERYONE.test(body) };
@@ -412,7 +412,8 @@ function createChat(ctx) {
       replyTo = r.id;
     }
     const nonce = typeof body.nonce === 'string' ? body.nonce.slice(0, 64) : undefined;
-    const mentions = mentionsIn(text, c);
+    const to = audience(c); // (audit P-4) once: for the mentions and for the event
+    const mentions = mentionsIn(text, c, to);
     const messageId = newId();
     db.tx(() => {
       // Files: this person's, finished, not sent before.
@@ -429,7 +430,6 @@ function createChat(ctx) {
       db.run('INSERT OR REPLACE INTO reads (user_id, channel_id, last_id) VALUES (?, ?, ?)', user.id, c.id, messageId);
     });
     const message = messageJson(messageId);
-    const to = audience(c);
     hub.emit(to, 'msg', { message, nonce });
     ctx.push?.notifyMessage({ message, channel: c, author: user, to, mentions }).catch(err => log.warn(`Push: ${err.message}`));
     send(res, 201, { message, nonce });
@@ -445,14 +445,15 @@ function createChat(ctx) {
     const text = cleanBody(body.body);
     if (!text && !db.get('SELECT 1 FROM attachments WHERE message_id = ?', m.id)) throw httpError(400, 'The message is empty: delete it instead');
     if (text === m.body) return send(res, 200, { message: messageJson(m.id) });
-    const mentions = mentionsIn(text, c);
+    const members = audience(c); // (audit P-4) once
+    const mentions = mentionsIn(text, c, members);
     db.tx(() => {
       db.run('UPDATE messages SET body = ?, edited_at = ?, mentions_all = ? WHERE id = ?', text, now(), mentions.everyone ? 1 : 0, m.id);
       db.run('DELETE FROM mentions WHERE message_id = ?', m.id);
       for (const p of mentions.ids) db.run('INSERT INTO mentions (message_id, user_id) VALUES (?, ?)', m.id, p);
     });
     const message = messageJson(m.id);
-    hub.emit(audience(c), 'msg-edit', { message });
+    hub.emit(members, 'msg-edit', { message });
     send(res, 200, { message });
   }
 

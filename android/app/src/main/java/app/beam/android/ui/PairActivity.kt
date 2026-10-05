@@ -95,7 +95,8 @@ class PairActivity : BaseActivity() {
         (intent?.getStringExtra(EXTRA_LINK) ?: intent?.dataString)?.let { link ->
             if (Pairing.parse(link) != null || Pairing.anyServer(link) != null) {
                 b.link.setText(link)
-                if (savedInstanceState == null) signIn()
+                // (audit S-10) From outside the app: say which server it is and wait for a yes.
+                if (savedInstanceState == null) confirmLink(link)
             }
         }
         // Signed out by the server (the sign-in was removed or expired): say so, and offer the same server.
@@ -103,6 +104,18 @@ class PairActivity : BaseActivity() {
             if (b.link.text.isNullOrBlank()) b.link.setText(server)
             if (!busy) showError(getString(R.string.signed_out))
         }
+    }
+
+    /** A link from a browser or another app: sign in to its server only once the person has seen which one it is. */
+    private fun confirmLink(link: String) {
+        val server = Pairing.parse(link)?.baseUrl ?: Pairing.anyServer(link) ?: return
+        val host = android.net.Uri.parse(server).host ?: server
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.pair_link_confirm_title)
+            .setMessage(getString(R.string.pair_link_confirm, host))
+            .setPositiveButton(R.string.pair_button) { _, _ -> signIn() }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun deviceName(): String =

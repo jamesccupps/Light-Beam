@@ -603,9 +603,19 @@ namespace Beam
                 case "update":
                     Item existing;
                     string id = Json.Str(d, "id");
-                    if (id != null && byId.TryGetValue(id, out existing) && Json.Get(d, "delivered") != null)
+                    if (id != null && byId.TryGetValue(id, out existing))
                     {
-                        existing.Delivered = Json.LongMap(d, "delivered");
+                        if (Json.Get(d, "delivered") != null) existing.Delivered = Json.LongMap(d, "delivered");
+                        // (audit X-2) An edited text's new words (cut as in lists): Copy in the chat window and "Copy
+                        // latest received text" copy what the page shows. (Pins, reactions and thumbnails aren't kept here.)
+                        long edited = Json.Long(d, "edited", 0);
+                        if (existing.IsText && edited > 0 && edited >= existing.Edited && Json.Str(d, "text") != null)
+                        {
+                            existing.Text = Json.Str(d, "text");
+                            existing.Truncated = Json.Bool(d, "truncated", false);
+                            existing.TextLength = Json.Long(d, "textLength", existing.Text.Length);
+                            existing.Edited = edited;
+                        }
                         MarkChanged();
                     }
                     break;
@@ -1574,6 +1584,8 @@ namespace Beam
             if (byId.TryGetValue(it.Id, out old))
             {
                 old.Delivered = it.Delivered;
+                // (audit X-2) its words too, unless what's here was edited later (an older copy arriving late)
+                if (it.Edited >= old.Edited) { old.Text = it.Text; old.Truncated = it.Truncated; old.TextLength = it.TextLength; old.Edited = it.Edited; }
                 MarkChanged();
                 return;
             }
@@ -2828,9 +2840,17 @@ namespace Beam
         }
 
         // No WebView2 Runtime: the web app in the default browser (it signs in by itself: this PC's app is connected).
-        void OpenInBrowser(string hash)
+        async void OpenInBrowser(string hash)
         {
-            FileUtil.OpenUrl(Cfg.Server.TrimEnd('/') + "/" + hash);
+            // (audit S-1) A browser on this PC isn't signed in just because this app is connected: give it a pairing link.
+            string key = null;
+            var api = Api;
+            if (api != null && Conn == Conn.Online && !Rc.Active)
+            {
+                try { key = await api.PairKey(); }
+                catch (Exception ex) { Log.Write("Opening Beam in the browser without a pairing link: " + Api.Describe(ex)); }
+            }
+            FileUtil.OpenUrl(Cfg.Server.TrimEnd('/') + "/" + (string.IsNullOrEmpty(key) ? "" : "?key=" + Uri.EscapeDataString(key)) + hash);
             if (!Cfg.RuntimeHintShown)
             {
                 Cfg.RuntimeHintShown = true;

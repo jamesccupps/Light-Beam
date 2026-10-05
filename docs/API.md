@@ -97,8 +97,9 @@ Here are the ways in, from most to least seamless.
   - `BEAM_TAILSCALE_OWNERS`;
   - accounts learned automatically when a signed-in device makes a request through tailscale serve;
   - the first account to sign in to a brand-new Beam.
-- **Or, for browsers only,** a Beam app is connected right now from the same machine (a Tailscale address or the
-  server itself).
+- (Until 1.14.3 also a browser while a Beam app was connected from its machine. With Beam on 127.0.0.1 that was any
+  local process or account, so such a browser now signs in like any other: the password, a pairing link, or approval,
+  which the Beam app on that machine can give.)
 
 Either way only at **this Beam's own address** (1.7.2): the `Host` (or a trusted proxy's `X-Forwarded-Host`) must be
 an IP address, `localhost`, this machine's name (or `<name>.local`), its Tailscale name, the public address, or an
@@ -294,7 +295,9 @@ merge). Adopt it. `GET /api/me` and `GET /api/devices` also return `you`.
   that machine whose *app* isn't connected is merged into the new one, so its history carries over.
   - This applies to installed apps only, never the CLI.
   - A browser tab still open as the old app doesn't block it (v3).
-  - Apps that report different `X-Beam-Profile` values are different user accounts and are never merged (v3).
+  - Apps that report different `X-Beam-Profile` values are different user accounts and are never merged (v3), and
+    (1.14.3) only apps that **both** report one, the same, are: an older app that never said which account it's for
+    stays a device of its own (the server logs the near miss once).
 - Browsers can't set headers on `EventSource`, so `/api/events` also accepts them as query parameters (`device`,
   `name`, `platform`). The web app sends the key as a cookie.
 - **Behind a reverse proxy (v3):** the server believes `X-Forwarded-For/-Proto/-Host` only from loopback plus
@@ -844,8 +847,8 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
 
   Never eligible, with `403 { "reason": "sign-in" }` ("sign in to Beam on this device with a pairing link, an approval
   or the password"):
-  - a browser signed in by Tailscale identity, or because a Beam app runs on the same machine. Any Windows account on
-    that machine gets those; a browser linked to an app's id is still refused;
+  - a browser signed in by Tailscale identity (or, before 1.14.3, because a Beam app ran on the same machine). Any
+    Windows account on that machine gets those; a browser linked to an app's id is still refused;
   - the CLI.
 
   More:
@@ -997,14 +1000,14 @@ signed-in request, unless configured.
 | `POST /api/password` | `{ "password", "current"? }` sets it (≥ 8 characters); `""` removes it. Changing or removing a set password takes `current` (1.7.2; `403 reason: "current-password"` without it or when wrong), except from a sign-in made deliberately (the password, a pairing link, an approval, the master key, a Beam app's own) |
 | `POST /api/security/sign-out-others` | **(v3)** optional body `{ "disableTailscaleSignIn": true }`. New master key, every sign-in revoked, every other device's Tailscale machine blocked, learned Tailscale owners dropped; the caller gets `{ "key": "bt_…", "revoked": n, "tailscaleSignIn" }` (and `X-Beam-Token` / a cookie). `409` when the key comes from `BEAM_KEY` |
 | `POST /api/logout` | Signs this browser out: revokes its token, clears the cookie, and sends `Clear-Site-Data: "cache", "storage"` (v3) |
-| `GET /api/logs?lines=200` | **(v3)** `{ "lines": [...] }`, the end of the server log (`data/logs/server.log`) |
+| `GET /api/logs?lines=200` | **(v3)** `{ "lines": [...] }`, the end of the server log (`data/logs/server.log`). **(1.14.3)** `403` for a session-only sign-in, as backups |
 | `GET /api/alerts` | **(1.3)** `{ "alerts": [Alert...] }`, the last 100, newest first (see Alerts) |
 | `POST /api/events/poke` | **(1.4)** see Background streams |
 | `POST /api/clear-cache` | **(1.4, feature `clear-cache`)** no sign-in needed, changes nothing on the server → `204` with `Clear-Site-Data: "cache"` (and `Cache-Control: no-store`): the browser drops what it cached from this Beam (thumbnails, files viewed inline, which are cached for a year). Call it after a `401` confirmed to come from your own Beam, once you have wiped your data. Only from Beam's own pages: a `Sec-Fetch-Site` other than `same-origin`, or a foreign `Origin`, gets `403 { reason: "csrf" }` |
-| `GET /api/metrics` | **(1.4)** how the server is doing (signed-in owners; see Metrics) |
+| `GET /api/metrics` | **(1.4)** how the server is doing (see Metrics). **(1.14.3)** `403` for a session-only sign-in, as backups |
 | `POST /api/move`, `DELETE /api/move` | **(v3)** see When the server moves |
 | `GET /api/admin/export` | **(v3)** the whole Beam as a `.tar.gz` (master key, or a token from an approved `purpose: "move"` request). `?freeze` pauses changes until a move completes |
-| `GET /api/backups` | **(1.8.1, feature `backups`)** this server's own backups: `{ "dir", "hours", "keep", "filesMB", "running", "last": { "at", "name", "bytes", "files", "why" } \| { "at", "error" } \| null, "backups": [{ "name", "at", "bytes" }] }` (newest first). A backup is an export (`beam-backup-<UTC time>.tar.gz`), made every `BEAM_BACKUP_HOURS` into `BEAM_BACKUP_DIR`; the newest `BEAM_BACKUP_KEEP` are kept. Item files go in while they add up to `BEAM_BACKUP_FILES_MB` (else `files: false`: the items that are files stay out). Restore: stop Beam, then `node server.js import <backup> --force`. `403` for a session-only sign-in |
+| `GET /api/backups` | **(1.8.1, feature `backups`)** this server's own backups: `{ "dir", "hours", "keep", "filesMB", "running", "last": { "at", "name", "bytes", "files", "filesLeftOut", "why" } \| { "at", "error" } \| null, "backups": [{ "name", "at", "bytes" }] }` (newest first). A backup is an export (`beam-backup-<UTC time>.tar.gz`), made every `BEAM_BACKUP_HOURS` into `BEAM_BACKUP_DIR`; the newest `BEAM_BACKUP_KEEP` are kept. Item files go in while they add up to `BEAM_BACKUP_FILES_MB`, the smallest first (1.14.3; before, all or none): `files` is true when every one went in, `filesLeftOut` counts the rest (also in the archive's `beam-export.json`); a file left out isn't in the backup's item list. Restore: stop Beam, then `node server.js import <backup> --force`. `403` for a session-only sign-in |
 | `POST /api/backups` | **(1.8.1)** a backup now (Settings → Server, `node server.js backup`) → `201` with the same as `GET`; one at a time (a second gets the one being written). `500` if writing it failed |
 | `POST /api/admin/shutdown` | **(v3)** stops the server cleanly; master key, from the server machine only (`node server.js stop`) |
 | `GET /api/qr.svg?data=…`, `GET /api/qr.png?data=…` | a QR code (signed-in only) |
@@ -1028,7 +1031,7 @@ signed-in request, unless configured.
   with another version, is `no-cache` (revalidate with its `ETag`).
 
 ### Metrics (1.4)
-`GET /api/metrics` (signed-in owners) →
+`GET /api/metrics` (a lasting sign-in: `403` for a session-only one since 1.14.3) →
 ```json
 { "at": 1790723000000, "version": "1.4.0", "uptime": 3600,
   "process": { "rss": 0, "heapUsed": 0, "heapTotal": 0, "external": 0, "cpu": { "user": 1.2, "system": 0.4 },

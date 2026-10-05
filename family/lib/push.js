@@ -148,6 +148,10 @@ function createPush(ctx, { file, contact = '' }) {
     const p256dh = String(body.keys?.p256dh || '');
     const auth = String(body.keys?.auth || '');
     if (fromB64u(p256dh).length !== 65 || fromB64u(auth).length !== 16) throw httpError(400, 'The subscription’s keys are missing');
+    // (audit S-7) An address stays with the member who registered it: someone else registering it again would stop
+    // their notifications. One that has been failing (gone stale) can move.
+    const held = db.get('SELECT user_id, failures FROM push_subs WHERE endpoint = ?', endpoint);
+    if (held && held.user_id !== user.id && !(held.failures > 0)) throw httpError(409, 'That notification address belongs to someone else');
     db.run(`INSERT INTO push_subs (id, user_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, failures = 0`,
     newId(), user.id, endpoint, p256dh, auth, now());

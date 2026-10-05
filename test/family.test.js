@@ -1284,6 +1284,50 @@ test('F-U (1.13.0): Beam’s fast links: on this machine and with the control ke
   } finally { await s.stop(); }
 });
 
+test('F-V (audit 2026-10-04): the storage cap counts the play copies; a push address stays its member’s (a failing one can move); "bytes=-" is no range; routes are literal; a newer database is refused', async () => {
+  const { DatabaseSync } = require('node:sqlite');
+  // ~1 MB of storage (BEAM_FAMILY_MAX_STORAGE_GB takes fractions)
+  let s = await start('audit-fv', 8848, { env: { BEAM_FAMILY_MAX_STORAGE_GB: String(1 / 1024) } });
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const bob = await join(s, f.owner, 'Bob');
+    // §5.1: a 600 KB file whose "plays everywhere" copy is 600 KB too: 1.2 MB used, so 100 KB more doesn't fit
+    const data = crypto.randomBytes(600 * 1024);
+    const id = (await call(s, 'POST', '/api/uploads', f.owner, { name: 'clip.bin', size: data.length })).json.id;
+    await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(f.owner), 'Content-Type': 'application/octet-stream' }, body: data });
+    await post(s, f.owner, f.general, '', { files: [id] });
+    assert.equal((await call(s, 'POST', '/api/uploads', f.owner, { name: 'small.bin', size: 100 * 1024 })).status, 201, 'fits while there is no play copy');
+    const db = new DatabaseSync(path.join(s.data, 'family.db'));
+    try { db.prepare('UPDATE attachments SET play_size = ? WHERE id = ?').run(600 * 1024, id); } finally { db.close(); }
+    const full = await call(s, 'POST', '/api/uploads', f.owner, { name: 'more.bin', size: 100 * 1024 });
+    assert.equal(full.status, 507, `the play copy counts: ${full.status} ${full.body}`);
+    // B-11: "bytes=-" asks for no range: the whole file, not a 206
+    const whole = await s.req('GET', `/api/files/${id}`, { headers: { ...as(f.owner), Range: 'bytes=-' }, raw: true });
+    assert.deepEqual([whole.status, whole.body.length], [200, data.length], 'bytes=- is the whole file');
+    // S-7: Mary's push address isn't Bob's to take; once it has been failing it can move
+    const endpoint = 'http://127.0.0.1:1/push/shared-tablet';
+    const keys = browserKeys().keys;
+    assert.equal((await call(s, 'PUT', '/api/push', mary.who, { endpoint, keys })).status, 204);
+    const taken = await call(s, 'PUT', '/api/push', bob.who, { endpoint, keys });
+    assert.equal(taken.status, 409, taken.body);
+    assert.equal((await call(s, 'PUT', '/api/push', mary.who, { endpoint, keys })).status, 204, 'Mary again: fine');
+    const db2 = new DatabaseSync(path.join(s.data, 'family.db'));
+    try { db2.prepare('UPDATE push_subs SET failures = 3 WHERE endpoint = ?').run(endpoint); } finally { db2.close(); }
+    assert.equal((await call(s, 'PUT', '/api/push', bob.who, { endpoint, keys })).status, 204, 'a failing address can move');
+  } finally { await s.stop(); }
+  // B-8: route patterns are literal outside their :names
+  const { createRouter } = require(path.join(ROOT, 'family', 'lib', 'http.js'));
+  const match = createRouter([['GET', '/api/qr.svg', () => 1], ['GET', '/api/people/:id', () => 2]]);
+  assert.ok(match('GET', '/api/qr.svg') && !match('GET', '/api/qrXsvg'), 'a dot is a dot');
+  assert.deepEqual(match('GET', '/api/people/p1').params, { id: 'p1' });
+  // B-9: a database a newer Family made is refused (and the supervisor isn't asked to try again)
+  const db3 = new DatabaseSync(path.join(TMP, 'audit-fv', 'data', 'family.db'));
+  try { db3.exec(`PRAGMA user_version = ${db3.prepare('PRAGMA user_version').get().user_version + 1}`); } finally { db3.close(); }
+  const err = await start('audit-fv', 8848, { keep: true }).then(() => null, e => e);
+  assert.ok(err && /made by a newer Beam Family/.test(err.message), `refused: ${err?.message.slice(0, 300)}`);
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {
