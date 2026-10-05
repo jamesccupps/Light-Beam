@@ -464,6 +464,25 @@ test('A3: a stalled chunk is taken over, times out, and cancelling mid-chunk is 
   } finally { await s.stop(); }
 });
 
+test('1.15.1: GET /api/uploads/{id} says what has arrived (`received`), the chunk still arriving included', async () => {
+  const s = await startServer('received', 8791);
+  try {
+    const h = app(s.key, 'rcvdev00001', 'Up', 'android');
+    const data = crypto.randomBytes(200_000);
+    const id = (await post(s, '/api/uploads', { name: 'r.bin', size: data.length }, h)).json.id;
+    const look = async () => (await s.req('GET', `/api/uploads/${id}`, { headers: h })).json;
+    let u = await look();
+    assert.deepEqual([u.offset, u.received], [0, 0]);
+    const stall = stalledPut(s.port, `/api/uploads/${id}?offset=0`, h, data.length, data.subarray(0, 50_000));
+    await waitFor(async () => (await look()).received === 50_000, 3000).catch(() => assert.fail('received counts the chunk still arriving'));
+    assert.equal((await look()).offset, 0, 'the offset stays at the chunk\'s start until it ends');
+    await stall.done; // cut off: no data for 2 s (60 s normally)
+    await waitFor(async () => (await look()).offset === 50_000, 3000).catch(() => assert.fail('the cut-off chunk\'s bytes are kept'));
+    u = await look();
+    assert.equal(u.received, 50_000, 'and both agree once it has ended');
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- A4 merges
 
 test('A4: merges rewrite pending uploads, tokens and read markers; old ids still work as targets', async () => {

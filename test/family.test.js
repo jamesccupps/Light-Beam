@@ -969,6 +969,20 @@ async function directConnect(srv, who, route = '/api/direct') {
         answered.catch(rej);
       });
     },
+    // (1.15.1) the first `bytes` (or a little more) from `offset` on, then this end closes the channel (a drop)
+    getSome: (file, offset, bytes) => new Promise((res, rej) => {
+      const parts = [];
+      let n = 0;
+      const dc = channel({ op: 'get', file, offset });
+      dc.onMessage(m => {
+        if (typeof m === 'string') { const j = JSON.parse(m); if (j.error) { rej(new Error(j.error)); dc.close(); } return; }
+        if (n >= bytes) return;
+        const b = Buffer.from(m);
+        parts.push(b);
+        n += b.length;
+        if (n >= bytes) { dc.close(); res(Buffer.concat(parts)); }
+      });
+    }),
     close: () => { for (const dc of keep) { try { dc.close(); } catch {} } pc.close(); },
   };
 }
@@ -1423,6 +1437,45 @@ test('F-W (1.15.0): a fast link can stop after some downloads (one picked up aga
     const arrivingId = await up('later.jpg', photo, 'image/jpeg', { send: false, part: 300 });
     assert.equal((await call(s, 'POST', `/api/files/${arrivingId}/links`, f.owner, { hours: 1, removeLocation: true })).status, 409, 'not until it is all here');
   } finally { await s.stop(); }
+});
+
+test('F-X (1.15.1): a fast link’s direct download counts as it starts, as over https; one picked up again from where it got to isn’t a new one, and goes on when the link is used up', async () => {
+  const s = await start('resume', 8847, { env: { BEAM_FAMILY_STUN: 'local' } });
+  const conns = [];
+  try {
+    const f = await family(s);
+    const data = crypto.randomBytes(2 * 1024 * 1024 + 11);
+    const id = (await call(s, 'POST', '/api/uploads', f.owner, { name: 'movie.bin', size: data.length })).json.id;
+    await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(f.owner), 'Content-Type': 'application/octet-stream' }, body: data });
+    await post(s, f.owner, f.general, '', { files: [id] });
+    let r = await call(s, 'POST', `/api/files/${id}/links`, f.owner, { hours: 1, maxDownloads: 1 });
+    assert.equal(r.status, 201, r.body);
+    const token = r.json.link.url.split('/f/')[1];
+    const conn = await directConnect(s, {}, `/api/links/${token}/direct`);
+    conns.push(conn);
+    assert.equal(conn.status, 200, conn.error);
+    // The first part, then the connection drops: the download counted as it started (it counted only once sent whole).
+    const head = await conn.getSome(null, 0, 1024 * 1024);
+    assert.ok(head.equals(data.subarray(0, head.length)), 'the first part');
+    let link = (await call(s, 'GET', `/api/links/${token}`)).json;
+    assert.deepEqual([link.usedUp, link.downloadsLeft], [true, 0], 'counted as it started');
+    // Picked up again from where it got to, over a new connection: not a new download, so it goes on.
+    conn.close();
+    const again = await directConnect(s, {}, `/api/links/${token}/direct`);
+    conns.push(again);
+    const rest = await again.get(null, head.length);
+    assert.ok(Buffer.concat([head, rest]).equals(data), 'the whole file, in two parts');
+    // Over https from a byte too; a new one (from byte 0) is refused either way.
+    r = await s.req('GET', `/api/links/${token}/file`, { headers: { Range: `bytes=${head.length}-` }, raw: true });
+    assert.deepEqual([r.status, r.body.equals(rest)], [206, true], 'https from that byte');
+    await assert.rejects(again.get(null, 0), /used up/);
+    assert.equal((await s.req('GET', `/api/links/${token}/file`)).status, 410);
+    const list = (await call(s, 'GET', `/api/files/${id}/links`, f.owner)).json.links;
+    assert.equal(list[0].downloads, 1, 'one download in all');
+  } finally {
+    for (const c of conns) c.close?.();
+    await s.stop();
+  }
 });
 
 // ---------------------------------------------------------------- runner

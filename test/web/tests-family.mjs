@@ -81,6 +81,21 @@ const send = (page, text) => page.evaluate(`(async () => {
   return true;
 })()`);
 
+// (1.15.1) For the tests of a dropped direct connection: the page's peer connections and data channels, kept where
+// the test can close them, and none at all once window.__noDirect is set.
+const DROPPER = `(() => {
+  const Real = window.RTCPeerConnection;
+  if (!Real) return;
+  window.__pcs = [];
+  window.__dcs = [];
+  window.__noDirect = false;
+  window.RTCPeerConnection = class extends Real {
+    constructor(...a) { if (window.__noDirect) throw new Error('no direct connection (a test)'); super(...a); window.__pcs.push(this); }
+    createDataChannel(label, ...rest) { const dc = super.createDataChannel(label, ...rest); window.__dcs.push({ label, dc }); return dc; }
+  };
+})()`;
+const GETS = `window.__dcs.filter(x => x.label.includes('"op":"get"'))`;
+
 export default function register(test) {
   test('family: in the Beam app’s Family window (beamHost.window = "family") the page offers no notifications: no banner, Settings says they come through the browser (Windows app 1.10)', async ctx => {
     const srv = await familyServer(ctx);
@@ -593,6 +608,117 @@ Robin ${sent}`);
     for (let i = 0; i < 50 && !gets.some(u => /\?download/.test(u)); i++) await sleep(100);
     eq(gets.filter(u => /\?download/.test(u)).length, 1, 'the small one over https');
   }, { timeout: 90000 });
+
+  test('family: a direct download that drops goes on from where it got to: over a new direct connection, or over https from that byte when none comes up; the same bytes (1.15.1)', async ctx => {
+    const srv = await familyServer(ctx, { BEAM_FAMILY_STUN: 'local' });
+    const headers = { 'Tailscale-User-Login': OWNER, 'Tailscale-User-Name': 'Robin', 'X-Forwarded-For': '100.64.7.7' };
+    const up = async (name, data) => {
+      const id = (await srv.call(owner, 'POST', '/api/uploads', { name, size: data.length })).json.id;
+      for (let o = 0; o < data.length; o += 16 * 1024 * 1024) {
+        await fetch(`${srv.base}/api/uploads/${id}?offset=${o}`, { method: 'PUT', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: data.subarray(o, o + 16 * 1024 * 1024) });
+      }
+      return id;
+    };
+    const make = seed => { const b = Buffer.alloc(32 * 1024 * 1024 + 3); for (let i = 0; i < b.length; i += 4096) b[i] = (i / 4096 + seed) % 251; return b; };
+    const one = make(1);
+    const two = make(2);
+    const general = (await srv.call(owner, 'GET', '/api/bootstrap')).json.channels.find(c => c.name === 'general').id;
+    const oneId = await up('one.bin', one);
+    const twoId = await up('two.bin', two);
+    await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body: 'First', files: [oneId] });
+    await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body: 'Second', files: [twoId] });
+    const robin = await tailscalePage(ctx, OWNER, 'Robin', { init: [DROPPER] });
+    const dir = path.join(srv.data, 'robin-downloads');
+    fs.mkdirSync(dir, { recursive: true });
+    await robin.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelectorAll('.file-card').length === 2`, 10000, 'both files in the chat');
+    // (what goes over https, with its range)
+    const asked = [];
+    await robin.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/files/*', requestStage: 'Request' }] });
+    const paused = m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      const h = m.params.request.headers;
+      asked.push({ url: m.params.request.url, range: h.Range || h.range || '' });
+      robin.send('Fetch.continueRequest', { requestId: m.params.requestId }).catch(() => {});
+    };
+    robin.on(paused);
+    ctx.defer(() => robin.off(paused));
+    const fill = `parseInt(document.querySelector('.downloads .dl-row:last-child .dl-fill')?.style.width || '0', 10)`;
+    const done = `/^Done in .*: it’s in your downloads$/.test(document.querySelector('.downloads .dl-row:last-child .dl-status')?.textContent || '')`;
+    const saved = async (name, data) => {
+      for (let i = 0; i < 50; i++) {
+        const f = path.join(dir, name);
+        if (fs.existsSync(f) && fs.statSync(f).size === data.length) return fs.readFileSync(f).equals(data);
+        await sleep(200);
+      }
+      return false;
+    };
+    // 1. The channel drops a quarter of the way through: a new one on the same connection goes on from there.
+    await robin.evaluate(`[...document.querySelectorAll('.file-card')].find(a => /one\\.bin/.test(a.textContent)).click(); true`);
+    await robin.waitFor(`${fill} >= 25`, 30000, 'a quarter of the first file');
+    await robin.evaluate(`${GETS}.at(-1).dc.close(); true`);
+    await robin.waitFor(done, 60000, 'the first file went on to the end');
+    const labels = await robin.evaluate(`${GETS}.map(x => JSON.parse(x.label))`);
+    eq(labels.length, 2, 'two parts over the direct connection');
+    assert(labels[1].offset > 0 && labels[1].offset < one.length, `the second part from where the first got to (${labels[1].offset})`);
+    eq(asked.filter(a => a.url.includes(oneId)), [], 'nothing of it over https');
+    assert(await saved('one.bin', one), 'the first file: the same bytes');
+    // 2. The connection drops and no new one comes up: the rest over https from that byte.
+    await robin.evaluate(`[...document.querySelectorAll('.file-card')].find(a => /two\\.bin/.test(a.textContent)).click(); true`);
+    await robin.waitFor(`${fill} >= 25`, 30000, 'a quarter of the second file');
+    await robin.evaluate(`window.__noDirect = true; for (const pc of window.__pcs) pc.close(); true`);
+    await robin.waitFor(done, 60000, 'the second file went on to the end');
+    const viaHttps = asked.filter(a => a.url.includes(twoId));
+    eq(viaHttps.length, 1, 'one request over https');
+    const from = Number(/^bytes=(\d+)-$/.exec(viaHttps[0].range)?.[1]);
+    assert(from > 0 && from < two.length, `from where the direct connection got to (${viaHttps[0].range})`);
+    assert(await saved('two.bin', two), 'the second file: the same bytes');
+  }, { timeout: 150000 });
+
+  test('family: a fast link’s page goes on from where it got to when its direct connection drops; a one-download link counts it once (1.15.1)', async ctx => {
+    const srv = await familyServer(ctx, { BEAM_FAMILY_STUN: 'local' });
+    const headers = { 'Tailscale-User-Login': OWNER, 'Tailscale-User-Name': 'Robin', 'X-Forwarded-For': '100.64.7.7' };
+    const data = Buffer.alloc(32 * 1024 * 1024 + 9);
+    for (let i = 0; i < data.length; i += 4096) data[i] = (i / 4096 + 7) % 251;
+    const id = (await srv.call(owner, 'POST', '/api/uploads', { name: 'film.bin', size: data.length })).json.id;
+    for (let o = 0; o < data.length; o += 16 * 1024 * 1024) {
+      await fetch(`${srv.base}/api/uploads/${id}?offset=${o}`, { method: 'PUT', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: data.subarray(o, o + 16 * 1024 * 1024) });
+    }
+    const general = (await srv.call(owner, 'GET', '/api/bootstrap')).json.channels.find(c => c.name === 'general').id;
+    await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body: 'The film', files: [id] });
+    const made = await srv.call(owner, 'POST', `/api/files/${id}/links`, { hours: 1, maxDownloads: 1 });
+    eq(made.status, 201, 'a one-download link');
+    const token = made.json.link.url.split('/f/')[1];
+    const visitor = await ctx.browser.newPage({ init: [DROPPER] });
+    const dir = path.join(srv.data, 'visitor-downloads');
+    fs.mkdirSync(dir, { recursive: true });
+    await visitor.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    await visitor.goto(`${srv.base}/f/${token}`);
+    await visitor.waitFor(`/film\\.bin/.test(document.querySelector('.link-name')?.textContent || '')`, 10000, 'the link’s page');
+    // (no save dialog: the browser's downloads through the service worker, as on a phone)
+    await visitor.evaluate(`window.showSaveFilePicker = undefined; [...document.querySelectorAll('.link-actions button')].find(b => b.textContent === 'Download').click(); true`);
+    await visitor.waitFor(`parseInt(document.querySelector('.link-progress .fill')?.style.width || '0', 10) >= 25`, 30000, 'a quarter of it');
+    await visitor.evaluate(`${GETS}.at(-1).dc.close(); true`);
+    try {
+      await visitor.waitFor(`/^Done: .* straight from the sender/.test(document.querySelector('.link-progress .status')?.textContent || '')`, 60000, 'it went on to the end, straight from the sender');
+    } catch (err) {
+      throw new Error(`${err.message}; the page says: ${await visitor.evaluate(`document.querySelector('.link-progress .status')?.textContent || '(nothing)'`)}`);
+    }
+    const labels = await visitor.evaluate(`${GETS}.map(x => JSON.parse(x.label))`);
+    eq(labels.length, 2, 'two parts');
+    assert(labels[1].offset > 0, `the second from where the first got to (${labels[1].offset})`);
+    let ok = false;
+    for (let i = 0; i < 50 && !ok; i++) {
+      const f = path.join(dir, 'film.bin');
+      ok = fs.existsSync(f) && fs.statSync(f).size === data.length && fs.readFileSync(f).equals(data);
+      if (!ok) await sleep(200);
+    }
+    assert(ok, `the same bytes in the downloads: ${fs.readdirSync(dir)}`);
+    const links = (await srv.call(owner, 'GET', `/api/files/${id}/links`)).json.links;
+    eq(links.map(l => l.downloads), [1], 'counted once');
+    eq((await (await fetch(`${srv.base}/api/links/${token}`)).json()).usedUp, true, 'and the link is used up');
+  }, { timeout: 120000 });
 
   test('family: a conversation’s gallery: its photos newest first, one opens in the viewer, Select picks two and deletes their messages; the files on their own tab (1.11.0)', async ctx => {
     const srv = await familyServer(ctx);

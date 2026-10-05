@@ -3,20 +3,23 @@
 // downloads through the service worker (no save dialog in the app), one at a time, in a small panel with how far each
 // got, how fast, and Stop. The browser's own download instead for a smaller file, on an iPhone or iPad (Safari's own:
 // the service worker's stream broke files there), or when no direct connection comes up (then from the start).
+// (1.15.1) A connection that drops goes on from where it got to (a new direct connection, else https from that byte);
+// it used to start over in the browser's own download.
 import { h, fill, formatSize, iconBtn } from './ui.js';
 import { DIRECT_MIN, directAvailable, directConnection } from './direct.js';
-import { IOS, openSink, plainSave, receiveDirect, took } from './saving.js';
+import { IOS, openSink, plainSave, receiveResuming, took } from './saving.js';
 
 const jobs = [];   // this round's downloads, shown in the panel until a while after the last one ends
 let running = null;
 let panel = null;
 let hideTimer = null;
 let lock = null;
+const LIVE = new Set(['waiting', 'connecting', 'going', 'resuming']);
 
 // One file (an attachment's JSON: id, name, size, mime, url); `href`: the browser's own download of it instead.
 export function downloadFile(f, href = `${f.url}?download`) {
   if (IOS || f.size < DIRECT_MIN || !directAvailable()) return plainSave(href, f.name);
-  if (jobs.some(j => j.f.id === f.id && (j.state === 'waiting' || j.state === 'connecting' || j.state === 'going'))) return;
+  if (jobs.some(j => j.f.id === f.id && LIVE.has(j.state))) return;
   jobs.push({ f, href, state: 'waiting', got: 0, rate: 0, note: '', stop: null });
   render();
   pump();
@@ -53,9 +56,16 @@ async function run(job) {
     if (!sink || sink === 'cancelled') throw Object.assign(new Error('this browser can’t save it that way'), { plain: true });
     job.state = 'going';
     render();
-    const r = await receiveDirect(conn.pc, { op: 'get', file: job.f.id, offset: 0 }, job.f.size, sink, {
+    const r = await receiveResuming({
+      pc: conn.pc,
+      connect: async () => (await directConnection())?.pc || null,
+      label: offset => ({ op: 'get', file: job.f.id, offset }),
+      url: job.f.url,
+      size: job.f.size,
+      sink,
       signal: stop.signal,
-      onProgress: (got, rate) => { job.got = got; job.rate = rate; render(); },
+      onProgress: (got, rate) => { job.state = 'going'; job.got = got; job.rate = rate; render(); },
+      onResume: got => { job.state = 'resuming'; job.got = got; render(); },
     });
     job.state = 'done';
     job.got = r.got;
@@ -86,6 +96,7 @@ const STATUS = {
   waiting: () => 'Waiting',
   connecting: () => 'Connecting straight to the server…',
   going: j => `${formatSize(j.got)} of ${formatSize(j.f.size)} · ${formatSize(j.rate)}/s`,
+  resuming: j => `The connection dropped: going on from ${formatSize(j.got)}…`,
   done: j => `Done in ${j.note}: it’s in your downloads`,
   stopped: () => 'Stopped',
   cancelled: () => 'Cancelled in your downloads',
@@ -100,7 +111,7 @@ function render() {
   }
   if (running) clearTimeout(hideTimer);
   fill(panel, ...jobs.map(j => {
-    const live = j.state === 'waiting' || j.state === 'connecting' || j.state === 'going';
+    const live = LIVE.has(j.state);
     return h('div', { class: `dl-row ${j.state}` },
       h('div', { class: 'dl-text' }, h('strong', { class: 'dl-name' }, j.f.name), h('span', { class: 'dl-status' }, STATUS[j.state](j))),
       live ? iconBtn('x', `Stop downloading ${j.f.name}`, () => {

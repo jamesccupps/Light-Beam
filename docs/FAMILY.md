@@ -34,7 +34,8 @@ who shared it: **Download** fetches it straight from this computer over a **dire
 service worker), else over https; **Download in the background** is https, for the phone's own download manager (it
 goes on with the screen locked). 30 wrong links a minute from one address get a wait. (1.9.1) While a direct download
 runs, Download turns into **Stop**, the screen stays on (Wake Lock), and the other button waits; a second download of
-the same file is asked about first ("Download it again?").
+the same file is asked about first ("Download it again?"). (1.15.1) When the direct connection drops, the download goes on
+from where it got to: over a new direct connection, else over https from that byte (it used to stop there).
 
 **How fast:** it depends on the browser and device at the other end, not on this end. Headless Chrome and Edge on this
 PC topped out around **6–7 MB/s** (~50 Mbit/s; Chrome to itself: 3.3 MB/s each way), the same with 1–8 connections,
@@ -73,7 +74,10 @@ sweep removes the file a day after its link stops working. Files a working link 
   public link carries ~2 MB/s), into the browser's downloads through the service worker, one at a time, in a small
   panel with how far it got, how fast, and Stop; the screen stays on meanwhile. A smaller file, an iPhone or iPad
   (Safari's own download), or no direct connection: the browser's own download, as before. The fast link's page and
-  the app share the saving code (`public/saving.js`).
+  the app share the saving code (`public/saving.js`). (1.15.1) A connection that drops (the channel closes, or the
+  connection fails or stays lost for 8 s) goes on from where it got to: a new direct connection, else https from that
+  byte (a Range request); it used to start over in the browser's own download. It gives up after 8 drops in a row
+  without a byte in between (about two minutes), and then does what it did before.
 - **The gallery** (the picture button in a conversation's header): its photos and videos, newest first, more as you
   scroll, and its other files on their own tab; a tap opens one in the viewer (or downloads a file); **Select** picks
   several to download or delete together. A file goes with its message, so deleting one deletes its whole message
@@ -253,7 +257,9 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   each 2 MB kept, then `{"done":true}`); `{"error"}` and closed when something's wrong.
 - Fast links (1.9): `POST /api/files/:id/links {hours, maxDownloads?, removeLocation?}` → `{link: {id, url, expires,
   maxDownloads, removeLocation}}` (the url only now). (1.15.0) `maxDownloads` 1–1000 (none: until it runs out): a new
-  download past it is `410` (one picked up again with a range from a byte isn't new; a direct one counts as it starts);
+  download past it is `410` (one picked up again from a byte, over https or a direct connection, isn't new; a new one
+  counts as it starts either way: 1.15.1, a direct one counted only once sent whole before, so one picked up again
+  after a drop never counted);
   `removeLocation` (JPEG and PNG photos; videos when ffmpeg is there; `400` for other kinds, `409` while the file is
   still arriving) shares a copy without location data, made once per file in `clean/` (`lib/clean.js`: a JPEG's
   Exif/XMP/IPTC blocks and comments go, its orientation kept in a small Exif of its own, nothing after the picture; a
