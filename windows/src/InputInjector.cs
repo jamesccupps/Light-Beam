@@ -389,9 +389,14 @@ namespace Beam
             this.clock = clock;
         }
 
+        // (1.12.1) Handle and Flush run on the session page's own thread (RcThread), the rest on the UI thread: one lock.
+        // Stopped (the session ended) it takes nothing more until the next connection.
+        readonly object sync = new object();
+        bool stopped;
+
         public string BackendName { get { return backend.Name; } }
-        public bool Holding { get { return heldKeys.Count > 0 || heldButtons.Count > 0; } }
-        public bool HasPending { get { return ctrlPending; } }
+        public bool Holding { get { lock (sync) return heldKeys.Count > 0 || heldButtons.Count > 0; } }
+        public bool HasPending { get { lock (sync) return ctrlPending; } }
 
         public DesktopLayout Layout
         {
@@ -407,36 +412,52 @@ namespace Beam
             }
         }
 
-        public void LayoutChanged() { layout = null; }
+        public void LayoutChanged() { lock (sync) layout = null; }
 
-        // A new connection (another screen, a reconnect): its mv numbers start again.
-        public void NewConnection() { lastMv = -1; }
+        // A new connection (another screen, a reconnect): its mv numbers start again, and input is taken again.
+        public void NewConnection() { lock (sync) { lastMv = -1; stopped = false; } }
 
         // One message from the `in` or `mv` channel, parsed.
         public void Handle(Dictionary<string, object> m)
         {
             if (m == null) return;
-            string t = Str(m, "t");
-            switch (t)
+            lock (sync)
             {
-                case "mv": Move(m); break;
-                case "btn": Button(m); break;
-                case "wheel": Wheel(m); break;
-                case "key": Key(m); break;
-                case "text": Text(m); break;
-                case "release": ReleaseAll("the viewer let go"); break;
-                default: Dropped++; break;
+                if (stopped) { Dropped++; return; }
+                string t = Str(m, "t");
+                switch (t)
+                {
+                    case "mv": Move(m); break;
+                    case "btn": Button(m); break;
+                    case "wheel": Wheel(m); break;
+                    case "key": Key(m); break;
+                    case "text": Text(m); break;
+                    case "release": ReleaseAll("the viewer let go"); break;
+                    default: Dropped++; break;
+                }
             }
         }
 
         // The AltGr window has passed: a held-back ControlLeft goes now (the owner's timer calls this).
         public void Flush()
         {
-            if (ctrlPending && clock() - ctrlAt > AltGrWindowMs) PressPendingCtrl();
+            lock (sync) if (!stopped && ctrlPending && clock() - ctrlAt > AltGrWindowMs) PressPendingCtrl();
+        }
+
+        // The session ended: everything held is let go, and nothing more is taken until NewConnection (a message the
+        // page's thread is handling right now goes first: the lock).
+        public int Stop(string why)
+        {
+            lock (sync) { stopped = true; return ReleaseAll(why); }
         }
 
         // Lets go of every key and button pressed here. Returns how many INPUTs that took.
         public int ReleaseAll(string why)
+        {
+            lock (sync) return ReleaseAllLocked(why);
+        }
+
+        int ReleaseAllLocked(string why)
         {
             ctrlPending = false;
             wheelX = wheelY = 0;

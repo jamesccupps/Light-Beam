@@ -10,11 +10,17 @@
 // closed, waiting for its browser process to exit.
 // (1.11) Its picture asks every viewer to show each frame at once (WebRTC's playout delay 0, sent with every frame): the
 // phone's WebView and browsers, which can't be given the Windows viewer's own flag, then hold nothing back.
+// (1.12.1) Every host lives on a thread of its own (RcThread), not the UI thread: the viewer's input (`in`, `mv`) goes
+// from the page to Input right there, everything else to the UI thread (Ui). A click from the viewer on one of Beam's own
+// windows (the user's minimize button, with the laptop's mouse) puts the UI thread in Windows' modal loop that tracks the
+// mouse until the button is up, and that button-up came through the page: on the UI thread it never arrived, and the PC
+// stayed stuck until its own mouse was clicked.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
@@ -26,25 +32,31 @@ namespace Beam
         public const string HostName = "beam-remote-control";
         public const string Origin = "https://" + HostName;
         const string PageUrl = Origin + "/rc-host.html";
+        // (all of these on RcThread)
         static Task lastExit = Task.FromResult(0);          // the previous host's browser process: the profile takes one at a time
         static readonly List<RcHost> open = new List<RcHost>();
         static RcHost parked;                               // the last session's host, kept warm
         static System.Windows.Forms.Timer parkTimer;
         const int ParkMs = 120000;
 
+        public static Action<Action> Ui;                    // posts to the UI thread (App.Post)
+
         readonly Config cfg;
         readonly string source;                             // the screen's name for --auto-select-desktop-capture-source
         readonly bool devTools;
-        Func<bool> gate;
+        Func<bool> gate;                                    // asked on RcThread: it reads the session's state, no windows
         HostForm form;
         CoreWebView2Controller controller;
         CoreWebView2 core;
         TaskCompletionSource<bool> exited;
         Task closing;
-        bool closed, ending, reused, dead;
+        volatile bool closed, ending;
+        bool reused, dead;
 
-        public event Action<RcHost, Dictionary<string, object>> Message;
-        public bool Captured;
+        public event Action<RcHost, Dictionary<string, object>> Message; // on the UI thread
+        public Action<Dictionary<string, object>> Input;    // the viewer's input (`in`, `mv`), on RcThread
+        public volatile bool InputAllowed;                  // set on the UI thread once the peer check passes
+        public volatile bool Captured;
         public string RuntimeVersion;
 
         public RcHost(Config cfg, string source, bool devTools, Func<bool> gate)
@@ -57,7 +69,12 @@ namespace Beam
 
         // A host for a session: the one kept warm from the last session when it captures the same screen (a reconnect
         // starts at once), else a new one.
-        public static RcHost For(Config cfg, string source, bool devTools, Func<bool> gate)
+        public static Task<RcHost> ForAsync(Config cfg, string source, bool devTools, Func<bool> gate)
+        {
+            return RcThread.Run(() => For(cfg, source, devTools, gate));
+        }
+
+        static RcHost For(Config cfg, string source, bool devTools, Func<bool> gate)
         {
             var p = parked;
             parked = null;
@@ -70,16 +87,18 @@ namespace Beam
                 p.reused = true;
                 return p;
             }
-            if (p != null) { var ignored = p.Close(); }
+            if (p != null) { var ignored = p.CloseHere(false); }
             return new RcHost(cfg, source, devTools, gate);
         }
 
         public bool Reused { get { return reused; } }
 
-        public async Task Start()
+        public Task Start() { return RcThread.Run(StartHere); }
+
+        async Task StartHere()
         {
             if (reused) { core.Navigate(PageUrl); return; } // a fresh page in the warm host
-            foreach (var other in open.ToList()) await other.Close(); // one at a time (the options differ per screen)
+            foreach (var other in open.ToList()) await other.CloseHere(false); // one at a time (the options differ per screen)
             open.Add(this);
             await lastExit;
             if (closed) return;
@@ -104,7 +123,7 @@ namespace Beam
             form = new HostForm();
             IntPtr hwnd = form.Handle; // the window exists, and is never shown
             controller = await env.CreateCoreWebView2ControllerAsync(hwnd);
-            if (closed) { var ignored = Close(true); return; }
+            if (closed) { var ignored = CloseHere(true); return; }
             controller.Bounds = new Rectangle(0, 0, 1280, 800);
             controller.IsVisible = true; // a hidden page gets throttled timers
             core = controller.CoreWebView2;
@@ -182,30 +201,52 @@ namespace Beam
             Raise(m);
         }
 
+        // (on RcThread) The viewer's input goes on here, at once; the rest to the UI thread, in order.
         void Raise(Dictionary<string, object> m)
         {
-            if (closed || ending || Message == null) return;
-            try { Message(this, m); }
-            catch (Exception ex) { Log.Error("Remote control: a message from the capture page", ex); }
+            if (closed || ending) return;
+            string t = Json.Str(m, "t");
+            var input = Input;
+            if (input != null && (t == "in" || t == "mv"))
+            {
+                try { input(m); }
+                catch (Exception ex) { Log.Error("Remote control: the viewer's input", ex); }
+                return;
+            }
+            var ui = Ui;
+            if (ui == null) return;
+            ui(() =>
+            {
+                var handler = Message;
+                if (closed || ending || handler == null) return;
+                try { handler(this, m); }
+                catch (Exception ex) { Log.Error("Remote control: a message from the capture page", ex); }
+            });
         }
 
         public void Post(Dictionary<string, object> m)
         {
-            if (closed || ending || core == null) return;
-            try { core.PostWebMessageAsJson(Json.Stringify(m)); }
-            catch (Exception ex) { Log.Error("Remote control: to the capture page", ex); }
+            if (closed || ending) return;
+            string json = Json.Stringify(m);
+            RcThread.Post(() =>
+            {
+                if (closed || ending || core == null) return;
+                try { core.PostWebMessageAsJson(json); }
+                catch (Exception ex) { Log.Error("Remote control: to the capture page", ex); }
+            });
         }
 
         // Starts the capture with a user gesture (DevTools Runtime.evaluate), as the spike did.
-        public async void StartCapture(Dictionary<string, object> config)
+        public void StartCapture(Dictionary<string, object> config)
         {
-            await Evaluate("rcStart(" + Json.Stringify(config) + ")");
+            string expression = "rcStart(" + Json.Stringify(config) + ")";
+            RcThread.Post(async () => await Evaluate(expression));
         }
 
         // Tests: a capture attempt the gate has to refuse.
-        public async void Probe()
+        public void Probe()
         {
-            await Evaluate("rcProbe()");
+            RcThread.Post(async () => await Evaluate("rcProbe()"));
         }
 
         async Task Evaluate(string expression)
@@ -220,7 +261,7 @@ namespace Beam
         }
 
         // The session is over: the page says bye to the viewer and stops the capture at once; half a second later (time
-        // for the bye to go out) the host is parked. Nothing from the page counts any more.
+        // for the bye to go out) the host is parked. Nothing from the page counts any more (from now: `ending`).
         public Task End(string reason)
         {
             if (closed || ending) return closing ?? Task.FromResult(0);
@@ -228,8 +269,12 @@ namespace Beam
             var m = new Dictionary<string, object>();
             m["t"] = "end";
             m["reason"] = reason;
-            try { if (core != null) core.PostWebMessageAsJson(Json.Stringify(m)); } catch { }
-            return Task.Delay(500).ContinueWith(t => Park(), TaskScheduler.FromCurrentSynchronizationContext());
+            string json = Json.Stringify(m);
+            return RcThread.Run(() =>
+            {
+                try { if (core != null) core.PostWebMessageAsJson(json); } catch { }
+                return Task.Delay(500).ContinueWith(t => Park(), TaskScheduler.FromCurrentSynchronizationContext());
+            });
         }
 
         // After a session: nothing of it is left (a blank page; the gate refuses everything; nobody hears it), and the
@@ -238,26 +283,28 @@ namespace Beam
         {
             if (closed) return;
             Message = null;
+            Input = null;
+            InputAllowed = false;
             gate = () => false;
             try { if (core != null) core.Navigate("about:blank"); } catch { }
             var old = parked;
             parked = this;
-            if (old != null && old != this) { var ignored = old.Close(); }
+            if (old != null && old != this) { var ignored = old.CloseHere(false); }
             if (parkTimer == null)
             {
                 parkTimer = new System.Windows.Forms.Timer();
                 parkTimer.Interval = ParkMs;
-                parkTimer.Tick += (s, e) => { parkTimer.Stop(); var p = parked; parked = null; if (p != null) { var ignored = p.Close(); } };
+                parkTimer.Tick += (s, e) => { parkTimer.Stop(); var p = parked; parked = null; if (p != null) { var ignored = p.CloseHere(false); } };
             }
             parkTimer.Stop();
             parkTimer.Start();
             Log.Write("Remote control: capture stopped (its host is kept 2 minutes for a reconnect)");
         }
 
-        public Task Close() { return Close(false); }
+        public Task Close() { return RcThread.Run(() => CloseHere(false)); }
 
         // Closes the web view and waits (at most 8 s) for its browser process to exit: the next host needs the folder.
-        Task Close(bool force)
+        Task CloseHere(bool force)
         {
             if (closed && !force) return closing ?? Task.FromResult(0);
             closed = true;
@@ -280,7 +327,8 @@ namespace Beam
 
         public static void CloseAll()
         {
-            foreach (var h in open.ToList()) { var ignored = h.Close(); }
+            if (!RcThread.Started) return;
+            RcThread.Post(() => { foreach (var h in open.ToList()) { var ignored = h.CloseHere(false); } });
         }
 
         // Never shown: it only gives the web view a window.
@@ -307,6 +355,77 @@ namespace Beam
                     return cp;
                 }
             }
+        }
+    }
+
+    // (1.12.1) The thread the capture hosts live on: an STA with its own message loop, started at the first session and
+    // kept (it owns no visible window, so nothing the viewer clicks can hold it). Nothing here ever waits for the UI
+    // thread, and the UI thread never waits for this one (Run returns a task): neither can hang the other.
+    static class RcThread
+    {
+        static readonly object gate = new object();
+        static Control marshal;
+
+        public static bool Started { get { return marshal != null; } }
+
+        static Control Marshal()
+        {
+            lock (gate)
+            {
+                if (marshal != null) return marshal;
+                Control c = null;
+                var ready = new ManualResetEventSlim();
+                var t = new Thread(() =>
+                {
+                    c = new Control();
+                    GC.KeepAlive(c.Handle); // its window, on this thread
+                    SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+                    ready.Set();
+                    Application.Run();
+                });
+                t.SetApartmentState(ApartmentState.STA);
+                t.IsBackground = true;
+                t.Name = "Beam remote control page";
+                t.Start();
+                ready.Wait();
+                marshal = c;
+                return c;
+            }
+        }
+
+        public static void Post(Action a)
+        {
+            try
+            {
+                Marshal().BeginInvoke(new Action(() =>
+                {
+                    try { a(); }
+                    catch (Exception ex) { Log.Error("Remote control: the page's thread", ex); }
+                }));
+            }
+            catch (Exception ex) { Log.Error("Remote control: the page's thread", ex); }
+        }
+
+        public static Task Run(Func<Task> f)
+        {
+            var done = new TaskCompletionSource<bool>();
+            Post(async () =>
+            {
+                try { await f(); done.TrySetResult(true); }
+                catch (Exception ex) { done.TrySetException(ex); }
+            });
+            return done.Task;
+        }
+
+        public static Task<T> Run<T>(Func<T> f)
+        {
+            var done = new TaskCompletionSource<T>();
+            Post(() =>
+            {
+                try { done.TrySetResult(f()); }
+                catch (Exception ex) { done.TrySetException(ex); }
+            });
+            return done.Task;
         }
     }
 }

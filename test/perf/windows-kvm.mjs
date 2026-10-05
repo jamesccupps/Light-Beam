@@ -12,6 +12,7 @@
 // 1.12.1 (the user's first day: Office Desktop froze once its chat window opened mid-session): the PC's chat window opens
 // during the session with no window of another process inside Beam's (web views hosted window to visual, so no input
 // queue shared with WebView2's processes), and the banner's pill keeps Hide.
+// 1.12.2 (the stuck release was the real cause): the PC's UI thread held 4 s, the laptop's press and release still go in.
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -254,6 +255,24 @@ try {
   let w2 = await where();
   check(!!w2 && w2.x === w.x - Math.trunc(100 * scale + 1e-9) && w2.y === w.y, `a move of 100 px on the laptop moves it ${Math.trunc(100 * scale + 1e-9)} px on SHOP at ${Math.round(scale * 100)}% (${w2 && w2.line})`);
   check(!!(await waitInput(r => r.type === 'mouse' && r.flags === MOVE, i0, 4000)), '...as a move there');
+
+  // (1.12.2) Shop's UI thread held for 4 s, as Windows' modal loop holds it while one of Beam's own title bar buttons is
+  // pressed with the laptop's mouse (the user's Camera and Shop Desktop stayed stuck until clicked there: the release
+  // came through that thread): the laptop's press, move and release still go in there meanwhile, from the page's thread.
+  i0 = inputLines().length;
+  n = lines(inst.pc).length;
+  rc('uiblock:4000');
+  check(!!(await waitLog(inst.pc, /\(test\) the UI thread is held for 4000 ms/, n, 5000)), 'SHOP\'s UI thread is held (4 s)');
+  kvm('btn:0:down');
+  kvm('move:-20,0');
+  kvm('btn:0:up');
+  const heldUp = await waitInput(r => r.type === 'mouse' && (r.flags & LEFTUP), i0, 3500);
+  const stillHeld = count(inst.pc, /\(test\) the UI thread is free again/, n) === 0;
+  const heldDown = inputLines().slice(i0).find(r => r.type === 'mouse' && (r.flags & LEFTDOWN));
+  check(!!heldDown && !!heldUp && stillHeld, `...and the laptop's press and release went in there meanwhile (${heldUp ? (stillHeld ? 'while held' : 'only after') : 'not at all'})`);
+  check(!!(await waitLog(inst.pc, /\(test\) the UI thread is free again/, n, 8000)), '...then the UI thread is free again');
+  st = await pcState();
+  check(!!st && /kvm live, here/.test(st), `Shop's session goes on (${st})`);
 
   // 3. A click, the wheel and a key go along; this PC gets none of them (the hooks would keep them).
   i0 = inputLines().length;

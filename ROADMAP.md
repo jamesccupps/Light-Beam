@@ -34,7 +34,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   (servers signing their requests), big files going direct.
 - **Remote control, further:** a Lowest delay mode (measured end to end), capture straight into the hardware encoder,
   decoding on the phone with WebCodecs, the cursor drawn on the viewing device, full-colour text, sound.
-- **The shared mouse and keyboard, further:** PCs on any side (a drag-to-arrange page), dragging files between them.
+- **The shared mouse and keyboard, further:** PCs on any side (a drag-to-arrange page), dragging files between them, and
+  the phone as a trackpad and keyboard for a PC without the picture (next to screen sharing, not instead of it).
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
 - **Builds and releases** with GitHub Actions.
 
