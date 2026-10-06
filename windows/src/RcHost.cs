@@ -38,6 +38,7 @@ namespace Beam
         static RcHost parked;                               // the last session's host, kept warm
         static System.Windows.Forms.Timer parkTimer;
         const int ParkMs = 120000;
+        static bool keepParked;                             // (1.12.4) a PC the KVM uses: the parked host stays (no 2 minutes)
 
         public static Action<Action> Ui;                    // posts to the UI thread (App.Post)
 
@@ -92,6 +93,24 @@ namespace Beam
         }
 
         public bool Reused { get { return reused; } }
+
+        // (1.12.4) A PC the KVM uses all day keeps a host warm, parked (a blank page, its gate shut, nobody listening): the
+        // next session (the laptop turning it on, or after an update) starts without a browser process to start first
+        // (Office Desktop took 4.6 s for that), and a parked host stays until closed. Nothing if a host is there already.
+        public static Task Warm(Config cfg, string source, bool devTools)
+        {
+            return RcThread.Run(async () =>
+            {
+                keepParked = true;
+                if (parkTimer != null) parkTimer.Stop();
+                if (parked != null || open.Count > 0) return; // (kept, or a session has one: one at a time)
+                var h = new RcHost(cfg, source, devTools, () => false);
+                await h.StartHere();
+                if (h.closed || h.core == null || parked != null || open.Count > 1) { var ignored = h.CloseHere(false); return; }
+                h.ending = true; // (a parked host: nothing from its page counts)
+                h.Park();
+            });
+        }
 
         public Task Start() { return RcThread.Run(StartHere); }
 
@@ -297,6 +316,7 @@ namespace Beam
                 parkTimer.Tick += (s, e) => { parkTimer.Stop(); var p = parked; parked = null; if (p != null) { var ignored = p.CloseHere(false); } };
             }
             parkTimer.Stop();
+            if (keepParked) { Log.Write("Remote control: capture host kept warm for the next session"); return; }
             parkTimer.Start();
             Log.Write("Remote control: capture stopped (its host is kept 2 minutes for a reconnect)");
         }
@@ -325,10 +345,16 @@ namespace Beam
             return closing;
         }
 
+        // (1.12.4) The KVM uses this PC: a session's host stays parked after it.
+        public static void KeepWarm()
+        {
+            RcThread.Post(() => keepParked = true);
+        }
+
         public static void CloseAll()
         {
             if (!RcThread.Started) return;
-            RcThread.Post(() => { foreach (var h in open.ToList()) { var ignored = h.CloseHere(false); } });
+            RcThread.Post(() => { keepParked = false; foreach (var h in open.ToList()) { var ignored = h.CloseHere(false); } });
         }
 
         // Never shown: it only gives the web view a window.

@@ -13,12 +13,15 @@
 // during the session with no window of another process inside Beam's (web views hosted window to visual, so no input
 // queue shared with WebView2's processes), and the banner's pill keeps Hide.
 // 1.12.2 (the stuck release was the real cause): the PC's UI thread held 4 s, the laptop's press and release still go in.
+// 1.12.4: pictures through the clipboard both ways (several 48 KB parts on `clip`), none taken as a PC connects, and the
+// PC's page kept warm after a session (the next one starts on it).
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -128,6 +131,28 @@ function foreignChildren(pid) {
   const m = /^windows: (.*)$/m.exec(r.stdout || '');
   return m ? m[1].split(', ').filter(Boolean) : null;
 }
+
+// (1.12.4) A PNG of w×h noise (it doesn't compress: several 48 KB parts), and a PNG's size.
+function noisePng(w, h, seed) {
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const c = Buffer.alloc(4);
+    c.writeUInt32BE(zlib.crc32(td) >>> 0);
+    return Buffer.concat([len, td, c]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; // 8 bits, RGB
+  ihdr[9] = 2;
+  const row = w * 3 + 1, raw = Buffer.alloc(row * h);
+  let x = seed >>> 0;
+  for (let y = 0; y < h; y++) for (let i = 1; i < row; i++) { x = (Math.imul(x, 1103515245) + 12345) >>> 0; raw[y * row + i] = x >>> 24; }
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+const pngSize = file => { try { const b = fs.readFileSync(file); return [b.readUInt32BE(16), b.readUInt32BE(20)]; } catch { return null; } };
 
 // Where the laptop's pointer is (--test-kvm where): { here, x, y } or { on, screen, w, h, scale, x, y }.
 async function where() {
@@ -319,6 +344,32 @@ try {
   for (let k = 0; k < 60 && got !== 'kvm clip from shop'; k++) { await sleep(100); try { got = fs.readFileSync(lapClip, 'utf8'); } catch {} }
   check(got === 'kvm clip from shop', `text copied on SHOP is on the laptop's clipboard (${got})`);
 
+  // 4b. (1.12.4) Pictures (the user: a screenshot pasted "just pasted the text that was already copied"): the laptop's
+  // goes to SHOP as the pointer does when it has no text, in parts on `clip`; Shop's comes back while the pointer is there.
+  nl = lines(inst.laptop).length;
+  kvm('move:5000,0');
+  await waitLog(inst.laptop, /Keyboard and mouse: \(test\) back on this PC/, nl, 5000);
+  fs.rmSync(path.join(inst.laptop.dir, 'clipboard-in.txt'), { force: true });
+  const lapPng = noisePng(300, 200, 7);
+  fs.writeFileSync(path.join(inst.laptop.dir, 'clipboard-in.png'), lapPng);
+  for (const x of ['clipboard.png', 'clipboard-image.txt']) fs.rmSync(path.join(inst.pc.dir, x), { force: true });
+  nl = lines(inst.laptop).length;
+  n = lines(inst.pc).length;
+  kvm('edge:0.5');
+  const imgWent = await waitLog(inst.laptop, /this PC's clipboard picture went to KVM Test SHOP \(\d+ KB\)/, nl, 8000);
+  check(!!imgWent && lapPng.length > 2 * 48 * 1024, `the laptop's picture goes to SHOP with the pointer (${Math.round(lapPng.length / 1024)} KB, ${Math.ceil(lapPng.length / 49152)} parts)`);
+  const pcHas = await waitLog(inst.pc, /the viewer's clipboard picture is on this PC's clipboard \(300×200\)/, n, 8000);
+  let pcImg = null;
+  try { pcImg = fs.readFileSync(path.join(inst.pc.dir, 'clipboard-image.txt'), 'utf8'); } catch {}
+  check(!!pcHas && /^png remote/.test(pcImg || '') && JSON.stringify(pngSize(path.join(inst.pc.dir, 'clipboard.png'))) === '[300,200]', `...and is on Shop's clipboard, marked as remote (${pcImg})`);
+  fs.rmSync(path.join(inst.pc.dir, 'clipboard-in.txt'), { force: true });
+  await sleep(1500); // (Shop's test clipboard is looked at every second)
+  for (const x of ['clipboard.png', 'clipboard-image.txt']) fs.rmSync(path.join(inst.laptop.dir, x), { force: true });
+  nl = lines(inst.laptop).length;
+  fs.writeFileSync(path.join(inst.pc.dir, 'clipboard-in.png'), noisePng(240, 160, 11));
+  const lapHas = await waitLog(inst.laptop, /KVM Test Shop's clipboard picture is on this PC's clipboard \(240×160\)/, nl, 10000);
+  check(!!lapHas && JSON.stringify(pngSize(path.join(inst.laptop.dir, 'clipboard.png'))) === '[240,160]', 'a picture copied on SHOP is on the laptop\'s clipboard while the pointer is there');
+
   // 5. Back from Shop's tray ("Back to KVM Test Laptop"), and its banner folded into the tray (remembered there).
   nl = lines(inst.laptop).length;
   rc('kvmback');
@@ -351,6 +402,8 @@ try {
   nl = lines(inst.laptop).length;
   const killedAt = Date.now();
   spawnSync('taskkill', ['/PID', String(inst.pc.proc.pid), '/T', '/F'], { windowsHide: true });
+  // (1.12.4: it comes back with another picture on its clipboard, which mustn't land on the laptop's as it connects)
+  fs.writeFileSync(path.join(inst.pc.dir, 'clipboard-in.png'), noisePng(200, 100, 23));
   const back = await waitLog(inst.laptop, /Keyboard and mouse: back on this PC \(/, nl, 8000);
   const took = Date.now() - killedAt;
   check(!!back && took < 5000, `SHOP gone: the laptop's pointer came back by itself in ${(took / 1000).toFixed(1)} s (${back ? back.replace(/.*back on this PC /, '') : 'it didn\'t'})`);
@@ -362,14 +415,28 @@ try {
   const again = await waitLog(inst.laptop, /Keyboard and mouse: KVM Test SHOP is ready \(/, nl, 90000);
   check(!!again, 'the laptop\'s link to SHOP came back by itself');
   check(!!(await waitLog(inst.pc, /folded into the tray \(as chosen at this PC\)/, 0, 5000)), '...and SHOP keeps its banner folded, as chosen there');
+  await sleep(2500);
+  check(JSON.stringify(pngSize(path.join(inst.laptop.dir, 'clipboard.png'))) === '[240,160]' && count(inst.laptop, /clipboard picture is on this PC's clipboard \(200×100\)/) === 0, 'SHOP\'s picture stays off the laptop\'s clipboard as it connects again');
 
   // 8. Stopped at SHOP: the laptop doesn't ask again by itself.
   nl = lines(inst.laptop).length;
+  const nStop = lines(inst.pc).length;
   rc('stop');
   check(!!(await waitLog(inst.laptop, /Keyboard and mouse: KVM Test SHOP ended it \(stopped at that PC\)/, nl, 8000)), 'Stop at SHOP ends it; the laptop says it won\'t ask again until turned off and on');
   n = lines(inst.pc).length;
   await sleep(8000);
   check(count(inst.pc, /asks to share its keyboard and mouse/, n) === 0, 'it didn\'t ask again');
+
+  // 8b. (1.12.4) SHOP kept its page warm (a PC the KVM uses: no 2 minutes), and the next session starts on it.
+  check(!!(await waitLog(inst.pc, /capture host kept warm for the next session/, nStop, 5000)), 'SHOP keeps its page warm after the session');
+  nl = lines(inst.laptop).length;
+  kvm('off');
+  await waitLog(inst.laptop, /Keyboard and mouse: off \(test\)/, nl, 5000);
+  n = lines(inst.pc).length;
+  nl = lines(inst.laptop).length;
+  kvm(`on:${pcId}`);
+  check(!!(await waitLog(inst.pc, /its page \(no capture: keyboard and mouse only\) is reused/, n, 30000)), '...and the next session starts on it (reused)');
+  check(!!(await waitLog(inst.laptop, /Keyboard and mouse: KVM Test SHOP is ready \(/, nl, 30000)), '...and is ready');
 
   // 9. Off; nothing real anywhere.
   nl = lines(inst.laptop).length;

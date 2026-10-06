@@ -233,8 +233,8 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **In the viewer:** the Picture panel (fit the PC to this screen: its resolution and display scaling change to suit
   the screen you view it on and go back when you disconnect, on by default except on phones; Auto, Sharp text, Smooth
   motion or Data saver; picture size, frame rate, data limit, codec and details, kept per PC), choose a screen, full
-  screen, a Keys menu (Win, Alt+Tab, Lock this PC…), and clipboard sync, which is off until you turn it on for that
-  session. A phone asks "Still there?" after 10 minutes without a touch.
+  screen, a Keys menu (Win, Alt+Tab, Lock this PC…), and clipboard sync (text and pictures, such as a screenshot),
+  which is off until you turn it on for that session. A phone asks "Still there?" after 10 minutes without a touch.
 - **Lag** (Windows app 1.11): the PC asks every viewer, the phone included, to show each frame the moment it arrives.
   The chip over the picture shows the lag (from your touch to the PC's answer on your screen, measured), and
   "relayed" while Tailscale relays the connection through its servers, which is slower; Show details has the
@@ -252,7 +252,7 @@ address, so the browser becomes part of that device instead of a separate entry.
   ticked (that's only ever set at that PC).
 - Move the pointer off the left edge of this PC's screens and it carries on onto the next PC's main screen at the same
   height, across its screens as Windows arranges them there (a TV above a monitor is reached from that PC's monitor),
-  and on to the next PC. Keys, clicks, the wheel and copied text go along; text copied there comes back.
+  and on to the next PC. Keys, clicks, the wheel and copied text or pictures go along; what's copied there comes back.
 - **Back:** move the pointer back over the edge (worked out on this PC, so it works even if the other PC stops
   answering), or that PC's tray → **Back to *this PC***. It also comes back by itself when a PC stops answering for a
   second and a half, or this PC locks. Ctrl+Alt+Del always stays on this PC.

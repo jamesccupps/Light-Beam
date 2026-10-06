@@ -936,6 +936,108 @@ namespace Beam
             return null;
         }
 
+        // (1.12.4) The clipboard's picture for a remote control viewer or a PC beside, as PNG, or null: as for text, nothing
+        // marked as not to be shared (Beam's own copy of a remote picture is), and none over max bytes. Text wins (Office
+        // copies carry both): the caller asks for this only when there's no text. A bitmap without PNG is encoded here.
+        public static byte[] ReadSharableImage(int max)
+        {
+            if (IsolatedDir != null)
+            {
+                try
+                {
+                    if (File.Exists(Path.Combine(IsolatedDir, "clipboard-in.secret"))) return null;
+                    string p = Path.Combine(IsolatedDir, "clipboard-in.png");
+                    if (!File.Exists(p) || new FileInfo(p).Length > max) return null;
+                    return File.ReadAllBytes(p);
+                }
+                catch { return null; }
+            }
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    var data = Clipboard.GetDataObject();
+                    if (data == null || data.GetDataPresent("Clipboard Viewer Ignore") || data.GetDataPresent("ExcludeClipboardContentFromMonitorProcessing")) return null;
+                    if (Zero(data, "CanIncludeInClipboardHistory") || Zero(data, "CanUploadToCloudClipboard")) return null;
+                    if (data.GetDataPresent("PNG"))
+                    {
+                        var s = data.GetData("PNG") as Stream;
+                        if (s != null)
+                            using (var ms = new MemoryStream())
+                            {
+                                s.CopyTo(ms);
+                                if (ms.Length > 0) return ms.Length <= max ? ms.ToArray() : null;
+                            }
+                    }
+                    if (!data.GetDataPresent(DataFormats.Bitmap)) return null;
+                    using (var img = data.GetData(DataFormats.Bitmap) as Image)
+                    {
+                        if (img == null || (long)img.Width * img.Height > MaxCopyPixels) return null;
+                        using (var ms = new MemoryStream())
+                        {
+                            img.Save(ms, ImageFormat.Png);
+                            return ms.Length <= max ? ms.ToArray() : null;
+                        }
+                    }
+                }
+                catch (ExternalException) { Thread.Sleep(50); }
+                catch { return null; }
+            }
+            return null;
+        }
+
+        // (1.12.4) A picture from a viewer or a PC beside, as SetRemoteText: never to the cloud clipboard, out of Win+V
+        // history when "Keep it in clipboard history" is off, and (so marked) never sent back. png: the bytes as they came
+        // when they're a PNG (kept exactly, transparency too), else null.
+        public static bool SetRemoteImage(Bitmap bmp, byte[] png, bool history)
+        {
+            if (IsolatedDir != null)
+            {
+                try
+                {
+                    bmp.Save(Path.Combine(IsolatedDir, "clipboard.png"), ImageFormat.Png);
+                    File.WriteAllText(Path.Combine(IsolatedDir, "clipboard-image.txt"), (png != null ? "png" : "bitmap") + " remote" + (history ? "" : " no-history"));
+                    return true;
+                }
+                catch (Exception ex) { Log.Error("Test clipboard", ex); return false; }
+            }
+            try
+            {
+                var data = new DataObject();
+                data.SetData(DataFormats.Bitmap, true, bmp);
+                if (png != null) data.SetData("PNG", false, new MemoryStream(png));
+                data.SetData("CanUploadToCloudClipboard", new MemoryStream(new byte[4]));
+                if (!history) data.SetData("CanIncludeInClipboardHistory", new MemoryStream(new byte[4]));
+                Clipboard.SetDataObject(data, true, 10, 100);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Clipboard", ex);
+                return false;
+            }
+        }
+
+        public static bool IsPng(byte[] b)
+        {
+            return b != null && b.Length > 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 && b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A;
+        }
+
+        // (1.12.4) Changes whenever what the clipboard shares may have, text or picture (tests: the test clipboard's files).
+        public static uint ShareSequence()
+        {
+            if (IsolatedDir != null)
+            {
+                long t = 0;
+                foreach (var f in new[] { "clipboard-in.txt", "clipboard-in.secret", "clipboard-in.png" })
+                {
+                    try { string p = Path.Combine(IsolatedDir, f); if (File.Exists(p)) t = t * 31 + File.GetLastWriteTimeUtc(p).Ticks + 1; } catch { }
+                }
+                return (uint)(t ^ (t >> 32));
+            }
+            return Native.GetClipboardSequenceNumber();
+        }
+
         static bool Zero(IDataObject data, string format)
         {
             if (!data.GetDataPresent(format)) return false;
@@ -958,6 +1060,83 @@ namespace Beam
                 return (uint)(t ^ (t >> 32));
             }
             return Native.GetClipboardSequenceNumber();
+        }
+    }
+
+    // (1.12.4) A picture through remote control's or the KVM's clipboard sync (the user: a screenshot pasted "just pasted
+    // the text that was already copied"): on the `clip` channel of its own (a big one on `ctl` would hold up the pings
+    // the KVM watches), in order, in parts of 48 KB as base64: {t: "img", n, i, of, size, type, d}.
+    static class ClipImage
+    {
+        public const int MaxBytes = 16 * 1024 * 1024, PartBytes = 48 * 1024;
+        public const int MaxParts = (MaxBytes + PartBytes - 1) / PartBytes;
+
+        // The parts, each as the JSON text the channel carries.
+        public static List<string> Parts(byte[] bytes, long n)
+        {
+            var list = new List<string>();
+            int of = Math.Max(1, (bytes.Length + PartBytes - 1) / PartBytes);
+            for (int i = 0; i < of; i++)
+            {
+                int at = i * PartBytes, len = Math.Min(PartBytes, bytes.Length - at);
+                var p = new Dictionary<string, object>();
+                p["t"] = "img";
+                p["n"] = n;
+                p["i"] = (long)i;
+                p["of"] = (long)of;
+                p["size"] = (long)bytes.Length;
+                p["type"] = "image/png";
+                p["d"] = Convert.ToBase64String(bytes, at, len);
+                list.Add(Json.Stringify(p));
+            }
+            return list;
+        }
+
+        // A picture that came, decoded off the UI thread (a big one takes a while): the bitmap and, if it came as a PNG,
+        // its bytes as they were. Null when it isn't one Windows can read.
+        public static Bitmap Decode(byte[] bytes, out byte[] png)
+        {
+            png = null;
+            string why;
+            byte[] alpha;
+            var bmp = ClipPayload.DecodeImage(bytes, out alpha, out why);
+            if (bmp != null) png = ClipPayload.IsPng(bytes) ? bytes : alpha;
+            return bmp;
+        }
+    }
+
+    // One picture coming in, part by part; anything out of step (another one started, a part missing) drops it.
+    class ClipImageIn
+    {
+        long n = -1, size;
+        int of, next;
+        MemoryStream data;
+
+        public long Number { get { return n; } }
+
+        // The whole picture once its last part has come, else null.
+        public byte[] Add(Dictionary<string, object> p)
+        {
+            if (p == null || Json.Str(p, "t") != "img") return null;
+            long pn = Json.Long(p, "n", -1), i = Json.Long(p, "i", -1), pof = Json.Long(p, "of", 0), psize = Json.Long(p, "size", -1);
+            if (i == 0)
+            {
+                n = pn;
+                of = (int)Math.Min(pof, int.MaxValue);
+                size = psize;
+                next = 0;
+                data = of >= 1 && of <= ClipImage.MaxParts && size >= 1 && size <= ClipImage.MaxBytes ? new MemoryStream() : null;
+            }
+            if (data == null || pn != n || i != next) { data = null; return null; }
+            byte[] chunk;
+            try { chunk = Convert.FromBase64String(Json.Str(p, "d") ?? ""); }
+            catch { data = null; return null; }
+            if (data.Length + chunk.Length > size) { data = null; return null; }
+            data.Write(chunk, 0, chunk.Length);
+            if (++next < of) return null;
+            var all = data.Length == size ? data.ToArray() : null;
+            data = null;
+            return all;
         }
     }
 

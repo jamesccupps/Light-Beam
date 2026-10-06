@@ -16,6 +16,7 @@
   const QUIET_MS = 1500;      // no answer for this long: Beam hears `quiet`
   const RESOLVE_MS = 5000;    // a peer-reflexive remote reads "" until the PC's own candidate replaces it: this long at most
   const MV_BUFFERED = 16384;  // a move waits while the `mv` channel has this much queued (the next one is newer anyway)
+  const CLIP_BUFFERED = 1 << 20; // (1.12.4) a picture's parts go on `clip` as it drains: at most this much waiting in it
   const links = new Map();    // link id -> its state
 
   // ------------------------------------------------------------------ addresses (as rc-host.js and remote.js)
@@ -73,7 +74,7 @@
   function open(id, peer) {
     close(id);
     const l = { id, peer: peer || {}, pc: null, ch: null, origin: '', pending: [], out: [], outTimer: 0, verified: false, hello: null,
-      pingN: 0, pingTimer: 0, lastPong: 0, quiet: false, reporting: false, again: false, lastSel: null, statsTimer: 0 };
+      pingN: 0, pingTimer: 0, lastPong: 0, quiet: false, reporting: false, again: false, lastSel: null, statsTimer: 0, clipOut: [] };
     links.set(id, l);
     return l;
   }
@@ -86,8 +87,12 @@
       ctl: pc.createDataChannel('ctl', { negotiated: true, id: 0, ordered: true }),
       in: pc.createDataChannel('in', { negotiated: true, id: 1, ordered: true }),
       mv: pc.createDataChannel('mv', { negotiated: true, id: 2, ordered: false, maxRetransmits: 0 }),
+      clip: pc.createDataChannel('clip', { negotiated: true, id: 3, ordered: true }), // (1.12.4: pictures; a PC before it never opens it)
     };
     const mine = () => l.pc === pc;
+    l.ch.clip.bufferedAmountLowThreshold = 256 * 1024;
+    l.ch.clip.onbufferedamountlow = l.ch.clip.onopen = () => { if (mine()) drainClip(l); };
+    l.ch.clip.onmessage = e => { if (mine() && l.verified && typeof e.data === 'string' && e.data.length <= 80000) post({ t: 'clip', link: l.id, d: e.data }); };
     l.ch.ctl.onopen = () => { if (mine() && l.verified) sendHello(l); };
     l.ch.ctl.onmessage = e => { if (mine()) onCtl(l, e.data); };
     l.ch.ctl.onclose = () => { if (mine() && links.get(l.id) === l) post({ t: 'state', link: l.id, pc: 'closed' }); };
@@ -106,6 +111,7 @@
     if (l.ch) for (const c of Object.values(l.ch)) { c.onopen = c.onmessage = c.onclose = null; try { c.close(); } catch (e) { } }
     if (l.pc) { l.pc.onicecandidate = l.pc.onconnectionstatechange = null; try { l.pc.close(); } catch (e) { } }
     l.pc = l.ch = null;
+    l.clipOut = [];
     l.verified = false;
     l.lastSel = null;
     l.lastPong = 0;
@@ -224,6 +230,14 @@
     try { c.send(JSON.stringify(m)); return true; } catch (e) { return false; }
   }
 
+  function drainClip(l) {
+    const c = l.ch && l.ch.clip;
+    if (!l.verified || !c || c.readyState !== 'open') { if (!c || c.readyState === 'closed') l.clipOut = []; return; }
+    while (l.clipOut.length && c.bufferedAmount < CLIP_BUFFERED) {
+      try { c.send(l.clipOut.shift()); } catch (e) { l.clipOut = []; return; }
+    }
+  }
+
   // Twice a second; the PC's page answers at once. Quiet (no answer for 1.5 s, once one has come) and back again are
   // told to Beam once each.
   function ping(l) {
@@ -261,6 +275,7 @@
         break;
       case 'verified': onVerified(l, m.hello); break;
       case 'send': if (m.m && typeof m.m === 'object' && (m.ch === 'in' || m.ch === 'mv' || m.ch === 'ctl')) send(l, m.ch, m.m); break;
+      case 'clipout': if (l.verified && typeof m.d === 'string' && m.d.length <= 80000) { l.clipOut.push(m.d); drainClip(l); } break; // (a picture's part, as text)
       case 'close': close(m.link); break;
     }
   });

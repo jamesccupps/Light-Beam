@@ -45,6 +45,10 @@ namespace Beam
         public int Fails;
         public string Why;                   // what happened last (the tray, beam.log)
         public string ClipHad;               // the clipboard text it has from here, or gave here (\n line ends)
+        public string ClipImgHad;            // (1.12.4) the same for a picture: its bytes' hash
+        public uint ClipImgSeq;              // this PC's clipboard (sequence) when its picture was last looked at for it
+        public bool ClipImgRecent;           // the picture coming from it started while the pointer was there (or just left)
+        public readonly ClipImageIn ClipIn = new ClipImageIn();
         // (1.12.3) -1: never. long.MinValue overflowed "now - it" into "it just left": each PC's clipboard text went onto
         // this PC's clipboard as the PC connected.
         public long LeftAt = -1;             // (clock ms) when the pointer last left it
@@ -113,6 +117,8 @@ namespace Beam
         // right after: while that's unchanged, it's still this PC's clipboard text, and goes on to the next PC.
         string clipSet;
         uint clipSetSeq;
+        byte[] clipImgSet;                   // (1.12.4) the same for a picture
+        uint clipImgSetSeq;
 
         public KvmController(App app)
         {
@@ -209,7 +215,8 @@ namespace Beam
             tick.Start();
             Log.Write("Keyboard and mouse: on (" + why + "): " + string.Join(", ", links.Select(NameOf)) + " to the left of this PC, nearest first");
             app.MarkChanged();
-            // (the page's "ready" asks each PC)
+            // (1.12.4) Each PC asked now, while the page still loads (~2 s): its own page starts meanwhile.
+            foreach (var l in links.ToList()) Connect(l);
         }
 
         void StartHooks()
@@ -278,7 +285,8 @@ namespace Beam
 
         async void Connect(KvmLink l)
         {
-            if (!started || page == null || !page.Ready || l.State == "asking" || l.State == "connecting" || l.State == "live" || l.State == "stopped") return;
+            // (1.12.4: not waiting for the page to be ready; what's posted to it waits there until it is)
+            if (!started || page == null || l.State == "asking" || l.State == "connecting" || l.State == "live" || l.State == "stopped") return;
             var api = app.Api;
             if (api == null) { Wait(l, 15, "not connected to Beam"); return; }
             l.State = "asking";
@@ -451,6 +459,9 @@ namespace Beam
             if (l == null) return;
             switch (t)
             {
+                case "clip": // (1.12.4) a part of a picture from that PC's clipboard
+                    if (l.Verified) OnClipPart(l, Json.ParseObject(Json.Str(m, "d")));
+                    break;
                 case "answer":
                 {
                     string sdp = Json.Str(m, "sdp");
@@ -560,6 +571,7 @@ namespace Beam
             hello["app"] = "windows";
             hello["version"] = AppVersion.Text;
             hello["kvm"] = true;
+            hello["caps"] = new object[] { "clip", "text", "clipimg" }; // (1.12.4: pictures through the clipboard too)
             var v = new Dictionary<string, object>();
             v["t"] = "verified";
             v["link"] = l.Session;
@@ -1013,7 +1025,8 @@ namespace Beam
         void ClipTo(KvmLink l)
         {
             string text = Norm(ClipNow());
-            if (string.IsNullOrEmpty(text) || text == l.ClipHad || Encoding.UTF8.GetByteCount(text) > MaxClip) return;
+            if (string.IsNullOrEmpty(text)) { ClipImageTo(l); return; } // (1.12.4: no text, maybe a picture)
+            if (text == l.ClipHad || Encoding.UTF8.GetByteCount(text) > MaxClip) return;
             l.ClipHad = text;
             var c = new Dictionary<string, object>();
             c["t"] = "clip";
@@ -1030,6 +1043,76 @@ namespace Beam
             return ClipPayload.ReadSharableText();
         }
 
+        // (1.12.4) This PC's clipboard picture (a screenshot) to a PC, when there's no text: read and encoded on a thread of
+        // its own (a big one takes a moment, and the pointer is crossing over right now), then in parts on `clip`, unless
+        // that PC has it already. A picture it got from a PC goes on as it came (Beam marks those not to be shared).
+        void ClipImageTo(KvmLink l)
+        {
+            uint seq = ClipPayload.ShareSequence();
+            if (seq == l.ClipImgSeq) return; // (nothing new since it was looked at for this PC)
+            l.ClipImgSeq = seq;
+            byte[] got = clipImgSet != null && seq == clipImgSetSeq ? clipImgSet : null;
+            var t = new Thread(() =>
+            {
+                byte[] png = got ?? ClipPayload.ReadSharableImage(ClipImage.MaxBytes);
+                if (png == null) return;
+                string hash = Hash(png);
+                app.Post(() =>
+                {
+                    var p = page;
+                    if (!started || p == null || !links.Contains(l) || !l.Verified || l.Session == null || hash == l.ClipImgHad) return;
+                    l.ClipImgHad = hash;
+                    foreach (var part in ClipImage.Parts(png, seq))
+                    {
+                        var o = new Dictionary<string, object>();
+                        o["t"] = "clipout";
+                        o["link"] = l.Session;
+                        o["d"] = part;
+                        p.Post(o);
+                    }
+                    Log.Write("Keyboard and mouse: this PC's clipboard picture went to " + NameOf(l) + " (" + (png.Length + 1023) / 1024 + " KB)");
+                });
+            });
+            t.SetApartmentState(ApartmentState.STA); // (the clipboard wants one)
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        static string Hash(byte[] b)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create()) return Convert.ToBase64String(sha.ComputeHash(b));
+        }
+
+        // (1.12.4) A part of a PC's clipboard picture: taken under the text's rule, as of its first part (a big one may
+        // still be coming as the pointer comes back), decoded off the UI thread, then onto this PC's clipboard.
+        void OnClipPart(KvmLink l, Dictionary<string, object> p)
+        {
+            if (p != null && Json.Long(p, "i", -1) == 0) l.ClipImgRecent = AwayOn(l) || (l.LeftAt >= 0 && clock.ElapsedMilliseconds - l.LeftAt < ClipAfterMs);
+            var bytes = l.ClipIn.Add(p);
+            if (bytes == null) return;
+            string hash = Hash(bytes);
+            if (!l.ClipImgRecent || hash == l.ClipImgHad) { l.ClipImgHad = hash; return; }
+            l.ClipImgHad = hash;
+            Task.Run(() =>
+            {
+                byte[] png;
+                var bmp = ClipImage.Decode(bytes, out png);
+                app.Post(() =>
+                {
+                    try
+                    {
+                        if (bmp == null) { Log.Write("Keyboard and mouse: " + NameOf(l) + "'s clipboard picture isn't one Windows can read"); return; }
+                        if (!ClipPayload.SetRemoteImage(bmp, png, app.Cfg.ClipboardHistory)) return;
+                        clipImgSet = bytes;
+                        clipImgSetSeq = ClipPayload.ShareSequence();
+                        clipSet = null; // (the text a PC gave before isn't on the clipboard any more)
+                        Log.Write("Keyboard and mouse: " + NameOf(l) + "'s clipboard picture is on this PC's clipboard (" + bmp.Width + "×" + bmp.Height + ")");
+                    }
+                    finally { if (bmp != null) bmp.Dispose(); }
+                });
+            });
+        }
+
         // A PC's clipboard text: taken while the pointer is there (or just left), never what it had before (its first
         // one, when the link comes up).
         void OnClipFrom(KvmLink l, string text)
@@ -1042,6 +1125,7 @@ namespace Beam
             if (!ClipPayload.SetRemoteText(text, app.Cfg.ClipboardHistory)) return;
             clipSet = text;
             clipSetSeq = ClipPayload.TextSequence();
+            clipImgSet = null; // (1.12.4: a picture a PC gave before isn't on the clipboard any more)
             Log.Write("Keyboard and mouse: " + NameOf(l) + "'s clipboard text is on this PC's clipboard (" + text.Length + " characters)");
         }
 

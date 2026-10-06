@@ -26,10 +26,11 @@ function fakePcMain(cfg) {
     'X-Beam-Platform': 'windows', 'X-Beam-App-Version': cfg.version, 'X-Beam-Profile': 'a1b2c3d4e5f60718' /* (its Windows account, as the app hashes it) */,
   };
   const pcs = window.fakePc = {
-    cfg, headers: H, rec: { ctl: [], in: [], mv: [], events: [], order: [], answers: 0, offers: 0, peer: [] },
+    cfg, headers: H, rec: { ctl: [], in: [], mv: [], clip: [], events: [], order: [], answers: 0, offers: 0, peer: [] },
     session: null, pc: null, ch: null, connected: false, monitor: 0, monitors: cfg.monitors,
     decline: false, offer: true, hello: true, viewerIp: cfg.viewerIp,
     holdCandidates: false, // (its checks then come before its candidates, as they often do)
+    imgIn: null, // (1.12.4) a picture coming in on `clip`: its size so far, as the PC's app assembles it
   };
   let seq = 0;
   const api = (method, path, body) => fetch(path, { method, headers: { ...H, ...(body !== undefined && { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -38,6 +39,12 @@ function fakePcMain(cfg) {
   pcs.signal = (kind, body = {}) => pcs.session && api('POST', `/api/rc/sessions/${pcs.session.id}/signal`, { kind, ...body }).then(r => r.status);
   pcs.end = (reason = 'stopped') => pcs.session && api('POST', `/api/rc/sessions/${pcs.session.id}/end`, { reason }).then(r => r.status);
   pcs.send = (name, msg) => { const c = pcs.ch?.[name]; if (c?.readyState === 'open') { c.send(JSON.stringify(msg)); return true; } return false; };
+  // (1.12.4) Its clipboard picture (base64 of a PNG) to the viewer, in parts of 48 KB, as Beam's PC side sends it.
+  pcs.sendImage = (b64, n) => {
+    const size = atob(b64).length, part = 65536, of = Math.max(1, Math.ceil(b64.length / part));
+    for (let i = 0; i < of; i++) pcs.send('clip', { t: 'img', n, i, of, size, type: 'image/png', d: b64.slice(i * part, (i + 1) * part) });
+    return of;
+  };
 
   // Its event stream (an app's: platform windows), read with fetch.
   pcs.open = () => new Promise(resolve => {
@@ -150,6 +157,7 @@ function fakePcMain(cfg) {
       ctl: pc.createDataChannel('ctl', { negotiated: true, id: 0, ordered: true }),
       in: pc.createDataChannel('in', { negotiated: true, id: 1, ordered: true }),
       mv: pc.createDataChannel('mv', { negotiated: true, id: 2, ordered: false, maxRetransmits: 0 }),
+      clip: pc.createDataChannel('clip', { negotiated: true, id: 3, ordered: true }), // (1.12.4: pictures)
     };
     const tr = pc.addTransceiver('video', { direction: 'sendonly', streams: [pcs.stream] });
     pcs.tr = tr;
@@ -169,6 +177,16 @@ function fakePcMain(cfg) {
     ch.ctl.onmessage = e => { const m = JSON.parse(e.data); mark(pcs.rec.ctl, m); pcs.onCtl(m); };
     ch.in.onmessage = e => mark(pcs.rec.in, JSON.parse(e.data));
     ch.mv.onmessage = e => mark(pcs.rec.mv, JSON.parse(e.data));
+    // (1.12.4) A picture's parts, as Beam's PC side takes them: in order, then `clip-img` on ctl once whole.
+    ch.clip.onmessage = e => {
+      const m = JSON.parse(e.data);
+      const len = atob(m.d).length;
+      mark(pcs.rec.clip, { t: m.t, n: m.n, i: m.i, of: m.of, size: m.size, len });
+      if (m.i === 0) pcs.imgIn = { n: m.n, got: 0 };
+      if (!pcs.imgIn || pcs.imgIn.n !== m.n) return;
+      pcs.imgIn.got += len;
+      if (m.i === m.of - 1) { const ok = pcs.imgIn.got === m.size; pcs.imgIn = null; pcs.send('ctl', { t: 'clip-img', n: m.n, ok }); }
+    };
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     pcs.rec.offers++;
@@ -454,7 +472,7 @@ export default function register(test) {
     await live(page, pc);
     eq(await page.evaluate('[rc.pair.remote, [...new Set(rc.added.map(a => a.split(":").slice(0, -1).join(":")))]]'), [TS4, [TS4]], 'connected to the attested address only');
     const hello = (await rec(pc, 'ctl')).find(m => m.t === 'hello');
-    eq([hello?.role, hello?.v, hello?.caps], ['viewer', 1, ['clip', 'text']], 'the viewer’s hello');
+    eq([hello?.role, hello?.v, hello?.caps], ['viewer', 1, ['clip', 'text', 'clipimg']], 'the viewer’s hello (1.12.4: it takes pictures)');
     eq((await rec(pc, 'ctl')).find(m => m.t === 'quality')?.mode, 'text', 'Sharp text asked for');
     await page.waitFor(`/fps/.test(rcUi.chip.textContent) && rcUi.chip.title.includes('libvpx')`, 8000, 'the quality chip (and the PC’s encoder)');
     eq(await page.evaluate(`[rc.monitors.length, rc.monitor, document.title]`), [2, 0, `${pc.name} · Beam`], 'its screens; the title');
@@ -1208,6 +1226,54 @@ export default function register(test) {
     await pc.page.waitFor(`fakePc.rec.order.slice(${order0}).filter(o => o.startsWith('key:')).length >= 4`, 5000, 'all the keys');
     const order = (await rec(pc, 'order')).slice(order0).filter(o => /^(clip|key:)/.test(o));
     eq(order, ['key:ControlLeft', 'clip', 'key:KeyV', 'key:KeyV', 'key:ControlLeft'], 'our clipboard reaches the PC before the V (and the Ctrl let go of after)');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: FEATURE, timeout: 60000 });
+
+  test('remote control 1.12.4: pictures through the clipboard both ways (a screenshot pasted here goes to the PC in parts before the keys; the PC\'s picture lands here)', async ctx => {
+    const pc = await fakePc(ctx, { caps: ['clipimg'] });
+    const page = await ctx.signedIn();
+    const b = await ctx.browser.browserConn();
+    await b.send('Browser.grantPermissions', { origin: ctx.srv.base, browserContextId: page.contextId, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+    await page.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await viewer(ctx, pc.id, { page });
+    await live(page, pc);
+    await page.evaluate(`document.querySelector('.rc-tool[data-tool="clip"]').click(); true`);
+    await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'clip' && m.on === true)`, 5000, '{ t: "clip", on: true }');
+    // A screenshot-like picture on this device's clipboard (noise: it doesn't compress, so it takes several parts).
+    const size = await page.evaluate(`(async () => {
+      const c = document.createElement('canvas'); c.width = 400; c.height = 300;
+      const g = c.getContext('2d'); const d = g.createImageData(400, 300);
+      let x = 7; for (let i = 0; i < d.data.length; i++) { x = (Math.imul(x, 1103515245) + 12345) >>> 0; d.data[i] = x >>> 24; }
+      for (let i = 3; i < d.data.length; i += 4) d.data[i] = 255;
+      g.putImageData(d, 0, 0);
+      const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      return blob.size;
+    })()`);
+    assert(size > 2 * 48 * 1024, `a picture of several parts: ${size} bytes`);
+    const order0 = (await rec(pc, 'order')).length;
+    await page.send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'ControlLeft', key: 'Control', modifiers: 2 });
+    await page.send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'KeyV', key: 'v', modifiers: 2, commands: ['paste'] });
+    await page.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'KeyV', key: 'v', modifiers: 2 });
+    await page.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'ControlLeft', key: 'Control' });
+    await pc.page.waitFor(`fakePc.rec.order.slice(${order0}).filter(o => o.startsWith('key:')).length >= 4`, 10000, 'all the keys');
+    const parts = await rec(pc, 'clip');
+    eq(parts.reduce((t, p) => t + p.len, 0), parts[0]?.size, 'the whole picture went to the PC (as pasted: the clipboard re-encodes what was written to it)');
+    assert(parts.length >= 3 && parts.every((p, i) => p.i === i && p.of === parts.length && p.size === parts[0].size), `in order, in ${parts.length} parts`);
+    eq(await rec(pc, 'ctl').then(l => l.filter(m => m.t === 'clip' && m.text)), [], 'no text sent instead');
+    const order = (await rec(pc, 'order')).slice(order0).filter(o => /^(img|key:)/.test(o));
+    eq(order, ['key:ControlLeft', ...parts.map(() => 'img'), 'key:KeyV', 'key:KeyV', 'key:ControlLeft'], 'the picture reaches the PC before the V');
+    // The PC's picture: here, on this device's clipboard.
+    const pcPng = await pc.page.evaluate(`(async () => {
+      const c = document.createElement('canvas'); c.width = 320; c.height = 200;
+      const g = c.getContext('2d'); g.fillStyle = '#3a7'; g.fillRect(0, 0, 320, 200); g.fillStyle = '#fff'; g.fillRect(40, 40, 120, 80);
+      const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+      const u8 = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (const x of u8) s += String.fromCharCode(x);
+      return { b64: btoa(s), size: u8.length };
+    })()`);
+    await pc.js(`fakePc.sendImage(${JSON.stringify(pcPng.b64)}, 7)`);
+    // (Ours stays on this clipboard until the PC's lands, and a read can meet that write: read it whole, until it's the PC's.)
+    await page.waitFor(`navigator.clipboard.read().then(async items => { const i = items.find(x => x.types.includes('image/png')); if (!i) return 'no picture'; const bmp = await createImageBitmap(await i.getType('image/png')); return (bmp.width === 320 && bmp.height === 200) || bmp.width + ' x ' + bmp.height; })`, 8000, 'the PC\'s picture (320 x 200) on this clipboard');
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 60000 });
 

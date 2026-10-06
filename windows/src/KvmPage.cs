@@ -30,6 +30,8 @@ namespace Beam
         public event Action<Dictionary<string, object>> Message;
         public bool Ready;                 // the page said so: messages to it arrive
         public string RuntimeVersion;
+        // (1.12.4) Messages posted before then (the PCs are asked at once, while the page still loads), sent in order then.
+        readonly List<string> waiting = new List<string>();
 
         public KvmPage(Config cfg, bool devTools)
         {
@@ -106,7 +108,12 @@ namespace Beam
             try { m = Json.ParseObject(e.WebMessageAsJson); }
             catch { return; }
             if (m == null) return;
-            if (Json.Str(m, "t") == "ready") Ready = true;
+            if (Json.Str(m, "t") == "ready")
+            {
+                Ready = true;
+                foreach (var json in waiting) Send(json);
+                waiting.Clear();
+            }
             Raise(m);
         }
 
@@ -119,8 +126,15 @@ namespace Beam
 
         public void Post(Dictionary<string, object> m)
         {
-            if (closed || core == null) return;
-            try { core.PostWebMessageAsJson(Json.Stringify(m)); }
+            if (closed) return;
+            string json = Json.Stringify(m);
+            if (!Ready || core == null) { if (waiting.Count < 4000) waiting.Add(json); return; }
+            Send(json);
+        }
+
+        void Send(string json)
+        {
+            try { if (core != null) core.PostWebMessageAsJson(json); }
             catch (Exception ex) { Log.Error("Keyboard and mouse: to the link page", ex); }
         }
 

@@ -35,6 +35,9 @@ const RC_ICE_MS = 15000;       // …and the connection this long to come up aft
 const RC_RESTART_MS = 3000;    // disconnected this long: ask the PC for an ICE restart
 const RC_RETRIES = 2;          // new sessions after a failed connection, before giving up
 const RC_CLIP_MAX = 64 * 1024; // clipboard text either way, as UTF-8
+// (1.12.4) Pictures through the clipboard (a screenshot): on the `clip` channel of their own, in parts of 48 KB as base64
+// (a multiple of 3 bytes: the parts join), sent as it drains; 16 MB at most.
+const RC_IMG_MAX = 16 * 1024 * 1024, RC_IMG_PART = 48 * 1024, RC_CLIP_BUFFERED = 1 << 20;
 const RC_MV_BUFFERED = 16384;  // a move waits while the `mv` channel has this much queued (latest wins)
 const RC_RESOLVE_MS = 5000;    // a peer-reflexive remote reads "" until the PC's own candidate replaces it: this long at most
 // No input for this long (a pocketed phone keeps its screen on, and stray touches would click the PC): "Still
@@ -90,6 +93,10 @@ const rc = {
   clipN: 0,
   clipPending: false,  // the PC's clipboard came but couldn't be written here: the Copy button
   lastClip: '',
+  lastClipImg: null,   // (1.12.4) the PC's clipboard picture (a Blob), waiting like lastClip
+  clipOut: [],         // (1.12.4) a picture's parts for the PC, sent as `clip` drains
+  clipIn: null,        // (1.12.4) the PC's picture coming in: { n, of, size, bytes, at, got }
+  pasteImg: 0,         // (1.12.4) the picture a held Ctrl+V waits for (its number)
   mvSeq: 0,            // the last `mv` sent (btn and wheel carry it as `n`)
   mvPending: null,
   mvFrame: 0,
@@ -382,6 +389,10 @@ function rcTeardown({ endSession = false, reason = 'stopped' } = {}) {
   rc.mvSeq = 0;
   rc.clipPending = false;
   rc.lastClip = '';
+  rc.lastClipImg = null;
+  rc.clipOut = [];
+  rc.clipIn = null;
+  rc.pasteImg = 0;
   rc.clip = false; // (per session: turned on again in the next one)
   rc.resolving = 0;
   rc.resolveSpent = 0;
@@ -572,6 +583,7 @@ function rcCreatePeer() {
     ctl: pc.createDataChannel('ctl', { negotiated: true, id: 0, ordered: true }),
     in: pc.createDataChannel('in', { negotiated: true, id: 1, ordered: true }),
     mv: pc.createDataChannel('mv', { negotiated: true, id: 2, ordered: false, maxRetransmits: 0 }),
+    clip: pc.createDataChannel('clip', { negotiated: true, id: 3, ordered: true }), // (1.12.4; a PC before it never opens it)
   };
   rc.pc = pc;
   rc.ch = ch;
@@ -592,6 +604,9 @@ function rcCreatePeer() {
   pc.oniceconnectionstatechange = () => { if (mine()) rcOnConnState(); };
   ch.ctl.onopen = () => { if (mine()) rcOnCtlOpen(); };
   ch.ctl.onmessage = e => { if (mine()) rcOnCtl(e.data); };
+  ch.clip.bufferedAmountLowThreshold = 256 * 1024;
+  ch.clip.onbufferedamountlow = ch.clip.onopen = () => { if (mine()) rcDrainClip(); };
+  ch.clip.onmessage = e => { if (mine() && rc.verified && typeof e.data === 'string' && e.data.length <= 80000) rcClipPart(e.data); };
 }
 
 // The offer's o= session id. Another one than the current offer's is a new connection (the PC started capture over,
@@ -1007,7 +1022,7 @@ function rcOnCtlOpen() {
   if (!rc.verified || rc.helloSent) return;
   rc.helloSent = true;
   const app = HOST ? 'windows' : /; wv\)/.test(navigator.userAgent) ? 'android' : 'web';
-  rcSend('ctl', { t: 'hello', v: 1, role: 'viewer', app, caps: ['clip', 'text'] });
+  rcSend('ctl', { t: 'hello', v: 1, role: 'viewer', app, caps: ['clip', 'text', 'clipimg'] });
   rc.quality = rc.pic.mode === 'motion' ? 'motion' : 'text'; // (a 1.6 PC's two; a 1.8 one gets the settings after its hello)
   rcSend('ctl', { t: 'quality', mode: rc.quality });
   if (rc.clip) rcSend('ctl', { t: 'clip', on: true });
@@ -1088,6 +1103,9 @@ function rcOnCtl(data) {
       break;
     case 'clip':
       if (rc.clip && typeof m.text === 'string' && rcUtf8Size(m.text) <= RC_CLIP_MAX) rcClipFromPc(m.text);
+      break;
+    case 'clip-img': // (1.12.4) the PC has the picture a held Ctrl+V waits for
+      if (rc.pasteImg && m.n === rc.pasteImg) { rc.pasteImg = 0; rcFlushHeld(); }
       break;
     case 'ping':
       if (Number.isFinite(m.n) && Number.isFinite(m.at)) rcSend('ctl', { t: 'pong', n: m.n, at: m.at });
@@ -1449,11 +1467,76 @@ function rcOnPaste(e) {
     if (text && rcUtf8Size(text) <= RC_CLIP_MAX && rc.clip) {
       rcSend('ctl', { t: 'clip', n: ++rc.clipN, text });
       rcTimer('paste', rcFlushHeld, 120); // (`ctl` and `in` aren't in order with each other: a moment for the PC)
-    } else rcFlushHeld();
+    } else if (!text && rc.clip && rcClipImageOf(e.clipboardData)) rcSendClipImage(rcClipImageOf(e.clipboardData)); // (1.12.4)
+    else rcFlushHeld();
     return;
   }
   if (text && rcUtf8Size(text) <= RC_CLIP_MAX) rcType(text);
 }
+
+// (1.12.4) A picture on the clipboard (a screenshot), when there's no text: to the PC on `clip`, and the keys wait until
+// it says it has it (`clip-img`; 15 s at most).
+function rcClipImageOf(dt) {
+  for (const it of dt?.items || []) if (it.kind === 'file' && /^image\//.test(it.type)) return it.getAsFile();
+  return null;
+}
+
+const rcB64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+
+async function rcSendClipImage(file) {
+  if (!file || !rc.caps.includes('clipimg') || rc.ch?.clip?.readyState !== 'open') {
+    if (file && !rc.caps.includes('clipimg') && typeof toast === 'function') toast('Pictures go across once the PC has Beam for Windows 1.12.4.', { ms: 6000 });
+    return rcFlushHeld();
+  }
+  if (file.size > RC_IMG_MAX) { if (typeof toast === 'function') toast('That picture is too big to send (over 16 MB).'); return rcFlushHeld(); }
+  const n = ++rc.clipN;
+  rc.pasteImg = n;
+  rcTimer('paste', rcFlushHeld, 15000);
+  let bytes;
+  try { bytes = new Uint8Array(await file.arrayBuffer()); } catch { rc.pasteImg = 0; return rcFlushHeld(); }
+  if (rc.pasteImg !== n) return;
+  const of = Math.max(1, Math.ceil(bytes.length / RC_IMG_PART));
+  for (let i = 0; i < of; i++) rc.clipOut.push(JSON.stringify({ t: 'img', n, i, of, size: bytes.length, type: file.type || 'image/png', d: rcB64(bytes.subarray(i * RC_IMG_PART, (i + 1) * RC_IMG_PART)) }));
+  rcDrainClip();
+}
+
+function rcDrainClip() {
+  const c = rc.ch?.clip;
+  if (!c || c.readyState !== 'open' || !rc.verified) { if (!c || c.readyState === 'closed') rc.clipOut = []; return; }
+  while (rc.clipOut.length && c.bufferedAmount < RC_CLIP_BUFFERED) {
+    try { c.send(rc.clipOut.shift()); } catch { rc.clipOut = []; return; }
+  }
+}
+
+// (1.12.4) The PC's clipboard picture, part by part (in order, decoded as they come): whole, it waits as text does.
+function rcClipPart(data) {
+  let p;
+  try { p = JSON.parse(data); } catch { return; }
+  if (!p || p.t !== 'img' || !rc.clip) return;
+  if (p.i === 0) {
+    const ok = Number.isInteger(p.of) && p.of >= 1 && p.of <= Math.ceil(RC_IMG_MAX / RC_IMG_PART) && Number.isInteger(p.size) && p.size > 0 && p.size <= RC_IMG_MAX;
+    rc.clipIn = ok ? { n: p.n, of: p.of, size: p.size, bytes: new Uint8Array(p.size), at: 0, got: 0 } : null;
+  }
+  const c = rc.clipIn;
+  if (!c || p.n !== c.n || p.i !== c.got || typeof p.d !== 'string') { rc.clipIn = null; return; }
+  let part;
+  try { part = atob(p.d); } catch { rc.clipIn = null; return; }
+  if (c.at + part.length > c.size) { rc.clipIn = null; return; }
+  for (let i = 0; i < part.length; i++) c.bytes[c.at++] = part.charCodeAt(i);
+  if (++c.got < c.of) return;
+  rc.clipIn = null;
+  if (c.at === c.size) rcClipImgFromPc(new Blob([c.bytes], { type: 'image/png' }));
+}
+
+async function rcClipImgFromPc(blob) {
+  rc.lastClipImg = blob;
+  rc.lastClip = '';
+  rc.clipPending = true;
+  await rcWriteClip();
+}
+
+const rcClipWaiting = () => rc.clip && rc.clipPending && Boolean(rc.lastClip || rc.lastClipImg);
+const rcWriteImage = async img => { try { await navigator.clipboard.write([new ClipboardItem({ [img.type || 'image/png']: img })]); return true; } catch { return false; } };
 
 function rcFlushHeld() {
   rcClearTimer('paste');
@@ -1468,14 +1551,16 @@ function rcFlushHeld() {
 // browser won't write it. (The Windows app's viewer window lets the page use the clipboard without asking.)
 async function rcClipFromPc(text) {
   rc.lastClip = text;
+  rc.lastClipImg = null; // (1.12.4: text after a picture)
   rc.clipPending = true;
   await rcWriteClip();
 }
 
 async function rcWriteClip() {
-  if (rc.clip && rc.clipPending && rc.lastClip && document.hasFocus() && navigator.clipboard && window.isSecureContext) {
-    const text = rc.lastClip;
-    try { await navigator.clipboard.writeText(text); if (rc.lastClip === text) rc.clipPending = false; } catch {}
+  if (rcClipWaiting() && document.hasFocus() && navigator.clipboard && window.isSecureContext) {
+    const text = rc.lastClip, img = rc.lastClipImg;
+    if (img) { if (await rcWriteImage(img) && rc.lastClipImg === img) rc.clipPending = false; }
+    else { try { await navigator.clipboard.writeText(text); if (rc.lastClip === text) rc.clipPending = false; } catch {} }
   }
   rcRenderBar();
 }
@@ -2168,7 +2253,7 @@ function rcRenderTools() {
   const live = rc.state === 'live' || rc.state === 'reconnecting';
   const phone = rcPhone();
   const kb = document.activeElement === rcUi.sink && rcTouchUi();
-  const sig = JSON.stringify([rc.state, phone, live && [rc.monitors.map(x => x.name), rc.monitor, rc.fit, rc.quality, rc.pic.mode, rc.caps.includes('settings'), rc.clip, rc.clipPending && Boolean(rc.lastClip),
+  const sig = JSON.stringify([rc.state, phone, live && [rc.monitors.map(x => x.name), rc.monitor, rc.fit, rc.quality, rc.pic.mode, rc.caps.includes('settings'), rc.clip, rcClipWaiting(),
     rc.touchMode, rcTouchUi(), kb, Boolean(document.fullscreenElement), document.fullscreenEnabled]]);
   rcRenderKeyStrip();
   if (sig === rcUi.toolsSig) return;
@@ -2186,7 +2271,7 @@ function rcRenderTools() {
     // A phone: the mode (labelled: it decides what a finger does), the keyboard, and the rest under ⋯.
     tools.push(mode());
     tools.push(btn('Keyboard', 'keyboard', () => rcShowKeyboard(), { pressed: kb, title: kb ? 'Hide the keyboard' : 'Show the keyboard' }));
-    tools.push(btn('More', 'more', e => rcMoreMenu(e.currentTarget), { cls: rc.clip && rc.clipPending && rc.lastClip ? 'attn' : '', title: 'Screens, quality, keys, clipboard, zoom and help' }));
+    tools.push(btn('More', 'more', e => rcMoreMenu(e.currentTarget), { cls: rcClipWaiting() ? 'attn' : '', title: 'Screens, quality, keys, clipboard, zoom and help' }));
   } else if (live) {
     const mon = rc.monitors.find(x => x.id === rc.monitor);
     if (rc.monitors.length > 1) tools.push(btn(mon?.name || 'Screen', 'monitor', e => rcMonitorMenu(e.currentTarget), { title: 'Choose a screen' }));
@@ -2197,7 +2282,7 @@ function rcRenderTools() {
     tools.push(btn(rcPicLabel('mode', shown), 'gear', () => rcShowSettings(), { title: 'Picture settings: quality, fitting the PC to this screen, size, frame rate, data limit, codec, details' }));
     tools.push(btn('Keys', 'keyboard', e => rcKeysMenu(e.currentTarget), { title: 'Send keys (Windows key, Alt+Tab, F-keys…)' }));
     tools.push(btn('Clipboard', 'clip', () => rcSetClip(!rc.clip), { pressed: rc.clip, cls: rc.clipPending ? 'attn' : '', title: rc.clip ? 'Clipboard sync is on (click to turn it off)' : 'Clipboard sync is off (click to share the clipboard both ways)' }));
-    if (rc.clip && rc.clipPending && rc.lastClip) tools.push(btn('Copy', 'copy', rcCopyFromPc, { title: 'Copy what was copied on the PC' }));
+    if (rcClipWaiting()) tools.push(btn('Copy', 'copy', rcCopyFromPc, { title: 'Copy what was copied on the PC' }));
     if (rcTouchUi()) {
       // (a PC with a touch screen too)
       tools.push(mode());
@@ -2210,6 +2295,10 @@ function rcRenderTools() {
 }
 
 function rcCopyFromPc() {
+  if (rc.lastClipImg) {
+    rcWriteImage(rc.lastClipImg).then(ok => { rc.clipPending = !ok; if (!ok) toast('Couldn’t copy the picture here.'); rcRenderBar(); });
+    return;
+  }
   writeClipboard(rc.lastClip).then(ok => { rc.clipPending = !ok; rcRenderBar(); });
 }
 
@@ -2227,7 +2316,7 @@ function rcMoreMenu(anchor) {
     'sep',
     { label: 'Send keys (Windows key, Alt+Tab, F-keys…)', icon: 'keyboard', action: () => rcKeysMenu(anchor) },
     { label: rc.clip ? 'Clipboard sync is on' : 'Clipboard sync is off', icon: rc.clip ? 'check' : 'clip', action: () => rcSetClip(!rc.clip) },
-    rc.clip && rc.clipPending && rc.lastClip && { label: 'Copy what was copied on the PC', icon: 'copy', action: rcCopyFromPc },
+    rcClipWaiting() && { label: 'Copy what was copied on the PC', icon: 'copy', action: rcCopyFromPc },
   ], anchor, { label: 'More' });
 }
 
@@ -2396,6 +2485,8 @@ function rcSetClip(on) {
   rc.clip = on;
   rc.clipPending = false;
   rc.lastClip = '';
+  rc.lastClipImg = null;
+  rc.clipIn = null;
   rcSend('ctl', { t: 'clip', on });
   toast(on ? 'Clipboard sync is on: what you copy on either side can be pasted on the other.' : 'Clipboard sync is off.');
   rcRenderBar();
