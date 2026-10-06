@@ -3110,7 +3110,7 @@ namespace Beam
                 if (states.Count > 0) kvm.DropDownItems.Add(new ToolStripSeparator());
                 foreach (var kv in states) kvm.DropDownItems.Add(new ToolStripMenuItem(kv.Key + " · " + kv.Value) { Enabled = false });
                 kvm.DropDownItems.Add(new ToolStripSeparator());
-                kvm.DropDownItems.Add(new ToolStripMenuItem("Choose the PCs…", null, (s, e) => Kvm.ShowSettings()));
+                kvm.DropDownItems.Add(new ToolStripMenuItem("Arrange the PCs…", null, (s, e) => Kvm.ShowSettings()));
                 menu.Items.Add(kvm);
             }
             var phoneOn = PhoneNotificationsOn;

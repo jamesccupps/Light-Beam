@@ -709,54 +709,108 @@ namespace Beam
                 var laptop = new KvmDesk(new[] { ks(0, 0, 0, 1920, 1200, true, 1.5), ks(1, -2560, -120, 2560, 1440, false, 1.0) });
                 var shop = new KvmDesk(new[] { ks(0, 0, 0, 1920, 1080, true, 1.0), ks(1, -960, -2160, 3840, 2160, false, 2.0) });
                 var camera = new KvmDesk(new[] { ks(0, 0, 0, 1920, 1080, true, 1.0) });
-                Check(laptop.MainOn(-1).Id == 1, "the laptop's left side is its dock monitor's (its own screen has the dock beside it)");
-                Check(!laptop.OpenSide(-1, 0, 600) && laptop.OpenSide(-1, -2560, 600), "...the laptop screen's left edge isn't open, the dock's is");
-                double hl = laptop.ExitHeight(-1, laptop.Screen(1), 600);
+                const KvmSide L = KvmSide.Left, R = KvmSide.Right, T = KvmSide.Top, B = KvmSide.Bottom;
+                int row = KvmSides.Bit(L) | KvmSides.Bit(R); // (PCs in a row, as at the user's desk: out by the left and right only)
+                Check(laptop.MainOn(L).Id == 1, "the laptop's left side is its dock monitor's (its own screen has the dock beside it)");
+                Check(!laptop.OpenSide(L, 0, 600) && laptop.OpenSide(L, -2560, 600), "...the laptop screen's left edge isn't open, the dock's is");
+                double hl = laptop.ExitAlong(L, laptop.Screen(1), -2560, 600);
                 Check(Math.Abs(hl - 720.0 / 1439) < 1e-9, "leaving by the dock's left edge at its middle: height " + hl);
-                var into = shop.Enter(1, hl);
+                var into = shop.Enter(R, hl);
                 Check(into.Screen == 0 && into.X == 1919 && into.Y == 540, "onto Shop's monitor (not the TV above it) at its right edge, the same height: " + into.Screen + " " + into.X + "," + into.Y);
-                var up = shop.Move(new KvmPoint(0, 500, 3), 0, -10);
-                Check(up.Exit == 0 && up.At.Screen == 1 && up.At.Y == -7, "up from Shop's monitor into its TV: screen " + up.At.Screen + " y " + up.At.Y);
-                var offTv = shop.Move(new KvmPoint(1, -950, -1000), -20, 0);
-                Check(offTv.Exit == -1 && offTv.Height == 0, "off the TV's left side: out of SHOP at the top (the TV is above its main screen): " + offTv.Exit + " " + offTv.Height);
-                var cam = camera.Enter(1, offTv.Height);
+                var up = shop.Move(new KvmPoint(0, 500, 3), 0, -10, row);
+                Check(up.Exit == KvmSide.None && up.At.Screen == 1 && up.At.Y == -7, "up from Shop's monitor into its TV: screen " + up.At.Screen + " y " + up.At.Y);
+                var offTv = shop.Move(new KvmPoint(1, -950, -1000), -20, 0, row);
+                Check(offTv.Exit == L && offTv.Along == 0, "off the TV's left side: out of SHOP at the top (the TV is above its main screen): " + offTv.Exit + " " + offTv.Along);
+                var cam = camera.Enter(R, offTv.Along);
                 Check(cam.Screen == 0 && cam.X == 1919 && cam.Y == 0, "...onto Camera's screen at its top right");
-                var offMon = shop.Move(new KvmPoint(0, 5, 540), -10, 0);
-                Check(offMon.Exit == -1 && Math.Abs(offMon.Height - 540.0 / 1079) < 1e-9, "off Shop's monitor's left side: out at its height");
-                var cam2 = camera.Enter(1, offMon.Height);
+                var offMon = shop.Move(new KvmPoint(0, 5, 540), -10, 0, row);
+                Check(offMon.Exit == L && Math.Abs(offMon.Along - 540.0 / 1079) < 1e-9, "off Shop's monitor's left side: out at its height");
+                var cam2 = camera.Enter(R, offMon.Along);
                 Check(cam2.X == 1919 && cam2.Y == 540, "...onto Camera's screen beside it at the same height: " + cam2.X + "," + cam2.Y);
-                var back = camera.Move(new KvmPoint(0, 1915, 300), 10, 0);
-                Check(back.Exit == 1, "off Camera's right side: back towards SHOP");
-                var onShop = shop.Enter(-1, back.Height);
+                var back = camera.Move(new KvmPoint(0, 1915, 300), 10, 0, row);
+                Check(back.Exit == R, "off Camera's right side: back towards SHOP");
+                var onShop = shop.Enter(L, back.Along);
                 Check(onShop.Screen == 0 && onShop.X == 0, "...onto Shop's monitor at its left edge");
-                var home = shop.Move(new KvmPoint(0, 1915, 900), 10, 0);
-                Check(home.Exit == 1 && Math.Abs(home.Height - 900.0 / 1079) < 1e-9, "off Shop's monitor's right side: home");
-                var atHome = laptop.Enter(-1, home.Height);
-                Check(atHome.Screen == 1 && atHome.X == -2560 && atHome.Y == -120 + (int)Math.Round(home.Height * 1439), "...onto the dock monitor's left edge at that height: " + atHome.X + "," + atHome.Y);
-                var inside = shop.Move(new KvmPoint(0, 100, 100), 50, 30);
-                Check(inside.Exit == 0 && inside.At.X == 150 && inside.At.Y == 130, "a move within a screen");
-                var floor = shop.Move(new KvmPoint(0, 100, 1070), 0, 50);
-                Check(floor.Exit == 0 && floor.At.Y == 1079, "down past the bottom with nothing below: stopped there");
+                var home = shop.Move(new KvmPoint(0, 1915, 900), 10, 0, row);
+                Check(home.Exit == R && Math.Abs(home.Along - 900.0 / 1079) < 1e-9, "off Shop's monitor's right side: home");
+                var atHome = laptop.Enter(L, home.Along);
+                Check(atHome.Screen == 1 && atHome.X == -2560 && atHome.Y == -120 + (int)Math.Round(home.Along * 1439), "...onto the dock monitor's left edge at that height: " + atHome.X + "," + atHome.Y);
+                var inside = shop.Move(new KvmPoint(0, 100, 100), 50, 30, row);
+                Check(inside.Exit == KvmSide.None && inside.At.X == 150 && inside.At.Y == 130, "a move within a screen");
+                var floor = shop.Move(new KvmPoint(0, 100, 1070), 0, 50, row);
+                Check(floor.Exit == KvmSide.None && floor.At.Y == 1079, "down past the bottom with nothing below: stopped there");
                 // Two screens side by side with a gap between them at this height: Windows stops at the edge, so does this.
                 var gap = new KvmDesk(new[] { ks(0, 0, 0, 1920, 1080, true, 1), ks(1, 2000, 0, 1920, 1080, false, 1) });
-                var stop = gap.Move(new KvmPoint(0, 1915, 500), 30, 0);
-                Check(stop.Exit == 0 && stop.At.Screen == 0 && stop.At.X == 1919, "a gap to the next screen: stopped at the edge, not out of the PC");
+                var stop = gap.Move(new KvmPoint(0, 1915, 500), 30, 0, row);
+                Check(stop.Exit == KvmSide.None && stop.At.Screen == 0 && stop.At.X == 1919, "a gap to the next screen: stopped at the edge, not out of the PC");
                 // (1.12.3) The user's laptop screen is taller than its dock monitor: at its corners above and below the
                 // monitor Windows stops the pointer at its left edge, and that isn't a way out (it went over to SHOP);
                 // the dock monitor's own left edge is.
                 var tall = new KvmDesk(new[] { ks(0, 0, 0, 2880, 1800, true, 2.0), ks(1, -1920, 360, 1920, 1080, false, 1.0) });
-                Check(!tall.OpenSide(-1, 0, 100) && !tall.OpenSide(-1, 0, 1700) && !tall.OpenSide(-1, 0, 900), "a laptop screen taller than its dock monitor: its left edge isn't a way out, above, beside or below the monitor");
-                Check(tall.OpenSide(-1, -1920, 400) && tall.OpenSide(-1, -1920, 1400), "...the dock monitor's left edge is, top to bottom");
-                Check(tall.MainOn(-1).Id == 1, "...and the pointer comes back onto the dock monitor");
+                Check(!tall.OpenSide(L, 0, 100) && !tall.OpenSide(L, 0, 1700) && !tall.OpenSide(L, 0, 900), "a laptop screen taller than its dock monitor: its left edge isn't a way out, above, beside or below the monitor");
+                Check(tall.OpenSide(L, -1920, 400) && tall.OpenSide(L, -1920, 1400), "...the dock monitor's left edge is, top to bottom");
+                Check(tall.MainOn(L).Id == 1, "...and the pointer comes back onto the dock monitor");
                 // The same on a PC beside: the taller of two monitors side by side, at a height its neighbour doesn't
                 // reach, stops the pointer at its edge (as Windows does there) instead of leaving past the neighbour.
                 var pair = new KvmDesk(new[] { ks(0, 0, 0, 1920, 1080, true, 1), ks(1, -2560, 200, 2560, 800, false, 1) });
-                var corner = pair.Move(new KvmPoint(0, 3, 50), -20, 0);
-                Check(corner.Exit == 0 && corner.At.Screen == 0 && corner.At.X == 0, "a PC's taller monitor above its neighbour's top: stopped at its edge, not out past the neighbour (" + corner.Exit + ", " + corner.At.Screen + " " + corner.At.X + ")");
-                var through = pair.Move(new KvmPoint(0, 3, 500), -20, 0);
-                Check(through.Exit == 0 && through.At.Screen == 1, "...beside the neighbour: into it");
-                var outside = pair.Move(new KvmPoint(1, -2555, 500), -20, 0);
-                Check(outside.Exit == -1, "...and out of that PC by the neighbour's own left edge");
+                var corner = pair.Move(new KvmPoint(0, 3, 50), -20, 0, row);
+                Check(corner.Exit == KvmSide.None && corner.At.Screen == 0 && corner.At.X == 0, "a PC's taller monitor above its neighbour's top: stopped at its edge, not out past the neighbour (" + corner.Exit + ", " + corner.At.Screen + " " + corner.At.X + ")");
+                var through = pair.Move(new KvmPoint(0, 3, 500), -20, 0, row);
+                Check(through.Exit == KvmSide.None && through.At.Screen == 1, "...beside the neighbour: into it");
+                var outside = pair.Move(new KvmPoint(1, -2555, 500), -20, 0, row);
+                Check(outside.Exit == L, "...and out of that PC by the neighbour's own left edge");
+
+                // (1.12.5) Any side (the user: "why can i only put computers to the left?"). Out of a top or bottom too,
+                // onto the next PC's facing side at the same place across.
+                int all = KvmSides.AllBits;
+                var upTv = shop.Move(new KvmPoint(0, 500, 3), 0, -10, all);
+                Check(upTv.Exit == KvmSide.None && upTv.At.Screen == 1, "with a PC above SHOP: up from its monitor still goes into its TV");
+                var offTop = shop.Move(new KvmPoint(1, 960, -2155), 0, -10, all);
+                Check(offTop.Exit == T && Math.Abs(offTop.Along - 1920.0 / 3839) < 1e-9 && offTop.At.Y == -2160, "...and off the TV's top, out of SHOP halfway across it: " + offTop.Exit + " " + offTop.Along);
+                Check(!shop.OpenSide(T, 500, 0), "...the monitor's own top isn't a way up (the TV is above it)");
+                var fromAbove = shop.Enter(T, 0.5);
+                Check(fromAbove.Screen == 1 && fromAbove.Y == -2160 && fromAbove.X == 960, "onto SHOP by its top: the TV's top, halfway across: " + fromAbove.Screen + " " + fromAbove.X + "," + fromAbove.Y);
+                var fromBelow = laptop.Enter(B, 0.25);
+                Check(fromBelow.Screen == 0 && fromBelow.X == (int)Math.Round(0.25 * 1919) && fromBelow.Y == 1199, "onto the laptop by its bottom: its own screen, a quarter across: " + fromBelow.X + "," + fromBelow.Y);
+                Check(Math.Abs(laptop.ExitAlong(T, laptop.Screen(0), 960, 0) - 960.0 / 1919) < 1e-9 && laptop.ExitAlong(T, laptop.Screen(1), -1000, -120) == 0,
+                    "leaving the laptop by its top: from its own screen, that share across; from the dock beside it, the left end");
+                // A side nobody stands beyond stops the pointer as an edge does, and the move goes on along it (1.12 lost
+                // the up or down of a move with a little of left in it at Camera's left edge).
+                var slide = camera.Move(new KvmPoint(0, 0, 500), -3, -40, KvmSides.Bit(R));
+                Check(slide.Exit == KvmSide.None && slide.At.X == 0 && slide.At.Y == 460, "at a left edge with nothing beyond: up and a little left goes up: " + slide.At.X + "," + slide.At.Y);
+                var noTop = camera.Move(new KvmPoint(0, 700, 2), 0, -10, KvmSides.Bit(R));
+                Check(noTop.Exit == KvmSide.None && noTop.At.Y == 0, "up past the top with no PC above: stopped there");
+                var outTop = camera.Move(new KvmPoint(0, 700, 2), 0, -10, KvmSides.Bit(R) | KvmSides.Bit(T));
+                Check(outTop.Exit == T && Math.Abs(outTop.Along - 700.0 / 1919) < 1e-9 && outTop.At.Y == 0, "...with a PC above: out of its top at that place across");
+                var corner2 = camera.Move(new KvmPoint(0, 1919, 1078), 5, 10, KvmSides.Bit(B));
+                Check(corner2.Exit == B && corner2.Along == 1 && corner2.At.X == 1919 && corner2.At.Y == 1079, "down and right at the corner, a PC below only: along the right edge, out at the bottom");
+                Check(camera.Move(new KvmPoint(0, 0, 500), -3, -40, 0).At.Y == 460, "a button down (a drag): no side is left, it goes along the edge");
+                // This PC's pointer as its mouse hook sees it: at or past the outer edge of its screens on each side.
+                KvmScreen es;
+                int ex, ey;
+                Check(laptop.AtEdge(T, 500, -1, out es, out ex, out ey) && es.Id == 0 && ey == 0, "the laptop's pointer pushed past its own screen's top: at that edge");
+                Check(laptop.AtEdge(T, -1000, -125, out es, out ex, out ey) && es.Id == 1 && ey == -120, "...past the dock's top, higher up: at that one");
+                Check(!laptop.AtEdge(T, 500, 3, out es, out ex, out ey), "...3 pixels under the top: not at it");
+                Check(laptop.AtEdge(R, 1920, 600, out es, out ex, out ey) && es.Id == 0 && ex == 1919 && !laptop.AtEdge(R, 1500, 600, out es, out ex, out ey), "past the right of its own screen: at its right edge (not in the middle)");
+                Check(laptop.AtEdge(B, -1000, 1320, out es, out ex, out ey) && es.Id == 1 && ey == 1319, "past the dock's bottom, lower down: at it");
+                Check(laptop.AtEdge(L, -2561, 600, out es, out ex, out ey) && ex == -2560 && !laptop.AtEdge(L, 0, 50, out es, out ex, out ey), "on the left: the dock's edge, not the laptop screen's inner one (1.12.3)");
+                Check(tall.AtEdge(T, -1000, 359, out es, out ex, out ey) && es.Id == 1, "a dock monitor lower than the laptop's screen: its own top still leads up (nothing of the laptop is above it)");
+                // Where the PCs stand: a grid around this PC.
+                Func<string, int, int, KvmPlace> at = (id, x, y) => new KvmPlace { Id = id, X = x, Y = y };
+                var desk = new KvmLayout(new[] { at("shop", -1, 0), at("camera", -2, 0) });
+                Check(desk.Beside(KvmLayout.This, L) == 0 && desk.Beside(0, L) == 1 && desk.Beside(1, R) == 0 && desk.Beside(0, R) == KvmLayout.This
+                    && desk.Beside(KvmLayout.This, R) == KvmLayout.Nothing && desk.Beside(1, T) == KvmLayout.Nothing,
+                    "the user's row: SHOP left of the laptop, Camera left of SHOP, and back; nothing above or to the laptop's right");
+                Check(desk.HomeSide(1) == L && desk.TowardHome(1) == R && desk.Via(1) == 0 && desk.SideOfVia(1) == L, "Camera: home by its right side, through SHOP, onto the laptop's left");
+                var around = new KvmLayout(new[] { at("a", 0, -1), at("b", -1, -1), at("c", 1, 0) });
+                Check(around.Joined(0) && around.Joined(1) && around.Joined(2) && around.HomeSide(1) == T && around.TowardHome(1) == R && around.HomeSide(2) == R,
+                    "one above, one left of that, one to the right: all joined up; the far one goes home through the one above, onto the laptop's top");
+                var apart = KvmLayout.Joining(new[] { at("near", 1, 0), at("far", 3, 0), at("up", 0, -1) }, 3);
+                Check(apart.Count == 2 && apart[0].Id == "near" && apart[1].Id == "up", "a PC with a gap between it and the rest doesn't join up (the others nearest first, right before top)");
+                var clean = KvmLayout.Clean(new[] { at("x", 0, 0), at("y", -1, 0), at("y", 1, 0), at("z", -1, 0), at("w", 9, 0), at("v", 0, 1) }, 3);
+                Check(clean.Count == 2 && clean[0].Id == "y" && clean[0].X == -1 && clean[1].Id == "v", "places: not this PC's cell, each id and cell once, within reach");
+                var slots = string.Join(" ", KvmLayout.Slots(new[] { at("shop", -1, 0) }, 3).Select(s => s.X + "," + s.Y));
+                Check(slots == "1,0 0,-1 0,1 -2,0 -1,-1 -1,1", "where another PC can go, beside the laptop and SHOP: " + slots);
                 // The pointer keeps its speed across scalings (150% here, 100% there: two thirds as many pixels), fractions carried.
                 var carry = new KvmCarry();
                 int ox, oy, sum = 0;
@@ -783,7 +837,7 @@ namespace Beam
                     && KeyMap.CodeOf(0xA2, 0x1D, false) == "ControlLeft" && KeyMap.CodeOf(0xA3, 0x1D, true) == "ControlRight" && KeyMap.CodeOf(0x0D, 0x1C, true) == "NumpadEnter",
                     "the hook's keys as codes: A, ←, Win, both Ctrls, numpad Enter");
             }
-            Section("keyboard and mouse across PCs: the user's desk (dock monitor, Shop's TV above), crossings, speed, any screen (1.12)", k0);
+            Section("keyboard and mouse across PCs: the user's desk (dock monitor, Shop's TV above), crossings, speed, any screen (1.12); PCs on any side (1.12.5)", k0);
 
             Console.WriteLine();
             Console.WriteLine(failures == 0 ? "All " + passed + " checks passed." : failures + " of " + (passed + failures) + " checks FAILED.");

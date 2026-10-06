@@ -396,6 +396,75 @@ try {
   const shiftUp = await waitInput(r => r.type === 'key' && r.scan === 42 && r.flags === (SCAN | KEYUP), i0, 4000);
   check(!!shiftUp, 'a key held down there goes up there when the pointer comes back');
 
+  // 6b. (1.12.5) Any side (the user: "why can i only put computers to the left?"). The settings (off-screen; window
+  // messages to its arrangement only, nothing real): SHOP dragged to the laptop's right, saved; the same PC, so its link
+  // stays up; over the laptop's right edge onto Shop's left edge, and back. Then through its menus (Remove; + above the
+  // laptop: SHOP), over the top onto Shop's bottom, and back down. Then the row to the left again.
+  const sessionWas = ((await api('/api/rc/sessions')).sessions || [])[0];
+  const nAsk = lines(inst.pc).length;
+  const arrangeState = async () => {
+    const from = lines(inst.laptop).length;
+    kvm('arrange-state');
+    const l = await waitLog(inst.laptop, /Keyboard and mouse settings: \(test\) /, from, 5000);
+    return l ? l.replace(/.*\(test\) /, '') : '';
+  };
+  kvm('arrange');
+  await sleep(1500);
+  let arr = await arrangeState();
+  check(arr === `on; ${inst.pc.name} -1,0 | slots 1,0 0,-1 0,1 -2,0 -1,-1 -1,1 | grid 4x3`, `the settings: SHOP to the left (1.12's row, kept), + all round (${arr})`);
+  kvm('arrange-drag:-1:0:1:0');
+  arr = await arrangeState();
+  check(arr.startsWith(`on; ${inst.pc.name} 1,0 |`), `...dragged to the laptop's right (${arr})`);
+  if (process.env.BEAM_KVM_SHOTS) { kvm('arrange-shot'); await sleep(500); try { fs.copyFileSync(path.join(inst.laptop.dir, 'arrange.png'), path.join(process.env.BEAM_KVM_SHOTS, 'arrange-right.png')); } catch {} }
+  nl = lines(inst.laptop).length;
+  kvm('arrange-save');
+  check(!!(await waitLog(inst.laptop, new RegExp(`Keyboard and mouse: arranged again: ${inst.pc.name} to the right of this PC`), nl, 5000)), '...saved: SHOP to the right of the laptop');
+  check(readConfig(inst.laptop).kvmPlaces?.[0]?.x === 1 && !('kvmLeft' in readConfig(inst.laptop)), 'the laptop keeps where it stands (kvmPlaces; 1.12\'s kvmLeft gone)');
+  nl = lines(inst.laptop).length;
+  kvm('edge:right:0.5');
+  check(!!(await waitLog(inst.laptop, /Keyboard and mouse: \(test\) on KVM Test SHOP/, nl, 5000)), 'the pointer at the laptop\'s right edge goes over to SHOP');
+  w = await where();
+  check(!!w && w.on === 'KVM Test SHOP' && w.x === 0 && w.y === Math.round(0.5 * (w.h - 1)), `...onto its left edge at half height (${w && w.line})`);
+  nl = lines(inst.laptop).length;
+  kvm('move:-5000,0');
+  check(!!(await waitLog(inst.laptop, /Keyboard and mouse: \(test\) back on this PC/, nl, 5000)), 'moved left past SHOP\'s left edge: back on the laptop');
+  w = await where();
+  check(!!w && w.here && w.x === 1918, `...just inside its right edge (${w && w.line})`);
+  kvm('arrange');
+  await sleep(1000);
+  nl = lines(inst.laptop).length;
+  kvm('arrange-click:1:0');
+  let menu = await waitLog(inst.laptop, /Keyboard and mouse settings: \(test\) menu: /, nl, 5000);
+  check(!!menu && new RegExp(`menu: ${inst.pc.name} · online \\(off\\) \\| Remove$`).test(menu), `a click on SHOP: its menu (${menu && menu.replace(/.*menu: /, '')})`);
+  kvm('arrange-pick:Remove');
+  arr = await arrangeState();
+  check(arr === 'on; no PCs | slots -1,0 1,0 0,-1 0,1 | grid 3x3', `...Remove (${arr})`);
+  nl = lines(inst.laptop).length;
+  kvm('arrange-click:0:-1');
+  menu = await waitLog(inst.laptop, /Keyboard and mouse settings: \(test\) menu: /, nl, 5000);
+  check(!!menu && new RegExp(`menu: ${inst.pc.name}( |$)`).test(menu) && !/KVM Test Laptop/.test(menu), `+ above the laptop: the other Windows PCs (${menu && menu.replace(/.*menu: /, '')})`);
+  kvm(`arrange-pick:${inst.pc.name}`);
+  arr = await arrangeState();
+  check(arr.startsWith(`on; ${inst.pc.name} 0,-1 |`), `...SHOP put there (${arr})`);
+  nl = lines(inst.laptop).length;
+  kvm('arrange-save');
+  check(!!(await waitLog(inst.laptop, new RegExp(`Keyboard and mouse: arranged again: ${inst.pc.name} above this PC`), nl, 5000)), '...saved: SHOP above the laptop');
+  nl = lines(inst.laptop).length;
+  kvm('edge:top:0.25');
+  check(!!(await waitLog(inst.laptop, /Keyboard and mouse: \(test\) on KVM Test SHOP/, nl, 5000)), 'the pointer at the laptop\'s top goes up to SHOP');
+  w = await where();
+  check(!!w && w.on === 'KVM Test SHOP' && w.y === w.h - 1 && Math.abs(w.x - 0.25 * (w.w - 1)) <= 1, `...onto its bottom edge, a quarter across (${w && w.line})`);
+  nl = lines(inst.laptop).length;
+  kvm('move:0,5000');
+  check(!!(await waitLog(inst.laptop, /Keyboard and mouse: \(test\) back on this PC/, nl, 5000)), 'moved down past SHOP\'s bottom: back on the laptop');
+  w = await where();
+  check(!!w && w.here && w.y === 1 && Math.abs(w.x - 480) <= 2, `...just inside its top, a quarter across (${w && w.line})`);
+  nl = lines(inst.laptop).length;
+  kvm(`on:${pcId}`);
+  check(!!(await waitLog(inst.laptop, new RegExp(`Keyboard and mouse: arranged again: ${inst.pc.name} to the left of this PC`), nl, 5000)), 'and back to the left');
+  const sessionNow = ((await api('/api/rc/sessions')).sessions || [])[0];
+  check(!!sessionWas && !!sessionNow && sessionNow.id === sessionWas.id && count(inst.pc, /asks to share its keyboard and mouse/, nAsk) === 0, 'all that time the same session: rearranged, not reconnected');
+
   // 7. SHOP goes away while the pointer is on it: the pointer comes back by itself at once.
   kvm('edge:0.5');
   await sleep(500);
