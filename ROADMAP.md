@@ -32,8 +32,9 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   AirDrop, or one of your devices shared with someone (they can send files to it, or control it remotely, as you
   choose), each side keeping its own data. Over Tailscale (sharing just the server's machine) or the public link
   (servers signing their requests), big files going direct.
-- **Remote control, further:** a Lowest delay mode (measured end to end), capture straight into the hardware encoder,
-  decoding on the phone with WebCodecs, the cursor drawn on the viewing device, full-colour text, sound.
+- **Remote control, further:** a Lowest delay mode (the delay is measured end to end since the Windows app 1.12.6, and
+  the pointer drawn on the viewing device), capture straight into the hardware encoder, decoding on the phone with
+  WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.

@@ -134,6 +134,12 @@ function fakePcMain(cfg) {
       g.fillStyle = '#ffffff';
       g.font = '40px sans-serif';
       g.fillText(`frame ${n}`, 40, 80);
+      // (1.12.6) The delay probe's square, as Beam's PC side shows it: 32 of its screen's pixels in the top left corner.
+      if (pcs.probeColor) {
+        const s = 32 * cv.width / (pcs.monitors.find(x => x.id === pcs.monitor) || pcs.monitors[0]).w;
+        g.fillStyle = pcs.probeColor === 'green' ? '#00ff00' : '#ff00ff';
+        g.fillRect(0, 0, Math.ceil(s), Math.ceil(s));
+      }
     }, 33);
     pcs.stream = cv.captureStream(30);
     pcs.track = pcs.stream.getVideoTracks()[0];
@@ -175,7 +181,7 @@ function fakePcMain(cfg) {
     pc.onconnectionstatechange = () => { if (pcs.pc === pc && pc.connectionState === 'connected') pcs.onConnected(pc); };
     const mark = (list, m) => { m.seq = ++seq; list.push(m); pcs.rec.order.push(m.t + (m.c ? `:${m.c}` : '')); };
     ch.ctl.onmessage = e => { const m = JSON.parse(e.data); mark(pcs.rec.ctl, m); pcs.onCtl(m); };
-    ch.in.onmessage = e => mark(pcs.rec.in, JSON.parse(e.data));
+    ch.in.onmessage = e => { const m = JSON.parse(e.data); mark(pcs.rec.in, m); if (m.t === 'probe') pcs.onProbe(m); };
     ch.mv.onmessage = e => mark(pcs.rec.mv, JSON.parse(e.data));
     // (1.12.4) A picture's parts, as Beam's PC side takes them: in order, then `clip-img` on ctl once whole.
     ch.clip.onmessage = e => {
@@ -238,6 +244,15 @@ function fakePcMain(cfg) {
       pcs.rec.offers++;
       await pcs.signal('offer', { sdp: offer.sdp });
     }
+  };
+
+  // (1.12.6) A delay probe, as Beam's PC side answers it: `on` shows the square (magenta), each probe after turns it,
+  // `off` takes it away; the answer says the colour and the PC's own time (made up here: 1.5 ms).
+  pcs.probeColor = null;
+  pcs.onProbe = m => {
+    if (m.off) { pcs.probeColor = null; return; }
+    pcs.probeColor = m.on ? 'magenta' : pcs.probeColor === 'magenta' ? 'green' : 'magenta';
+    pcs.send('ctl', { t: 'probe', n: m.n, color: pcs.probeColor, ms: 1.5, x: 0, y: 0, size: 32 });
   };
 
   pcs.onCtl = m => {
@@ -472,7 +487,7 @@ export default function register(test) {
     await live(page, pc);
     eq(await page.evaluate('[rc.pair.remote, [...new Set(rc.added.map(a => a.split(":").slice(0, -1).join(":")))]]'), [TS4, [TS4]], 'connected to the attested address only');
     const hello = (await rec(pc, 'ctl')).find(m => m.t === 'hello');
-    eq([hello?.role, hello?.v, hello?.caps], ['viewer', 1, ['clip', 'text', 'clipimg']], 'the viewer’s hello (1.12.4: it takes pictures)');
+    eq([hello?.role, hello?.v, hello?.caps], ['viewer', 1, ['clip', 'text', 'clipimg', 'cursor']], 'the viewer’s hello (1.12.4: it takes pictures; 1.12.6: with a mouse, it can draw the PC’s pointer)');
     eq((await rec(pc, 'ctl')).find(m => m.t === 'quality')?.mode, 'text', 'Sharp text asked for');
     await page.waitFor(`/fps/.test(rcUi.chip.textContent) && rcUi.chip.title.includes('libvpx')`, 8000, 'the quality chip (and the PC’s encoder)');
     eq(await page.evaluate(`[rc.monitors.length, rc.monitor, document.title]`), [2, 0, `${pc.name} · Beam`], 'its screens; the title');
@@ -635,7 +650,7 @@ export default function register(test) {
     await ctx.setHidden(page, false);
     await pc.page.waitFor(`fakePc.rec.ctl.filter(m => m.t === 'video').at(-1)?.on === true`, 5000, 'video on again');
     // Kept for this PC on this device: the next session starts with them.
-    eq(await page.evaluate(`JSON.parse(localStorage.getItem('beam.rc.pic.${pc.id}'))`), { mode: 'motion', size: 'auto', fps: 30, kbps: 10000, codec: 'h264', fitPc: false, fitScale: true, details: true }, 'kept for this PC');
+    eq(await page.evaluate(`JSON.parse(localStorage.getItem('beam.rc.pic.${pc.id}'))`), { mode: 'motion', size: 'auto', fps: 30, kbps: 10000, codec: 'h264', fitPc: false, fitScale: true, details: true, pointer: true }, 'kept for this PC');
     const n0 = (await rec(pc, 'ctl')).length;
     await page.evaluate('location.reload(); true');
     await live(page, pc);
@@ -1276,6 +1291,55 @@ export default function register(test) {
     await page.waitFor(`navigator.clipboard.read().then(async items => { const i = items.find(x => x.types.includes('image/png')); if (!i) return 'no picture'; const bmp = await createImageBitmap(await i.getType('image/png')); return (bmp.width === 320 && bmp.height === 200) || bmp.width + ' x ' + bmp.height; })`, 8000, 'the PC\'s picture (320 x 200) on this clipboard');
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 60000 });
+
+  test('remote control 1.12.6: the PC\'s pointer drawn here with a mouse (the PC hides its own; a phone keeps its own), and the delay measured end to end', async ctx => {
+    const pc = await fakePc(ctx, { caps: ['settings', 'video', 'cursor', 'probe'] });
+    const page = await viewer(ctx, pc.id);
+    await live(page, pc);
+    // A mouse here: our hello says we draw the PC's pointer, and we ask it to hide its own.
+    await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'pointer' && m.here === true)`, 5000, '{ t: "pointer", here: true }');
+    eq((await rec(pc, 'ctl')).find(m => m.t === 'hello').caps, ['clip', 'text', 'clipimg', 'cursor'], 'our hello: we can draw its pointer');
+    const cursor = () => page.evaluate(`rcUi.stage.style.cursor`);
+    eq(await cursor(), '', 'until the PC says which pointer shows: the dot');
+    const say = m => pc.js(`fakePc.send('ctl', ${JSON.stringify({ t: 'cursor', ...m })}); true`);
+    await say({ css: 'text', hidden: false });
+    await page.waitFor(`rcUi.stage.style.cursor === 'text'`, 3000, 'the text pointer, drawn here');
+    await say({ css: 'url(x.png), auto', hidden: false });
+    await page.waitFor(`rcUi.stage.style.cursor === ''`, 3000, 'a name it doesn\'t know: the dot (only the standard names)');
+    await say({ css: 'pointer', hidden: false });
+    await page.waitFor(`rcUi.stage.style.cursor === 'pointer'`, 3000, 'the hand');
+    await say({ css: null, hidden: true });
+    await page.waitFor(`rcUi.stage.style.cursor === 'none'`, 3000, 'hidden by an app there: none here');
+    await say({ css: null, hidden: false });
+    await page.waitFor(`rcUi.stage.style.cursor === ''`, 3000, 'an app\'s own pointer (in the picture): the dot');
+    // Off (Picture): the PC shows its own again; the dot here.
+    await say({ css: 'text', hidden: false });
+    await page.waitFor(`rcUi.stage.style.cursor === 'text'`, 3000, 'text again');
+    await page.evaluate(`rcSetPic('pointer', false); true`);
+    await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'pointer' && m.here === false)`, 5000, '{ t: "pointer", here: false }');
+    eq(await cursor(), '', 'turned off: the dot, and the PC\'s own pointer in the picture');
+    await page.evaluate(`rcSetPic('pointer', true); true`);
+    // The delay: probes the way input goes; the PC's square turns in its picture; each step's share.
+    await page.evaluate(`rcMeasure(); true`);
+    await page.waitFor(`rc.measured && rc.measured.n >= 8 && !rc.measuring`, 40000, 'measured');
+    const m = await page.evaluate(`rc.measured`);
+    assert(m.total > 0 && m.total < 3000 && m.pc === 1.5 && m.toPc != null, `from a probe to its frame shown here, with the PC's own 1.5 ms: ${JSON.stringify(m)}`);
+    assert((m.capture != null && m.back != null && m.decode != null && m.shown != null) || m.rest != null, `each step's share, or what's left: ${JSON.stringify(m)}`);
+    const probes = (await rec(pc, 'in')).filter(x => x.t === 'probe');
+    eq([probes[0].n, probes[0].on, probes.at(-1).off], [0, true, true], 'the probes went on `in`: on first, off last');
+    assert(probes.length >= 10, `${probes.length} probes`);
+    eq(await pc.js('fakePc.probeColor'), null, 'the square is gone');
+    const text = await page.evaluate(`rcUi.details.hidden ? '' : rcUi.details.textContent`);
+    assert(/Measured\d+ ms from a click to the picture \(median of \d+\): to the PC/.test(text), `the details say it: ${text.slice(text.indexOf('Measured'), text.indexOf('Measured') + 160)}`);
+    eq(page.errors, [], 'no page errors');
+    // A phone draws its own pointer (the trackpad's ring): it never asks the PC to hide its own.
+    const pc2 = await fakePc(ctx, { caps: ['settings', 'video', 'cursor', 'probe'] });
+    const phone = await viewer(ctx, pc2.id, { mobile: true });
+    await live(phone, pc2);
+    await sleep(800);
+    const ctl2 = await rec(pc2, 'ctl');
+    eq([ctl2.find(x => x.t === 'hello').caps, ctl2.some(x => x.t === 'pointer')], [['clip', 'text', 'clipimg'], false], 'a phone: no `cursor` in its hello, no `pointer`');
+  }, { requires: FEATURE, timeout: 120000 });
 
   test('remote control in the chat app: Control (a new tab), a locked PC says to use Remote Desktop, Settings → Devices shows who controls a PC (End) and turns it off', async ctx => {
     const pc = await fakePc(ctx);

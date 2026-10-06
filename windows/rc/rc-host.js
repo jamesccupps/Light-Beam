@@ -485,6 +485,10 @@
       codecNow = codec ? codec.mimeType.replace(/^video\//i, '') : null;
       encoderNow = o.encoderImplementation || null;
       const kbps = prev && o.timestamp > prev.timestamp ? Math.round((o.bytesSent - prev.bytesSent) * 8 / (o.timestamp - prev.timestamp)) : 0;
+      // (1.12.6, the viewer's delay measurement) A frame's encoding and its packets' wait to go out, lately, in ms.
+      const per = (total, count) => (prev && Number.isFinite(o[total]) && Number.isFinite(prev[total]) && o[count] > prev[count]
+        ? Math.round((o[total] - prev[total]) / (o[count] - prev[count]) * 10000) / 10 : null);
+      const encMs = per('totalEncodeTime', 'framesEncoded'), sendMs = per('totalPacketSendDelay', 'packetsSent');
       prev = o;
       const p = profile();
       const ms = v => (Number.isFinite(v) ? Math.round(v * 1000) : null);
@@ -495,7 +499,7 @@
         avail: pair && pair.availableOutgoingBitrate ? Math.round(pair.availableOutgoingBitrate / 1000) : 0,
         lost: back && Number.isFinite(back.fractionLost) ? Math.round(back.fractionLost * 1000) / 10 : null,
         rtt: back && Number.isFinite(back.roundTripTime) ? ms(back.roundTripTime) : pair ? ms(pair.currentRoundTripTime) : null,
-        video: videoOn,
+        video: videoOn, encMs, sendMs,
       };
       post(st);
       sendCtl(st);

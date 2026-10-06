@@ -43,6 +43,7 @@ namespace Beam
         public bool Verified;            // this connection's peer passed the check: video and input flow
         public bool Clip;                // the viewer turned clipboard sync on
         public bool ClipImg;             // (1.12.4) its hello says it takes pictures too (`clip` channel)
+        public bool CursorCap;           // (1.12.6) its hello says it draws this PC's pointer itself (`cursor`)
         public readonly ClipImageIn ClipIn = new ClipImageIn();
         public int Screen;
         public string Mode = "text";
@@ -110,6 +111,8 @@ namespace Beam
         readonly Stopwatch clock = Stopwatch.StartNew();
         readonly RcDisplay display;
         readonly SemaphoreSlim displayGate = new SemaphoreSlim(1, 1); // one display change at a time, in order
+        RcPointer pointer;             // (1.12.6) the viewer draws this PC's pointer: hidden here meanwhile (UI thread)
+        volatile RcProbe probe;        // (1.12.6) the viewer measuring the delay: its square (from the page's thread)
 
         public RemoteControl(App app)
         {
@@ -127,6 +130,7 @@ namespace Beam
                 warm.Start();
             }
             window = new RcWindow(this);
+            RcPointer.Recover(app.Cfg); // (1.12.6) still hidden when Beam last stopped: shown again
             tick = new Timer();
             tick.Interval = 1000;
             tick.Tick += (s, e) => Tick();
@@ -590,8 +594,84 @@ namespace Beam
             if (inj == null || host == null || !host.InputAllowed) return;
             var msg = Json.ParseObject(Json.Str(m, "d"));
             if (msg == null) return;
+            if (Json.Str(msg, "t") == "probe") { OnProbe(host, msg); return; } // (1.12.6: input's own way, measured)
             inj.Handle(msg);
             if (inj.HasPending) flush.Change(InputInjector.AltGrWindowMs + 10, Timeout.Infinite);
+        }
+
+        // (1.12.6, on the page's thread) The viewer measuring the delay (RcProbe): `on` shows the square, each probe after
+        // turns it, `off` ends it. Each answer on `ctl`: the colour now, and how long it took to be on this PC's screen.
+        void OnProbe(RcHost host, Dictionary<string, object> msg)
+        {
+            long arrived = Stopwatch.GetTimestamp();
+            long n = Json.Long(msg, "n", -1);
+            var s = current;
+            if (s == null || s.Host != host || s.Kvm) return;
+            if (Json.Bool(msg, "off", false)) { CloseProbe(); return; }
+            var p = probe;
+            if (p == null)
+            {
+                var sc = DesktopLayout.Current().Screen(s.Screen);
+                if (sc == null) return;
+                Log.Write("Remote control: the viewer measures the delay (a square in the top left corner of screen " + (s.Screen + 1) + ")");
+                probe = RcProbe.Start(new System.Drawing.Point(sc.X, sc.Y), ms => ProbeAnswer(host, n, false, ms));
+                return;
+            }
+            if (Json.Bool(msg, "on", false)) { ProbeAnswer(host, n, p.IsGreen, 0); return; }
+            p.Flip(arrived, (green, ms) => ProbeAnswer(host, n, green, ms));
+        }
+
+        static void ProbeAnswer(RcHost host, long n, bool green, double ms)
+        {
+            var a = new Dictionary<string, object>();
+            a["t"] = "probe";
+            a["n"] = n;
+            a["color"] = green ? "green" : "magenta";
+            a["ms"] = Math.Round(ms, 1);
+            a["x"] = 0;
+            a["y"] = 0;
+            a["size"] = RcProbe.Size;
+            var d = new Dictionary<string, object>();
+            d["t"] = "send";
+            d["ch"] = "ctl";
+            d["m"] = a;
+            host.Post(d);
+        }
+
+        void CloseProbe()
+        {
+            var p = probe;
+            probe = null;
+            if (p != null) { p.Close(); Log.Write("Remote control: the delay measurement's square is gone"); }
+        }
+
+        // (1.12.6) This PC's pointer hidden while the viewer draws it (RcPointer), or shown again; never for a kvm session
+        // (the viewer looks at this PC's own screen) or a viewer that can't (a phone).
+        void SetPointer(RcSession s, bool here, string why)
+        {
+            if (here && (s.Kvm || current != s)) return;
+            if (here && pointer != null) { pointer.Resend(); return; } // (a new connection, after a switch of screens)
+            if (!here && pointer == null) return;
+            if (here)
+            {
+                pointer = new RcPointer(app.Cfg, msg => SendCtl(s, msg));
+                if (!app.Cfg.CustomPath) window.Mouse(true);
+                Log.Write("Remote control: the viewer draws this PC's pointer itself (" + why + ")");
+            }
+            else
+            {
+                window.Mouse(false);
+                pointer.Dispose();
+                pointer = null;
+                Log.Write("Remote control: this PC's pointer is back to normal (" + why + ")");
+            }
+        }
+
+        // (1.12.6) Raw input from a real mouse here (someone at this PC): its pointer shows for a while.
+        public void OnRawInput(IntPtr lParam)
+        {
+            var p = pointer;
+            if (p != null && RcPointer.FromThisMouse(lParam)) p.Reveal();
         }
 
         // (a thread-pool timer: a ControlLeft held back for AltGr goes even while the UI thread is held)
@@ -766,7 +846,8 @@ namespace Beam
             hello["monitor"] = s.Screen;
             // Beam 1.8: what this PC does besides 1.6's (fit-scale: 1.11.4). A kvm session (1.12): input on any of its
             // screens (`mv`, `btn` and `wheel` say which in `m`), "kvm-back", and nothing about a picture.
-            hello["caps"] = s.Kvm ? new object[] { "kvm", "clipimg" } : new object[] { "fit", "fit-scale", "settings", "video", "clipimg" }; // (1.12.4: pictures)
+            // (1.12.4: pictures; 1.12.6: `cursor`, the viewer may draw this PC's pointer itself, and `probe`, the delay)
+            hello["caps"] = s.Kvm ? new object[] { "kvm", "clipimg" } : new object[] { "fit", "fit-scale", "settings", "video", "clipimg", "cursor", "probe" };
             if (!s.Kvm) hello["fitted"] = display.Fitted;
             // Where this PC's cursor is, when it's on the shared screen: a phone's trackpad pointer starts there (1.6.1).
             var cursor = CursorOn(layout, s.Screen);
@@ -864,6 +945,7 @@ namespace Beam
                     var layout = DesktopLayout.Current();
                     if (id == s.Screen || layout.Screen(id) == null) break;
                     Log.Write("Remote control: switching to screen " + (id + 1));
+                    CloseProbe();
                     var old = s.Host;
                     s.Host = null;
                     s.Verified = false;
@@ -906,9 +988,14 @@ namespace Beam
                 {
                     var caps = Json.Get(m, "caps") as object[];
                     s.ClipImg = caps != null && caps.Any(c => c as string == "clipimg");
-                    Log.Write("Remote control: the viewer is " + (Json.Str(m, "app") ?? "web") + " (protocol " + Json.Long(m, "v", 0) + ")" + (s.ClipImg ? ", takes pictures" : ""));
+                    s.CursorCap = !s.Kvm && caps != null && caps.Any(c => c as string == "cursor");
+                    Log.Write("Remote control: the viewer is " + (Json.Str(m, "app") ?? "web") + " (protocol " + Json.Long(m, "v", 0) + ")" + (s.ClipImg ? ", takes pictures" : "") +
+                        (s.CursorCap ? ", can draw this PC's pointer" : ""));
                     break;
                 }
+                case "pointer": // (1.12.6) the viewer draws this PC's pointer itself (its Picture setting), or no longer
+                    SetPointer(s, s.CursorCap && Json.Bool(m, "here", false), "the viewer's setting");
+                    break;
             }
         }
 
@@ -1209,6 +1296,8 @@ namespace Beam
             }
             if (s.Banner != null) { s.Banner.CloseBanner(); s.Banner = null; }
             ClipWatch(false);
+            SetPointer(s, false, "the session ended");
+            CloseProbe();
             if (display.Fitted && !closing) RestoreDisplay("the session ended"); // (quitting: Quit puts it back itself)
             if (current == null)
             {
@@ -1576,6 +1665,7 @@ namespace Beam
                     break;
                 }
                 case "warm": WarmHost("test"); break;                            // (1.12.4) as 20 s after Beam starts
+                case "pointerreveal": if (pointer != null) pointer.Reveal(); break; // (1.12.6) as this PC's own mouse moving
                 case "kvmback": KvmBack("test"); break;                        // (1.12) as the tray's "Back to …"
                 case "kvmbanner": KvmBanner(arg != "hide", "test"); break;      // kvmbanner:show|hide
                 case "kvmstate": // the kvm session as this PC sees it
@@ -1648,6 +1738,15 @@ namespace Beam
             listening = on ? AddClipboardFormatListener(Handle) : !RemoveClipboardFormatListener(Handle);
         }
 
+        // (1.12.6) Raw input from the mice here, while this PC's pointer is hidden for a viewer (RcPointer.Reveal).
+        public void Mouse(bool on)
+        {
+            if (on == mouse || Handle == IntPtr.Zero) return;
+            if (RcPointer.Listen(Handle, on) || !on) mouse = on;
+            else Log.Write("Remote control: this PC's own mouse can't be watched (" + Marshal.GetLastWin32Error() + "): its pointer stays hidden while it moves");
+        }
+        bool mouse;
+
         protected override void WndProc(ref Message m)
         {
             switch (m.Msg)
@@ -1655,6 +1754,7 @@ namespace Beam
                 case 0x02B1: rc.OnSessionChange(m.WParam.ToInt32()); break;   // WM_WTSSESSION_CHANGE
                 case 0x007E: rc.OnDisplayChange(); break;                    // WM_DISPLAYCHANGE
                 case 0x031D: rc.CheckClipboardNow(); break;                  // WM_CLIPBOARDUPDATE
+                case 0x00FF: rc.OnRawInput(m.LParam); break;                 // WM_INPUT
             }
             base.WndProc(ref m);
         }
@@ -1665,6 +1765,7 @@ namespace Beam
             {
                 if (registered) WTSUnRegisterSessionNotification(Handle);
                 if (listening) RemoveClipboardFormatListener(Handle);
+                if (mouse) RcPointer.Listen(Handle, false);
             }
             base.DestroyHandle();
         }

@@ -109,6 +109,12 @@ const rc = {
   pingN: 0,
   rtt: null,
   delays: [],          // (1.14.2) each frame's way from the PC's screen to this one (ms), since the last stats tick
+  cursorCss: null,     // (a Windows app 1.12.6) the PC's pointer as a CSS name while it's drawn here (null: in the picture)
+  cursorHidden: false, // ...an app there hid it
+  probe: null,         // (1.12.6) a delay probe on its way: { n, t0, answer, frame, check }
+  probeRect: null,     // ...the PC's square: { x, y, size } in its screen's pixels
+  measuring: null,     // ...a delay measurement under way: { got: [...] }
+  measured: null,      // ...its result (medians, ms)
   path: null,          // (1.14.2) how Tailscale reaches the PC, as it says: { via: direct | peer-relay | relay, lan, relay }
   stats: null,         // { fps, kbps, codec, w, h } as received here
   statsPrev: null,
@@ -980,9 +986,152 @@ function rcWatchFrames(v) {
     if (v.rcFrameGen !== gen) return;
     const d = m.captureTime ? m.expectedDisplayTime - m.captureTime : null;
     if (d != null && d >= 0 && d < 10000 && rc.delays.length < 600) rc.delays.push(d);
+    if (rc.probe && !rc.probe.frame) rcProbeLook(v, m);
     v.requestVideoFrameCallback(tick);
   };
   v.requestVideoFrameCallback(tick);
+}
+
+// ---------------------------------------------------------------- the delay, measured end to end (a Windows app 1.12.6)
+
+// "Measure the delay" (Picture): probes go the way input goes (`in`); for each, the PC turns a square in the top left
+// corner of its screen from magenta to green or back and says how long that took there, and this page watches each
+// frame (requestVideoFrameCallback) for the change: from sending a probe to its frame being shown here, and each
+// step's share (half the round trip each way; the PC's own time; its encoding and sending, from its stats; the
+// capture, what's left of the way here; decoding; the wait to be shown).
+const RC_PROBES = 10;
+
+async function rcMeasure() {
+  if (rc.measuring) return;
+  const v = rcUi.video;
+  if (!rc.caps.includes('probe') || !rcLive()) { toast('Measuring the delay needs Beam 1.12.6 or later on the PC, and control of it.'); return; }
+  if (typeof v.requestVideoFrameCallback !== 'function') { toast('This browser can’t time the picture’s frames, so it can’t measure the delay.'); return; }
+  const gen = rc.gen;
+  rc.measuring = { got: [] };
+  rc.measured = null;
+  if (!rc.pic.details) rcSetPic('details', true);
+  rcRenderDetails();
+  try {
+    if (!(await rcProbe(0, true))) throw new Error('The PC’s square didn’t show up in the picture, so the delay couldn’t be measured.');
+    for (let i = 1; i <= RC_PROBES && rc.gen === gen && rc.measuring; i++) {
+      await new Promise(r => setTimeout(r, 120 + Math.random() * 180)); // (each probe at another point between frames)
+      const r = await rcProbe(i, false);
+      if (r && rc.measuring) rc.measuring.got.push(r);
+      rcRenderDetails();
+    }
+    if (rc.gen === gen && rc.measuring) {
+      rc.measured = rcMeasureSum(rc.measuring.got);
+      if (!rc.measured) toast('No probe came back in time, so the delay couldn’t be measured.');
+    }
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    if (rc.gen === gen) rcSend('in', { t: 'probe', off: true });
+    rc.measuring = null;
+    rc.probe = null;
+    rcRenderDetails();
+  }
+}
+
+// One probe: sent, then both the PC's answer and the frame showing the change (3 s at most).
+function rcProbe(n, on) {
+  return new Promise(resolve => {
+    const p = { n, t0: performance.now(), answer: null, frame: null, done: false };
+    const finish = r => { if (p.done) return; p.done = true; clearTimeout(timer); if (rc.probe === p) rc.probe = null; resolve(r); };
+    const timer = setTimeout(() => finish(null), 3000);
+    p.check = () => {
+      if (!p.answer || !p.frame) return;
+      const f = p.frame;
+      finish({ total: f.shown - p.t0, pc: p.answer.ms, received: Number.isFinite(f.received) ? f.received - p.t0 : null, decode: f.decode,
+        shown: Number.isFinite(f.received) ? f.shown - f.received - (f.decode || 0) : null });
+    };
+    rc.probe = p;
+    if (!rcSend('in', on ? { t: 'probe', n, on: true } : { t: 'probe', n })) finish(null);
+  });
+}
+
+// A frame (requestVideoFrameCallback's metadata): does the square show the colour this probe makes it?
+function rcProbeLook(v, m) {
+  const p = rc.probe;
+  const want = p.n % 2 ? 'green' : 'magenta'; // (it starts magenta; each probe after turns it)
+  if (rcProbeColor(v, rc.probeRect || { x: 0, y: 0, size: 32 }) !== want) return;
+  p.frame = { shown: m.expectedDisplayTime, received: m.receiveTime, decode: Number.isFinite(m.processingDuration) ? m.processingDuration * 1000 : null };
+  p.check();
+}
+
+// The colour in the middle of the square, in the frame shown now: magenta, green, or null (anything else).
+function rcProbeColor(v, r) {
+  const mon = rc.monitors.find(x => x.id === rc.monitor);
+  if (!mon?.w || !v.videoWidth) return null;
+  const k = v.videoWidth / mon.w;
+  const half = Math.max(1, r.size * k / 4);
+  const cx = (r.x + r.size / 2) * k, cy = (r.y + r.size / 2) * k;
+  let c = rcUi.probeCanvas;
+  if (!c) { c = rcUi.probeCanvas = document.createElement('canvas'); c.width = c.height = 2; }
+  const g = c.getContext('2d', { willReadFrequently: true });
+  try { g.drawImage(v, cx - half, cy - half, half * 2, half * 2, 0, 0, 2, 2); } catch { return null; }
+  const d = g.getImageData(0, 0, 2, 2).data;
+  let R = 0, G = 0, B = 0;
+  for (let i = 0; i < d.length; i += 4) { R += d[i]; G += d[i + 1]; B += d[i + 2]; }
+  R /= 4; G /= 4; B /= 4;
+  if (R > 150 && B > 150 && G < 110) return 'magenta';
+  if (G > 150 && R < 110 && B < 110) return 'green';
+  return null;
+}
+
+// The probes' medians, each step's own.
+function rcMeasureSum(got) {
+  if (!got.length) return null;
+  const med = list => { const a = list.filter(Number.isFinite).sort((x, y) => x - y); return a.length ? a[a.length >> 1] : null; };
+  const rtt = rc.rtt ?? rc.pair?.rtt;
+  const half = Number.isFinite(rtt) ? rtt / 2 : null;
+  const enc = rc.host?.encMs ?? null, send = rc.host?.sendMs ?? null;
+  // (on the PC's screen → here, per probe: the capture, encoding, sending and the way back)
+  const out = got.map(g => (g.received != null && g.pc != null && half != null ? g.received - half - g.pc : null));
+  const way = med(out);
+  return {
+    n: got.length, at: Date.now(), total: med(got.map(g => g.total)), toPc: half, pc: med(got.map(g => g.pc)),
+    capture: way != null ? Math.max(0, way - half - (enc || 0) - (send || 0)) : null, enc, send, back: way != null ? half : null,
+    decode: med(got.map(g => g.decode)), shown: med(got.map(g => g.shown)),
+    rest: way == null ? Math.max(0, med(got.map(g => g.total)) - (half || 0) - (med(got.map(g => g.pc)) || 0)) : null,
+  };
+}
+
+// The result for the details: "48 ms from a click to the picture: to the PC 2 · …".
+function rcMeasuredText() {
+  if (rc.measuring) return `measuring… ${rc.measuring.got.length} of ${RC_PROBES}`;
+  const m = rc.measured;
+  if (!m) return '';
+  const ms = v => `${v < 10 ? Math.round(v * 10) / 10 : Math.round(v)}`;
+  const parts = [
+    m.toPc != null && `to the PC ${ms(m.toPc)}`, m.pc != null && `on its screen ${ms(m.pc)}`,
+    m.capture != null && `capture ${ms(m.capture)}`, m.enc != null && m.capture != null && `encode ${ms(m.enc)}`, m.send != null && m.capture != null && `send ${ms(m.send)}`,
+    m.back != null && `back ${ms(m.back)}`, m.decode != null && `decode ${ms(m.decode)}`, m.shown != null && `shown ${ms(m.shown)}`,
+    m.rest != null && `the rest ${ms(m.rest)}`,
+  ].filter(Boolean);
+  return `${Math.round(m.total)} ms from a click to the picture (median of ${m.n}): ${parts.join(' · ')}`;
+}
+
+// ---------------------------------------------------------------- the PC's pointer, drawn here (a Windows app 1.12.6)
+
+// With a mouse (Picture → "Draw the pointer here", on by default): the PC hides its own pointer, which Edge's capture
+// would otherwise draw into the picture a moment behind this mouse, and says which one is showing; the picture area
+// then shows that one at once. An app's own pointer (it can't be hidden there) stays in the picture, with the dot here.
+const RC_CURSORS = new Set(['default', 'text', 'wait', 'crosshair', 'nwse-resize', 'nesw-resize', 'ew-resize', 'ns-resize', 'move', 'not-allowed', 'pointer', 'progress', 'help']);
+const rcPointerHere = () => rc.pic.pointer !== false && !rcPhone() && rc.caps.includes('cursor');
+
+function rcSendPointer() {
+  if (!rc.verified || !rc.hostHello || !rc.caps.includes('cursor') || rcPhone()) return rcApplyCursor();
+  rcSend('ctl', { t: 'pointer', here: rcPointerHere() });
+  if (!rcPointerHere()) { rc.cursorCss = null; rc.cursorHidden = false; }
+  rcApplyCursor();
+}
+
+function rcApplyCursor() {
+  const st = rcUi.stage;
+  if (!st) return;
+  const on = rcPointerHere() && rc.state === 'live';
+  st.style.cursor = !on ? '' : rc.cursorHidden ? 'none' : rc.cursorCss || ''; // ('': the stylesheet's dot)
 }
 
 // The lag: a touch's way to the PC (half the round trip) and the picture's way back (measured per frame). A browser
@@ -1022,7 +1171,8 @@ function rcOnCtlOpen() {
   if (!rc.verified || rc.helloSent) return;
   rc.helloSent = true;
   const app = HOST ? 'windows' : /; wv\)/.test(navigator.userAgent) ? 'android' : 'web';
-  rcSend('ctl', { t: 'hello', v: 1, role: 'viewer', app, caps: ['clip', 'text', 'clipimg'] });
+  // (a Windows app 1.12.6: `cursor`, the PC's pointer drawn here, with a mouse; a phone has its own)
+  rcSend('ctl', { t: 'hello', v: 1, role: 'viewer', app, caps: ['clip', 'text', 'clipimg', ...(rcPhone() ? [] : ['cursor'])] });
   rc.quality = rc.pic.mode === 'motion' ? 'motion' : 'text'; // (a 1.6 PC's two; a 1.8 one gets the settings after its hello)
   rcSend('ctl', { t: 'quality', mode: rc.quality });
   if (rc.clip) rcSend('ctl', { t: 'clip', on: true });
@@ -1062,12 +1212,27 @@ function rcOnCtl(data) {
       rcMaybeHelp();
       rcSendPic();
       rcSendFit();
+      rc.cursorCss = null; // (a new connection: the PC says again which pointer shows)
+      rc.cursorHidden = false;
+      rcSendPointer();
       rcVideo(!document.hidden);
       break;
     case 'stats':
       rcHostStats(m);
       rcRenderChip();
       rcRenderDetails();
+      break;
+    case 'cursor': // (a Windows app 1.12.6) the pointer showing there, drawn here: a CSS name; null: an app's own (in the picture)
+      rc.cursorCss = typeof m.css === 'string' && RC_CURSORS.has(m.css) ? m.css : null;
+      rc.cursorHidden = m.hidden === true;
+      rcApplyCursor();
+      break;
+    case 'probe': // (1.12.6) a delay probe's answer: the square's colour now, and the PC's own time to put it on its screen
+      if (rc.probe && m.n === rc.probe.n && ['magenta', 'green'].includes(m.color)) {
+        rc.probe.answer = { color: m.color, ms: Number.isFinite(m.ms) ? Math.max(0, Math.min(m.ms, 5000)) : null };
+        if (Number.isFinite(m.size) && m.size > 0 && m.size <= 256) rc.probeRect = { x: Number(m.x) || 0, y: Number(m.y) || 0, size: m.size };
+        rc.probe.check();
+      }
       break;
     case 'path': // (1.14.2, a Windows app 1.11) how Tailscale reaches this viewer: direct, or through a relay
       rc.path = ['direct', 'relay', 'peer-relay'].includes(m.via)
@@ -1152,6 +1317,7 @@ function rcHostStats(m) {
     srcW: num(m.srcW, 16384), srcH: num(m.srcH, 16384), w: num(m.w, 16384), h: num(m.h, 16384), down: num(m.down, 64),
     fps: num(m.fps, 1000), kbps: num(m.kbps, 1e7), maxFps: num(m.maxFps, 1000), maxKbps: num(m.maxKbps, 1e7),
     avail: num(m.avail, 1e7), lost: num(m.lost, 100), rtt: num(m.rtt, 1e5), auto: m.auto === true, video: m.video !== false,
+    encMs: num(m.encMs, 1000), sendMs: num(m.sendMs, 1000), // (1.12.6) a frame's encoding, and its packets' wait to go out
   };
   if (['text', 'motion', 'saver'].includes(m.profile)) rc.profile = m.profile;
 }
@@ -2340,7 +2506,8 @@ function rcLoadPic() {
   const p = store.json(`beam.rc.pic.${RC_ID}`, null);
   const q = p && typeof p === 'object' ? p : {};
   const one = key => (RC_PIC[key].some(([v]) => v === q[key]) ? q[key] : RC_PIC[key][0][0]);
-  return { mode: one('mode'), size: one('size'), fps: one('fps'), kbps: one('kbps'), codec: one('codec'), fitPc: typeof q.fitPc === 'boolean' ? q.fitPc : null, fitScale: q.fitScale === true, details: q.details === true };
+  return { mode: one('mode'), size: one('size'), fps: one('fps'), kbps: one('kbps'), codec: one('codec'), fitPc: typeof q.fitPc === 'boolean' ? q.fitPc : null, fitScale: q.fitScale === true, details: q.details === true,
+    pointer: q.pointer !== false };
 }
 const rcPicLabel = (key, v) => RC_PIC[key].find(([x]) => x === v)?.[1] || String(v);
 const rcFitOn = () => rc.pic.fitPc ?? !rcPhone();
@@ -2349,6 +2516,7 @@ function rcSetPic(key, value) {
   rc.pic[key] = value;
   store.setJson(`beam.rc.pic.${RC_ID}`, rc.pic);
   if (key === 'fitPc' || key === 'fitScale') rcSendFit();
+  else if (key === 'pointer') rcSendPointer();
   else if (key !== 'details') rcSendPic();
   rcRenderBar();
   rcRenderDetails();
@@ -2445,7 +2613,12 @@ function rcShowSettings() {
     full && pick('kbps', 'Data limit', RC_PIC.kbps, rc.pic.kbps),
     full && pick('codec', 'Codec', RC_PIC.codec, rc.pic.codec),
     !full && note(`More settings (picture size, frame rate, data limit, codec) need Beam 1.8 or later on ${n}.`),
+    rc.caps.includes('cursor') && !rcPhone() && toggle('Draw the pointer here', rc.pic.pointer !== false, v => rcSetPic('pointer', v),
+      { hint: `Your pointer moves at once, in ${n}’s shape (arrow, text, hand…), and ${n} hides its own while you control it. Turn this off while someone is watching ${n}’s own screen.` }),
     toggle('Show details', rc.pic.details, v => rcSetPic('details', v), { hint: 'Picture size, frames, data rate, codec, delay and losses, over the picture.' }),
+    rc.caps.includes('probe') && field('Delay', el('div', {},
+      el('button', { class: 'btn', type: 'button', disabled: Boolean(rc.measuring), onclick: () => { $('#genDlg').close('ok'); rcMeasure(); } }, 'Measure the delay'),
+      el('small', { class: 'muted block' }, `From a click to the picture, step by step (in the details). A small square in the top left corner of ${n}’s screen changes colour a few times meanwhile.`))),
     note(`Kept for ${n} on this device. They apply at once.`),
   ];
   const done = el('button', { class: 'btn primary', type: 'button', onclick: () => $('#genDlg').close('ok') }, 'Done');
@@ -2475,6 +2648,7 @@ function rcRenderDetails() {
     ['Codec', [s.codec || rc.hostCodec, rc.encoder && `encoder ${rc.encoder}${hw(rc.encoder)}`, rc.decoder && `decoder ${rc.decoder}`].filter(Boolean).join(' · ')],
     ['Delay', [s.picMs != null && `about ${rcLag()} ms from a touch to the picture`, s.picMs != null && `${s.picMs} ms from the PC’s screen to this one`,
       rtt != null && `${rtt} ms round trip`, s.jitterMs != null && `${s.jitterMs} ms buffered here`, h?.lost != null && `${h.lost}% lost`].filter(Boolean).join(' · ')],
+    ['Measured', rcMeasuredText()],
     ['Limited by', rc.qlr && rc.qlr !== 'none' ? (rc.qlr === 'cpu' ? 'the PC’s processor' : rc.qlr === 'bandwidth' ? 'the network' : rc.qlr) : 'nothing'],
     ['Path', rcPathText()],
   ].filter(([, v]) => v);
@@ -2711,6 +2885,7 @@ function rcRender() {
   const n = rc.name || 'the PC';
   rcRenderBar();
   rcDrawPointer();
+  rcApplyCursor();
   rcUi.root.dataset.state = rc.state;
   // The PC's foreground window runs as administrator: a note over the picture. Windows drops all injected input then
   // (UIPI), not just input to that window (1.7.6: the user found every click and key blocked).

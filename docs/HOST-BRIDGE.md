@@ -450,6 +450,25 @@ and (Windows 1.12.4) `clip` (id 3, ordered: clipboard pictures; a side before it
   out of step drops it), sent as the channel drains (at most 1 MB waiting in it). The PC answers a whole one on `ctl`:
   `{ t: "clip-img", n, ok }`; the viewer's held Ctrl+V goes once it has (15 s at most). Pictures set from the other side
   are marked never to be sent back (and out of the cloud clipboard), as text is.
+- **The PC's pointer drawn by the viewer (Windows 1.12.6, web viewer too; caps `"cursor"` in both hellos, a viewer
+  with a mouse only):** Edge's capture always draws the PC's pointer into the picture (`cursor: 'never'` is ignored),
+  so the viewer sends `{ t: "pointer", here }` (its Picture setting "Draw the pointer here", on by default) and the PC
+  swaps its standard pointers for blank ones while `here` (never for a kvm session; back at the session's end, at
+  `here: false`, when Beam quits or fails, and at its next start). The PC then says which pointer shows, on change:
+  `{ t: "cursor", css, hidden }`: `css` a CSS cursor name (default, text, pointer, the resize ones, wait, progress,
+  crosshair, move, not-allowed, help) that the viewer sets on its picture area; `null` for an app's own pointer (it
+  can't be hidden: it's in the picture, and the viewer shows its dot), and while the PC's own mouse moves (someone at
+  the PC: raw input from a real device; the pointer shows there for 4 s); `hidden`: an app hid it (the viewer shows
+  none).
+- **The delay, measured end to end (Windows 1.12.6, web viewer too; the PC's caps `"probe"`):** the viewer's Picture →
+  "Measure the delay" sends probes on `in` (input's own way): `{ t: "probe", n: 0, on: true }`, then `{ t: "probe", n }`
+  for n = 1…10 (a few hundred ms apart), then `{ t: "probe", off: true }`. The PC shows a 32-pixel square in the top left
+  corner of the screen it shares (topmost, click-through, a thread of its own), magenta, then turns it green or back
+  for each probe, and answers on `ctl`: `{ t: "probe", n, color, ms, x, y, size }` (`ms`: from the probe's arrival to
+  the change being composed on its screen; the square's place in the screen's pixels). The viewer watches its frames
+  (requestVideoFrameCallback) for the colour and shows the medians in its details: half the round trip each way, the
+  PC's `ms`, the capture (what's left), encoding and sending (the PC's stats now carry `encMs` and `sendMs`), decoding
+  and the wait to be shown. The square goes after 20 s without a probe, at the session's end or a switch of screens.
 - **Screens:** `{ t: "monitor", id }` restarts the capture as a new connection. The new `offer` has a different SDP
   `o=` session id, so the viewer answers it with a fresh RTCPeerConnection. An offer with the same `o=` id is a
   renegotiation on the same connection: an ICE restart (after `restart`, or 3 s of `disconnected`), or a switch to
