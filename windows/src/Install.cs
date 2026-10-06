@@ -86,6 +86,7 @@ namespace Beam
                 {
                     Autostart.Set(true, cfg);
                     cfg.AutostartInitialized = true;
+                    cfg.AutostartWanted = true;
                     cfg.Save();
                 }
                 else Autostart.Repair(cfg);

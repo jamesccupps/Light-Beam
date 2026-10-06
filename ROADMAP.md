@@ -10,7 +10,7 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - A speed and battery audit, with speed budgets the tests enforce.
 - Phone notifications on your PCs, with replies and actions.
 - Remote control of a Windows PC's screen from another PC, a browser or a phone; the PC's resolution and scaling
-  fitted to the screen you view it on (put back after), and a Picture panel that applies at once: Auto, Sharp text,
+  fitted to the screen you view it on if you choose (put back after), and a Picture panel that applies at once: Auto, Sharp text,
   Smooth motion or Data saver, picture size, frame rate, data limit, codec and details; your pointer drawn on the
   viewing device at once, and the delay measured end to end, step by step (the Windows app 1.12.6).
 - **Beam Family**: the family's own chat, reachable over Tailscale or a public link.

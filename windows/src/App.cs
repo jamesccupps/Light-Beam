@@ -218,7 +218,16 @@ namespace Beam
             });
             Theme.Changed += (s, e) => { SetTrayIcon(trayDot); MarkChanged(); };
 
+            // (1.12.7) "Start with Windows" follows the user's choice, kept in the config, and an entry that went missing is
+            // put back. (Desktop's value, written while Beam was started from a Claude session, lived only in that app's
+            // private copy of the registry, so Windows never started Beam at sign-in.) Before 1.12.7 the entry was the choice.
             if (!Cfg.AutostartInitialized && Autostart.IsEnabled(Cfg)) { Cfg.AutostartInitialized = true; Cfg.Save(); }
+            if (Cfg.AutostartInitialized && !Cfg.AutostartWanted.HasValue) { Cfg.AutostartWanted = Autostart.IsEnabled(Cfg); Cfg.Save(); }
+            if (Cfg.AutostartWanted == true && !Autostart.IsEnabled(Cfg))
+            {
+                Autostart.Set(true, Cfg);
+                Log.Write(Autostart.IsEnabled(Cfg) ? "Start with Windows was missing; put it back" : "Start with Windows is missing and couldn't be put back");
+            }
             Autostart.Repair(Cfg);
 
             if (Cfg.Paired) StartSession();
@@ -2465,6 +2474,7 @@ namespace Beam
                 bool v = Json.Bool(s, "autostart", false);
                 if (v != Autostart.IsEnabled(Cfg)) Autostart.Set(v, Cfg);
                 Cfg.AutostartInitialized = true;
+                Cfg.AutostartWanted = v; // (1.12.7)
             }
             Cfg.Save();
             if (nameChanged && Api != null)

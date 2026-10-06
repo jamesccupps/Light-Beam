@@ -1626,10 +1626,19 @@ function rcOnPaste(e) {
   if (!rcLive()) return;
   const text = e.clipboardData?.getData('text/plain') || '';
   if (rc.held) {
+    // (1.12.7) What the PC itself put on our clipboard, unchanged: the keys go at once, and the PC's clipboard stays as
+    // it was (its own formats). A picture used to go there and back first: seconds, and a paste that could miss.
+    if (text && rc.clip && !rc.clipPending && text === rc.lastClip) return rcFlushHeld();
+    const img = !text && rc.clip ? rcClipImageOf(e.clipboardData) : null;
+    if (img && rc.lastClipImg && !rc.clipPending) {
+      const theirs = rc.lastClipImg;
+      rcSamePicture(img, theirs).then(same => { if (rc.held) { if (same && rc.lastClipImg === theirs) rcFlushHeld(); else rcSendClipImage(img); } });
+      return;
+    }
     if (text && rcUtf8Size(text) <= RC_CLIP_MAX && rc.clip) {
       rcSend('ctl', { t: 'clip', n: ++rc.clipN, text });
       rcTimer('paste', rcFlushHeld, 120); // (`ctl` and `in` aren't in order with each other: a moment for the PC)
-    } else if (!text && rc.clip && rcClipImageOf(e.clipboardData)) rcSendClipImage(rcClipImageOf(e.clipboardData)); // (1.12.4)
+    } else if (img) rcSendClipImage(img); // (1.12.4)
     else rcFlushHeld();
     return;
   }
@@ -1641,6 +1650,28 @@ function rcOnPaste(e) {
 function rcClipImageOf(dt) {
   for (const it of dt?.items || []) if (it.kind === 'file' && /^image\//.test(it.type)) return it.getAsFile();
   return null;
+}
+
+// (1.12.7) Whether two pictures have the same pixels: the PC's comes back from our clipboard re-encoded, never the same
+// bytes. Both drawn at full size, with a little leeway for the colours' round trip; over 16 megapixels they count as
+// different (sending is the safe way).
+async function rcSamePicture(a, b) {
+  let x, y;
+  try {
+    [x, y] = await Promise.all([createImageBitmap(a), createImageBitmap(b)]);
+    if (x.width !== y.width || x.height !== y.height || x.width * x.height > 16e6) return false;
+    const px = bmp => {
+      const g = new OffscreenCanvas(bmp.width, bmp.height).getContext('2d', { willReadFrequently: true });
+      g.drawImage(bmp, 0, 0);
+      return g.getImageData(0, 0, bmp.width, bmp.height).data;
+    };
+    const p = px(x), q = px(y);
+    for (let i = 0; i < p.length; i += 4) {
+      if (p[i + 3] < 4 && q[i + 3] < 4) continue; // both see-through: their colours don't count
+      if (Math.abs(p[i] - q[i]) > 3 || Math.abs(p[i + 1] - q[i + 1]) > 3 || Math.abs(p[i + 2] - q[i + 2]) > 3 || Math.abs(p[i + 3] - q[i + 3]) > 3) return false;
+    }
+    return true;
+  } catch { return false; } finally { x?.close?.(); y?.close?.(); }
 }
 
 const rcB64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
@@ -2506,7 +2537,9 @@ function rcLoadPic() {
     pointer: q.pointer !== false };
 }
 const rcPicLabel = (key, v) => RC_PIC[key].find(([x]) => x === v)?.[1] || String(v);
-const rcFitOn = () => rc.pic.fitPc ?? !rcPhone();
+// (1.12.7) Off unless chosen: a new resolution makes some of the PC's apps (Windows' Settings) lay out wrong until
+// they're reopened, and a mode of another shape than its monitor's is blurrier there.
+const rcFitOn = () => rc.pic.fitPc === true;
 
 function rcSetPic(key, value) {
   rc.pic[key] = value;
@@ -2597,7 +2630,7 @@ function rcShowSettings() {
   const body = [
     rc.caps.includes('fit')
       ? toggle(`Fit ${n} to this screen`, rcFitOn(), v => rcSetPic('fitPc', v),
-        { hint: `${n}’s resolution changes to suit this screen, and goes back when you disconnect. Its own monitor shows the change too.` })
+        { hint: `Off: ${n}’s display stays as it is, and the picture fits this window. On: its resolution changes to suit this screen (its own monitor shows it too) and goes back when you disconnect; some apps, like Windows’ Settings, lay out wrong until they’re reopened.` })
       : note(`Fitting ${n} to this screen needs Beam 1.8 or later on it.`),
     rc.caps.includes('fit') && (rc.caps.includes('fit-scale')
       ? toggle('Bigger text: change its scaling too', rc.pic.fitScale === true, v => rcSetPic('fitScale', v),
