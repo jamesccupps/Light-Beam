@@ -64,6 +64,7 @@ namespace Beam
         public int WebViewReleaseSec = 180;    // the hidden messenger window's web view is released after this
         public string BadUpdateVersion;        // an update that failed its health check; skipped until a newer one
         public bool AutostartInitialized;      // "start with Windows" was set up once; the user owns it from then on
+        public bool? AutostartWanted;          // (1.12.7) the user's choice for it (null: not known yet); a missing entry is put back
         public bool RuntimeHintShown;          // told once that the WebView2 runtime is missing
         public Dictionary<string, string> Hotkeys = DefaultHotkeys();
         public List<string> KnownUrls = new List<string>(); // every address our Beam said it answers on (hello.urls)
@@ -243,6 +244,7 @@ namespace Beam
                 c.WebViewReleaseSec = (int)Math.Max(5, Json.Long(d, "webViewReleaseSec", 180));
                 c.BadUpdateVersion = Json.Str(d, "badUpdateVersion");
                 c.AutostartInitialized = Json.Bool(d, "autostartInitialized", false);
+                if (d.ContainsKey("autostartWanted")) c.AutostartWanted = Json.Bool(d, "autostartWanted", true);
                 c.RuntimeHintShown = Json.Bool(d, "runtimeHintShown", false);
                 double zoom;
                 if (double.TryParse(Json.Str(d, "zoom") ?? "", NumberStyles.Float, CultureInfo.InvariantCulture, out zoom) && zoom >= 0.25 && zoom <= 5) c.Zoom = zoom;
@@ -376,6 +378,7 @@ namespace Beam
                 if (Quiet) d["quiet"] = true; else d.Remove("quiet");
                 d["badUpdateVersion"] = BadUpdateVersion;
                 d["autostartInitialized"] = AutostartInitialized;
+                if (AutostartWanted.HasValue) d["autostartWanted"] = AutostartWanted.Value; else d.Remove("autostartWanted");
                 if (RuntimeHintShown) d["runtimeHintShown"] = true;
                 if (Math.Abs(Zoom - 1.0) > 0.001) d["zoom"] = Zoom.ToString("0.###", CultureInfo.InvariantCulture); else d.Remove("zoom");
                 var hk = new Dictionary<string, object>();

@@ -600,9 +600,15 @@ export default function register(test) {
     const pc = await fakePc(ctx, { caps: ['fit', 'fit-scale', 'settings', 'video'] });
     const page = await viewer(ctx, pc.id);
     await live(page, pc);
-    // Right after the PC's hello: the settings (Auto), the fit (a desktop: on unless turned off) and visible.
+    // Right after the PC's hello: the settings (Auto) and visible; no fit (1.12.7: off until chosen), then Fit turned on.
     try {
-      await pc.page.waitFor(`['settings', 'fit', 'video'].every(t => fakePc.rec.ctl.some(m => m.t === t))`, 5000, 'settings, fit, video');
+      await pc.page.waitFor(`['settings', 'video'].every(t => fakePc.rec.ctl.some(m => m.t === t))`, 5000, 'settings, video');
+      eq(await pc.js(`fakePc.rec.ctl.some(m => m.t === 'fit')`), false, 'no fit unless chosen (1.12.7)');
+      await page.evaluate(`document.querySelector('.rc-tool[data-tool="gear"]').click(); true`);
+      await page.waitFor(`$('#genDlg').open && [...document.querySelectorAll('#genBody label.check')].some(l => /^Fit /.test(l.textContent))`, 3000, 'Picture: the Fit switch');
+      eq(await page.evaluate(`[...document.querySelectorAll('#genBody label.check')].find(l => /^Fit /.test(l.textContent)).querySelector('input').checked`), false, 'Fit off');
+      await page.evaluate(`[...document.querySelectorAll('#genBody label.check')].find(l => /^Fit /.test(l.textContent)).querySelector('input').click(); $('#genDlg').close(); true`);
+      await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'fit')`, 5000, 'the fit, once chosen');
     } catch (err) {
       const got = await pc.js(`JSON.stringify(fakePc.rec.ctl.map(m => m.t))`);
       const v = await page.evaluate(`JSON.stringify({ caps: rc.caps, hello: rc.hostHello, verified: rc.verified, fitSent: rc.fitSent, picSent: rc.picSent, videoOff: rc.videoOff, hidden: document.hidden, stage: [rcUi.stage.clientWidth, rcUi.stage.clientHeight], fitOn: rcFitOn() })`);
@@ -1289,6 +1295,58 @@ export default function register(test) {
     await pc.js(`fakePc.sendImage(${JSON.stringify(pcPng.b64)}, 7)`);
     // (Ours stays on this clipboard until the PC's lands, and a read can meet that write: read it whole, until it's the PC's.)
     await page.waitFor(`navigator.clipboard.read().then(async items => { const i = items.find(x => x.types.includes('image/png')); if (!i) return 'no picture'; const bmp = await createImageBitmap(await i.getType('image/png')); return (bmp.width === 320 && bmp.height === 200) || bmp.width + ' x ' + bmp.height; })`, 8000, 'the PC\'s picture (320 x 200) on this clipboard');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: FEATURE, timeout: 60000 });
+
+  test('remote control 1.12.7: Ctrl+V sends nothing back while this clipboard holds what the PC put there (its text, or the same picture), and the keys go at once; something else still goes first', async ctx => {
+    const pc = await fakePc(ctx, { caps: ['clipimg'] });
+    const page = await ctx.signedIn();
+    const b = await ctx.browser.browserConn();
+    await b.send('Browser.grantPermissions', { origin: ctx.srv.base, browserContextId: page.contextId, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+    await page.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await viewer(ctx, pc.id, { page });
+    await live(page, pc);
+    await page.evaluate(`document.querySelector('.rc-tool[data-tool="clip"]').click(); true`);
+    await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'clip' && m.on === true)`, 5000, '{ t: "clip", on: true }');
+    const ctrlV = async () => {
+      await page.send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'ControlLeft', key: 'Control', modifiers: 2 });
+      await page.send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'KeyV', key: 'v', modifiers: 2, commands: ['paste'] });
+      await page.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'KeyV', key: 'v', modifiers: 2 });
+      await page.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'ControlLeft', key: 'Control' });
+    };
+    const marks = async () => ({ ctl: (await rec(pc, 'ctl')).length, order: (await rec(pc, 'order')).length, clip: (await rec(pc, 'clip')).length });
+    const keysArrive = m => pc.page.waitFor(`fakePc.rec.order.slice(${m.order}).filter(o => o.startsWith('key:')).length >= 4`, 5000, 'the keys');
+    const sentBack = async m => ({
+      text: (await rec(pc, 'ctl')).slice(m.ctl).filter(x => x.t === 'clip' && typeof x.text === 'string').map(x => x.text),
+      parts: (await rec(pc, 'clip')).length - m.clip,
+    });
+    // The PC's text lands on this clipboard; Ctrl+V: the keys at once, nothing sent back.
+    await pc.js(`fakePc.send('ctl', { t: 'clip', text: 'copied on the PC' }); true`);
+    await page.waitFor(`rc.lastClip === 'copied on the PC' && !rc.clipPending`, 5000, 'the PC’s text on this clipboard');
+    let m = await marks();
+    await ctrlV();
+    await keysArrive(m);
+    eq(await sentBack(m), { text: [], parts: 0 }, 'its own text: nothing sent back');
+    // The PC's picture: the same pixels (re-encoded by the clipboard), so nothing goes back either.
+    const pcPng = await pc.page.evaluate(`(async () => {
+      const c = document.createElement('canvas'); c.width = 320; c.height = 200;
+      const g = c.getContext('2d'); g.fillStyle = '#3a7'; g.fillRect(0, 0, 320, 200); g.fillStyle = '#fff'; g.fillRect(40, 40, 120, 80);
+      const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+      const u8 = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (const x of u8) s += String.fromCharCode(x);
+      return { b64: btoa(s), size: u8.length };
+    })()`);
+    await pc.js(`fakePc.sendImage(${JSON.stringify(pcPng.b64)}, 9)`);
+    await page.waitFor(`Boolean(rc.lastClipImg) && !rc.clipPending`, 5000, 'the PC’s picture on this clipboard');
+    m = await marks();
+    await ctrlV();
+    await keysArrive(m);
+    eq(await sentBack(m), { text: [], parts: 0 }, 'its own picture: nothing sent back');
+    // Something copied on this device: it still goes to the PC first.
+    await page.evaluate(`navigator.clipboard.writeText('copied on this device').then(() => true)`);
+    m = await marks();
+    await ctrlV();
+    await keysArrive(m);
+    eq(await sentBack(m), { text: ['copied on this device'], parts: 0 }, 'this device’s text goes first');
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 60000 });
 
