@@ -424,7 +424,7 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 /* ---------- device status and alerts ---------- */
 .i.tiny { width: 13px; height: 13px; vertical-align: -2px; margin-right: 3px; }
-.fact.low, dd.low { color: var(--warn); font-weight: 650; }
+.fact.low, dd.low, .conn-key.low, .conn-server.low { color: var(--warn); font-weight: 650; }
 .fact.ringing { color: var(--accent); font-weight: 650; }
 .fact.ringing .i { animation: ring-wiggle 1s ease-in-out infinite; transform-origin: 50% 20%; }
 @keyframes ring-wiggle { 0%, 60%, 100% { transform: rotate(0); } 15% { transform: rotate(14deg); } 30% { transform: rotate(-12deg); } 45% { transform: rotate(8deg); } }

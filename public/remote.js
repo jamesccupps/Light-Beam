@@ -1145,11 +1145,7 @@ function rcLag() {
 
 // Tailscale's path to the PC, as the PC sees it (a Windows app 1.11 says): direct (on the same network, or over the
 // internet), through a peer relay, or through Tailscale's relay servers, which add delay.
-const RC_DERP = {
-  nyc: 'New York', sfo: 'San Francisco', sea: 'Seattle', ord: 'Chicago', dfw: 'Dallas', den: 'Denver', mia: 'Miami', lax: 'Los Angeles',
-  tor: 'Toronto', hnl: 'Honolulu', sao: 'São Paulo', lhr: 'London', fra: 'Frankfurt', par: 'Paris', mad: 'Madrid', ams: 'Amsterdam',
-  waw: 'Warsaw', jnb: 'Johannesburg', nai: 'Nairobi', dbi: 'Dubai', blr: 'Bangalore', sin: 'Singapore', hkg: 'Hong Kong', tok: 'Tokyo', syd: 'Sydney',
-};
+const RC_DERP = RELAY_CITIES; // (core.js since 1.17: Settings → Connections names them too)
 function rcPathText() {
   const p = rc.path;
   if (p?.via === 'direct') return p.lan ? 'Tailscale, direct on the same network' : 'Tailscale, direct over the internet';

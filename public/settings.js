@@ -7,6 +7,7 @@ const SECTIONS = [
   ['device', 'This device', 'user'],
   ['pc', 'This PC', 'monitor'],
   ['devices', 'Devices', 'phone'],
+  ['connections', 'Connections', 'globe'], // (1.17)
   ['alerts', 'Alerts', 'alert'],
   ['security', 'Security', 'shield'],
   ['server', 'Server', 'server'],
@@ -17,6 +18,7 @@ const SECTIONS = [
 async function openSettings(section = 'device') {
   settingsSection = section;
   backupState = null; // (1.8.1: the Server section asks again)
+  connState = null; // (1.17: so does Connections)
   const dlg = $('#settingsDlg');
   renderSettings();
   if (!dlg.open) dlg.showModal();
@@ -44,7 +46,7 @@ function jumpToSection(id) {
   for (const b of $$('#settingsNav button')) b.setAttribute('aria-current', String(b.dataset.section === id));
 }
 
-const visibleSections = () => SECTIONS.filter(([id]) => (id === 'pc' ? Boolean(HOST) : id === 'notifications' ? !HOST : id === 'alerts' ? alertsSupported() : true));
+const visibleSections = () => SECTIONS.filter(([id]) => (id === 'pc' ? Boolean(HOST) : id === 'notifications' ? !HOST : id === 'alerts' ? alertsSupported() : id === 'connections' ? serverHas('connections') : true));
 
 function renderSettings() {
   const body = $('#settingsBody');
@@ -61,7 +63,7 @@ function renderSettings() {
   const top = body.scrollTop;
   $('#settingsNav').replaceChildren(...visibleSections().map(([id, label, ic]) =>
     el('button', { type: 'button', 'data-section': id, 'aria-current': String(id === settingsSection), onclick: () => jumpToSection(id) }, icon(ic), el('span', {}, label))));
-  const builders = { device: sectionDevice, pc: sectionPc, devices: sectionDevices, alerts: sectionAlerts, security: sectionSecurity, server: sectionServer, notifications: sectionNotifications, help: sectionHelp };
+  const builders = { device: sectionDevice, pc: sectionPc, devices: sectionDevices, connections: sectionConnections, alerts: sectionAlerts, security: sectionSecurity, server: sectionServer, notifications: sectionNotifications, help: sectionHelp };
   body.replaceChildren(...visibleSections().map(([id, label]) => el('section', { class: 'set-section', id: `set-${id}`, 'aria-labelledby': `set-h-${id}` },
     el('h3', { id: `set-h-${id}` }, label), ...[].concat(builders[id]()).filter(Boolean))));
   body.scrollTop = top;
@@ -223,6 +225,82 @@ async function removeDevice(d) {
     await api(`api/devices/${encodeURIComponent(d.id)}`, { method: 'DELETE' });
     toast(v3 ? `${d.name} is signed out` : `${d.name} was removed`);
   } catch (err) { toast(friendlyError(err), { error: true }); }
+}
+
+// ---------------------------------------------------------------- Connections (1.17)
+// How the server reaches each device's machine over Tailscale (GET /api/connections): the way it last took (seen
+// while they talked, or tested: a few pings), whether Tailscale sees the machine, and when its sign-in runs out.
+
+let connState = null; // the last GET /api/connections, or { error }
+let connLoading = false;
+const connTesting = new Set(); // device ids being tested
+
+async function loadConnections() {
+  if (connLoading) return;
+  connLoading = true;
+  try { connState = await apiJson('api/connections'); } catch (err) { connState = { error: friendlyError(err) }; }
+  connLoading = false;
+  if ($('#settingsDlg').open) renderSettings();
+}
+
+function pathLine(p) {
+  if (!p) return 'Not talking to the server right now: Test shows the way';
+  const how = p.via === 'direct' ? (p.lan ? 'Direct, on the same network' : 'Direct over the internet')
+    : p.via === 'peer-relay' ? 'Through a peer relay'
+    : `Through Tailscale’s relay${p.relay ? ` in ${RELAY_CITIES[p.relay] || p.relay.toUpperCase()}` : ''} (slower)`;
+  return `${how}${Number.isFinite(p.ms) ? ` · ${Math.round(p.ms)} ms` : ''} · ${p.tested ? 'tested' : 'seen'} ${timeAgo(p.at)}`;
+}
+
+function connRow(m) {
+  const testing = connTesting.has(m.id);
+  const key = keyExpiryLine(m.machine);
+  const reach = m.machine.online === false
+    ? `Tailscale can’t reach it now${m.machine.lastSeen ? ` (last seen ${timeAgo(m.machine.lastSeen)})` : ''}`
+    : testing ? 'Testing…' : pathLine(m.path);
+  return el('li', { class: 'device-row', 'data-conn': m.id },
+    avatar(m.id),
+    el('div', { class: 'dev-body' },
+      el('strong', {}, m.name),
+      el('span', { class: 'muted small block conn-path' }, reach),
+      key && el('span', { class: `muted small block conn-key${key.low ? ' low' : ''}` }, `Tailscale sign-in: ${key.text}`),
+      m.machine.online !== false && el('div', { class: 'dev-actions' },
+        el('button', { class: 'btn small-btn', type: 'button', disabled: testing, onclick: () => testConnection(m) }, icon('refresh'), testing ? 'Testing…' : 'Test'))));
+}
+
+async function testConnection(m) {
+  connTesting.add(m.id);
+  if ($('#settingsDlg').open) renderSettings();
+  try {
+    const r = await apiJson(`api/connections/${encodeURIComponent(m.id)}/test`, jsonBody({}));
+    const row = connState?.machines?.find(x => x.id === m.id);
+    if (r?.path && row) row.path = r.path;
+    if (!r?.path) toast(`${m.name} didn’t answer`, { error: true });
+  } catch (err) { toast(friendlyError(err), { error: true }); }
+  connTesting.delete(m.id);
+  if ($('#settingsDlg').open) renderSettings();
+}
+
+async function testAllConnections() {
+  for (const m of (connState?.machines || []).filter(x => !x.machine.self && x.machine.online !== false)) await testConnection(m);
+}
+
+function sectionConnections() {
+  if (!connState) {
+    loadConnections();
+    return note('Loading…');
+  }
+  if (connState.error) return note(`Couldn’t load the connections: ${connState.error}`);
+  if (!connState.tailscale) return note('This Beam server doesn’t see Tailscale, so it can’t tell how your devices reach it.');
+  const rows = (connState.machines || []).filter(m => !m.machine.self);
+  const serverKey = keyExpiryLine(connState.server);
+  const admin = el('a', { href: 'https://login.tailscale.com/admin/machines', target: '_blank', rel: 'noopener noreferrer', onclick: e => { if (HOST) { e.preventDefault(); openLink(e.currentTarget.href); } } }, 'Tailscale’s admin console');
+  return [
+    note(`How this Beam server (${connState.server?.name || 'this PC'}) reaches each device over Tailscale. Direct is fastest; Tailscale’s relay is the slow way round, used when a direct path is blocked.`),
+    serverKey && el('p', { class: `small conn-server${serverKey.low ? ' low' : ''}` }, `This server’s Tailscale sign-in: ${serverKey.text}`),
+    rows.length ? el('ul', { class: 'device-list conn-list' }, ...rows.map(connRow)) : note('No devices on Tailscale yet.'),
+    rows.length > 1 && el('div', { class: 'dev-actions' }, el('button', { class: 'btn small-btn', type: 'button', disabled: connTesting.size > 0, onclick: testAllConnections }, icon('refresh'), 'Test all')),
+    el('p', { class: 'muted small' }, 'A Tailscale sign-in runs out after a while (180 days unless your tailnet says otherwise), and the machine drops off Tailscale until someone signs in there again. For PCs that stay put, turn off key expiry in ', admin, '. A sleeping phone answers slower.'),
+  ];
 }
 
 // ---------------------------------------------------------------- Security

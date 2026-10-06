@@ -139,6 +139,7 @@ const cookieValue = res => /beam_key=([^;]*)/.exec([].concat(res.headers['set-co
 // (1.11.1) the sign-in a page got over https (as __Host-beam_key)
 const hostCookieValue = res => /__Host-beam_key=([^;]+)/.exec([].concat(res.headers['set-cookie'] || []).join('\n'))?.[1];
 const post = (srv, route, body, headers) => srv.req('POST', route, { headers: json(headers), body: JSON.stringify(body) });
+const pick = (o, keys) => o && Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k]])); // (1.17)
 
 async function sendText(srv, headers, text, to) {
   const r = await post(srv, '/api/text', { text, ...(to && { to }) }, headers);
@@ -155,20 +156,32 @@ async function upload(srv, headers, name, data, extra = {}) {
 }
 
 // A fake tailscaled LocalAPI (unix socket or Windows named pipe) with made-up machines and accounts.
+// (1.17) selfInfo and each peer's `info` add status fields (Online, CurAddr, KeyExpiry…); the fake's `peers` and
+// `selfInfo` can change between requests; `pings[ip]` lists the answers to POST ping (the last one repeats; none: Err).
 let fakeCount = 0;
-function fakeTailscale({ self = [], peers = [], whois = {}, servePort = null } = {}) {
+function fakeTailscale({ self = [], selfInfo = {}, peers = [], whois = {}, servePort = null, pings = {} } = {}) {
   const where = IS_WIN ? `\\\\.\\pipe\\beam-test-ts-${process.pid}-${++fakeCount}` : path.join(TMP, `ts-${++fakeCount}.sock`);
   const users = {};
-  const peerMap = {};
-  peers.forEach((p, i) => {
+  const peerMap = () => Object.fromEntries(fake.peers.map((p, i) => {
     users[100 + i] = { LoginName: p.user || 'someone@example.com' };
-    peerMap[`peer${i}`] = { ID: `nPEER${i}`, HostName: p.name, DNSName: p.dns ?? `${p.name}.tail1234.ts.net.`, TailscaleIPs: p.ips, UserID: 100 + i };
-  });
+    return [`peer${i}`, { ID: `nPEER${i}`, HostName: p.name, DNSName: p.dns ?? `${p.name}.tail1234.ts.net.`, TailscaleIPs: p.ips, UserID: 100 + i, ...p.info }];
+  }));
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://local-tailscaled.sock');
     const reply = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
     // (Self.DNSName: the name tailscale serve answers at, which automatic sign-in requires as the Host, 1.7.2)
-    if (u.pathname === '/localapi/v0/status') return reply(200, { Self: { HostName: 'beam-host', DNSName: 'beam.tail1234.ts.net.', TailscaleIPs: self, UserID: 1 }, Peer: peerMap, User: { 1: { LoginName: 'owner@example.com' }, ...users } });
+    if (u.pathname === '/localapi/v0/status') {
+      fake.statusCalls++;
+      const Peer = peerMap();
+      return reply(200, { Self: { HostName: 'beam-host', DNSName: 'beam.tail1234.ts.net.', TailscaleIPs: self, UserID: 1, ...fake.selfInfo }, Peer, User: { 1: { LoginName: 'owner@example.com' }, ...users } });
+    }
+    if (u.pathname === '/localapi/v0/ping') {
+      if (req.method !== 'POST') return reply(400, {});
+      const ip = u.searchParams.get('ip');
+      fake.pinged.push(ip);
+      const list = fake.pings[ip] || [];
+      return reply(200, (list.length > 1 ? list.shift() : list[0]) || { Err: 'timeout' });
+    }
     if (u.pathname === '/localapi/v0/whois') {
       const addr = u.searchParams.get('addr') || '';
       const ip = addr.startsWith('[') ? addr.slice(1, addr.indexOf(']')) : addr.split(':')[0];
@@ -180,7 +193,7 @@ function fakeTailscale({ self = [], peers = [], whois = {}, servePort = null } =
     if (u.pathname === '/localapi/v0/serve-config') return reply(200, servePort ? { Web: { 'beam.tail1234.ts.net:443': { Handlers: { '/': { Proxy: `http://127.0.0.1:${servePort}` } } } } } : {});
     reply(404, {});
   });
-  const fake = { socket: where, delay: 0, close: () => new Promise(r => server.close(r)) };
+  const fake = { socket: where, delay: 0, peers: peers.map(p => ({ ...p, info: { ...p.info } })), selfInfo: { ...selfInfo }, pings, pinged: [], statusCalls: 0, close: () => new Promise(r => server.close(r)) };
   return new Promise(resolve => server.listen(where, () => resolve(fake)));
 }
 
@@ -1946,7 +1959,8 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     assert.equal(d.status.os, 'Windows 11 Pro 24H2');
     assert.ok(d.status.at > 0);
     assert.equal(d.status.macs, undefined);
-    assert.deepEqual(d.tailscale, { name: 'gaming-pc', dns: 'gaming-pc.tail1234.ts.net', ip: '100.64.50.1' });
+    // (1.17: + Tailscale's own view of the machine: the fake says nothing about Online or a key expiry)
+    assert.deepEqual(d.tailscale, { name: 'gaming-pc', dns: 'gaming-pc.tail1234.ts.net', ip: '100.64.50.1', online: false, keyExpiry: null });
     assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false });
     assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false });
     // a partial report keeps the rest; null clears a field
@@ -2143,10 +2157,10 @@ test('QW-E: battery and storage alerts fire once and re-arm; settings; alerts.js
     assert.equal(JSON.parse(fs.readFileSync(path.join(s.data, 'alerts.json'), 'utf8')).length, 4);
     // settings
     let r = await s.req('GET', '/api/settings', { headers: desk });
-    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, offline: [] });
+    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, offline: [] });
     r = await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify({ alerts: { battery: false } }) });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, offline: [] }, 'partial changes keep the rest');
+    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, offline: [] }, 'partial changes keep the rest');
     for (const bad of [{ alerts: { battery: 'no' } }, { alerts: { nope: true } }, { alerts: { offline: 'phone' } }, { alerts: [] }]) {
       assert.equal((await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify(bad) })).status, 400, JSON.stringify(bad));
     }
@@ -2198,6 +2212,130 @@ test('QW-E: offline and back-online alerts for watched devices; the server disk 
     again.close();
     ev.close();
   } finally { await s.stop(); }
+});
+
+test('1.17 Connections: each machine’s path and a test, Tailscale’s view on the devices, key expiry alerts, and why a watched device is offline', async () => {
+  const DAY = 86400e3;
+  const inDays = n => new Date(Date.now() + n * DAY - 60e3).toISOString(); // (a minute short: "in 10 days", not 11)
+  const selfExpiry = inDays(10);
+  const ts = await fakeTailscale({
+    self: ['100.64.17.1'], selfInfo: { KeyExpiry: selfExpiry },
+    peers: [
+      { name: 'shop-desktop', ips: ['100.64.17.2'], info: { Online: true, Active: true, CurAddr: '10.20.30.40:41641', Relay: 'nyc', KeyExpiry: '2099-03-29T13:37:47Z' } },
+      { name: 'pixel', ips: ['100.64.17.3'], info: { Online: true, Active: false, CurAddr: '', Relay: 'nyc', KeyExpiry: inDays(2) } },
+      { name: 'camera-desktop', ips: ['100.64.17.4'], info: { Online: false, LastSeen: new Date(Date.now() - 3600e3).toISOString() } },
+      { name: 'robin-laptop', ips: ['100.64.17.5'], info: { Online: true, Active: true, CurAddr: '203.0.113.7:41641', Relay: 'tor' } },
+    ],
+    pings: { '100.64.17.3': [{ LatencySeconds: 0.12, DERPRegionID: 1, DERPRegionCode: 'nyc' }, { LatencySeconds: 0.051, Endpoint: '198.51.100.27:14600' }] },
+  });
+  const s = await startServer('conn117', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket } });
+  try {
+    const K = s.key;
+    const laptop = app(K, 'laptop00017', 'Robin Laptop', 'windows', from('100.64.17.5'));
+    const shop = app(K, 'shopdesk017', 'Shop Desktop', 'windows', from('100.64.17.2'));
+    const phone = app(K, 'pixelphone1', 'Robin Phone', 'android', from('100.64.17.3'));
+    const camera = app(K, 'cameradesk1', 'Office Desktop', 'windows', from('100.64.17.4'));
+    const server = app(K, 'serverpc001', 'Desktop', 'windows', from('100.64.17.1'));
+    for (const h of [laptop, shop, phone, camera, server]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    const info = (await s.req('GET', '/api/info', { headers: laptop })).json;
+    assert.ok(info.features.includes('connections'));
+
+    // GET /api/connections: one row per machine; the path only while it talks (an idle machine's Relay is just its home relay)
+    let c = (await s.req('GET', '/api/connections', { headers: laptop })).json;
+    assert.equal(c.tailscale, true);
+    assert.equal(c.server.name, 'beam-host');
+    assert.equal(c.server.keyExpiry, Date.parse(selfExpiry));
+    const row = id => c.machines.find(m => m.id === id);
+    assert.deepEqual(pick(row('shopdesk017').path, ['via', 'lan']), { via: 'direct', lan: true });
+    assert.deepEqual(pick(row('laptop00017').path, ['via', 'lan']), { via: 'direct', lan: false });
+    assert.equal(row('pixelphone1').path, null, 'idle: no path yet');
+    assert.equal(row('cameradesk1').machine.online, false);
+    assert.ok(row('cameradesk1').machine.lastSeen > Date.now() - 2 * 3600e3);
+    assert.equal(row('serverpc001').machine.self, true);
+    assert.equal(row('serverpc001').path, null);
+
+    // the devices carry Tailscale's view of their machines (for "why is it offline" and the key's date)
+    const devs = (await s.req('GET', '/api/devices', { headers: laptop })).json.devices;
+    const dev = id => devs.find(d => d.id === id).tailscale;
+    assert.equal(dev('shopdesk017').online, true);
+    assert.equal(dev('shopdesk017').keyExpiry, Date.parse('2099-03-29T13:37:47Z'));
+    assert.equal(dev('cameradesk1').online, false);
+    assert.equal(dev('cameradesk1').keyExpiry, null, 'no expiry: the key doesn’t run out');
+
+    // key expiry alerts: this server's (10 days) and the phone's (2 days), once per stage
+    const keyAlerts = async () => (await s.req('GET', '/api/alerts', { headers: laptop })).json.alerts.filter(a => a.kind === 'tailscaleKey');
+    let ka = await waitFor(async () => { const k = await keyAlerts(); return k.length >= 2 && k; });
+    const serverAlert = ka.find(a => a.device === null);
+    assert.match(serverAlert.text, /^The Beam server's Tailscale sign-in runs out in 10 days \(.+\)\. Then no device can reach Beam until it's renewed: turn off key expiry for beam-host/);
+    assert.match(ka.find(a => a.device === 'pixelphone1').text, /^Robin Phone's Tailscale sign-in runs out in 2 days/);
+    await s.req('GET', '/api/connections', { headers: laptop });
+    await sleep(400);
+    await s.req('GET', '/api/connections', { headers: laptop });
+    assert.equal((await keyAlerts()).length, 2, 'the same stage doesn’t alert again');
+    ts.peers[1].info.KeyExpiry = new Date(Date.now() - 60e3).toISOString();
+    ts.peers[1].info.Expired = true;
+    ka = await waitFor(async () => { await s.req('GET', '/api/connections', { headers: laptop }); const k = await keyAlerts(); return k.length >= 3 && k; });
+    assert.match(ka[0].text, /^Robin Phone's Tailscale sign-in has run out, so it can't reach Beam/);
+    // turned off: logged, not alerted
+    let r = await s.req('PATCH', '/api/settings', { headers: json(laptop), body: JSON.stringify({ alerts: { tailscaleKey: false } }) });
+    assert.equal(r.json.alerts.tailscaleKey, false);
+    ts.peers[0].info.KeyExpiry = inDays(5);
+    await waitFor(async () => { await s.req('GET', '/api/connections', { headers: laptop }); return /Shop Desktop's Tailscale sign-in runs out in 5 days/.test(s.out); });
+    assert.equal((await keyAlerts()).length, 3);
+
+    // a test: a few pings; the first went through the relay, then direct (the path and delay of the last ones)
+    r = await post(s, '/api/connections/pixelphone1/test', {}, laptop);
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(pick(r.json.path, ['via', 'lan', 'ms', 'tested']), { via: 'direct', lan: false, ms: 51, tested: true });
+    assert.equal(ts.pinged.filter(ip => ip === '100.64.17.3').length, 3);
+    c = (await s.req('GET', '/api/connections', { headers: laptop })).json;
+    assert.equal(row('pixelphone1').path.ms, 51, 'remembered');
+    assert.match(s.out, /Robin Laptop tested the connection to Robin Phone: direct over the internet, 51 ms/);
+    r = await post(s, '/api/connections/cameradesk1/test', {}, laptop);
+    assert.deepEqual(r.json, { path: null });
+    assert.match(s.out, /tested the connection to Office Desktop: no answer/);
+    assert.equal((await post(s, '/api/connections/serverpc001/test', {}, laptop)).status, 409, 'the server’s own machine');
+    assert.equal((await post(s, '/api/connections/nosuchdev01/test', {}, laptop)).status, 404);
+
+    // a watched device offline: the alert says why, as Tailscale sees it
+    r = await s.req('PATCH', '/api/settings', { headers: json(laptop), body: JSON.stringify({ alerts: { offline: ['shopdesk017', 'cameradesk1'] } }) });
+    const ev = await openEvents(s.port, laptop);
+    await ev.wait('hello');
+    for (const h of [shop, camera]) {
+      const st = await openEvents(s.port, h);
+      await st.wait('hello');
+      await sleep(100);
+      st.close();
+    }
+    const offShop = await ev.wait('alert', d => d.kind === 'offline' && d.device === 'shopdesk017', 8000);
+    assert.match(offShop.data.text, /^Shop Desktop has been offline for .+: the PC is still on Tailscale, so Beam itself isn't running there$/);
+    const offCam = await ev.wait('alert', d => d.kind === 'offline' && d.device === 'cameradesk1', 8000);
+    assert.match(offCam.data.text, /: Tailscale can't reach it either \(off, asleep or without internet\)$/);
+    ev.close();
+  } finally { await s.stop(); await ts.close(); }
+});
+
+test('1.17 lib/tailscale: reading `tailscale ping` and `tailscale status`', async () => {
+  const t = require(path.join(ROOT, 'lib', 'tailscale.js'));
+  const out = [
+    'pong from pixel (100.64.0.8) via DERP(nyc) in 120ms',
+    'pong from pixel (100.64.0.8) via 198.51.100.27:14600 in 608ms',
+    'timeout waiting for ping reply',
+    'pong from pixel (100.64.0.8) via 198.51.100.27:14600 in 51ms',
+    'pong from pixel (100.64.0.8) via 198.51.100.27:14600 in 53ms',
+  ].join('\r\n');
+  assert.deepEqual(t.summarizePongs(t.parsePing(out)), { via: 'direct', lan: false, ms: 53, answers: 4 });
+  assert.deepEqual(t.parsePing('pong from a (100.64.0.9) via 192.168.1.32:41641 in 1.2s\npong from a (100.64.0.9) via [fe80::1]:41641 in 900µs'),
+    [{ via: 'direct', lan: true, ms: 1200 }, { via: 'direct', lan: true, ms: 0.9 }]);
+  assert.deepEqual(t.parsePing('pong from a (100.64.0.9) via peer-relay(10.0.0.5:40000:vni:3) in 2ms'), [{ via: 'peer-relay', ms: 2 }]);
+  assert.deepEqual(t.parsePing('pong from a (100.64.0.9) via something-new in 2ms'), [], 'an unknown way says nothing');
+  assert.equal(t.summarizePongs([]), null);
+  assert.equal(t.pathOf({ CurAddr: '', Relay: 'nyc', Active: false }), null, 'idle');
+  assert.deepEqual(t.pathOf({ CurAddr: '', Relay: 'NYC', Active: true }), { via: 'relay', relay: 'nyc' });
+  assert.deepEqual(t.pathOf({ PeerRelay: '10.0.0.5:40000:vni:3' }), { via: 'peer-relay' });
+  const facts = t.machineFacts({ Self: { TailscaleIPs: ['100.64.0.1'], KeyExpiry: '2027-03-28T23:40:29Z' }, Peer: { a: { TailscaleIPs: ['100.64.0.2', 'fd7a:115c:a1e0::2'], Online: false, LastSeen: '0001-01-01T00:00:00Z', KeyExpiry: '2020-01-01T00:00:00Z' } } }, Date.parse('2026-10-06T00:00:00Z'));
+  assert.deepEqual(facts.get('100.64.0.1'), { online: true, lastSeen: null, keyExpiry: Date.parse('2027-03-28T23:40:29Z'), expired: false, path: null, self: true });
+  assert.deepEqual(facts.get('fd7a:115c:a1e0::2'), { online: false, lastSeen: null, keyExpiry: Date.parse('2020-01-01T00:00:00Z'), expired: true, path: null, self: false });
 });
 
 // ---------------------------------------------------------------- 1.4 protocol additions (plan/speed.md P1–P6)
