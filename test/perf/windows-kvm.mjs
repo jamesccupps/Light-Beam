@@ -367,7 +367,7 @@ try {
   for (const x of ['clipboard.png', 'clipboard-image.txt']) fs.rmSync(path.join(inst.laptop.dir, x), { force: true });
   nl = lines(inst.laptop).length;
   fs.writeFileSync(path.join(inst.pc.dir, 'clipboard-in.png'), noisePng(240, 160, 11));
-  const lapHas = await waitLog(inst.laptop, /KVM Test Shop's clipboard picture is on this PC's clipboard \(240×160\)/, nl, 10000);
+  const lapHas = await waitLog(inst.laptop, new RegExp(`${inst.pc.name}'s clipboard picture is on this PC's clipboard \\(240×160\\)`), nl, 10000); // (the name: see 5.)
   check(!!lapHas && JSON.stringify(pngSize(path.join(inst.laptop.dir, 'clipboard.png'))) === '[240,160]', 'a picture copied on SHOP is on the laptop\'s clipboard while the pointer is there');
 
   // 5. Back from Shop's tray ("Back to KVM Test Laptop"), and its banner folded into the tray (remembered there).
