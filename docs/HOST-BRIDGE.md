@@ -365,8 +365,8 @@ ends: the **PC** (native, plus a hidden capture page of its own) and, in a **vie
 
 ### 11.2 The PC's connection to the viewer (research §8.7, with these rules)
 
-The PC offers: video plus three negotiated data channels, `ctl` (id 0), `in` (id 1) and `mv` (id 2, unordered, no
-retransmits).
+The PC offers: video plus negotiated data channels, `ctl` (id 0), `in` (id 1), `mv` (id 2, unordered, no retransmits)
+and (Windows 1.12.4) `clip` (id 3, ordered: clipboard pictures; a side before it never opens it).
 
 - **The viewer's side of the signalling:**
   - `iceServers: []`;
@@ -377,7 +377,8 @@ retransmits).
   address stays unreadable is hung up on.
   - Then the PC enables the video and sends `{ t: "hello", v: 1, role: "host", name, monitors: [{ id, name, x, y, w, h,
     primary, scale }], monitor, codec, encoder }`.
-  - Input sent before that hello is dropped.
+  - Input sent before that hello is dropped. (1.12.4) The viewer's `ctl` messages from before the PC's check (its
+    hello, when its own check was quicker) are kept until it passes and handled then, in order.
 - **Coordinates:** `btn`, `wheel` and `mv` carry physical pixels within monitor `m` (0…w-1, 0…h-1); the PC clamps them.
   `btn` and `wheel` may carry `n`, the last `mv` number sent before them, so that a late `mv` never moves the pointer
   back.
@@ -436,12 +437,19 @@ retransmits).
   - **`{ t: "kvm-back" }`** from the PC: its tray's "Back to <viewer>"; the viewer's pointer goes back to its own screen.
   - **Clipboard:** the viewer turns it on at once. Its clipboard text goes over when its pointer does (if the PC doesn't
     have it yet); the PC's comes back while the pointer is there (or just left), never the text the PC had before.
+    (1.12.4) A picture the same way when there's no text (decided as its first part comes).
   - **Pings:** the viewer's page pings every 500 ms (the PC's page answers at once); without an answer for 1.5 s, or
     the PC's own pings (every 2 s) missing for 6 s, the viewer takes its keyboard and mouse back.
   - **The banner** says "<viewer>'s keyboard and mouse · Hide · Stop"; Hide folds it into the PC's tray (remembered
     there), which then shows the session (Show the banner, Back, Stop). It still counts as up.
   - The PC doesn't keep itself awake for a kvm session (it lasts all day): its screen sleeps as usual, and the viewer's
     input wakes it.
+- **Clipboard pictures (Windows 1.12.4, web viewer too; caps `"clipimg"` in both hellos):** with clipboard sync on and
+  no text on the clipboard, a picture (a screenshot) goes on `clip` as PNG (or the viewer's pasted type), in parts:
+  `{ t: "img", n, i, of, size, type, d }` (`d`: base64 of 48 KB, the last shorter; in order; at most 16 MB; anything
+  out of step drops it), sent as the channel drains (at most 1 MB waiting in it). The PC answers a whole one on `ctl`:
+  `{ t: "clip-img", n, ok }`; the viewer's held Ctrl+V goes once it has (15 s at most). Pictures set from the other side
+  are marked never to be sent back (and out of the cloud clipboard), as text is.
 - **Screens:** `{ t: "monitor", id }` restarts the capture as a new connection. The new `offer` has a different SDP
   `o=` session id, so the viewer answers it with a fresh RTCPeerConnection. An offer with the same `o=` id is a
   renegotiation on the same connection: an ICE restart (after `restart`, or 3 s of `disconnected`), or a switch to

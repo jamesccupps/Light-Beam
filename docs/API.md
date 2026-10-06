@@ -919,8 +919,8 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
   The same viewer asking again (after a reload) replaces its own session of the same kind; the old one ends `stopped`.
 - **Keyboard and mouse (kind `kvm`, 1.16; feature `kvm`).** Another PC's own keyboard and mouse work this PC: its
   pointer comes over the edge of its own screen (the Windows app 1.12's "Keyboard and mouse across PCs"). The same
-  rules as above, the same signalling and channels, and **no picture**: the PC captures nothing. Its banner can be
-  folded into its tray there.
+  rules as above, the same signalling and channels (with `clip`, Windows 1.12.4: clipboard pictures), and **no
+  picture**: the PC captures nothing. Its banner can be folded into its tray there.
   - The PC needs the Beam app 1.12 or later (`409 old-app`). `rc-request` carries `"kind": "kvm"`.
   - A kvm session never takes the place of someone viewing the PC: it gets `409 busy`. Someone asking to view the PC
     ends a kvm session (`rc-end` reason `busy`, `from`/`by` the one viewing); the viewer's app asks again later. The

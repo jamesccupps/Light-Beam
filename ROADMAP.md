@@ -21,8 +21,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   copy, share, save, forward or delete them together (the Windows app copies them as files and drags them out
   together; Android shares them into any app in one go), and a gallery of each conversation's photos, videos and files.
 - **A shared mouse and keyboard** (Beam 1.16, the Windows app 1.12): one PC's own keyboard and mouse work the PCs beside
-  it; the pointer crosses over the edge of its screens, with the keyboard and copied text, and comes back the same way
-  (or by itself if a PC stops answering).
+  it; the pointer crosses over the edge of its screens, with the keyboard and what was copied (text or a picture), and
+  comes back the same way (or by itself if a PC stops answering).
 
 ## Next
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;

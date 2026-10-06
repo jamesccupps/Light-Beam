@@ -530,7 +530,7 @@ try {
   check(!!verifiedLine, 'connected, and the peer passed the check (its address is the attested one, its node the pinned one)');
   const hello = await waitCtl('hello', t0, 10000);
   check(!!hello && hello.role === 'host' && Array.isArray(hello.monitors) && hello.monitors.length > 0, `the viewer got the host's hello (${hello ? hello.monitors.length + ' screen(s)' : 'none'})`);
-  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video"]' && hello.fitted === false, `...saying what 1.8 adds (and 1.11.4's fit-scale) (${hello ? JSON.stringify(hello.caps) : '-'})`);
+  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video","clipimg"]' && hello.fitted === false, `...saying what 1.8 adds (and 1.11.4's fit-scale, 1.12.4's clipimg) (${hello ? JSON.stringify(hello.caps) : '-'})`);
   {
     // 1.6.1: where the cursor is, when it's on the shared screen (this machine's real cursor: wherever it happens to be).
     const hm = hello && (hello.monitors.find(m => m.id === hello.monitor) || hello.monitors[0]);

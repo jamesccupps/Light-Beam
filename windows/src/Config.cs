@@ -35,6 +35,7 @@ namespace Beam
         public bool AllowRemoteControl;        // Beam 1.6 "Allow remote control": off by default, turned on only at this PC
         public string RcBannerSpot;            // Beam 1.7.4: where the remote-control banner was put ("screen|fx|fy", RcBannerPlace)
         public bool RcKvmBannerHidden;         // Beam 1.12: a kvm session's banner folded into the tray (chosen at this PC)
+        public bool RcKvmTarget;               // Beam 1.12.4: a kvm session has been live here: its capture host is kept warm
         public bool KvmOn;                     // Beam 1.12: this PC's keyboard and mouse go over to the PCs beside it (KvmController)
         public List<string> KvmLeft = new List<string>(); // ...the PCs to its left, nearest first (device ids)
         public string RcDisplayRestore;        // Beam 1.8: a screen fitted to a viewer, as it was ("device|w|h|hz|percent", RcDisplay)
@@ -202,6 +203,7 @@ namespace Beam
                 c.AllowRemoteControl = Json.Bool(d, "allowRemoteControl", false);
                 c.RcBannerSpot = Json.Str(d, "rcBannerSpot");
                 c.RcKvmBannerHidden = Json.Bool(d, "rcKvmBannerHidden", false);
+                c.RcKvmTarget = Json.Bool(d, "rcKvmTarget", false);
                 c.KvmOn = Json.Bool(d, "kvmOn", false);
                 c.KvmLeft = Json.StrList(d, "kvmLeft").Where(ValidId).Distinct().Take(KvmController.MaxPcs).ToList();
                 c.RcDisplayRestore = Json.Str(d, "rcDisplayRestore");
@@ -347,6 +349,7 @@ namespace Beam
                 d["allowRemoteControl"] = AllowRemoteControl;
                 if (!string.IsNullOrEmpty(RcBannerSpot)) d["rcBannerSpot"] = RcBannerSpot; else d.Remove("rcBannerSpot");
                 if (RcKvmBannerHidden) d["rcKvmBannerHidden"] = true; else d.Remove("rcKvmBannerHidden");
+                if (RcKvmTarget) d["rcKvmTarget"] = true; else d.Remove("rcKvmTarget");
                 d["kvmOn"] = KvmOn;
                 d["kvmLeft"] = KvmLeft.ToArray();
                 if (!string.IsNullOrEmpty(RcDisplayRestore)) d["rcDisplayRestore"] = RcDisplayRestore; else d.Remove("rcDisplayRestore");

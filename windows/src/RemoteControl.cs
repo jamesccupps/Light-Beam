@@ -42,6 +42,8 @@ namespace Beam
         public RcBanner Banner;
         public bool Verified;            // this connection's peer passed the check: video and input flow
         public bool Clip;                // the viewer turned clipboard sync on
+        public bool ClipImg;             // (1.12.4) its hello says it takes pictures too (`clip` channel)
+        public readonly ClipImageIn ClipIn = new ClipImageIn();
         public int Screen;
         public string Mode = "text";
         public DateTime Asked = DateTime.Now, LiveSince;
@@ -116,6 +118,14 @@ namespace Beam
             IDisplayBackend screens = app.Cfg.CustomPath ? (IDisplayBackend)new FakeDisplay() : new Win32Display(); // tests: nothing real changes
             display = new RcDisplay(screens, line => Log.Write("Remote control: the shared screen " + line));
             app.Post(RestoreLeftoverDisplay);
+            // (1.12.4) A PC the KVM has used keeps its capture host warm, from a little after Beam starts.
+            if (app.Cfg.RcKvmTarget)
+            {
+                var warm = new Timer();
+                warm.Interval = 20000;
+                warm.Tick += (s, e) => { warm.Stop(); warm.Dispose(); WarmHost("Beam started"); };
+                warm.Start();
+            }
             window = new RcWindow(this);
             tick = new Timer();
             tick.Interval = 1000;
@@ -541,6 +551,17 @@ namespace Beam
             watch.Start();
         }
 
+        // (1.12.4) The capture host a session here would take (the main screen's), started and parked (RcHost.Warm), on a PC
+        // the KVM has used: its next session starts without a browser process to start first.
+        void WarmHost(string why)
+        {
+            if (!app.Cfg.AllowRemoteControl || !app.Cfg.RcKvmTarget || current != null || closing) return;
+            var layout = DesktopLayout.Current();
+            var primary = layout.Primary;
+            var ignored = RcHost.Warm(app.Cfg, layout.SourceName(primary != null ? primary.Id : 0), app.DevTools);
+            Log.Write("Remote control: keeping a capture host warm (" + why + ")");
+        }
+
         // The gate behind ScreenCaptureStarting: this session's capture host, the session going on, its banner up.
         bool CaptureAllowed(RcSession s)
         {
@@ -615,6 +636,9 @@ namespace Beam
                     break;
                 case "ctl":
                     if (s.Verified) OnViewerCtl(s, Json.ParseObject(Json.Str(m, "d")));
+                    break;
+                case "clip": // (1.12.4) a part of a picture from the viewer's clipboard
+                    if (s.Verified) OnClipPart(s, Json.ParseObject(Json.Str(m, "d")));
                     break;
                 case "stats":
                     string codec = Json.Str(m, "codec"), enc = Json.Str(m, "encoder");
@@ -742,7 +766,7 @@ namespace Beam
             hello["monitor"] = s.Screen;
             // Beam 1.8: what this PC does besides 1.6's (fit-scale: 1.11.4). A kvm session (1.12): input on any of its
             // screens (`mv`, `btn` and `wheel` say which in `m`), "kvm-back", and nothing about a picture.
-            hello["caps"] = s.Kvm ? new object[] { "kvm" } : new object[] { "fit", "fit-scale", "settings", "video" };
+            hello["caps"] = s.Kvm ? new object[] { "kvm", "clipimg" } : new object[] { "fit", "fit-scale", "settings", "video", "clipimg" }; // (1.12.4: pictures)
             if (!s.Kvm) hello["fitted"] = display.Fitted;
             // Where this PC's cursor is, when it's on the shared screen: a phone's trackpad pointer starts there (1.6.1).
             var cursor = CursorOn(layout, s.Screen);
@@ -762,6 +786,9 @@ namespace Beam
                     // (all day: this PC sleeps and its screen turns off as usual, and the viewer's input wakes it; no
                     // balloon each time the link comes up, the banner or the tray says it)
                     Log.Write("Remote control: " + s.ViewerName + "'s keyboard and mouse can reach this PC (peer " + remote + " is " + s.Machine + ", checked)");
+                    // (1.12.4) A PC the KVM uses: its host stays warm after this session, and is warmed from Beam's start.
+                    if (!app.Cfg.RcKvmTarget) { app.Cfg.RcKvmTarget = true; app.Cfg.Save(); }
+                    RcHost.KeepWarm();
                 }
                 else
                 {
@@ -876,8 +903,12 @@ namespace Beam
                     else LockWorkStation();
                     break;
                 case "hello":
-                    Log.Write("Remote control: the viewer is " + (Json.Str(m, "app") ?? "web") + " (protocol " + Json.Long(m, "v", 0) + ")");
+                {
+                    var caps = Json.Get(m, "caps") as object[];
+                    s.ClipImg = caps != null && caps.Any(c => c as string == "clipimg");
+                    Log.Write("Remote control: the viewer is " + (Json.Str(m, "app") ?? "web") + " (protocol " + Json.Long(m, "v", 0) + ")" + (s.ClipImg ? ", takes pictures" : ""));
                     break;
+                }
             }
         }
 
@@ -1383,7 +1414,56 @@ namespace Beam
             if (app.Kvm != null) app.Kvm.OnDisplayChange();
         }
 
-        // ------------------------------------------------------------------ clipboard (text, opt-in per session)
+        // ------------------------------------------------------------------ clipboard (text and pictures, opt-in per session)
+
+        // (1.12.4) A part of a picture from the viewer's clipboard: once whole, onto this PC's (decoded off the UI thread),
+        // then the viewer hears `clip-img` (its Ctrl+V waits for that).
+        void OnClipPart(RcSession s, Dictionary<string, object> p)
+        {
+            if (!s.Clip) return;
+            var bytes = s.ClipIn.Add(p);
+            if (bytes == null) return;
+            long n = s.ClipIn.Number;
+            Task.Run(() =>
+            {
+                byte[] png;
+                var bmp = ClipImage.Decode(bytes, out png);
+                app.Post(() =>
+                {
+                    bool ok = false;
+                    try
+                    {
+                        if (bmp != null && current == s && s.Clip)
+                        {
+                            ok = ClipPayload.SetRemoteImage(bmp, png, app.Cfg.ClipboardHistory);
+                            if (ok) { clipSeen = ClipPayload.ShareSequence(); Log.Write("Remote control: the viewer's clipboard picture is on this PC's clipboard (" + bmp.Width + "×" + bmp.Height + ")"); }
+                        }
+                        else if (bmp == null) Log.Write("Remote control: the viewer's clipboard picture isn't one Windows can read");
+                    }
+                    finally { if (bmp != null) bmp.Dispose(); }
+                    var a = new Dictionary<string, object>();
+                    a["t"] = "clip-img";
+                    a["n"] = n;
+                    a["ok"] = ok;
+                    SendCtl(s, a);
+                });
+            });
+        }
+
+        // (1.12.4) This PC's clipboard picture to the viewer, in parts on the `clip` channel (the page sends them as it
+        // drains).
+        void SendClipImage(RcSession s, byte[] png, long n)
+        {
+            if (s.Host == null) return;
+            foreach (var part in ClipImage.Parts(png, n))
+            {
+                var o = new Dictionary<string, object>();
+                o["t"] = "clipout";
+                o["d"] = part;
+                s.Host.Post(o);
+            }
+            Log.Write("Remote control: this PC's clipboard picture went to the viewer (" + (png.Length + 1023) / 1024 + " KB)");
+        }
 
         void OnViewerClip(RcSession s, Dictionary<string, object> m)
         {
@@ -1420,11 +1500,18 @@ namespace Beam
 
         void CheckClipboard(RcSession s)
         {
-            uint seq = ClipPayload.TextSequence();
+            uint seq = ClipPayload.ShareSequence();
             if (seq == clipSeen) return;
             clipSeen = seq;
             string text = ClipPayload.ReadSharableText();
-            if (text == null) return;
+            if (text == null)
+            {
+                // (1.12.4) No text: a picture, to a viewer that takes them (a screenshot, "Copy image").
+                if (!s.ClipImg) return;
+                var png = ClipPayload.ReadSharableImage(ClipImage.MaxBytes);
+                if (png != null) SendClipImage(s, png, seq);
+                return;
+            }
             if (text.Replace("\r\n", "\n") == clipLast) return; // what the viewer just sent
             if (Encoding.UTF8.GetByteCount(text) > 64 * 1024) { Log.Write("Remote control: clipboard text over 64 KB isn't sent"); return; }
             var c = new Dictionary<string, object>();
@@ -1488,6 +1575,7 @@ namespace Beam
                     Log.Write("Remote control: (test) the UI thread is free again");
                     break;
                 }
+                case "warm": WarmHost("test"); break;                            // (1.12.4) as 20 s after Beam starts
                 case "kvmback": KvmBack("test"); break;                        // (1.12) as the tray's "Back to …"
                 case "kvmbanner": KvmBanner(arg != "hide", "test"); break;      // kvmbanner:show|hide
                 case "kvmstate": // the kvm session as this PC sees it

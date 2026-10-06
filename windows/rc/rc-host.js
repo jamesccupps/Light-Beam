@@ -29,6 +29,13 @@
   let autoPick = 'text', busyTicks = 0, calmTicks = 0, videoOn = true, src = { w: 0, h: 0 }, codecsKey = '';
   let pendingRemote = [], outCands = [], candTimer = 0, restartTimer = 0, statsTimer = 0, prev = null, lastSelected = null;
   let codecNow = null, encoderNow = null, ended = false, candidatesIn = 0, candidatesAdded = 0, recapturing = null, kvm = false;
+  // (1.12.4) Pictures through the clipboard: the `clip` channel of their own (on `ctl` a big one would hold up the pings),
+  // Beam's parts sent as it drains (at most 1 MB waiting in it), the viewer's passed to Beam.
+  let clipOut = [];
+  // (1.12.4) The viewer's control messages from before Beam's own peer check (its hello, when its check was quicker):
+  // kept until the check passes, then handled in order; nothing of them counts before it.
+  let earlyCtl = [];
+  const CLIP_BUFFERED = 1 << 20;
   // Windows' "Stop sharing", or a display change that ended the capture: Beam tells them apart (1.11.4: the second
   // starts again).
   const onTrackEnded = () => { if (!ended) post({ t: 'ended', reason: 'stopped-sharing' }); };
@@ -188,12 +195,18 @@
   // ------------------------------------------------------------------ the connection
 
   async function connect() {
+    earlyCtl = [];
     pc = new RTCPeerConnection({ iceServers: [], bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
     ch = {
       ctl: pc.createDataChannel('ctl', { negotiated: true, id: 0, ordered: true }),
       in: pc.createDataChannel('in', { negotiated: true, id: 1, ordered: true }),
       mv: pc.createDataChannel('mv', { negotiated: true, id: 2, ordered: false, maxRetransmits: 0 }),
+      clip: pc.createDataChannel('clip', { negotiated: true, id: 3, ordered: true }), // (1.12.4; a viewer before it never opens it)
     };
+    ch.clip.bufferedAmountLowThreshold = 256 * 1024;
+    ch.clip.onbufferedamountlow = drainClip;
+    ch.clip.onopen = drainClip;
+    ch.clip.onmessage = e => { if (verified && typeof e.data === 'string' && e.data.length <= 80000) post({ t: 'clip', d: e.data }); };
     ch.ctl.onopen = () => { if (verified) sendHello(); };
     ch.ctl.onmessage = e => onCtl(e.data);
     ch.in.onmessage = e => { if (verified && typeof e.data === 'string' && e.data.length <= 16384) post({ t: 'in', d: e.data }); };
@@ -365,6 +378,7 @@
   async function onVerified(m) {
     verified = true;
     hello = m.hello || {};
+    earlyCtl.splice(0).forEach(onCtl);
     await applyParams(); // the video starts
     if (ch && ch.ctl.readyState === 'open') sendHello();
   }
@@ -382,7 +396,8 @@
     if (typeof data !== 'string' || data.length > 100000) return;
     let m;
     try { m = JSON.parse(data); } catch (e) { return; }
-    if (!m || typeof m !== 'object' || !verified) return;
+    if (!m || typeof m !== 'object') return;
+    if (!verified) { if (!ended && earlyCtl.length < 20) earlyCtl.push(data); return; }
     if (m.t === 'ping') { sendCtl({ t: 'pong', n: m.n, at: m.at }); return; }
     post({ t: 'ctl', d: data });
   }
@@ -496,6 +511,14 @@
     }
   }
 
+  function drainClip() {
+    const c = ch && ch.clip;
+    if (!verified || !c || c.readyState !== 'open') { if (!c || c.readyState === 'closed') clipOut = []; return; }
+    while (clipOut.length && c.bufferedAmount < CLIP_BUFFERED) {
+      try { c.send(clipOut.shift()); } catch (e) { clipOut = []; return; }
+    }
+  }
+
   // ------------------------------------------------------------------ the end
 
   function end(reason) {
@@ -503,6 +526,7 @@
     sendCtl({ t: 'bye', reason: reason || 'stopped' });
     ended = true;
     verified = false;
+    clipOut = [];
     clearInterval(statsTimer);
     if (stream) stream.getTracks().forEach(t => t.stop()); // the capture stops now
     setTimeout(() => { try { if (pc) pc.close(); } catch (e) { } pc = null; }, 200); // time for the bye to go out
@@ -517,6 +541,7 @@
       case 'signal': onSignal(m).catch(err => log('signal ' + m.kind + ': ' + (err && err.name))); break;
       case 'verified': onVerified(m).catch(err => log('verified: ' + (err && err.name))); break;
       case 'send': if (m.ch === 'ctl' && m.m && typeof m.m === 'object') sendCtl(m.m); break;
+      case 'clipout': if (typeof m.d === 'string' && m.d.length <= 80000) { clipOut.push(m.d); drainClip(); } break;
       case 'quality': setQuality(m).catch(() => {}); break;
       case 'settings': setSettings(m).catch(err => log('settings: ' + (err && err.name))); break;
       case 'video':
