@@ -239,6 +239,15 @@ address, so the browser becomes part of that device instead of a separate entry.
   The chip over the picture shows the lag (from your touch to the PC's answer on your screen, measured), and
   "relayed" while Tailscale relays the connection through its servers, which is slower; Show details has the
   breakdown and Tailscale's path (direct on the same network, direct over the internet, or which relay).
+- **The pointer drawn here** (Windows app 1.12.6): with a mouse, your pointer moves at once in the PC's shape (arrow,
+  text, hand, resize arrows…), the way Parsec does it; the PC hides its own while you control it (its screen capture
+  would otherwise draw it into the picture a moment behind), and shows it again when you're done or when its own mouse
+  moves. Picture → **Draw the pointer here** turns it off, for when someone watches the PC's own screen. A phone keeps
+  its own pointer.
+- **Measure the delay** (Picture, Windows app 1.12.6): ten probes go to the PC the way your clicks do; it turns a small
+  square in the top left corner of its screen from magenta to green and back, and the viewer times when each change
+  reaches your screen. The details then show the whole (from a click to the picture) and each step: to the PC, on its
+  screen, the capture, encoding, sending, back, decoding and the wait to be shown.
 - **Limits:** a locked or signed-out PC, administrator windows and Ctrl+Alt+Del need Remote Desktop (the existing
   button). Only Beam apps, or a browser where you signed in with a pairing link, approval or password, can start a
   session.

@@ -231,7 +231,7 @@ namespace Beam
             Application.SetCompatibleTextRenderingDefault(false);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             Application.ThreadException += (s, e) => Log.Write("UI error: " + e.Exception);
-            AppDomain.CurrentDomain.UnhandledException += (s, e) => Log.Write("Fatal: " + e.ExceptionObject);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => { Log.Write("Fatal: " + e.ExceptionObject); RcPointer.Emergency(); }; // (1.12.6: the pointer back)
             System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) => { Log.Error("Task", e.Exception); e.SetObserved(); };
             SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
 

@@ -299,7 +299,8 @@ async function evalIn(expression) {
 }
 
 // The fake viewer page: research §8.7's channels, the strict candidate rewrite to the PC's attested addresses, a new
-// RTCPeerConnection when an offer has a new o= session id. Counts frames from getStats; never touches pixels.
+// RTCPeerConnection when an offer has a new o= session id. Counts frames from getStats; touches no pixels but the
+// delay probe's square in the top left corner (1.12.6: its colour).
 const VIEWER_SCRIPT = `window.V = (() => {
   const isTs = a => /^100\\.(6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])\\./.test(a) || /^fd7a:115c:a1e0:/i.test(a);
   let pc = null, ch = null, peer = null, pending = [], sessionO = null, pongs = true, video = null;
@@ -345,6 +346,21 @@ const VIEWER_SCRIPT = `window.V = (() => {
     async frames() { if (!pc) return 0; const s = await pc.getStats(); let n = 0; s.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'video') n = r.framesDecoded || 0; }); return n; },
     async heldRaw() { if (!pc) return null; const s = await pc.getStats(); let r = null; s.forEach(x => { if (x.type === 'inbound-rtp' && x.kind === 'video') r = x; }); return r ? { d: r.jitterBufferDelay || 0, n: r.jitterBufferEmittedCount || 0 } : null; },
     pongs(on) { pongs = on; },
+    // (1.12.6) The colour in the middle of the delay probe's square (size: its side in the screen's pixels, monW: the
+    // screen's width), in the frame shown now: magenta, green, or what it is.
+    color(size, monW) {
+      if (!video || !video.videoWidth) return 'no picture';
+      const k = video.videoWidth / monW, half = Math.max(1, size * k / 4), c = size * k / 2;
+      const cv = document.createElement('canvas');
+      cv.width = cv.height = 2;
+      const g = cv.getContext('2d');
+      g.drawImage(video, c - half, c - half, half * 2, half * 2, 0, 0, 2, 2);
+      const d = g.getImageData(0, 0, 2, 2).data;
+      let R = 0, G = 0, B = 0;
+      for (let i = 0; i < d.length; i += 4) { R += d[i]; G += d[i + 1]; B += d[i + 2]; }
+      R /= 4; G /= 4; B /= 4;
+      return R > 150 && B > 150 && G < 110 ? 'magenta' : G > 150 && R < 110 && B < 110 ? 'green' : 'other ' + Math.round(R) + ',' + Math.round(G) + ',' + Math.round(B);
+    },
     state() { return pc ? pc.connectionState : 'none'; },
     close() { if (video) video.srcObject = null; if (pc) pc.close(); pc = null; sessionO = null; },
   };
@@ -530,7 +546,8 @@ try {
   check(!!verifiedLine, 'connected, and the peer passed the check (its address is the attested one, its node the pinned one)');
   const hello = await waitCtl('hello', t0, 10000);
   check(!!hello && hello.role === 'host' && Array.isArray(hello.monitors) && hello.monitors.length > 0, `the viewer got the host's hello (${hello ? hello.monitors.length + ' screen(s)' : 'none'})`);
-  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video","clipimg"]' && hello.fitted === false, `...saying what 1.8 adds (and 1.11.4's fit-scale, 1.12.4's clipimg) (${hello ? JSON.stringify(hello.caps) : '-'})`);
+  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video","clipimg","cursor","probe"]' && hello.fitted === false,
+    `...saying what 1.8 adds (and 1.11.4's fit-scale, 1.12.4's clipimg, 1.12.6's cursor and probe) (${hello ? JSON.stringify(hello.caps) : '-'})`);
   {
     // 1.6.1: where the cursor is, when it's on the shared screen (this machine's real cursor: wherever it happens to be).
     const hm = hello && (hello.monitors.find(m => m.id === hello.monitor) || hello.monitors[0]);
@@ -606,6 +623,38 @@ try {
   if (!sameInput) for (let i = 0; i < Math.max(recorded.length, want.length); i++) console.log(`    ${strip(recorded[i] || {})}  vs  ${JSON.stringify(want[i] || {})}`);
   check(recorded.length >= 2 && recorded[recorded.length - 1].b === recorded[recorded.length - 2].b, 'release-all goes as one SendInput');
   check(!!(await waitLog(/Win\+L isn't passed on/, from, 1000)), 'Win+L is dropped (and logged without the key)');
+  // 1.12.6: the viewer draws this PC's pointer (a test instance never touches the real pointers: it says what it would
+  // do), and measures the delay with probes the way input comes: the PC's square in the top left corner of the screen it
+  // shares, seen in the picture (this machine's real screen shows the square for a few seconds).
+  let tp = Date.now();
+  const inputBefore = inputLines().length;
+  await send('ctl', { t: 'hello', v: 1, role: 'viewer', app: 'web', caps: ['clip', 'text', 'clipimg', 'cursor'] });
+  await send('ctl', { t: 'pointer', here: true });
+  check(!!(await waitLog(/the viewer draws this PC's pointer itself \(the viewer's setting\)/, from, 5000)) && !!(await waitLog(/\(test\) this PC's pointer would be hidden now/, from, 3000)),
+    'a viewer with a mouse draws the pointer: this PC hides its own (a test instance only says so)');
+  const shape = await waitCtl('cursor', tp, 3000);
+  check(!!shape && (shape.css === null || /^[a-z-]+$/.test(shape.css)) && typeof shape.hidden === 'boolean', `...and says which pointer shows (${shape ? JSON.stringify(shape) : 'nothing'})`);
+  rc('pointerreveal');
+  check(!!(await waitLog(/\(test\) this PC's pointer would show again/, from, 3000)), 'this PC\'s own mouse moving: its pointer shows again...');
+  await sleep(4500);
+  check(count(/\(test\) this PC's pointer would be hidden now/, from) >= 2, '...for a few seconds, then it\'s hidden again');
+  tp = Date.now();
+  await send('in', { t: 'probe', n: 0, on: true });
+  const p0 = await waitCtl('probe', tp, 5000, m => m.n === 0);
+  check(!!p0 && p0.color === 'magenta' && p0.size === 32 && p0.x === 0 && p0.y === 0, `the delay probe: the PC shows its square (${p0 ? JSON.stringify(p0) : 'no answer'})`);
+  let seen = await waitFor(async () => { const c = await evalIn(`V.color(32, ${mon.w})`); return c === 'magenta' ? c : null; }, 5000, 40);
+  check(!!seen, `...and the picture shows it, magenta, in the top left corner (${seen || await evalIn(`V.color(32, ${mon.w})`)})`);
+  tp = Date.now();
+  await send('in', { t: 'probe', n: 1 });
+  const p1 = await waitCtl('probe', tp, 5000, m => m.n === 1);
+  check(!!p1 && p1.color === 'green' && p1.ms > 0 && p1.ms < 1000, `a probe turns it green: the PC's time from the probe to its screen (${p1 ? p1.ms + ' ms' : 'no answer'})`);
+  seen = await waitFor(async () => ((await evalIn(`V.color(32, ${mon.w})`)) === 'green' ? Date.now() : null), 5000, 20);
+  check(!!seen, `...in the picture ${seen ? seen - tp : '-'} ms after the probe was sent (polled, so roughly)`);
+  await send('in', { t: 'probe', off: true });
+  check(!!(await waitLog(/the delay measurement's square is gone/, from, 3000)), '...and gone when the viewer is done');
+  check(inputLines().length === inputBefore, 'probes are never input (nothing recorded)');
+  const st2 = await waitCtl('stats', Date.now(), 5000);
+  check(!!st2 && 'encMs' in st2 && 'sendMs' in st2, `the stats say a frame's encoding and sending (${st2 ? st2.encMs + ' / ' + st2.sendMs + ' ms' : 'none'})`);
   // A viewer that stops answering pings: what it holds is let go after 5 s.
   await evalIn('V.pongs(false)');
   await sleep(2500);
@@ -766,6 +815,7 @@ try {
   check(!!stopped && stopped.reason === 'stopped', 'the banner\'s Stop ends it: the viewer hears rc-end stopped');
   check(!!(await waitCtl('bye', t1, 3000)), '...and a bye on ctl first');
   check(!!(await waitLog(/Test Phone stopped controlling this PC after \d+ s \(the banner's Stop\)/, from, 5000)), 'beam.log: who, how long, how it ended');
+  check(!!(await waitLog(/this PC's pointer is back to normal \(the session ended\)/, from, 3000)), 'its pointer is back to normal (1.12.6)');
   check(!!(await waitLog(/the shared screen back to 2560×1440 at 150% \(the session ended\)$/, from, 5000)) && !readConfig().rcDisplayRestore, 'the fitted screen is put back when the session ends (1.8)');
   check(!!(await waitLog(/capture stopped \(its host is kept 2 minutes for a reconnect\)/, from, 5000)), 'the capture stopped at once (its host is kept 2 minutes for a reconnect)');
   await endViewer();
