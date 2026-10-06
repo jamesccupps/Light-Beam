@@ -11,7 +11,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - Phone notifications on your PCs, with replies and actions.
 - Remote control of a Windows PC's screen from another PC, a browser or a phone; the PC's resolution and scaling
   fitted to the screen you view it on (put back after), and a Picture panel that applies at once: Auto, Sharp text,
-  Smooth motion or Data saver, picture size, frame rate, data limit, codec and details.
+  Smooth motion or Data saver, picture size, frame rate, data limit, codec and details; your pointer drawn on the
+  viewing device at once, and the delay measured end to end, step by step (the Windows app 1.12.6).
 - **Beam Family**: the family's own chat, reachable over Tailscale or a public link.
 - Two security audits worked through, including signed Windows updates (the apps install only builds signed with
   your own key).
@@ -32,9 +33,11 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   AirDrop, or one of your devices shared with someone (they can send files to it, or control it remotely, as you
   choose), each side keeping its own data. Over Tailscale (sharing just the server's machine) or the public link
   (servers signing their requests), big files going direct.
-- **Remote control, further:** a Lowest delay mode (the delay is measured end to end since the Windows app 1.12.6, and
-  the pointer drawn on the viewing device), capture straight into the hardware encoder, decoding on the phone with
-  WebCodecs, full-colour text, sound.
+- **Remote control, further:** less delay where the measurement shows it goes (the first measurements, a PC 25 ms
+  away over the internet: 92–146 ms from a click to the picture, half of it in the PC's screen capture; 60 fps saved
+  25 ms, and Windows' hardware H.264 path added 30): the capture step split and shortened, 60 fps in Auto, the
+  viewer's wait to show a frame; then a Lowest delay mode, capture straight into the hardware encoder, decoding on the
+  phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
