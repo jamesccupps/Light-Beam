@@ -24,6 +24,9 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **A shared mouse and keyboard** (Beam 1.16, the Windows app 1.12): one PC's own keyboard and mouse work the PCs beside
   it, on any side (arranged by dragging, 1.12.5); the pointer crosses over the edge of its screens, with the keyboard and
   what was copied (text or a picture), and comes back the same way (or by itself if a PC stops answering).
+- **Connections** (Beam 1.17): how the server reaches each device over Tailscale (direct, a peer relay or Tailscale's
+  relay) with a test and its delay, alerts before a Tailscale sign-in runs out, and why a device is offline (the PC is
+  on but Beam isn't running, or it's off or asleep).
 
 ## Next
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;

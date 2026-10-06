@@ -157,8 +157,14 @@ address, so the browser becomes part of that device instead of a separate entry.
   - Sign in with that PC's Windows account: its email address (or user name) and password. A PIN or Windows Hello
     doesn't work over Remote Desktop (choosing it ends in "A certification authority could not be contacted"):
     pick **More choices → Use a different account**.
-- **Alerts** (Settings → Alerts): a device's battery is low, its storage is nearly full, or the Beam server's disk is
-  nearly full. For the devices you pick in Settings → Devices, also when one goes offline and comes back.
+- **Alerts** (Settings → Alerts): a device's battery is low, its storage is nearly full, the Beam server's disk is
+  nearly full, or a Tailscale sign-in is about to run out (two weeks and three days before; the server's own matters
+  most: when it runs out, no device can reach Beam). For the devices you pick in Settings → Devices, also when one goes
+  offline (with why, when Tailscale can tell: the PC is on but Beam isn't running, or it's off or asleep) and comes back.
+- **Connections** (Settings → Connections): how the Beam server reaches each device over Tailscale: direct on the same
+  network, direct over the internet, through a peer relay, or through Tailscale's relay (slower), with **Test** to
+  check it now and the delay. It also shows when each Tailscale sign-in runs out: turn off key expiry in Tailscale's
+  admin console for PCs that stay put. A device that's offline says why on its line and in Device info.
 
 **Speed and battery**
 

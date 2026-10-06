@@ -214,6 +214,60 @@ export default function register(test) {
     await page.waitFor(`serverSettings.alerts.offline.length === 0`, 5000, 'offline alert off');
   }, { timeout: 60000 });
 
+  test('connections (1.17): Settings → Connections shows each machine’s way and key, Test asks again; an offline app says why', async ctx => {
+    const page = await ctx.signedIn();
+    await recordToasts(page);
+    await page.waitFor(`serverHas('connections')`, 8000, 'the server offers it');
+    await page.waitFor(`navigator.serviceWorker.controller !== null`, 8000, 'the service worker took over (before the interception)');
+    const DAY = 86400e3;
+    const now = Date.now();
+    const list = { tailscale: true, server: { name: 'beam-host', keyExpiry: now + 10 * DAY - 60e3 }, at: now, machines: [
+      { id: 'shopdesk017', name: 'Shop Desktop', platform: 'windows', online: true, machine: { name: 'shop-desktop', ip: '100.64.17.2', online: true, keyExpiry: now + 170 * DAY }, path: { via: 'direct', lan: true, at: now - 120e3 } },
+      { id: 'pixelphone1', name: 'Robin Phone', platform: 'android', online: true, machine: { name: 'pixel', ip: '100.64.17.3', online: true, keyExpiry: now + 2 * DAY - 60e3 }, path: null },
+      { id: 'cameradesk1', name: 'Office Desktop', platform: 'windows', online: false, machine: { name: 'camera-desktop', ip: '100.64.17.4', online: false, lastSeen: now - 3 * 3600e3, keyExpiry: null }, path: null },
+      { id: 'serverpc001', name: 'Desktop', platform: 'windows', online: true, machine: { name: 'beam-host', ip: '100.64.17.1', self: true, keyExpiry: now + 10 * DAY }, path: null },
+    ] };
+    const seen = [];
+    page.on(m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      const { url, method } = m.params.request;
+      seen.push([method, new URL(url).pathname]);
+      const body = method === 'GET' ? list : { path: { via: 'relay', relay: 'nyc', ms: 48.6, at: Date.now(), tested: true } };
+      page.send('Fetch.fulfillRequest', { requestId: m.params.requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }], body: Buffer.from(JSON.stringify(body)).toString('base64') }).catch(() => {});
+    });
+    await page.send('Fetch.enable', { patterns: [{ urlPattern: '*api/connections*', requestStage: 'Request' }] });
+    ctx.defer(() => page.send('Fetch.disable').catch(() => {}));
+    await page.evaluate(`openSettings('connections')`);
+    const sec = `$('#set-connections')`;
+    await page.waitFor(`${sec}?.querySelectorAll('.conn-list .device-row').length === 3`, 8000, 'three machines (not the server’s own)');
+    const text = await page.evaluate(`${sec}.textContent`);
+    assert(/This server’s Tailscale sign-in: Runs out .+ \(in 10 days\)/.test(text), `the server's key: ${text}`);
+    assert(/Direct, on the same network · seen 2 min ago/.test(text), 'SHOP: the way it saw');
+    assert(/Not talking to the server right now/.test(text), 'the phone: idle');
+    assert(/Tailscale can’t reach it now \(last seen 3 h ago\)/.test(text), 'Camera: off');
+    assert(/Doesn’t run out \(key expiry is off\)/.test(text), 'Camera: no expiry');
+    eq(await page.evaluate(`[...${sec}.querySelectorAll('.conn-key.low, .conn-server.low')].length`), 2, 'the phone’s key (2 days) and the server’s (10 days) stand out');
+    eq(await page.evaluate(`[...${sec}.querySelectorAll('.conn-list button')].map(b => b.textContent.trim())`), ['Test', 'Test'], 'no Test for a machine Tailscale can’t reach');
+    await page.evaluate(`[...${sec}.querySelectorAll('.device-row')].find(r => /Robin Phone/.test(r.textContent)).querySelector('button').click()`);
+    await page.waitFor(`/Through Tailscale’s relay in New York \\(slower\\) · 49 ms · tested just now/.test(${sec}.textContent)`, 5000, 'the test’s answer');
+    assert(seen.some(([m, p]) => m === 'POST' && p === '/api/connections/pixelphone1/test'), JSON.stringify(seen));
+    // Why an app is offline, from Tailscale's view of its machine (not in the first minutes: Tailscale is slow to notice)
+    const why = d => page.evaluate(`offlineWhy(${JSON.stringify(d)})`);
+    eq((await why({ online: false, platform: 'windows', lastSeen: now - 10 * 60e3, tailscale: { online: true } }))?.short, 'PC on, Beam not running');
+    eq(await why({ online: false, platform: 'windows', lastSeen: Date.now() - 60e3, tailscale: { online: true } }), null, 'too soon to say');
+    eq((await why({ online: false, platform: 'android', lastSeen: 0, tailscale: { online: false, lastSeen: now - 3600e3 } }))?.short, 'Off or asleep');
+    eq((await why({ online: false, platform: 'android', lastSeen: 0, tailscale: { online: true, expired: true } }))?.low, true, 'a key that ran out stands out');
+    eq(await why({ online: false, platform: 'web', lastSeen: 0, tailscale: { online: false } }), null, 'not for a browser');
+    eq(await why({ online: true, platform: 'windows', tailscale: { online: true } }), null, 'online');
+    await page.evaluate(`$('#settingsDlg').close()`);
+    await page.evaluate(`openDeviceInfo({ id: 'someid00001', name: 'Garage PC', platform: 'windows', online: false, lastSeen: Date.now() - 600e3, tailscale: { ip: '100.64.17.9', online: false, keyExpiry: Date.now() + 5 * ${DAY} } })`);
+    const facts = await page.evaluate(`[...$('#genBody').querySelectorAll('dt')].map(dt => [dt.textContent, dt.nextElementSibling.textContent, dt.nextElementSibling.classList.contains('low')])`);
+    eq(facts.find(f => f[0] === 'Why')?.[1], 'Tailscale can’t reach it either: it’s off, asleep or without internet', 'device info says why');
+    assert(/^Runs out .+ \(in 5 days\)$/.test(facts.find(f => f[0] === 'Tailscale sign-in')?.[1] || ''), JSON.stringify(facts));
+    eq(facts.find(f => f[0] === 'Tailscale sign-in')?.[2], true, 'soon: stands out');
+    await page.evaluate(`$('#genDlg').close()`);
+  });
+
   test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {
     const { page } = await hostPage(ctx, { state: {} });
     await page.waitFor(`paired && hostState.ready`);

@@ -736,8 +736,8 @@ const originOf = req => `${isHttps(req) ? 'https' : 'http'}://${requestHost(req)
 
 // Tailscale: machine names, whois and the address `tailscale serve` publishes. See lib/tailscale.js.
 const ts = env.BEAM_TAILSCALE === 'off'
-  ? { status: async () => null, serveConfig: async () => null, whois: async () => null, source: 'off' }
-  : tailscale.createClient({ socket: env.BEAM_TAILSCALE_SOCKET || '' });
+  ? { status: async () => null, serveConfig: async () => null, whois: async () => null, ping: async () => null, source: 'off' }
+  : tailscale.createClient({ socket: env.BEAM_TAILSCALE_SOCKET || '', statusTtl: FAST_TIMEOUTS ? 300 : 30_000 });
 // Requests to other Beams (moves, import-from); through tailscaled's HTTP proxy when BEAM_TAILNET_PROXY is set.
 const outbound = createOutbound({ proxy: env.BEAM_TAILNET_PROXY || '', isTailnetHost: host => /\.ts\.net$/i.test(host) || tailscale.isTailscaleIp(host) });
 const postJson = (url, body, headers = {}, timeout = 30_000) => outbound.request(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body), timeout });
@@ -747,6 +747,8 @@ let tsIndexAt = 0;
 let tsRefreshing = null;
 let tsSelfName = '';
 let tsSelfDns = ''; // this machine's MagicDNS name (e.g. pc.tailnet.ts.net), for ownHost()
+let tsFacts = new Map(); // (1.17) tailnet address -> { online, lastSeen, keyExpiry, expired, path, self } (lib/tailscale.js machineFacts)
+const tsPaths = new Map(); // (1.17) machine key -> the path tailscaled last took to it: { via, lan?, relay?, at, ms?, tested? }
 
 function refreshTailnet(force = false) {
   if (tsRefreshing || (!force && now() - tsIndexAt < 15_000)) return tsRefreshing || Promise.resolve();
@@ -755,10 +757,99 @@ function refreshTailnet(force = false) {
       tsIndex = tailscale.machineIndex(status);
       tsSelfName = statusText(status.Self?.HostName || '');
       tsSelfDns = String(status.Self?.DNSName || '').replace(/\.$/, '').toLowerCase();
+      tsFacts = tailscale.machineFacts(status, now());
     }
     tsIndexAt = now();
+    if (status) afterTailnet();
   }).catch(() => {}).finally(() => { tsRefreshing = null; });
   return tsRefreshing;
+}
+
+// (1.17) After each look at tailscaled: the paths it's using now, the devices' Tailscale state on their pages (sent
+// when it changed) and the keys that are about to run out.
+let tsDeviceState = '';
+function afterTailnet() {
+  for (const [ip, f] of tsFacts) {
+    const key = tsIndex.get(ip)?.key;
+    if (!f.path || !key || key !== ip) continue; // one entry per machine (its key is one of its addresses)
+    const had = tsPaths.get(key);
+    const same = had && had.via === f.path.via && had.lan === f.path.lan && had.relay === f.path.relay;
+    tsPaths.set(key, same ? { ...had, at: now() } : { ...f.path, at: now() });
+  }
+  const state = JSON.stringify(Object.values(devices).map(d => [d.id, tsStateOf(tailscaleOf(d)?.ip)]));
+  if (state !== tsDeviceState) {
+    if (tsDeviceState) broadcastDevices();
+    tsDeviceState = state;
+  }
+  checkTailscaleKeys();
+}
+
+// What a device's page shows about its machine: Tailscale's own online state, when it last saw it and when its key
+// runs out. Nothing when tailscaled hasn't said (no Tailscale, or a machine it doesn't list).
+function tsStateOf(ip) {
+  const f = ip && tsFacts.get(ip);
+  if (!f) return null;
+  return { online: f.online, ...(f.lastSeen && { lastSeen: f.lastSeen }), keyExpiry: f.keyExpiry, ...(f.expired && { expired: true }) };
+}
+
+// ---- Tailscale keys (1.17): a machine whose key runs out drops off Tailscale until someone signs in there again; for
+// this server's own machine that's every device losing Beam. Alerts two weeks and three days before, and when it has.
+const TS_KEY_STAGES = { near: 1, soon: 2, expired: 3 };
+
+function keyStageOf(expiry) {
+  if (!expiry) return null;
+  const left = expiry - now();
+  return left <= 0 ? 'expired' : left <= 3 * 86400e3 ? 'soon' : left <= 14 * 86400e3 ? 'near' : null;
+}
+
+function keyAlertText(name, expiry, stage, isServer) {
+  const days = Math.max(1, Math.ceil((expiry - now()) / 86400e3));
+  const when = `${days === 1 ? 'within a day' : `in ${days} days`} (${new Date(expiry).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })})`;
+  if (isServer) {
+    return stage === 'expired'
+      ? `The Beam server's Tailscale sign-in has run out: devices can't reach Beam until you sign in to Tailscale on ${name} again`
+      : `The Beam server's Tailscale sign-in runs out ${when}. Then no device can reach Beam until it's renewed: turn off key expiry for ${name} in Tailscale's admin console`;
+  }
+  return stage === 'expired'
+    ? `${name}'s Tailscale sign-in has run out, so it can't reach Beam: sign in to Tailscale on it again`
+    : `${name}'s Tailscale sign-in runs out ${when}: turn off key expiry for it in Tailscale's admin console, or sign in to Tailscale on it again`;
+}
+
+// holder[field] remembers { expiry, stage } so each stage alerts once per key; a new or endless key starts over.
+function keyAlert(holder, field, expiry, name, deviceId, isServer) {
+  const stage = keyStageOf(expiry);
+  const had = holder[field];
+  if (!stage) {
+    if (!had) return false;
+    delete holder[field];
+    return true;
+  }
+  if (had && had.expiry === expiry && TS_KEY_STAGES[had.stage] >= TS_KEY_STAGES[stage]) return false;
+  holder[field] = { expiry, stage };
+  const text = keyAlertText(name, expiry, stage, isServer);
+  if (alertSettings().tailscaleKey) raiseAlert('tailscaleKey', deviceId, 'warn', text);
+  else log.warn(text);
+  return true;
+}
+
+function checkTailscaleKeys() {
+  const self = [...tsFacts.values()].find(f => f.self);
+  if (self && keyAlert(settings, 'tailscaleKeyAlert', self.keyExpiry, tsSelfName || os.hostname(), null, true)) persistSettings();
+  // One alert per machine, named after its Beam app (a browser on the same machine shares its key).
+  const byMachine = new Map();
+  for (const d of Object.values(devices)) {
+    const ip = tailscaleOf(d)?.ip;
+    const f = ip && tsFacts.get(ip);
+    if (!f || f.self) continue;
+    const key = tsIndex.get(ip)?.key || ip;
+    const had = byMachine.get(key);
+    if (!had || (!APP_PLATFORMS.has(had.platform) && APP_PLATFORMS.has(d.platform))) byMachine.set(key, d);
+  }
+  let changed = false;
+  for (const d of byMachine.values()) {
+    if (keyAlert((d.alerted ||= {}), 'tailscaleKey', tsFacts.get(tailscaleOf(d).ip).keyExpiry, d.name, d.id, false)) changed = true;
+  }
+  if (changed) persistDevices();
 }
 
 let ownIps = { at: 0, set: new Set() };
@@ -1464,7 +1555,7 @@ function deviceList() {
         ...(d.appVersion && { appVersion: d.appVersion }),
         signedIn: signedIn.has(d.id), ...(d.temporary && { temporary: true }),
         ...(d.status && { status: publicStatus(d.status) }),
-        ...(ts && { tailscale: ts }),
+        ...(ts && { tailscale: { ...ts, ...tsStateOf(ts.ip) } }), // (1.17: + online, lastSeen, keyExpiry, expired)
         can: capabilitiesOf(d, ts),
         settings: { phoneNotifications: d.settings?.phoneNotifications === true },
         // (1.8.1) when its app last backed up its settings (only that: the settings are at /backups)
@@ -1673,6 +1764,9 @@ function noteOffline(id) {
     const since = onlineSince.get(id);
     onlineSince.delete(id);
     log.info(`${whoName(id)} went offline${since ? ` after ${durationText(leftAt - since)} online` : ''}`);
+    // (1.17) Tailscale notices a machine that lost power or network only after a few minutes: look again then, so its
+    // page can say why it's offline.
+    setTimeout(() => { if (!isOnline(id)) refreshTailnet(true); }, FAST_TIMEOUTS ? 500 : 4 * 60e3).unref?.();
   }, 60_000);
   timer.unref?.();
   offlinePending.set(id, timer);
@@ -2012,6 +2106,7 @@ function alertSettings() {
     battery: a.battery !== false,
     storage: a.storage !== false,
     serverDisk: a.serverDisk !== false,
+    tailscaleKey: a.tailscaleKey !== false, // (1.17)
     offline: Array.isArray(a.offline) ? a.offline.filter(id => typeof id === 'string') : [],
   };
 }
@@ -2064,13 +2159,14 @@ const offlineTimers = new Map(); // device id -> timer
 function watchOffline(id) {
   if (!alertSettings().offline.includes(id) || devices[id]?.alerted?.offline) return;
   clearTimeout(offlineTimers.get(id));
-  const timer = setTimeout(() => {
+  const timer = setTimeout(async () => {
     offlineTimers.delete(id);
+    await refreshTailnet(true); // (1.17: why, as Tailscale sees it now)
     const device = devices[id];
-    if (!device || isOnline(id) || !alertSettings().offline.includes(id)) return;
+    if (!device || isOnline(id) || !alertSettings().offline.includes(id) || device.alerted?.offline) return;
     (device.alerted ||= {}).offline = true;
     persistDevices();
-    raiseAlert('offline', id, 'warn', `${device.name} has been offline for ${durationText(OFFLINE_ALERT_MS)}`);
+    raiseAlert('offline', id, 'warn', `${device.name} has been offline for ${durationText(OFFLINE_ALERT_MS)}${offlineReason(device)}`);
   }, OFFLINE_ALERT_MS);
   timer.unref?.();
   offlineTimers.set(id, timer);
@@ -2079,6 +2175,15 @@ function watchOffline(id) {
 function stopOfflineWatch(id) {
   clearTimeout(offlineTimers.get(id));
   offlineTimers.delete(id);
+}
+
+// (1.17) Why a device is offline, as Tailscale sees its machine: ": <reason>" for the alert, or '' when it can't tell.
+function offlineReason(device) {
+  const state = tsStateOf(tailscaleOf(device)?.ip);
+  if (!state) return '';
+  if (state.expired) return ': its Tailscale sign-in has run out';
+  if (state.online) return device.platform === 'windows' ? ': the PC is still on Tailscale, so Beam itself isn\'t running there' : ': it\'s still on Tailscale, so Beam itself isn\'t connected';
+  return ': Tailscale can\'t reach it either (off, asleep or without internet)';
 }
 
 function backOnline(id) {
@@ -2105,6 +2210,73 @@ async function checkServerDisk() {
 
 function getAlerts(req, res) {
   send(res, 200, { alerts });
+}
+
+// ---------------------------------------------------------------- connections (1.17)
+// How tailscaled on this server reaches each device's machine (web Settings → Connections): the path it last took
+// (seen while they talk, or tested: a few disco pings), Tailscale's own online state, and when each key runs out.
+
+const tsTests = new Map(); // machine key -> the test going on
+
+const pathText = p => (p.via === 'direct' ? (p.lan ? 'direct on the same network' : 'direct over the internet')
+  : p.via === 'peer-relay' ? 'through a peer relay' : `through Tailscale's relay${p.relay ? ` (${p.relay})` : ''}`);
+
+// One row per machine, named after its Beam app (a browser on it shares the row): online when any of them is.
+function connectionList() {
+  const machines = new Map(); // machine key -> { t: tailscaleOf, list: [device] }
+  for (const d of Object.values(devices)) {
+    const t = tailscaleOf(d);
+    if (!t?.ip) continue;
+    const key = tsIndex.get(t.ip)?.key || t.ip;
+    const m = machines.get(key) || { t, list: [] };
+    m.list.push(d);
+    machines.set(key, m);
+  }
+  return [...machines].map(([key, { t, list }]) => {
+    const d = list.find(x => APP_PLATFORMS.has(x.platform)) || list[0];
+    const self = tsFacts.get(t.ip)?.self === true;
+    return {
+      id: d.id, name: d.name, platform: d.platform, online: list.some(x => isOnline(x.id)),
+      machine: { name: t.name, ip: t.ip, ...(self && { self: true }), ...tsStateOf(t.ip) },
+      path: self ? null : tsPaths.get(key) || null,
+    };
+  }).sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name));
+}
+
+async function getConnections(req, res) {
+  await refreshTailnet(true);
+  const self = [...tsFacts.values()].find(f => f.self);
+  send(res, 200, {
+    tailscale: Boolean(self),
+    ...(self && { server: { name: tsSelfName, keyExpiry: self.keyExpiry, ...(self.expired && { expired: true }) } }),
+    machines: connectionList(),
+    at: now(),
+  });
+}
+
+// POST /api/connections/{id}/test: ping the device's machine now. One test per machine at a time (a second request
+// gets the same answer). { path: { via, lan?, relay?, ms, at, tested } }, or { path: null } when nothing answered.
+async function testConnection(req, res, [id], url) {
+  const target = targetDevice(id);
+  await readJson(req, { optional: true });
+  const t = tailscaleOf(target);
+  if (!t?.ip || ts.source === 'off') throw httpError(409, `Beam doesn't know how to reach ${target.name} over Tailscale`);
+  if (tsFacts.get(t.ip)?.self) throw httpError(409, `${target.name} is on this server's own machine`);
+  const key = tsIndex.get(t.ip)?.key || t.ip;
+  const mine = !tsTests.has(key);
+  if (mine) tsTests.set(key, ts.ping(t.ip).catch(() => null).finally(() => tsTests.delete(key)));
+  const r = await tsTests.get(key) ?? null;
+  const by = whoName(deviceIdOf(req, url), 'A browser');
+  if (!r) {
+    if (mine) log.info(`${by} tested the connection to ${target.name}: no answer`);
+    return send(res, 200, { path: null });
+  }
+  const path = { via: r.via, ...(r.via === 'direct' && { lan: r.lan }), ...(r.relay && { relay: r.relay }), ms: r.ms, at: now(), tested: true };
+  if (mine) {
+    tsPaths.set(key, path);
+    log.info(`${by} tested the connection to ${target.name}: ${pathText(path)}, ${r.ms} ms`);
+  }
+  send(res, 200, { path });
 }
 
 // ---------------------------------------------------------------- phone notifications (1.5)
@@ -4746,6 +4918,7 @@ const FEATURES = [
   ...(FAMILY_URL ? ['fast-links'] : []), // (1.13.0: Beam Family on this machine makes fast links of Beam's files)
   'replies', 'reactions', 'edit', // (1.14.0)
   'kvm', // (1.16.0: a remote control session of kind kvm, a PC's keyboard and mouse shared with another)
+  'connections', // (1.17.0: GET /api/connections + test, devices' Tailscale state, tailscaleKey alerts)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -4819,7 +4992,7 @@ const SETTING_RULES = {
     if (!isPlainObject(v)) throw httpError(400, 'alerts must be an object like {"battery": true, "offline": ["<device id>"]}');
     const next = alertSettings();
     for (const [key, value] of Object.entries(v)) {
-      if (['battery', 'storage', 'serverDisk'].includes(key)) {
+      if (['battery', 'storage', 'serverDisk', 'tailscaleKey'].includes(key)) {
         if (typeof value !== 'boolean') throw httpError(400, `alerts.${key} must be true or false`);
         next[key] = value;
       } else if (key === 'offline') {
@@ -6047,6 +6220,8 @@ const routes = [
   ['POST', `/api/devices/${DEV}/wake`, wakeDevice],
   ['GET', `/api/devices/${DEV}/remote-desktop\\.rdp`, remoteDesktopFile],
   ['GET', '/api/alerts', getAlerts],
+  ['GET', '/api/connections', getConnections],
+  ['POST', `/api/connections/${DEV}/test`, testConnection],
   ['GET', '/api/metrics', getMetrics],
   ['GET', '/api/items', listItems],
   ['DELETE', '/api/items', clearItems],

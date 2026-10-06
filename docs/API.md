@@ -14,8 +14,9 @@ of files still arriving), `big-chunks` (upload chunks of any size) and `clear-ca
 notifications on your PCs). Server 1.6 marks its additions **(1.6)** and adds the feature `remote-control` (see and
 control a PC's screen from another device). Server 1.8.1 adds `backups` (the apps' settings, the server's own backups)
 and 1.13 `fast-links` (a fast link for a file, made by Beam Family on the same machine; listed when `BEAM_FAMILY_URL`
-is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat). Use each one only when its flag is there; everything
-older keeps working.
+is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keyboard and mouse across PCs) and 1.17
+`connections` (how the server reaches each device over Tailscale, the devices' Tailscale state and `tailscaleKey`
+alerts). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -348,7 +349,7 @@ can't pass for it.
   "user": "owner", "signedIn": true, "temporary": false, "appVersion": "1.3.0",
   "status": { "battery": { "level": 64, "charging": false }, "storage": { "free": 51200000000, "total": 256000000000 },
               "os": "Android 16", "at": 1790723000000 },
-  "tailscale": { "name": "pixel-9", "dns": "pixel-9.tail1234.ts.net", "ip": "100.70.248.8" },
+  "tailscale": { "name": "pixel-9", "dns": "pixel-9.tail1234.ts.net", "ip": "100.70.248.8", "online": true, "keyExpiry": 1806278692000 },
   "can": { "ring": true, "wake": false, "remoteDesktop": false, "remoteControl": false },
   "settings": { "phoneNotifications": false } }
 ```
@@ -362,6 +363,16 @@ can't pass for it.
   - `name`: the machine name;
   - `dns`: its MagicDNS name (may be `null`);
   - `ip`: its Tailscale IPv4 address.
+  - **(1.17)** what tailscaled on the server says about that machine, when it says (absent without Tailscale):
+    - `online`: Tailscale's own online state, apart from Beam's `online`;
+    - `lastSeen`: while it's offline, when Tailscale last saw it (absent when it doesn't know);
+    - `keyExpiry`: when its Tailscale key runs out (ms), `null` when it doesn't (key expiry turned off);
+    - `expired: true` once it has run out: the machine is off Tailscale until someone signs in there again.
+
+    Why an app is offline, then: `tailscale.online` true means the machine is on but Beam isn't running or connected
+    there; `false` means it's off, asleep or without internet; `expired`, its Tailscale sign-in ran out. Tailscale
+    notices a machine that lost power or network only after a few minutes, so the web app says "still on" only once
+    Beam has missed the device for 4 minutes.
 - `can` (1.3): what the device can do:
   - `ring`: an Android or Windows app at version 1.3.0 or later, as reported with `X-Beam-App-Version` (an unknown
     version counts as older);
@@ -516,17 +527,24 @@ The server watches for trouble and tells every client:
   alert follows when it comes back. Dropping out for less than that is not reported.
 - **serverDisk:** the server's own disk has less than max(5 GB, 5 %) free. It is repeated at most every 12 hours while
   it lasts.
+- **tailscaleKey (1.17):** a machine's Tailscale key runs out within 14 days, within 3 days, and once it has: one alert
+  per stage and key (a renewed key, or expiry turned off, starts over). `device` is the device's Beam app (one per
+  machine), or `null` for the server's own machine: when that one runs out, no device can reach Beam until it's
+  renewed. Checked whenever the server looks at tailscaled (every 5 minutes).
+- **(1.17)** An offline alert says why when tailscaled knows ("…: the PC is still on Tailscale, so Beam itself isn't
+  running there", "…: Tailscale can't reach it either (off, asleep or without internet)", "…: its Tailscale sign-in has
+  run out").
 
 Each alert is the event `alert { "id", "kind", "device", "level": "warn" | "info", "text", "at" }`:
-- `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`;
-- `device` is the device it is about (`null` for `serverDisk`);
+- `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`, `tailscaleKey` (1.17);
+- `device` is the device it is about (`null` for `serverDisk` and the server's own `tailscaleKey`);
 - `text` is ready to show.
 
 The last 100 are kept (`GET /api/alerts` → `{ "alerts": [...] }`, newest first). They are also written to the server
 log and pushed through ntfy when that is configured. **Clients ignore alerts about themselves** (`alert.device === me`),
-except `serverDisk`.
+except `serverDisk` and `tailscaleKey` (the apps don't watch their own Tailscale key).
 
-The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "offline": ["<device id>", …] }`,
+The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "offline": ["<device id>", …] }`,
 changed with `PATCH /api/settings`; see Settings. Crossings are logged even when that kind of alert is turned off.
 
 ### Items
@@ -666,7 +684,7 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `settings` | **(v3)** the settings object, after a change |
 | `moved` | **(v3)** `{ "movedTo" }`: Beam moved (see above); the stream closes |
 | `ring` | **(1.3)** `{ "device", "by", "from", "stop", "at" }`: ring (or stop ringing) the device `device`; everyone else ignores it |
-| `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk` |
+| `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk` and `tailscaleKey` (1.17) |
 | `notification`, `notification-removed`, `notification-request`, `notification-request-done` | **(1.5)** see Phone notifications; only the devices concerned get them, urgent on background streams |
 | `rc-request`, `rc-signal`, `rc-end`, `rc-disable` | **(1.6)** see Remote control; only the devices named get them, urgent on background streams |
 | `rc-sessions` | **(1.6)** the remote control sessions going on, to everyone (not urgent) |
@@ -1018,6 +1036,8 @@ signed-in request, unless configured.
 | `POST /api/logout` | Signs this browser out: revokes its token, clears the cookie, and sends `Clear-Site-Data: "cache", "storage"` (v3) |
 | `GET /api/logs?lines=200` | **(v3)** `{ "lines": [...] }`, the end of the server log (`data/logs/server.log`). **(1.14.3)** `403` for a session-only sign-in, as backups |
 | `GET /api/alerts` | **(1.3)** `{ "alerts": [Alert...] }`, the last 100, newest first (see Alerts) |
+| `GET /api/connections` | **(1.17, feature `connections`)** how tailscaled on this server reaches each device's machine: `{ "tailscale": true, "server": { "name", "keyExpiry", "expired"? }, "machines": [{ "id", "name", "platform", "online", "machine": { "name", "ip", "self"?, "online", "lastSeen"?, "keyExpiry", "expired"? }, "path" }], "at" }`. One row per machine, named after its Beam app (a browser on it shares the row; `online` when any of them is). `path`: `{ "via": "direct", "lan" }` (lan: an address of the same network), `{ "via": "peer-relay" }` or `{ "via": "relay", "relay": "nyc" }` (Tailscale's relay, by region), plus `at` and, from a test, `ms` and `tested: true`; `null` until tailscaled has used a path to it (an idle machine has none). `tailscale: false` (and no `server`) when the server doesn't see Tailscale |
+| `POST /api/connections/{id}/test` | **(1.17)** three disco pings to that device's machine now (`tailscale ping`; about 3 s, longer for a machine that doesn't answer) → `{ "path": { "via", "lan"?, "relay"?, "ms", "at", "tested": true } }` (the way of the last answer, the middle delay of the answers that took it; a sleeping phone answers slower), or `{ "path": null }` when nothing answered. One test per machine at a time (a second request gets the same answer). `409` for a device without a Tailscale machine, or the server's own |
 | `POST /api/events/poke` | **(1.4)** see Background streams |
 | `POST /api/clear-cache` | **(1.4, feature `clear-cache`)** no sign-in needed, changes nothing on the server → `204` with `Clear-Site-Data: "cache"` (and `Cache-Control: no-store`): the browser drops what it cached from this Beam (thumbnails, files viewed inline, which are cached for a year). Call it after a `401` confirmed to come from your own Beam, once you have wiped your data. Only from Beam's own pages: a `Sec-Fetch-Site` other than `same-origin`, or a foreign `Origin`, gets `403 { reason: "csrf" }` |
 | `GET /api/metrics` | **(1.4)** how the server is doing (see Metrics). **(1.14.3)** `403` for a session-only sign-in, as backups |

@@ -15,6 +15,12 @@ const NARROW = matchMedia('(max-width: 760px)');
 const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)');
 const PLATFORM_ICON = { windows: 'monitor', mac: 'monitor', linux: 'monitor', android: 'phone', ios: 'phone', web: 'globe', cli: 'terminal' };
 const PLATFORM_NAME = { windows: 'Windows', mac: 'Mac', linux: 'Linux', android: 'Android', ios: 'iPhone', web: 'Browser', cli: 'Command line', other: 'Script' };
+// Where Tailscale's relay servers are, by region code (remote control's details and Settings → Connections).
+const RELAY_CITIES = {
+  nyc: 'New York', sfo: 'San Francisco', sea: 'Seattle', ord: 'Chicago', dfw: 'Dallas', den: 'Denver', mia: 'Miami', lax: 'Los Angeles',
+  tor: 'Toronto', hnl: 'Honolulu', sao: 'São Paulo', lhr: 'London', fra: 'Frankfurt', par: 'Paris', mad: 'Madrid', ams: 'Amsterdam',
+  waw: 'Warsaw', jnb: 'Johannesburg', nai: 'Nairobi', dbi: 'Dubai', blr: 'Bangalore', sin: 'Singapore', hkg: 'Hong Kong', tok: 'Tokyo', syd: 'Sydney',
+};
 const DEVICE_ID = /^[A-Za-z0-9_-]{8,64}$/;
 
 // Host mode: the page is the Windows app's messenger window (WebView2). Contract: docs/HOST-BRIDGE.md.

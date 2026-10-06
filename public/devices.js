@@ -14,12 +14,41 @@ const beamVersionOf = d => d.appVersion || ''; // the Beam apps report it; brows
 // Where Remote Desktop connects: the MagicDNS name, else the Tailscale address (the server only offers it with one).
 const rdpHost = d => d.tailscale?.dns || d.tailscale?.ip || '';
 
+// (1.17) Why an app is offline, as Tailscale sees its machine (the server's `tailscale.online`, `expired`): { short, long,
+// low } or null. Not for browsers or the command line, which are often away. And "still on Tailscale" only once Beam has
+// missed it for 4 minutes: Tailscale notices a machine that lost power or network only after a few.
+const WHY_PLATFORMS = new Set(['windows', 'android', 'ios', 'mac', 'linux']);
+function offlineWhy(d) {
+  const t = d.tailscale;
+  if (d.online || !t || typeof t.online !== 'boolean' || !WHY_PLATFORMS.has(d.platform)) return null;
+  if (t.expired) return { short: 'Tailscale sign-in ran out', long: 'Its Tailscale sign-in ran out: sign in to Tailscale on it again', low: true };
+  if (t.online) {
+    if (Date.now() - (d.lastSeen || 0) < 4 * 60e3) return null;
+    return d.platform === 'windows'
+      ? { short: 'PC on, Beam not running', long: 'The PC is on (Tailscale still sees it), but Beam isn’t running there' }
+      : { short: 'On Tailscale, Beam not connected', long: 'It’s on Tailscale, but Beam isn’t connected (the app may be closed)' };
+  }
+  return { short: 'Off or asleep', long: `Tailscale can’t reach it either: it’s off, asleep or without internet${t.lastSeen ? ` (Tailscale last saw it ${timeAgo(t.lastSeen)})` : ''}` };
+}
+
+// (1.17) When a machine's Tailscale sign-in (its key) runs out: { text, low } or null when the server doesn't say.
+const longDate = t => dateFormat({ year: 'numeric', month: 'long', day: 'numeric' }).format(t);
+function keyExpiryLine(t) {
+  if (!t || !('keyExpiry' in t)) return null;
+  if (t.expired) return { text: 'Ran out: sign in to Tailscale on it again', low: true };
+  if (!Number.isFinite(t.keyExpiry)) return { text: 'Doesn’t run out (key expiry is off)' };
+  const days = Math.ceil((t.keyExpiry - Date.now()) / 86400e3);
+  return { text: `Runs out ${longDate(t.keyExpiry)}${days <= 30 ? ` (in ${plural(Math.max(days, 1), 'day')})` : ''}`, low: days <= 14 };
+}
+
 // The facts about a device, most useful first: [{ text, cls, icon, title }].
 function deviceFacts(d, { long = false } = {}) {
   const facts = [];
   const s = d.status || {};
   const reported = s.at ? `Reported ${timeAgo(s.at)}` : '';
   facts.push({ text: d.online ? 'Online' : long ? `Offline, last seen ${timeAgo(d.lastSeen)}` : `Last seen ${timeAgo(d.lastSeen)}` });
+  const why = offlineWhy(d);
+  if (why) facts.push({ text: why.short, cls: why.low ? 'low' : '', title: why.long });
   if (isRinging(d.id)) facts.push({ text: 'Ringing…', cls: 'ringing', icon: 'bell' });
   if (s.battery && Number.isFinite(s.battery.level)) {
     facts.push({ label: 'Battery', text: `${Math.round(s.battery.level)}%${s.battery.charging ? ' charging' : ''}`, icon: s.battery.charging ? 'bolt' : 'battery',
@@ -142,14 +171,18 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   const dlg = $('#genDlg');
   if (refresh && !(dlg.open && dlg.dataset.device === d.id)) return;
   const s = d.status || {};
+  const why = offlineWhy(d);
+  const key = keyExpiryLine(d.tailscale);
   const rows = [
     ['Status', d.online ? 'Online' : `Offline, last seen ${timeAgo(d.lastSeen)}`],
+    why && ['Why', why.long, why.low],
     isRinging(d.id) && ['Ringing', 'Now'],
     s.battery && Number.isFinite(s.battery.level) && ['Battery', `${Math.round(s.battery.level)}%${s.battery.charging ? ', charging' : ''}`, lowBattery(s.battery)],
     s.storage && Number.isFinite(s.storage.free) && ['Storage', `${formatSize(s.storage.free)} free${s.storage.total ? ` of ${formatSize(s.storage.total)}` : ''}`, lowStorage(s.storage)],
     ['System', s.os || PLATFORM_NAME[d.platform] || d.platform],
     beamVersionOf(d) && ['Beam', beamVersionOf(d)],
     (d.tailscale?.dns || d.tailscale?.ip) && ['Tailscale', d.tailscale.dns || d.tailscale.ip],
+    key && ['Tailscale sign-in', key.text, key.low],
     s.at && ['Reported', timeAgo(s.at)],
   ].filter(Boolean);
   const facts = el('dl', { class: 'facts' }, ...rows.flatMap(([k, v, low]) => [el('dt', {}, k), el('dd', { class: low ? 'low' : null }, v)]));
@@ -180,7 +213,7 @@ function onAlertEvent(a) {
   if (!a || !a.text) return;
   if (recentAlerts) recentAlerts = [a, ...recentAlerts.filter(x => x.id !== a.id)].slice(0, 100); // the history has them all
   if ($('#settingsDlg').open) renderSettings();
-  if (a.device && a.device === me.id && a.kind !== 'serverDisk') return; // the device itself tells its user
+  if (a.device && a.device === me.id && a.kind !== 'serverDisk' && a.kind !== 'tailscaleKey') return; // the device itself tells its user (not about its Tailscale key)
   if (!document.hidden) {
     toast(a.text, { warn: a.level === 'warn', ms: 9000, action: a.device && deviceById(a.device) ? 'Show' : null, onAction: () => { openConv(a.device); } });
   } else if (!HOST && 'Notification' in window && Notification.permission === 'granted') {
@@ -221,6 +254,7 @@ function sectionAlerts() {
     toggle('A device’s battery is low', a.battery, v => setAlerts({ battery: v }), { hint: '15% or less and not charging.' }),
     toggle('A device is running out of storage', a.storage, v => setAlerts({ storage: v }), { hint: 'Less than 2 GB (or 5%) free.' }),
     toggle('The Beam server’s disk is almost full', a.serverDisk, v => setAlerts({ serverDisk: v })),
+    typeof a.tailscaleKey === 'boolean' && toggle('A Tailscale sign-in is running out', a.tailscaleKey, v => setAlerts({ tailscaleKey: v }), { hint: 'Two weeks and three days before, for your devices and this server.' }), // (1.17)
     field('Devices going offline', note(watched.length ? `Watching ${watched.join(', ')}.` : 'None yet. Turn it on for a device under Devices.')),
     el('h4', {}, 'Recent alerts'),
   ];
