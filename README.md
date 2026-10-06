@@ -247,12 +247,14 @@ address, so the browser becomes part of that device instead of a separate entry.
 
 **Keyboard and mouse across PCs** (Beam 1.16, Windows app 1.12: one PC's own keyboard and mouse on the PCs beside it)
 
-- On the PC whose keyboard and mouse you use: tray → **Keyboard and mouse across PCs → Choose the PCs…**: up to three
-  of your PCs to its left, nearest first, and **On**. Each of those PCs needs "Allow remote control" on with this PC
-  ticked (that's only ever set at that PC).
-- Move the pointer off the left edge of this PC's screens and it carries on onto the next PC's main screen at the same
-  height, across its screens as Windows arranges them there (a TV above a monitor is reached from that PC's monitor),
-  and on to the next PC. Keys, clicks, the wheel and copied text or pictures go along; what's copied there comes back.
+- On the PC whose keyboard and mouse you use: tray → **Keyboard and mouse across PCs → Arrange the PCs…**: up to three
+  of your PCs on a grid around this one, on any side, as they stand on your desk (**+** puts one there, drag one to
+  move it, click one to remove it; Windows app 1.12.5), and **On**. Each of those PCs needs "Allow remote control" on
+  with this PC ticked (that's only ever set at that PC).
+- Move the pointer off an edge of this PC's screens toward a PC and it carries on onto that PC's main screen at the
+  same place along the facing edge, across its screens as Windows arranges them there (a TV above a monitor is reached
+  from that PC's monitor), and on to the PC beyond. Keys, clicks, the wheel and copied text or pictures go along;
+  what's copied there comes back.
 - **Back:** move the pointer back over the edge (worked out on this PC, so it works even if the other PC stops
   answering), or that PC's tray → **Back to *this PC***. It also comes back by itself when a PC stops answering for a
   second and a half, or this PC locks. Ctrl+Alt+Del always stays on this PC.
@@ -260,7 +262,7 @@ address, so the browser becomes part of that device instead of a separate entry.
   then shows it (Show the banner, Back, Stop), and it stays folded next time. Stop there ends it until you turn it off
   and on here.
 - Nothing is seen or recorded: it's a remote control session with no picture, directly between the PCs over
-  Tailscale. **Limits:** not onto a locked PC; no dragging files between PCs yet; only PCs to the left for now.
+  Tailscale. **Limits:** not onto a locked PC; no dragging files between PCs yet.
 
 **Windows app** (`Beam.exe`, one self-updating file)
 

@@ -1,7 +1,8 @@
 // Keyboard and mouse across PCs (Beam 1.12; the user: "my laptop kvm, will actually be for the laptop, shop desktop to
 // the left of it and the office desktop to the left of that"): this PC's own keyboard and mouse work the PCs beside it.
-// The pointer goes off the left edge of this PC's screen and on across theirs, with the keyboard and the clipboard text,
-// and comes back the same way.
+// The pointer goes off an edge of this PC's screens and on across theirs, with the keyboard and the clipboard, and comes
+// back the same way. (1.12.5) The PCs stand on any side, arranged on a grid around this one (Cfg.KvmPlaces, KvmLayout;
+// the user: "why can i only put computers to the left?"); 1.12 had them in a row to its left.
 // - Each PC is a remote control session of kind kvm (server.js; RemoteControl on that PC): the same rules as remote
 //   control, its own switch and list, its whois check, its lease and its banner (which can be folded into its tray), and
 //   no picture. The sessions stay up while this is on, so a crossing is instant.
@@ -35,6 +36,7 @@ namespace Beam
     class KvmLink
     {
         public readonly string Device;
+        public int X, Y;                     // (1.12.5) its cell around this PC (KvmPlace)
         public string Session;               // the server's session id while there is one
         public string Ip4, Ip6;              // the PC's Tailscale addresses as the server attested them
         public string State = "off";         // off | asking | connecting | live | waiting (to ask again) | stopped (at that PC)
@@ -74,14 +76,15 @@ namespace Beam
         readonly bool test;                    // a test instance: no hooks, no cover, nothing real moves (--test-kvm)
         KvmPage page;
         KvmHooks hooks;
-        readonly List<KvmLink> links = new List<KvmLink>();   // nearest first (Cfg.KvmLeft)
+        readonly List<KvmLink> links = new List<KvmLink>();   // nearest first (the ones of Cfg.KvmPlaces that join up)
+        KvmLayout layout = new KvmLayout(null);               // ...where they stand (links' cells, in links' order)
         readonly Timer tick, moveTimer;
         bool started, starting;
         int gen;
         readonly Stopwatch clock = Stopwatch.StartNew();
 
         // What the hook thread works from, swapped whole (never changed in place).
-        sealed class Map { public KvmDesk Here; public KvmDesk[] Desks; public bool[] Ready; }
+        sealed class Map { public KvmDesk Here; public KvmDesk[] Desks; public bool[] Ready; public KvmLayout Layout; }
         volatile Map map;
 
         // Where the pointer is. The hook thread and the window thread both change it, under `gate`.
@@ -178,25 +181,68 @@ namespace Beam
         // signed in, and a server that knows kvm sessions (1.16).
         public void Apply(string why)
         {
-            var ids = app.Cfg.KvmLeft.Where(id => id != app.Me).Distinct().Take(MaxPcs).ToList();
-            bool want = app.Cfg.KvmOn && ids.Count > 0 && app.Cfg.Paired && app.Api != null && app.ServerHas("kvm");
+            var places = Joining();
+            bool want = app.Cfg.KvmOn && places.Count > 0 && app.Cfg.Paired && app.Api != null && app.ServerHas("kvm");
             if (!want) { if (started || starting) Stop(why); return; }
-            if ((started || starting) && links.Select(l => l.Device).SequenceEqual(ids))
+            if ((started || starting) && links.Select(l => l.Device).OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(places.Select(x => x.Id).OrderBy(x => x, StringComparer.Ordinal)))
             {
+                Arrange(places); // (the same PCs, maybe standing elsewhere now)
                 // (the stream came back: a link that was waiting asks now; one stopped at its PC stays stopped)
                 if (started && page != null && page.Ready) foreach (var l in links) if (l.State == "waiting") Connect(l);
                 return;
             }
             if (started || starting) Stop("the PCs beside this one changed");
-            Start(ids, why);
+            Start(places, why);
         }
 
-        async void Start(List<string> ids, string why)
+        // The PCs to link: those of Cfg.KvmPlaces that join up with this PC, nearest first (one that doesn't can't be
+        // reached: the settings say so).
+        List<KvmPlace> Joining()
+        {
+            return KvmLayout.Joining(app.Cfg.KvmPlaces.Where(p => p.Id != app.Me), MaxPcs);
+        }
+
+        // (1.12.5) The same PCs standing elsewhere: the pointer comes back first, and the links keep their connections.
+        void Arrange(List<KvmPlace> places)
+        {
+            bool moved = false;
+            foreach (var l in links)
+            {
+                var p = places.First(x => x.Id == l.Device);
+                if (p.X != l.X || p.Y != l.Y) moved = true;
+            }
+            if (!moved) return;
+            ReturnHome("the PCs were arranged again");
+            foreach (var l in links)
+            {
+                var p = places.First(x => x.Id == l.Device);
+                l.X = p.X;
+                l.Y = p.Y;
+            }
+            layout = new KvmLayout(links.Select(l => new KvmPlace { Id = l.Device, X = l.X, Y = l.Y }));
+            Rebuild();
+            Log.Write("Keyboard and mouse: arranged again: " + Describe());
+        }
+
+        // Where each PC stands, for beam.log: "Shop Desktop to the left of this PC, Office Desktop to the left of SHOP
+        // Desktop".
+        string Describe()
+        {
+            var lay = layout;
+            return string.Join(", ", Enumerable.Range(0, Math.Min(links.Count, lay.Pcs.Length)).Select(i =>
+            {
+                int via = lay.Via(i);
+                return NameOf(links[i]) + " " + KvmSides.Phrase(lay.SideOfVia(i)) + " " + (via == KvmLayout.This ? "this PC" : NameOf(links[via]));
+            }));
+        }
+
+        async void Start(List<KvmPlace> places, string why)
         {
             starting = true;
             int g = ++gen;
             links.Clear();
-            foreach (var id in ids) links.Add(new KvmLink(id));
+            foreach (var x in places) links.Add(new KvmLink(x.Id) { X = x.X, Y = x.Y });
+            layout = new KvmLayout(places);
             var p = new KvmPage(app.Cfg, app.DevTools);
             page = p;
             p.Message += OnPage;
@@ -204,7 +250,7 @@ namespace Beam
             catch (Exception ex)
             {
                 Log.Error("Keyboard and mouse: the link page", ex);
-                if (g == gen) { starting = false; p.Close(); page = null; links.Clear(); }
+                if (g == gen) { starting = false; p.Close(); page = null; links.Clear(); layout = new KvmLayout(null); }
                 return;
             }
             if (g != gen) { p.Close(); return; } // turned off meanwhile
@@ -213,7 +259,7 @@ namespace Beam
             Rebuild();
             if (!test) StartHooks();
             tick.Start();
-            Log.Write("Keyboard and mouse: on (" + why + "): " + string.Join(", ", links.Select(NameOf)) + " to the left of this PC, nearest first");
+            Log.Write("Keyboard and mouse: on (" + why + "): " + Describe());
             app.MarkChanged();
             // (1.12.4) Each PC asked now, while the page still loads (~2 s): its own page starts meanwhile.
             foreach (var l in links.ToList()) Connect(l);
@@ -233,7 +279,7 @@ namespace Beam
             lock (gate)
             {
                 if (away < 0) return;
-                HomeLocked(0.5, "this PC's own mouse reached it: its hook wasn't keeping it", map);
+                HomeFromLocked("this PC's own mouse reached it: its hook wasn't keeping it", map);
             }
             app.Post(() =>
             {
@@ -254,6 +300,7 @@ namespace Beam
             if (hooks != null) { hooks.Stop(); hooks = null; } // (the cover goes with its thread)
             foreach (var l in links) Close(l, "stopped");
             links.Clear();
+            layout = new KvmLayout(null);
             if (page != null) { page.Close(); page = null; }
             started = starting = false;
             map = null;
@@ -266,7 +313,7 @@ namespace Beam
         // The tray's "On" (no PCs chosen yet: the settings).
         public void Toggle(string from)
         {
-            if (!app.Cfg.KvmOn && app.Cfg.KvmLeft.Count == 0) { ShowSettings(); return; }
+            if (!app.Cfg.KvmOn && Joining().Count == 0) { ShowSettings(); return; }
             app.Cfg.KvmOn = !app.Cfg.KvmOn;
             app.Cfg.Save();
             Log.Write("Keyboard and mouse across PCs turned " + (app.Cfg.KvmOn ? "on" : "off") + " (" + from + ")");
@@ -278,6 +325,7 @@ namespace Beam
         {
             if (form != null && !form.IsDisposed) { form.Show(); form.Activate(); return; }
             form = new KvmForm(app);
+            Ui.PlaceForTest(form);
             form.Show();
         }
 
@@ -700,6 +748,7 @@ namespace Beam
             m.Here = DeskHere();
             m.Desks = links.Select(l => l.Desk ?? new KvmDesk(null)).ToArray();
             m.Ready = links.Select(l => l.Ready).ToArray();
+            m.Layout = layout;
             map = m;
             app.MarkChanged();
         }
@@ -743,27 +792,34 @@ namespace Beam
         }
 
         // Here: buttons are counted (no crossing while one is down: a drag, a window snapping to the edge), and a move to
-        // the left edge with the nearest PC ready crosses over.
+        // an edge of this PC's screens with a PC ready beside it on that side crosses over.
         bool MouseHere(KvmInput e, Map m)
         {
             int bit = ButtonBit(e);
             if (bit != 0) { if (IsDown(e.Msg)) buttonsHere |= bit; else buttonsHere &= ~bit; return false; }
             // (an up that never came by here, from a press before this was on: Windows says what's down)
             if (buttonsHere != 0 && !test && !AnyButtonDown()) buttonsHere = 0;
-            if (e.Msg != KvmHooks.WM_MOUSEMOVE || buttonsHere != 0 || m.Desks.Length == 0 || !m.Ready[0] || m.Here.Empty) return false;
-            // The leftmost of this PC's screens at this height; the pointer at (or past) its left edge leaves.
-            var s = m.Here.Screens.Where(x => e.Y >= x.Y && e.Y < x.Bottom).OrderBy(x => x.X).FirstOrDefault();
-            if (s == null || e.X > s.X || !m.Here.OpenSide(-1, s.X, e.Y)) { if (test) { testX = e.X; testY = e.Y; } return false; }
-            fromScale = s.Scale;
-            EnterLocked(0, 1, m.Here.ExitHeight(-1, s, e.Y), m, null);
-            return true;
+            if (e.Msg != KvmHooks.WM_MOUSEMOVE || buttonsHere != 0 || m.Desks.Length == 0 || m.Here.Empty || m.Layout == null) return false;
+            foreach (var side in KvmSides.All)
+            {
+                int i = m.Layout.Beside(KvmLayout.This, side);
+                KvmScreen s;
+                int x, y;
+                // The outermost of this PC's screens that way, where the pointer is; at (or past) its edge it leaves.
+                if (i < 0 || i >= m.Ready.Length || !m.Ready[i] || !m.Here.AtEdge(side, e.X, e.Y, out s, out x, out y)) continue;
+                fromScale = s.Scale;
+                EnterLocked(i, KvmSides.Opposite(side), m.Here.ExitAlong(side, s, x, y), m, null);
+                return true;
+            }
+            if (test) { testX = e.X; testY = e.Y; }
+            return false;
         }
 
         // There: every move goes to the PC it's on (or on to the next PC, or back here), and buttons, the wheel and keys
         // with it.
         bool MouseAway(KvmInput e, Map m)
         {
-            if (away >= m.Desks.Length || m.Desks[away].Empty) { HomeLocked(0.5, "its screens aren't known", m); return true; }
+            if (away >= m.Desks.Length || m.Desks[away].Empty) { HomeFromLocked("its screens aren't known", m); return true; }
             var desk = m.Desks[away];
             int bit = ButtonBit(e);
             if (bit != 0)
@@ -787,21 +843,32 @@ namespace Beam
             int ox, oy;
             carry.Scale(dx, dy, fromScale, scr != null ? scr.Scale : 1, out ox, out oy);
             if (ox == 0 && oy == 0) return true;
-            var mv = desk.Move(where, ox, oy);
-            if (mv.Exit != 0 && buttonsThere == 0)
+            // Out by a side with this PC or a ready PC beyond it (by none while a button is down there: a drag); the
+            // others stop it as its own edges do.
+            var mv = desk.Move(where, ox, oy, buttonsThere == 0 ? Leavable(m, away) : 0);
+            if (mv.Exit != KvmSide.None)
             {
-                if (mv.Exit > 0)
-                {
-                    // Its right edge: the PC nearer this one, or this PC.
-                    if (away == 0) { HomeLocked(mv.Height, null, m); return true; }
-                    if (m.Ready[away - 1]) { SwitchLocked(away - 1, -1, mv.Height, m); return true; }
-                }
-                else if (away + 1 < m.Desks.Length && m.Ready[away + 1]) { SwitchLocked(away + 1, 1, mv.Height, m); return true; }
+                int next = m.Layout.Beside(away, mv.Exit);
+                if (next == KvmLayout.This) { HomeLocked(KvmSides.Opposite(mv.Exit), mv.Along, null, m); return true; }
+                if (next >= 0 && next < m.Ready.Length && m.Ready[next]) { SwitchLocked(next, KvmSides.Opposite(mv.Exit), mv.Along, m); return true; }
             }
             where = mv.At;
             seq++;
             Queue(new Out { Kind = OutKind.Move, Link = away, At = where, N = seq });
             return true;
+        }
+
+        // The sides PC i may be left by: the ones with this PC, or a ready PC, beyond them.
+        static int Leavable(Map m, int i)
+        {
+            if (m.Layout == null) return 0;
+            int bits = 0;
+            foreach (var side in KvmSides.All)
+            {
+                int n = m.Layout.Beside(i, side);
+                if (n == KvmLayout.This || (n >= 0 && n < m.Ready.Length && m.Ready[n])) bits |= KvmSides.Bit(side);
+            }
+            return bits;
         }
 
         bool KeyAway(KvmInput e)
@@ -848,11 +915,11 @@ namespace Beam
             return msg == KvmHooks.WM_LBUTTONDOWN || msg == KvmHooks.WM_RBUTTONDOWN || msg == KvmHooks.WM_MBUTTONDOWN || msg == KvmHooks.WM_XBUTTONDOWN;
         }
 
-        // (under gate) Onto PC `i` through its edge `side` (+1: its right edge, from this PC or a PC to its right; -1: its
-        // left edge) at a height. `from`: the PC it was on (null: this PC).
-        void EnterLocked(int i, int side, double height, Map m, int? from)
+        // (under gate) Onto PC `i` through its side `side` (the one facing where the pointer comes from), at a place along
+        // it. `from`: the PC it was on (null: this PC).
+        void EnterLocked(int i, KvmSide side, double along, Map m, int? from)
         {
-            where = m.Desks[i].Enter(side, height);
+            where = m.Desks[i].Enter(side, along);
             away = i;
             carry.Reset();
             buttonsThere = 0;
@@ -876,15 +943,34 @@ namespace Beam
             Queue(new Out { Kind = OutKind.Move, Link = i, At = where, N = seq });
         }
 
-        void SwitchLocked(int i, int side, double height, Map m)
+        void SwitchLocked(int i, KvmSide side, double along, Map m)
         {
             int was = away;
             Queue(new Out { Kind = OutKind.Leave, Link = was });
-            EnterLocked(i, side, height, m, was);
+            EnterLocked(i, side, along, m, was);
         }
 
-        // (under gate) Back to this PC at its left edge, at a height; why: a reason it came back by itself (null: moved).
-        void HomeLocked(double height, string why, Map m)
+        // (under gate) Back to this PC by itself, from the PC the pointer is on: through the side of this PC the way out to
+        // that PC starts by, at the place along the side it would leave that PC by when that PC stands right there (else
+        // the middle).
+        void HomeFromLocked(string why, Map m)
+        {
+            if (away < 0) return;
+            var side = KvmSide.Left;
+            double along = 0.5;
+            if (m != null && m.Layout != null)
+            {
+                side = m.Layout.HomeSide(away);
+                var toward = m.Layout.TowardHome(away);
+                if (toward == KvmSides.Opposite(side) && away < m.Desks.Length && !m.Desks[away].Empty)
+                    along = m.Desks[away].ExitAlong(toward, m.Desks[away].Screen(where.Screen), where.X, where.Y);
+            }
+            HomeLocked(side, along, why, m);
+        }
+
+        // (under gate) Back to this PC through one of its sides, at a place along it; why: a reason it came back by itself
+        // (null: moved).
+        void HomeLocked(KvmSide side, double along, string why, Map m)
         {
             if (away < 0) return;
             int was = away;
@@ -893,8 +979,8 @@ namespace Beam
             heldHere.Clear();
             Queue(new Out { Kind = OutKind.Leave, Link = was, Home = true, Why = why });
             if (m == null || m.Here.Empty) return;
-            var p = m.Here.Enter(-1, height);
-            int x = p.X + 1, y = p.Y; // (just inside: the next move left crosses again)
+            var p = m.Here.Enter(side, along);
+            int x = p.X - KvmSides.Dx(side), y = p.Y - KvmSides.Dy(side); // (just inside: the next move that way crosses again)
             if (test) { testX = x; testY = y; }
             else
             {
@@ -909,10 +995,7 @@ namespace Beam
             lock (gate)
             {
                 if (away < 0) return;
-                var m = map;
-                double h = 0.5;
-                if (m != null && away < m.Desks.Length && !m.Desks[away].Empty) h = m.Desks[away].ExitHeight(1, m.Desks[away].Screen(where.Screen), where.Y);
-                HomeLocked(h, why, m);
+                HomeFromLocked(why, map);
             }
             Drain();
         }
@@ -1147,25 +1230,44 @@ namespace Beam
             var inv = CultureInfo.InvariantCulture;
             switch (cmd)
             {
-                case "on": // on:<id>[,<id>…], nearest first
-                    app.Cfg.KvmLeft = (arg ?? "").Split(',').Where(Config.ValidId).Distinct().Take(MaxPcs).ToList();
+                case "on": // on:<id>[@<x>:<y>][,…]: where each PC stands (an id alone: the next one to the left, 1.12's row)
+                {
+                    var places = new List<KvmPlace>();
+                    int row = 0;
+                    foreach (var part in (arg ?? "").Split(','))
+                    {
+                        var at = part.Split('@');
+                        if (!Config.ValidId(at[0])) continue;
+                        if (at.Length == 1) { places.Add(new KvmPlace { Id = at[0], X = -(++row), Y = 0 }); continue; }
+                        var xy = at[1].Split(':');
+                        int x, y;
+                        if (at.Length == 2 && xy.Length == 2 && int.TryParse(xy[0], NumberStyles.Integer, inv, out x) && int.TryParse(xy[1], NumberStyles.Integer, inv, out y))
+                            places.Add(new KvmPlace { Id = at[0], X = x, Y = y });
+                    }
+                    app.Cfg.KvmPlaces = KvmLayout.Clean(places, MaxPcs);
                     app.Cfg.KvmOn = true;
                     app.Cfg.Save();
                     Apply("test");
                     break;
+                }
                 case "off":
                     app.Cfg.KvmOn = false;
                     app.Cfg.Save();
                     Apply("test");
                     break;
-                case "edge": // the pointer at the left edge of this PC's (made-up) screen, at a height (0..1)
-                {
+                case "edge": // edge:[<left|right|top|bottom>:]<0..1>: the pointer just past that edge of this PC's (made-up)
+                {            // screen (the left one if none is named), at that place along it
+                    var side = KvmSide.Left;
+                    string a = arg ?? "0.5";
+                    int c = a.IndexOf(':');
+                    if (c > 0) { side = KvmSides.Parse(a.Substring(0, c)); a = a.Substring(c + 1); }
                     double h;
-                    if (!double.TryParse(arg ?? "0.5", NumberStyles.Float, inv, out h)) h = 0.5;
+                    if (!double.TryParse(a, NumberStyles.Float, inv, out h)) h = 0.5;
+                    h = Math.Max(0, Math.Min(1, h));
                     var e = new KvmInput();
                     e.Msg = KvmHooks.WM_MOUSEMOVE;
-                    e.X = -1;
-                    e.Y = (int)Math.Round(Math.Max(0, Math.Min(1, h)) * 1079);
+                    e.X = side == KvmSide.Left ? -1 : side == KvmSide.Right ? 1920 : (int)Math.Round(h * 1919);
+                    e.Y = side == KvmSide.Top ? -1 : side == KvmSide.Bottom ? 1080 : (int)Math.Round(h * 1079);
                     OnInput(e);
                     break;
                 }
@@ -1224,6 +1326,32 @@ namespace Beam
                     OnInput(e);
                     break;
                 }
+                // (1.12.5) The settings (off-screen), driven by window messages to its arrangement only.
+                case "arrange": ShowSettings(); break;
+                case "arrange-state": // what it shows
+                    Log.Write("Keyboard and mouse settings: (test) " + (form != null && !form.IsDisposed ? form.Describe() : "not open"));
+                    break;
+                case "arrange-drag": // arrange-drag:<x>:<y>:<to x>:<to y> (cells)
+                case "arrange-click": // arrange-click:<x>:<y>[:right]
+                {
+                    if (form == null || form.IsDisposed) break;
+                    var p = (arg ?? "").Split(':');
+                    var n = new int[4];
+                    int need = cmd == "arrange-drag" ? 4 : 2;
+                    if (p.Length < need || Enumerable.Range(0, need).Any(k => !int.TryParse(p[k], NumberStyles.Integer, inv, out n[k]))) break;
+                    if (cmd == "arrange-drag") form.Arrange.TestDrag(new Point(n[0], n[1]), new Point(n[2], n[3]));
+                    else form.Arrange.TestClick(new Point(n[0], n[1]), p.Length > 2 && p[2] == "right");
+                    break;
+                }
+                case "arrange-pick": // arrange-pick:<the start of a menu item's text>
+                    if (form != null && !form.IsDisposed && !form.Arrange.TestPick(arg ?? "")) Log.Write("Keyboard and mouse settings: (test) no menu item " + arg);
+                    break;
+                case "arrange-save":
+                    if (form != null && !form.IsDisposed) form.Save();
+                    break;
+                case "arrange-shot": // the window as drawn: arrange.png beside the config
+                    if (form != null && !form.IsDisposed) form.Shot(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(app.Cfg.FilePath), "arrange.png"));
+                    break;
                 case "where":
                 {
                     string s;

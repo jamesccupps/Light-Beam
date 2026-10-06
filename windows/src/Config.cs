@@ -37,7 +37,7 @@ namespace Beam
         public bool RcKvmBannerHidden;         // Beam 1.12: a kvm session's banner folded into the tray (chosen at this PC)
         public bool RcKvmTarget;               // Beam 1.12.4: a kvm session has been live here: its capture host is kept warm
         public bool KvmOn;                     // Beam 1.12: this PC's keyboard and mouse go over to the PCs beside it (KvmController)
-        public List<string> KvmLeft = new List<string>(); // ...the PCs to its left, nearest first (device ids)
+        public List<KvmPlace> KvmPlaces = new List<KvmPlace>(); // ...where those PCs stand around it (1.12.5; 1.12's kvmLeft: a row to its left)
         public string RcDisplayRestore;        // Beam 1.8: a screen fitted to a viewer, as it was ("device|w|h|hz|percent", RcDisplay)
         public string InstallId;               // Beam 1.8.1: this install's own id (its settings backups on the server go by it)
         public bool RestoreChecked;            // ...and an earlier install's backup was looked for (offered once)
@@ -205,7 +205,12 @@ namespace Beam
                 c.RcKvmBannerHidden = Json.Bool(d, "rcKvmBannerHidden", false);
                 c.RcKvmTarget = Json.Bool(d, "rcKvmTarget", false);
                 c.KvmOn = Json.Bool(d, "kvmOn", false);
-                c.KvmLeft = Json.StrList(d, "kvmLeft").Where(ValidId).Distinct().Take(KvmController.MaxPcs).ToList();
+                var places = Json.Get(d, "kvmPlaces") as object[];
+                if (places != null)
+                    c.KvmPlaces = KvmLayout.Clean(places.Select(o => Json.Obj(o)).Where(p => p != null && ValidId(Json.Str(p, "id")))
+                        .Select(p => new KvmPlace { Id = Json.Str(p, "id"), X = (int)Json.Long(p, "x", 0), Y = (int)Json.Long(p, "y", 0) }), KvmController.MaxPcs);
+                else // (1.12's row to the left, nearest first)
+                    c.KvmPlaces = KvmLayout.Clean(Json.StrList(d, "kvmLeft").Where(ValidId).Distinct().Select((id, i) => new KvmPlace { Id = id, X = -(i + 1), Y = 0 }), KvmController.MaxPcs);
                 c.RcDisplayRestore = Json.Str(d, "rcDisplayRestore");
                 c.InstallId = Json.Str(d, "installId");
                 c.RestoreChecked = Json.Bool(d, "restoreChecked", false);
@@ -351,7 +356,8 @@ namespace Beam
                 if (RcKvmBannerHidden) d["rcKvmBannerHidden"] = true; else d.Remove("rcKvmBannerHidden");
                 if (RcKvmTarget) d["rcKvmTarget"] = true; else d.Remove("rcKvmTarget");
                 d["kvmOn"] = KvmOn;
-                d["kvmLeft"] = KvmLeft.ToArray();
+                d["kvmPlaces"] = KvmPlaces.Select(p => (object)new Dictionary<string, object> { { "id", p.Id }, { "x", p.X }, { "y", p.Y } }).ToArray();
+                d.Remove("kvmLeft");
                 if (!string.IsNullOrEmpty(RcDisplayRestore)) d["rcDisplayRestore"] = RcDisplayRestore; else d.Remove("rcDisplayRestore");
                 d["installId"] = InstallId;
                 d["restoreChecked"] = RestoreChecked;
