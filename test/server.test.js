@@ -1961,8 +1961,8 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     assert.equal(d.status.macs, undefined);
     // (1.17: + Tailscale's own view of the machine: the fake says nothing about Online or a key expiry)
     assert.deepEqual(d.tailscale, { name: 'gaming-pc', dns: 'gaming-pc.tail1234.ts.net', ip: '100.64.50.1', online: false, keyExpiry: null });
-    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false });
-    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false });
+    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false });
+    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false });
     // a partial report keeps the rest; null clears a field
     r = await put({ battery: null });
     assert.equal(r.status, 204);
@@ -2157,10 +2157,10 @@ test('QW-E: battery and storage alerts fire once and re-arm; settings; alerts.js
     assert.equal(JSON.parse(fs.readFileSync(path.join(s.data, 'alerts.json'), 'utf8')).length, 4);
     // settings
     let r = await s.req('GET', '/api/settings', { headers: desk });
-    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, offline: [] });
+    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, offline: [] });
     r = await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify({ alerts: { battery: false } }) });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, offline: [] }, 'partial changes keep the rest');
+    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, offline: [] }, 'partial changes keep the rest');
     for (const bad of [{ alerts: { battery: 'no' } }, { alerts: { nope: true } }, { alerts: { offline: 'phone' } }, { alerts: [] }]) {
       assert.equal((await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify(bad) })).status, 400, JSON.stringify(bad));
     }
@@ -2574,6 +2574,185 @@ test('1.18 speed tests: test data both ways, a device’s result kept on its Con
     e = await post(s, '/api/connections/shoppc00118/speed', {}, phone); // (it never answers this time)
     assert.equal(e.status, 409);
     assert.match(e.json.error, /didn’t finish a speed test within a minute/);
+    st.close();
+  } finally { await s.stop(); }
+});
+
+test('1.19 updates one PC at a time: a new Windows build goes to this server’s PC first, then to the rest; a failure stops it there', async () => {
+  const s = await startServer('stage119', 8794);
+  try {
+    const K = s.key;
+    const v = version => ({ 'X-Beam-App-Version': version });
+    const own = app(K, 'hostpc00119', 'Office PC', 'windows', v('1.13.0')); // (this server's own PC: from this machine)
+    const shop = app(K, 'shoppc00119', 'Shop Desktop', 'windows', { ...v('1.13.0'), ...from('100.64.21.2') });
+    const cam = app(K, 'campc000119', 'Office Desktop', 'windows', { ...v('1.13.0'), ...from('100.64.21.4') });
+    const streams = {};
+    for (const [name, h] of [['own', own], ['shop', shop], ['cam', cam]]) { streams[name] = await openEvents(s.port, h); await streams[name].wait('hello'); }
+    const publish = version => {
+      fs.writeFileSync(path.join(s.dist, 'Beam.exe'), crypto.randomBytes(2000));
+      fs.writeFileSync(path.join(s.dist, 'Beam.exe.json'), JSON.stringify({ version }));
+    };
+    const offered = (st, version) => st.events.some(e => e.event === 'app-update' && e.data.windows?.version === version);
+    const settingsNow = async () => (await s.req('GET', '/api/settings', { headers: shop })).json;
+    assert.equal((await s.req('GET', '/api/info', { headers: shop })).json.features.includes('staged-updates'), true);
+    assert.equal((await settingsNow()).stagedUpdates, true, 'on unless turned off');
+
+    // 1.14.0: this server's own PC first; the other two aren't told, and aren't offered it when they ask
+    publish('1.14.0');
+    await streams.own.wait('app-update', d => d.windows?.version === '1.14.0', 10000);
+    await sleep(500);
+    assert.ok(!offered(streams.shop, '1.14.0') && !offered(streams.cam, '1.14.0'), 'held back');
+    assert.equal((await s.req('GET', '/api/updates', { headers: shop })).json.windows, undefined);
+    assert.equal((await s.req('GET', '/api/updates', { headers: own })).json.windows.version, '1.14.0');
+    assert.equal((await s.req('GET', '/api/updates', { headers: { Authorization: `Bearer ${K}` } })).json.windows.version, '1.14.0', 'not a Windows app: sees it');
+    assert.match(s.out, /Windows 1\.14\.0: offered to Office PC first; the other PCs get it once it has run there for/);
+    const again = await openEvents(s.port, shop); // (an app that connects meanwhile isn't offered it either)
+    await again.wait('hello');
+    await sleep(300);
+    assert.ok(!offered(again, '1.14.0'));
+    again.close();
+    // it runs there: the others get it after the pilot's minutes (1.5 s in tests)
+    assert.equal((await s.req('GET', '/api/me', { headers: { ...own, ...v('1.14.0') } })).status, 200);
+    let r = await settingsNow();
+    assert.deepEqual(pick(r.rollout, ['version', 'pilotName', 'released']), { version: '1.14.0', pilotName: 'Office PC', released: null });
+    assert.ok(r.rollout.releaseAt > Date.now());
+    await streams.shop.wait('app-update', d => d.windows?.version === '1.14.0', 6000);
+    await streams.cam.wait('app-update', d => d.windows?.version === '1.14.0', 3000);
+    assert.match(s.out, /Office PC runs Windows 1\.14\.0: the other PCs get it at .+ if it keeps running/);
+    assert.match(s.out, /Windows 1\.14\.0: Office PC has run it for .+; offering it to every PC now/);
+    assert.ok((await settingsNow()).rollout.released > 0);
+
+    // 1.15.0 fails on the pilot (it rolled back and says why): the others never get it, an alert says so
+    publish('1.15.0');
+    await streams.own.wait('app-update', d => d.windows?.version === '1.15.0', 10000);
+    r = await s.req('PUT', '/api/devices/me/status', { headers: json({ ...own, ...v('1.14.0') }), body: JSON.stringify({ update: { version: '1.15.0', problem: 'it didn’t start (health check)' } }) });
+    assert.equal(r.status, 204, r.body);
+    const halted = await streams.shop.wait('alert', d => d.kind === 'update', 3000);
+    assert.match(halted.data.text, /^Beam for Windows 1\.15\.0 didn’t work on Office PC \(it didn’t start \(health check\)\), so the other PCs keep the version they have/);
+    await sleep(2500);
+    assert.ok(!offered(streams.shop, '1.15.0') && !offered(streams.cam, '1.15.0'), 'stopped there');
+    assert.deepEqual(pick((await settingsNow()).rollout.halted, ['problem']), { problem: 'it didn’t start (health check)' });
+    // ...unless offered to every PC anyway
+    r = await post(s, '/api/updates/release', {}, shop);
+    assert.equal(r.status, 200, r.body);
+    await streams.cam.wait('app-update', d => d.windows?.version === '1.15.0', 3000);
+    assert.equal((await post(s, '/api/updates/release', {}, shop)).status, 409, 'nothing waiting now');
+
+    // 1.16.0: the pilot doesn't install it (updates off there, asleep…): after a while another PC tries it first
+    publish('1.16.0');
+    await streams.own.wait('app-update', d => d.windows?.version === '1.16.0', 10000);
+    const switched = await waitFor(() => (offered(streams.shop, '1.16.0') ? 'shop' : offered(streams.cam, '1.16.0') ? 'cam' : null), 8000);
+    const next = switched === 'shop' ? shop : cam;
+    assert.match(s.out, /Windows 1\.16\.0: Office PC hasn't installed it in .+; offering it to (Shop|Camera) Desktop first instead/);
+    assert.equal((await s.req('GET', '/api/me', { headers: { ...next, ...v('1.16.0') } })).status, 200);
+    await streams[switched === 'shop' ? 'cam' : 'shop'].wait('app-update', d => d.windows?.version === '1.16.0', 6000);
+
+    // turned off: a new build goes to every PC at once
+    r = await s.req('PATCH', '/api/settings', { headers: json(shop), body: JSON.stringify({ stagedUpdates: false }) });
+    assert.equal(r.json.stagedUpdates, false);
+    publish('1.17.0');
+    for (const st of Object.values(streams)) await st.wait('app-update', d => d.windows?.version === '1.17.0', 10000);
+    assert.equal((await settingsNow()).rollout, null);
+    for (const st of Object.values(streams)) st.close();
+  } finally { await s.stop(); }
+});
+
+test('1.20 the setup check: the servers at boot, backups, disk, every PC up to date and starting with Windows; alerts once until fixed', async () => {
+  const tasksFile = path.join(TMP, 'setup120-tasks.json');
+  fs.writeFileSync(tasksFile, JSON.stringify([{ name: 'Beam server', command: `"${process.execPath}" "${SERVER}" --supervise`, boot: true, enabled: true }]));
+  const s = await startServer('setup120', 8795, { env: { BEAM_TEST_BOOT_TASKS: tasksFile, BEAM_SETUP_CHECK: 'on', BEAM_STAGED_UPDATES: '0' } });
+  let behindStream = null;
+  try {
+    const K = s.key;
+    const pc = (id, name, version, ip) => app(K, id, name, 'windows', { 'X-Beam-App-Version': version, ...from(ip) });
+    const up = pc('uptodate120', 'Office PC', '1.14.0', '100.64.22.1');
+    const behind = pc('behindpc120', 'Shop Desktop', '1.13.0', '100.64.22.2');
+    const off = pc('offbyuser12', 'Spare PC', '1.14.0', '100.64.22.3');
+    for (const h of [up, behind, off]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    const status = (h, body) => s.req('PUT', '/api/devices/me/status', { headers: json(h), body: JSON.stringify(body) });
+    assert.equal((await status(up, { startsWithWindows: true, startWanted: true })).status, 204);
+    assert.equal((await status(behind, { startsWithWindows: false, startWanted: true })).status, 204);
+    assert.equal((await status(off, { startsWithWindows: false, startWanted: false })).status, 204, 'turned off on purpose: not a problem');
+    assert.equal((await status(up, { startsWithWindows: 'yes' })).status, 400);
+    fs.writeFileSync(path.join(s.dist, 'Beam.exe'), crypto.randomBytes(1000));
+    fs.writeFileSync(path.join(s.dist, 'Beam.exe.json'), JSON.stringify({ version: '1.14.0' }));
+    assert.ok((await s.req('GET', '/api/info', { headers: up })).json.features.includes('setup-check'));
+    behindStream = await openEvents(s.port, behind); // (behind and online: it should have updated by now)
+    await behindStream.wait('hello');
+    await sleep(800); // (past the run 0.5 s after the start, which saw none of this)
+
+    let r = (await s.req('GET', '/api/setup?refresh=1', { headers: up })).json;
+    const byId = id => r.checks.find(c => c.id === id);
+    assert.deepEqual(pick(byId('boot'), ['ok', 'detail']), { ok: true, detail: 'Beam: task "Beam server" at boot' });
+    assert.equal(byId('backups').ok, null, 'none yet, and not due');
+    assert.equal(byId('disk').ok, true);
+    assert.equal(byId('https').ok, null, 'no address known yet');
+    assert.deepEqual(pick(byId('versions'), ['ok', 'detail']), { ok: false, detail: 'Shop Desktop (1.13.0): Beam for Windows 1.14.0 is out' });
+    assert.deepEqual(pick(byId('autostart'), ['ok', 'detail']), { ok: false, detail: 'Not on Shop Desktop' });
+    assert.match(byId('autostart').fix, /Start Beam when I sign in to Windows/);
+    const setupAlerts = async () => (await s.req('GET', '/api/alerts', { headers: up })).json.alerts.filter(a => a.kind === 'setup');
+    let alerts = await waitFor(async () => { const a = await setupAlerts(); return a.length >= 2 && a; });
+    assert.ok(alerts.some(a => /^Beam's setup check: “Beam starts with Windows on each PC” isn't so: Not on Shop Desktop\. On that PC:/.test(a.text)), JSON.stringify(alerts));
+    await sleep(300);
+    r = (await s.req('GET', '/api/setup?refresh=1', { headers: up })).json;
+    assert.equal((await setupAlerts()).length, 2, 'once while it stays wrong');
+    // fixed: re-armed; wrong again: alerted again
+    await status(behind, { startsWithWindows: true });
+    await sleep(300);
+    r = (await s.req('GET', '/api/setup?refresh=1', { headers: up })).json;
+    assert.equal(byId('autostart').ok, true);
+    await status(behind, { startsWithWindows: false });
+    await sleep(300);
+    await s.req('GET', '/api/setup?refresh=1', { headers: up });
+    alerts = await setupAlerts();
+    assert.equal(alerts.filter(a => /Beam starts with Windows on each PC/.test(a.text)).length, 2, JSON.stringify(alerts));
+    // the server's task not at boot (or missing)
+    fs.writeFileSync(tasksFile, JSON.stringify([{ name: 'Beam server', command: `"${process.execPath}" "${SERVER}"`, boot: false, enabled: true }]));
+    await sleep(300);
+    r = (await s.req('GET', '/api/setup?refresh=1', { headers: up })).json;
+    assert.deepEqual(pick(byId('boot'), ['ok', 'detail']), { ok: false, detail: 'Beam: task "Beam server", not at boot' });
+    // alerts can be turned off (logged only)
+    assert.equal((await s.req('PATCH', '/api/settings', { headers: json(up), body: JSON.stringify({ alerts: { setup: false } }) })).json.alerts.setup, false);
+    // a PC that's behind but off isn't a problem (it updates when it connects)
+    behindStream.close();
+    await sleep(500);
+    r = (await s.req('GET', '/api/setup?refresh=1', { headers: up })).json;
+    assert.deepEqual(pick(byId('versions'), ['ok', 'detail']), { ok: null, detail: 'Shop Desktop (1.13.0, off): Beam for Windows 1.14.0 is out' });
+  } finally { behindStream?.close(); await s.stop(); }
+});
+
+test('1.20 a PC’s log from anywhere: asked through the server, answered by the PC’s app, kept nowhere', async () => {
+  const s = await startServer('log120', 8796);
+  try {
+    const K = s.key;
+    const laptop = app(K, 'laptop00120', 'Robin Laptop', 'windows', { 'X-Beam-App-Version': '1.14.0', ...from('100.64.23.5') });
+    const shop = app(K, 'shoppc00120', 'Shop Desktop', 'windows', { 'X-Beam-App-Version': '1.14.0', ...from('100.64.23.2') });
+    const old = app(K, 'oldpc000120', 'Old PC', 'windows', { 'X-Beam-App-Version': '1.13.0', ...from('100.64.23.3') });
+    for (const h of [laptop, shop, old]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('device-logs'));
+    const devs = (await s.req('GET', '/api/devices', { headers: laptop })).json.devices;
+    assert.equal(devs.find(d => d.id === 'shoppc00120').can.log, true);
+    assert.equal(devs.find(d => d.id === 'oldpc000120').can.log, false, 'needs Beam for Windows 1.14');
+    assert.match((await post(s, '/api/devices/shoppc00120/log', {}, laptop)).json.error, /Shop Desktop is offline/);
+
+    const st = await openEvents(s.port, shop);
+    await st.wait('hello');
+    const asked = post(s, '/api/devices/shoppc00120/log', {}, laptop);
+    const ev = await st.wait('log-request');
+    assert.equal((await post(s, '/api/devices/me/log', { id: ev.data.id, name: 'beam.log', text: 'x' }, laptop)).status, 404, 'only the PC asked answers');
+    const text = '2026-10-07 21:00:00.000  Events: connected\n'.repeat(3);
+    assert.equal((await post(s, '/api/devices/me/log', { id: ev.data.id, name: 'beam.log', text }, shop)).status, 204);
+    let r = await asked;
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(pick(r.json, ['name', 'text', 'size']), { name: 'beam.log', text, size: Buffer.byteLength(text) });
+    assert.equal(r.headers['cache-control'], 'no-store');
+    assert.match(s.out, /Robin Laptop got Shop Desktop's Beam log/);
+    assert.ok(!fs.readdirSync(s.data).some(f => /log/i.test(f) && f !== 'logs'), 'nothing kept in the data folder');
+    // too old, no answer in time
+    assert.match((await post(s, '/api/devices/oldpc000120/log', {}, laptop)).json.error, /needs Beam for Windows 1\.14\.0 or later/);
+    r = await post(s, '/api/devices/shoppc00120/log', {}, laptop);
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /didn’t send its log in time/);
     st.close();
   } finally { await s.stop(); }
 });

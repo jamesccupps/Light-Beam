@@ -17,7 +17,8 @@ and 1.13 `fast-links` (a fast link for a file, made by Beam Family on the same m
 is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keyboard and mouse across PCs) and 1.17
 `connections` (how the server reaches each device over Tailscale, the devices' Tailscale state and `tailscaleKey`
 alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
-device and the server). Use each one only when its flag is there; everything older keeps working.
+device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
+`device-logs` (shipped with 1.19's in Beam 1.20.0). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -259,6 +260,17 @@ Apps update themselves from the Beam server.
   `url` (with the key), **verify `sha256`** and install:
   - **Android:** compare `versionCode`, then ask with a notification; Android always shows its own confirmation.
   - **Windows:** compare `version` and swap the exe automatically.
+- **One PC first (1.19, feature `staged-updates`):** a new Windows build goes to one PC first: the pilot, this server's
+  own PC when its Beam app is online, else the Windows app seen last (a rollout without one takes the first Windows
+  app that connects). Meanwhile the other Windows apps aren't offered it: `GET /api/updates` and `app-update` leave out
+  `windows` for them (browsers, the command line and the master key still see it). Once the pilot runs it (its
+  `X-Beam-App-Version`) and has for 10 minutes and is connected, everyone gets `app-update`. A pilot that reports the
+  build didn't install (its status `update.problem` for that version) stops it there: an `update` alert, and the others
+  keep their version until `POST /api/updates/release` offers it to every PC anyway. A pilot that hasn't installed it
+  within 30 minutes hands over to another online PC. Only when more than one Windows app is known. The setting
+  `stagedUpdates` (true unless turned off; `BEAM_STAGED_UPDATES=0` overrides) turns it off; turning it off on the way
+  offers it to every PC. `GET /api/settings` → `rollout`: `{ "version", "pilot", "pilotName", "since", "installedAt",
+  "releaseAt", "released", "halted": { "at", "problem" } | null, "running", "pcs" }`, or `null`.
 
 ## Every request
 
@@ -351,7 +363,7 @@ can't pass for it.
   "status": { "battery": { "level": 64, "charging": false }, "storage": { "free": 51200000000, "total": 256000000000 },
               "os": "Android 16", "at": 1790723000000 },
   "tailscale": { "name": "pixel-9", "dns": "pixel-9.tail1234.ts.net", "ip": "100.70.248.8", "online": true, "keyExpiry": 1806278692000 },
-  "can": { "ring": true, "wake": false, "remoteDesktop": false, "remoteControl": false },
+  "can": { "ring": true, "wake": false, "remoteDesktop": false, "remoteControl": false, "log": false },
   "settings": { "phoneNotifications": false } }
 ```
 - `online` is true while the device holds an open `/api/events` connection.
@@ -382,6 +394,7 @@ can't pass for it.
   - `remoteControl` **(1.6)**: a Windows PC with the Beam app 1.6.0 or later whose "Allow remote control" switch is
     on (`status.remoteControl`) and tied to its app on a Tailscale machine, that isn't locked (`status.locked`) and
     wasn't turned off from another device since (see Remote control).
+  - `log` **(1.20)**: a Windows PC with the Beam app 1.14 or later, which sends its log when asked (see A PC's log).
 - **MAC addresses are never sent to clients.** Devices report them, but only the server uses them, to wake the device.
 - `settings` (1.5): the device's own settings, which any signed-in device may change (`PUT /api/devices/{id}/settings`):
   - `phoneNotifications`: it shows phone notifications (see Phone notifications). Always present, `false` by default.
@@ -488,6 +501,9 @@ their last value, and `null` clears one. Unknown fields or bad values are `400`.
   system's words (1–300 characters; Beam for Android sends it when Android refuses an install). The server log says
   "<device> couldn't install Beam <version>: <problem>" (again only when it changes). It goes away by itself once
   the device runs that version or a later one. Older servers answer `400` (send it on its own, not with other fields).
+- `startsWithWindows`, `startWanted` **(1.20, Windows, feature `setup-check`)**: whether Windows' own startup list has
+  the app, and whether its user wants it there (the setup check flags a PC where it's wanted and missing). Shown in the
+  device list's `status`. Older servers answer `400`: send them only when the server lists `setup-check`.
 - Both show in `status` in the device list.
 - Others see `status` (without the MACs), `tailscale` and `can` in the device list; the `devices` event goes out at
   most every 5 s for status changes. Low battery or storage can raise alerts (see Alerts).
@@ -540,7 +556,8 @@ The server watches for trouble and tells every client:
   run out").
 
 Each alert is the event `alert { "id", "kind", "device", "level": "warn" | "info", "text", "at" }`:
-- `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`, `tailscaleKey` (1.17), `powerLoss` (1.18);
+- `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`, `tailscaleKey` (1.17), `powerLoss` (1.18), `update` (1.19: a Windows build that didn't work on the PC that tried it first; `device` null), `setup` (1.20: a setup
+  check that went wrong; `device` null);
 - `device` is the device it is about (`null` for `serverDisk` and the server's own `tailscaleKey`);
 - `text` is ready to show.
 
@@ -549,7 +566,7 @@ log and pushed through ntfy when that is configured. **Clients ignore alerts abo
 except `serverDisk`, `tailscaleKey` (the apps don't watch their own Tailscale key) and `powerLoss` (1.18: why this PC
 restarted).
 
-The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "offline": ["<device id>", …] }`,
+The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "setup": true (1.20), "offline": ["<device id>", …] }`,
 changed with `PATCH /api/settings`; see Settings. Crossings are logged even when that kind of alert is turned off.
 
 ### Each PC's history (1.18)
@@ -588,6 +605,40 @@ The server's own PC (a Windows server with Tailscale on, unless `BEAM_OWN_HISTOR
 start (PowerShell's Get-WinEvent, as the server's account), for its Beam app's device (the Windows app on this machine):
 a power loss there is known, and alerted, before anyone signs in. `BEAM_TEST_OWN_EVENTS` (a JSON file of records)
 stands in for Windows in tests.
+
+### The setup check (1.20)
+Feature `setup-check`. The server looks at its own setup two minutes after it starts and every 6 hours (a real
+install: Tailscale on and not a test; `BEAM_SETUP_CHECK=on|off` decides otherwise), and when asked:
+
+| Method & path | Result |
+|---|---|
+| `GET /api/setup?refresh=1` | `{ "checks": [{ "id", "title", "ok": true \| false \| null, "detail", "fix"? }], "at" }`: without `refresh`, the last results (the first ask runs them); with it, a new look (at most every 10 s). `ok: null` is "can't tell yet"; `fix` (only when `ok` is false) says what to do |
+
+The checks (each only where it applies):
+- `boot`: the servers start when Windows does (a Windows server: a scheduled task with a boot trigger runs this
+  server.js, and Beam Family's when `BEAM_FAMILY_URL` is set; PowerShell's Get-ScheduledTask; `BEAM_TEST_BOOT_TASKS`
+  stands in for tests);
+- `unattended`: Tailscale runs before anyone signs in (Windows: tailscaled's `ForceDaemon`);
+- `https`: the address devices use is https;
+- `backups`: the last backup is younger than twice `BEAM_BACKUP_HOURS` (false when backups are off);
+- `disk`: at least max(5 GB, 5 %) free;
+- `versions`: every Windows PC seen in the last 14 days runs the build in dist (or later);
+- `autostart`: every PC that says (Beam for Windows 1.14+, status `startsWithWindows`) has its Beam app in Windows' own
+  startup list, unless its user turned that off (`startWanted: false`);
+- `keys`: no Tailscale sign-in of this server's or the devices' machines runs out within 30 days;
+- `family`: Beam Family answers on its local address.
+
+A check that turns `false` raises a `setup` alert once; it alerts again only after it was right in between.
+
+### A PC's log (1.20)
+Feature `device-logs`. A device asks a PC's Beam app (Windows 1.14 or later, online: its `can.log`) for the end of
+its beam.log; the server passes the request on (the event `log-request { id }`, to that PC's streams only) and the
+answer back, and keeps nothing.
+
+| Method & path | Result |
+|---|---|
+| `POST /api/devices/{id}/log` | `{ "name", "text", "size", "at" }` (`Cache-Control: no-store`), within 30 s. `409` when it can't (too old, offline, no answer in time); `403` for a session-only sign-in |
+| `POST /api/devices/me/log` | the PC's answer: `{ "id", "name", "text" }` (1 MB at most is passed on, the end of it) → `204`; `404` for a request that isn't for this device or timed out |
 
 ### Items
 | Method & path | Result |
@@ -728,6 +779,7 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `ring` | **(1.3)** `{ "device", "by", "from", "stop", "at" }`: ring (or stop ringing) the device `device`; everyone else ignores it |
 | `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk`, `tailscaleKey` (1.17) and `powerLoss` (1.18) |
 | `speed-test` | **(1.18)** `{ "id" }`, to the asked device's own streams only (at once): run a speed test (see Speed tests) and send the result with this `id` |
+| `log-request` | **(1.20)** `{ "id" }`, to the asked PC's own streams only (at once): send the end of its log with this `id` (see A PC's log) |
 | `notification`, `notification-removed`, `notification-request`, `notification-request-done` | **(1.5)** see Phone notifications; only the devices concerned get them, urgent on background streams |
 | `rc-request`, `rc-signal`, `rc-end`, `rc-disable` | **(1.6)** see Remote control; only the devices named get them, urgent on background streams |
 | `rc-sessions` | **(1.6)** the remote control sessions going on, to everyone (not urgent) |
@@ -1095,6 +1147,7 @@ signed-in request, unless configured.
 | `POST /api/admin/shutdown` | **(v3)** stops the server cleanly; master key, from the server machine only (`node server.js stop`) |
 | `GET /api/qr.svg?data=…`, `GET /api/qr.png?data=…` | a QR code (signed-in only) |
 | `GET /api/updates` | see App updates |
+| `POST /api/updates/release` | **(1.19, feature `staged-updates`)** the Windows build waiting on the PC that tries it first (or stopped there) goes to every PC now → `{ "rollout" }`; `409` when nothing is waiting; `403` for a session-only sign-in |
 | `GET /download/windows` | the Windows app (`Beam.exe`), if built |
 | `GET /download/android` | the Android app (`beam.apk`), if built |
 

@@ -27,6 +27,7 @@ const { createOutbound } = require('./lib/outbound');
 const { makePrivate } = require('./lib/private-dir');
 const pcHistory = require('./lib/history');
 const winevents = require('./lib/winevents');
+const winsetup = require('./lib/winsetup');
 const { version: VERSION } = require('./package.json');
 
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch {}
@@ -548,6 +549,8 @@ function validateSettings(obj) {
   out.tailscaleSeen = Object.fromEntries(Object.entries(seen).filter(([login, e]) => normalizeLogin(login) === login && login && isPlainObject(e))
     .map(([login, e]) => [login, { since: Number(e.since) || 0, last: Number(e.last) || 0, devices: Array.isArray(e.devices) ? e.devices.filter(id => typeof id === 'string' && DEVICE_ID.test(id)) : [] }]));
   if (!Array.isArray(out.knownHosts)) out.knownHosts = [];
+  // (1.19) a Windows build going out one PC first
+  if (out.rollout !== undefined && !(isPlainObject(out.rollout) && typeof out.rollout.version === 'string' && typeof out.rollout.sha256 === 'string' && Number.isFinite(out.rollout.since))) delete out.rollout;
   return out;
 }
 
@@ -677,6 +680,8 @@ function publicSettings() {
     maxItems: setting('maxItems'),
     blockedNodes: (settings.blockedNodes || []).map(({ node, name, since, device }) => ({ node, name, since, device })),
     alerts: alertSettings(),
+    stagedUpdates: stagedOn(), // (1.19) a Windows build goes to one PC first
+    rollout: rolloutInfo(),
     locked: Object.keys(ENV_SETTINGS).filter(k => ENV_SETTINGS[k] !== undefined),
   };
 }
@@ -760,7 +765,7 @@ const originOf = req => `${isHttps(req) ? 'https' : 'http'}://${requestHost(req)
 
 // Tailscale: machine names, whois and the address `tailscale serve` publishes. See lib/tailscale.js.
 const ts = env.BEAM_TAILSCALE === 'off'
-  ? { status: async () => null, serveConfig: async () => null, whois: async () => null, ping: async () => null, source: 'off' }
+  ? { status: async () => null, serveConfig: async () => null, prefs: async () => null, whois: async () => null, ping: async () => null, source: 'off' }
   : tailscale.createClient({ socket: env.BEAM_TAILSCALE_SOCKET || '', statusTtl: FAST_TIMEOUTS ? 300 : 30_000 });
 // Requests to other Beams (moves, import-from); through tailscaled's HTTP proxy when BEAM_TAILNET_PROXY is set.
 const outbound = createOutbound({ proxy: env.BEAM_TAILNET_PROXY || '', isTailnetHost: host => /\.ts\.net$/i.test(host) || tailscale.isTailscaleIp(host) });
@@ -1414,6 +1419,7 @@ function touchDevice(req, url) {
     device.appVersion = appVersion;
     // An update that didn't install there is over once it runs that version or a later one.
     if (device.status?.update && versionAtLeast(appVersion, device.status.update.version)) delete device.status.update;
+    pilotRuns(device); // (1.19) the PC trying a new build first now runs it
   }
   device.name = name;
   device.platform = nextPlatform;
@@ -1852,7 +1858,8 @@ async function logStatus() {
 // Apps report their battery, free storage, OS, network adapters (for Wake-on-LAN) and whether Remote Desktop is on.
 // MAC addresses stay on the server: they are used to wake a PC and never sent to any client.
 
-const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update']);
+// (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
+const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted']);
 // One line of text from a device: no control or direction characters, trimmed.
 const statusText = v => typeof v === 'string' ? v.toWellFormed().replace(/[\u0000-\u001f\u007f]/g, ' ').replace(BIDI, '').replace(/\s+/g, ' ').trim() : '';
 const MAC = /^([0-9a-f]{2})([:-]?)([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})$/i;
@@ -1897,7 +1904,7 @@ function parseStatus(body) {
       const macs = Array.isArray(value) && value.length <= 8 ? value.map(normalizeMac) : [null];
       if (macs.some(m => !m)) throw bad('macs must be a list of up to 8 addresses like aa:bb:cc:dd:ee:ff');
       out.macs = [...new Set(macs)];
-    } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked') {
+    } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked' || key === 'startsWithWindows' || key === 'startWanted') {
       if (typeof value !== 'boolean') throw bad(`${key} must be true or false`);
       out[key] = value;
     } else if (key === 'update') {
@@ -1915,10 +1922,12 @@ function parseStatus(body) {
 
 // What other devices see of a status report (no MAC addresses).
 function publicStatus(status) {
-  const { battery, storage, os, remoteControl, locked, update, at } = status;
+  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, at } = status;
   return {
     ...(battery && { battery }), ...(storage && { storage }), ...(os && { os }),
-    ...(remoteControl !== undefined && { remoteControl }), ...(locked !== undefined && { locked }), ...(update && { update }), at: at || 0,
+    ...(remoteControl !== undefined && { remoteControl }), ...(locked !== undefined && { locked }), ...(update && { update }),
+    ...(startsWithWindows !== undefined && { startsWithWindows }), ...(startWanted !== undefined && { startWanted }), // (1.20)
+    at: at || 0,
   };
 }
 
@@ -1976,6 +1985,7 @@ function capabilitiesOf(device, ts = tailscaleOf(device)) {
     wake: Boolean(device.status?.macs?.length),
     remoteDesktop: device.platform === 'windows' && device.status?.remoteDesktop === true && Boolean(ts?.dns || ts?.ip),
     remoteControl: rcAllowed(device) && device.status?.locked !== true,
+    log: canSendLog(device), // (1.20) its Beam app sends its log when asked
   };
 }
 
@@ -2007,6 +2017,7 @@ async function putStatus(req, res, _m, url) {
   const { update } = changes;
   if (update && (update.version !== device.status?.update?.version || update.problem !== device.status?.update?.problem)) {
     log.warn(`${device.name} couldn't install Beam ${update.version}: ${update.problem}`);
+    pilotProblem(device, update); // (1.19) on the PC trying it first: it goes no further
   }
   const status = { ...(device.status || {}) };
   for (const [key, value] of Object.entries(changes)) {
@@ -2144,6 +2155,7 @@ function alertSettings() {
     serverDisk: a.serverDisk !== false,
     tailscaleKey: a.tailscaleKey !== false, // (1.17)
     powerLoss: a.powerLoss !== false, // (1.18) a PC came back from a power loss, a blue screen or a forced power-off
+    setup: a.setup !== false, // (1.20) the setup check found something wrong
     offline: Array.isArray(a.offline) ? a.offline.filter(id => typeof id === 'string') : [],
   };
 }
@@ -2509,6 +2521,178 @@ async function readOwnHistory() {
   const from = since ? Date.parse(since) - 60e3 : now() - 30 * 86400e3;
   const added = ingestHistory(pc, await winevents.readOwnEvents({ since: new Date(from).toISOString(), env }));
   if (added) log.info(`${pc.name} (this server's PC): ${added} new record${added === 1 ? '' : 's'} for its history, from Windows`);
+}
+
+// ---------------------------------------------------------------- the setup check (1.20)
+// Beam looks at its own setup (web Settings → Server → Setup; the user, 2026-10-07, on my list: after a week where
+// Desktop's Beam app hadn't started with Windows for days, and Tailscale wasn't unattended, without anything saying so):
+// that the servers start when Windows does, that Tailscale doesn't wait for a sign-in, the https address, backups, disk
+// space, every PC on the latest Beam and starting with Windows, Tailscale sign-ins not running out. Two minutes after
+// start, every 6 hours and when asked; a check that goes wrong raises a `setup` alert (once, until it's right again).
+
+const SETUP_EVERY_MS = 6 * 3600e3;
+// A real install looks by itself (not a test's scratch server: BEAM_SETUP_CHECK=on|off decides otherwise).
+const SETUP_AUTO = env.BEAM_SETUP_CHECK ? env.BEAM_SETUP_CHECK === 'on' : env.BEAM_TAILSCALE !== 'off' && !FAST_TIMEOUTS;
+let setupState = null; // { checks: [{ id, title, ok: true | false | null, detail, fix? }], at }
+let setupRun = null;
+
+const setupItem = (id, title, ok, detail, fix) => ({ id, title, ok, detail, ...(fix && ok === false && { fix }) });
+const recentApps = () => windowsApps().filter(d => now() - (d.lastSeen || 0) < 14 * 86400e3);
+
+async function setupChecks() {
+  const out = [];
+  // the servers start when Windows does (Windows servers: a scheduled task with a boot trigger, as install-windows.ps1
+  // -AtBoot makes); not for a test's scratch server unless it brings its own task list
+  if ((process.platform === 'win32' && env.BEAM_TAILSCALE !== 'off' && !FAST_TIMEOUTS) || env.BEAM_TEST_BOOT_TASKS) {
+    try {
+      const tasks = await winsetup.serverTasks({ env });
+      const parts = [['Beam', path.join(__dirname, 'server.js')], ...(FAMILY_URL ? [['Beam Family', path.join(__dirname, 'family', 'server.js')]] : [])]
+        .map(([name, script]) => { const t = winsetup.taskFor(tasks, script); return { name, ok: Boolean(t?.boot), how: t ? (t.boot ? `task "${t.name}" at boot` : `task "${t.name}", not at boot`) : 'no scheduled task' }; });
+      const ok = parts.every(p => p.ok);
+      out.push(setupItem('boot', 'The servers start when Windows does', ok, parts.map(p => `${p.name}: ${p.how}`).join('; '),
+        'Run scripts\\install-windows.ps1 -AtBoot on this PC (Windows asks once): they then start before anyone signs in.'));
+    } catch (err) { out.push(setupItem('boot', 'The servers start when Windows does', null, `Windows' task list couldn't be read (${err.message})`)); }
+  }
+  // Tailscale doesn't wait for a sign-in (Windows: "Run unattended")
+  if (process.platform === 'win32' && ts.source !== 'off') {
+    const p = await ts.prefs();
+    const ok = p ? p.ForceDaemon === true : null;
+    out.push(setupItem('unattended', 'Tailscale runs before anyone signs in', ok, ok === null ? 'tailscaled\'s settings couldn\'t be read' : ok ? 'Run unattended is on' : 'Tailscale connects only once someone signs in to this PC',
+      'Tailscale\'s tray icon → Run unattended, or run "tailscale set --unattended" on this PC.'));
+  }
+  // the https address devices use
+  const remote = await publicBase();
+  out.push(setupItem('https', 'Devices reach Beam over https', /^https:/.test(remote || '') ? true : remote ? false : null,
+    remote ? `At ${remote}` : 'No address known yet (one is learned from the first device that signs in through it)',
+    'Share Beam with "tailscale serve" (README: Running it) so every device comes in over https.'));
+  // backups
+  if (BACKUP_HOURS > 0) {
+    const list = await listBackups().catch(() => null);
+    const last = list?.[0];
+    const age = last ? now() - last.at : null;
+    const ok = last ? age < 2 * BACKUP_HOURS * 3600e3 : process.uptime() * 1000 < BACKUP_HOURS * 3600e3 ? null : false;
+    out.push(setupItem('backups', 'Backups are recent', ok, last ? `The last one ${durationText(age)} ago, in ${BACKUP_DIR}` : `None yet (every ${BACKUP_HOURS} h into ${BACKUP_DIR})`,
+      'Look at Settings → Server → Backups (Back up now) and the server log.'));
+  } else {
+    out.push(setupItem('backups', 'Backups are recent', false, 'Automatic backups are off (BEAM_BACKUP_HOURS=0)', 'Set BEAM_BACKUP_HOURS (24 is the default) in .env and restart Beam.'));
+  }
+  // disk space
+  const disk = await diskInfo();
+  if (disk) {
+    const limit = Math.max(5 * 1024 ** 3, disk.total * 0.05);
+    out.push(setupItem('disk', 'Room on the server\'s disk', disk.free >= limit, `${formatSize(disk.free)} free of ${formatSize(disk.total)}`, 'Free some space, or lower BEAM_MAX_STORAGE_GB or how long items are kept.'));
+  }
+  // every PC on the latest Beam for Windows, and starting with Windows
+  const offer = (await appUpdates().catch(() => ({}))).windows?.version;
+  const pcs = recentApps();
+  if (offer && pcs.length) {
+    // Behind is a problem only for a PC that's online and was offered it a while ago: not while the build goes to one
+    // PC first (or stopped there: the `update` alert said so), not in the half hour after it went to every PC, and not
+    // for a PC that's off (it updates when it connects).
+    const r = settings.rollout;
+    const waiting = Boolean(activeRollout() || r?.halted) || (r?.released && now() - r.released < 30 * 60e3);
+    const behind = pcs.filter(d => !versionAtLeast(d.appVersion, offer));
+    const stuck = behind.filter(d => isOnline(d.id));
+    out.push(setupItem('versions', 'Every PC runs the latest Beam', behind.length === 0 ? true : !waiting && stuck.length ? false : null,
+      behind.length ? `${behind.map(d => `${d.name} (${d.appVersion}${isOnline(d.id) ? '' : ', off'})`).join(', ')}: Beam for Windows ${offer} is out${activeRollout() ? ', going to one PC first' : ''}` : `All ${pcs.length} run Beam for Windows ${offer} or later`,
+      'An online PC that stays behind may have updates turned off, or skipped this version after it failed there: look at its Beam log.'));
+  }
+  const told = pcs.filter(d => typeof d.status?.startsWithWindows === 'boolean');
+  if (told.length) {
+    const off = told.filter(d => d.status.startsWithWindows === false && d.status.startWanted !== false);
+    out.push(setupItem('autostart', 'Beam starts with Windows on each PC', off.length === 0,
+      off.length ? `Not on ${off.map(d => d.name).join(', ')}` : `On all ${told.length} that say${pcs.length > told.length ? ` (${pcs.length - told.length} more tell with Beam for Windows 1.14)` : ''}`,
+      'On that PC: Beam\'s Settings → This PC → "Start Beam when I sign in to Windows" (started normally, not from another app).'));
+  }
+  // Tailscale sign-ins (keys) of this server's and the devices' machines that run out within 30 days
+  const mine = new Set(Object.values(devices).map(d => tailscaleOf(d)?.ip).filter(Boolean));
+  const machines = new Map(); // machine name -> its facts (its IPv4 and IPv6 address once)
+  for (const [ip, f] of tsFacts) if (f.self || mine.has(ip)) machines.set(tsIndex.get(ip)?.name || ip, f);
+  if (machines.size) {
+    const soon = [...machines].filter(([, f]) => f.expired || (Number.isFinite(f.keyExpiry) && f.keyExpiry - now() < 30 * 86400e3));
+    const first = [...machines.values()].map(f => f.keyExpiry).filter(Number.isFinite).sort((a, b) => a - b)[0];
+    out.push(setupItem('keys', 'No Tailscale sign-in runs out soon', soon.length === 0,
+      soon.length ? soon.map(([name, f]) => `${name}${f.expired ? ' (ran out)' : ` (${new Date(f.keyExpiry).toISOString().slice(0, 10)})`}`).join(', ') : first ? `The first runs out ${new Date(first).toISOString().slice(0, 10)}` : 'None runs out',
+      'Turn off key expiry for PCs that stay put in Tailscale\'s admin console (Machines → … → Disable key expiry).'));
+  }
+  // Beam Family answers
+  if (FAMILY_URL) {
+    let ok = false;
+    try { ok = (await fetch(`${FAMILY_LOCAL}/api/hello`, { signal: AbortSignal.timeout(5000) })).ok; } catch {}
+    out.push(setupItem('family', 'Beam Family answers', ok, ok ? `At ${FAMILY_URL}` : `Nothing answers at ${FAMILY_LOCAL}`, 'Start it (the "Beam Family" task) and look at its log.'));
+  }
+  return out;
+}
+
+// Runs the checks (one run at a time) and alerts each one that went wrong since the last run.
+function runSetupCheck() {
+  setupRun ||= (async () => {
+    try {
+      const checks = await setupChecks();
+      const alerted = new Set(settings.setupAlerted || []);
+      for (const c of checks) {
+        if (c.ok === false && !alerted.has(c.id)) {
+          alerted.add(c.id);
+          const text = `Beam's setup check: “${c.title}” isn't so: ${c.detail}.${c.fix ? ` ${c.fix}` : ''}`;
+          if (alertSettings().setup) raiseAlert('setup', null, 'warn', text); else log.warn(text);
+        } else if (c.ok === true) alerted.delete(c.id);
+      }
+      if (JSON.stringify([...alerted]) !== JSON.stringify(settings.setupAlerted || [])) { settings.setupAlerted = [...alerted]; persistSettings(); }
+      setupState = { checks, at: now() };
+    } catch (err) { log.warn(`The setup check failed: ${err.message}`); }
+    return setupState;
+  })().finally(() => { setupRun = null; });
+  return setupRun;
+}
+
+// GET /api/setup[?refresh=1]: { checks, at } (refresh: now, at most every 10 s; the first ask runs them).
+async function getSetup(req, res, _m, url) {
+  const fresh = url.searchParams.get('refresh') === '1' && now() - (setupState?.at || 0) > (FAST_TIMEOUTS ? 200 : 10_000);
+  send(res, 200, (!setupState || fresh ? await runSetupCheck() : setupState) || { checks: [], at: 0 });
+}
+
+// ---------------------------------------------------------------- a PC's log, from anywhere (1.20)
+// "Beam log" in a PC's Device info: its Beam app (Windows 1.14 or later, online) sends the end of its beam.log (never
+// message text, keys or tokens: Beam doesn't log those), which goes straight to the device that asked; nothing is kept
+// here. For the History's "Beam crashed" on a PC that's out of reach.
+
+const LOG_APP_MIN = '1.14.0';
+const LOG_MAX_BYTES = 1024 * 1024;
+const LOG_ANSWER_MS = FAST_TIMEOUTS ? 4000 : 30_000;
+const logAsks = new Map(); // request id -> { target, done(log) }
+
+const canSendLog = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, LOG_APP_MIN);
+
+// POST /api/devices/{id}/log: { name, text, size, at }, or 409 when it can't (too old, offline, didn't answer in time).
+async function askDeviceLog(req, res, [id], url) {
+  const target = targetDevice(id);
+  await readJson(req, { optional: true });
+  if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read a PC’s log');
+  if (!canSendLog(target)) throw httpError(409, `${target.name} can’t send its log (that needs Beam for Windows ${LOG_APP_MIN} or later)`);
+  if (!isOnline(target.id)) throw httpError(409, `${target.name} is offline`);
+  const askId = crypto.randomBytes(8).toString('hex');
+  const got = await new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), LOG_ANSWER_MS);
+    logAsks.set(askId, { target: target.id, done: l => { clearTimeout(timer); resolve(l); } });
+    sendTo(new Set([target.id]), 'log-request', { id: askId });
+  });
+  logAsks.delete(askId);
+  if (!got) throw httpError(409, `${target.name} didn’t send its log in time`);
+  log.info(`${whoName(resolveAlias(deviceIdOf(req, url) || ''), 'A browser')} got ${target.name}'s Beam log (${formatSize(got.size)})`);
+  send(res, 200, got, { 'Cache-Control': 'no-store' });
+}
+
+// POST /api/devices/me/log { id, name, text }: a PC's answer to a log request.
+async function postDeviceLog(req, res, _m, url) {
+  const d = devices[deviceIdOf(req, url)];
+  if (!d) throw httpError(400, 'X-Beam-Device-Id is required');
+  const body = await readJson(req, { limit: LOG_MAX_BYTES * 2 + 4096 });
+  const ask = typeof body.id === 'string' ? logAsks.get(body.id) : null;
+  if (!ask || ask.target !== d.id) throw httpError(404, 'No such request (it may have timed out)');
+  if (typeof body.text !== 'string') throw httpError(400, 'Expected {"id", "name", "text"}');
+  const text = body.text.length > LOG_MAX_BYTES ? body.text.slice(-LOG_MAX_BYTES) : body.text;
+  ask.done({ name: statusText(body.name).slice(0, 80) || 'beam.log', text, size: Buffer.byteLength(text), at: now() });
+  send(res, 204);
 }
 
 // ---------------------------------------------------------------- phone notifications (1.5)
@@ -4964,8 +5148,11 @@ async function appUpdates() {
   return out;
 }
 
-async function getUpdates(req, res) {
-  send(res, 200, await appUpdates());
+// (1.19) While a Windows build goes to one PC first, the other Windows apps aren't offered it yet.
+async function getUpdates(req, res, _m, url) {
+  const updates = await appUpdates();
+  noticeWindowsBuild(updates);
+  send(res, 200, offersFor(deviceIdOf(req, url), updates));
 }
 
 // A Windows app that connects while running an older version than the one in dist is told at once (1.7.2). It checks
@@ -4977,9 +5164,11 @@ async function offerUpdateOnConnect(client, req, url) {
   if (!version) return;
   try {
     const updates = await appUpdates();
-    const offered = updates.windows?.version;
+    noticeWindowsBuild(updates);
+    const mine = offersFor(client.deviceId, updates); // (1.19)
+    const offered = mine.windows?.version;
     if (!offered || offered === version || !versionAtLeast(offered, version) || client.res.writableEnded) return;
-    writeTo(client, `event: app-update\ndata: ${JSON.stringify(updates)}\n\n`);
+    writeTo(client, `event: app-update\ndata: ${JSON.stringify(mine)}\n\n`);
   } catch {}
 }
 
@@ -5031,10 +5220,151 @@ async function checkDist() {
       const changed = Object.entries(updates).filter(([p, u]) => before[p]?.sha256 !== u.sha256)
         .map(([p, u]) => `${p === 'android' ? 'Android' : 'Windows'} ${u.version}`);
       if (changed.length) log.info(`New app build${changed.length > 1 ? 's' : ''} published: ${changed.join(', ')}; telling connected apps to update`);
-      broadcast('app-update', updates);
+      noticeWindowsBuild(updates);
+      broadcast('app-update', updates, null, c => offersFor(c.deviceId, updates) === updates); // (1.19: not the held-back PCs)
     }
     lastUpdatesSent = json;
   } catch {}
+}
+
+// ---------------------------------------------------------------- updates one PC at a time (1.19)
+// A new Windows build goes to one PC first (the pilot: this server's own PC when its Beam app is online, else the
+// Windows app seen last), and to the others once the pilot has run it for 10 minutes and is still connected (the user:
+// "lets keep going", on updates one PC at a time: on 2026-10-07 all 7 PCs installed 1.13.0 within 3 minutes). A pilot
+// that tries it and goes back (Beam for Windows rolls back a build that fails its health check, and reports why) stops
+// it there, with an alert. A pilot that hasn't installed it within 30 minutes (asleep, updates turned off, being
+// controlled) hands over to another online PC. Settings → Server shows where it is, can offer it to every PC at once,
+// and turns this off (`stagedUpdates`). Windows only: Android is one phone. State: settings.rollout.
+
+const PILOT_MS = FAST_TIMEOUTS ? 1500 : 10 * 60e3;
+const PILOT_SWITCH_MS = FAST_TIMEOUTS ? 3000 : 30 * 60e3;
+let knownWindowsBuild = null; // the Windows build in dist when last looked at (its sha256; '' for none)
+
+const stagedOn = () => settings.stagedUpdates !== false && env.BEAM_STAGED_UPDATES !== '0';
+const windowsApps = () => Object.values(devices).filter(d => d.platform === 'windows' && d.appVersion && !d.temporary);
+const activeRollout = () => { const r = settings.rollout; return r && !r.released && !r.halted ? r : null; };
+
+function rolloutChanged() {
+  persistSettings();
+  broadcast('settings', publicSettings());
+}
+
+function choosePilot(skip = new Set()) {
+  const ok = d => d && d.appVersion && isOnline(d.id) && !skip.has(d.id);
+  const own = ownPc();
+  if (ok(own)) return own;
+  return windowsApps().filter(ok).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0))[0] || null;
+}
+
+// Looks at the Windows build in dist: the first look at it (a server start) only notes it (a rollout already under way
+// for it goes on); a new one starts a rollout when there's more than one PC to update.
+function noticeWindowsBuild(updates) {
+  const w = updates.windows;
+  const sha = w?.sha256 || '';
+  // (the file and its sidecar together: a look between a build's two writes sees a new file with the old version)
+  const key = `${sha}|${w?.version || ''}`;
+  if (knownWindowsBuild === null) {
+    knownWindowsBuild = key;
+    if (settings.rollout && (settings.rollout.sha256 !== sha || settings.rollout.version !== w?.version)) { delete settings.rollout; persistSettings(); }
+    return;
+  }
+  if (key === knownWindowsBuild) return;
+  knownWindowsBuild = key;
+  if (!w || !stagedOn() || windowsApps().length < 2) {
+    if (settings.rollout) { delete settings.rollout; rolloutChanged(); }
+    return;
+  }
+  const pilot = choosePilot();
+  settings.rollout = { version: w.version, sha256: sha, pilot: pilot?.id || null, since: now() };
+  log.info(`Windows ${w.version}: ${pilot ? `offered to ${pilot.name} first` : 'held until a PC connects to try it first'}; the other PCs get it once it has run there for ${durationText(PILOT_MS)}`);
+  if (pilot && versionAtLeast(pilot.appVersion, w.version)) pilotRuns(pilot);
+  rolloutChanged();
+}
+
+// What a device is offered: the build being rolled out only to the pilot among the Windows apps (a rollout without a
+// pilot takes the first Windows app that connects).
+function offersFor(deviceId, updates) {
+  const r = activeRollout();
+  const d = devices[resolveAlias(deviceId || '')];
+  if (!r || !updates.windows || updates.windows.sha256 !== r.sha256 || d?.platform !== 'windows' || d.id === r.pilot) return updates;
+  if (!r.pilot && d.appVersion && isOnline(d.id)) {
+    r.pilot = d.id;
+    r.since = now();
+    log.info(`Windows ${r.version}: offered to ${d.name} first (the first PC to connect)`);
+    rolloutChanged();
+    return updates;
+  }
+  const { windows, ...rest } = updates;
+  return rest;
+}
+
+function pilotRuns(device) {
+  const r = activeRollout();
+  if (!r || device.id !== r.pilot || r.installedAt || !versionAtLeast(device.appVersion, r.version)) return;
+  r.installedAt = now();
+  log.info(`${device.name} runs Windows ${r.version}: the other PCs get it at ${clockText(r.installedAt + PILOT_MS)} if it keeps running`);
+  rolloutChanged();
+}
+
+// The pilot reported that the build didn't install (or rolled back): it goes no further.
+function pilotProblem(device, update) {
+  const r = activeRollout();
+  if (!r || device.id !== r.pilot || update.version !== r.version || !update.problem) return;
+  r.halted = { at: now(), problem: String(update.problem).slice(0, 200) };
+  raiseAlert('update', null, 'warn', `Beam for Windows ${r.version} didn’t work on ${device.name} (${r.halted.problem}), so the other PCs keep the version they have. Settings → Server can offer it to them anyway.`);
+  rolloutChanged();
+}
+
+async function releaseRollout(why) {
+  const r = activeRollout();
+  if (!r) return false;
+  r.released = now();
+  log.info(`Windows ${r.version}: ${why}; offering it to every PC now`);
+  rolloutChanged();
+  try { broadcast('app-update', await appUpdates()); } catch {}
+  return true;
+}
+
+function rolloutTick() {
+  const r = activeRollout();
+  if (!r) return;
+  if (r.installedAt && now() - r.installedAt >= PILOT_MS && isOnline(r.pilot)) {
+    releaseRollout(`${nameOf(r.pilot)} has run it for ${durationText(PILOT_MS)}`);
+    return;
+  }
+  if (r.installedAt || now() - r.since < PILOT_SWITCH_MS) return;
+  const next = choosePilot(new Set([r.pilot].filter(Boolean)));
+  if (!next) return;
+  log.info(`Windows ${r.version}: ${r.pilot ? `${nameOf(r.pilot)} hasn't installed it in ${durationText(PILOT_SWITCH_MS)}` : 'no PC has taken it'}; offering it to ${next.name} first instead`);
+  r.pilot = next.id;
+  r.since = now();
+  rolloutChanged();
+  appUpdates().then(u => sendTo(new Set([next.id]), 'app-update', u)).catch(() => {});
+  if (versionAtLeast(next.appVersion, r.version)) pilotRuns(next);
+}
+
+// For Settings → Server: where the latest Windows build is (null when none went out one PC first).
+function rolloutInfo() {
+  const r = settings.rollout;
+  if (!r) return null;
+  const apps = windowsApps();
+  return {
+    version: r.version, pilot: r.pilot || null, pilotName: r.pilot ? nameOf(r.pilot) : null, since: r.since,
+    installedAt: r.installedAt || null, releaseAt: r.installedAt && !r.released && !r.halted ? r.installedAt + PILOT_MS : null,
+    released: r.released || null, halted: r.halted || null,
+    running: apps.filter(d => versionAtLeast(d.appVersion, r.version)).length, pcs: apps.length,
+  };
+}
+
+// POST /api/updates/release: the build waiting on its pilot (or stopped there) goes to every PC now.
+async function releaseUpdate(req, res, _m, url) {
+  if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t do that');
+  await readJson(req, { optional: true });
+  const r = settings.rollout;
+  if (!r || r.released) throw httpError(409, 'No Windows build is waiting to go to every PC');
+  delete r.halted;
+  await releaseRollout(`${whoName(deviceIdOf(req, url), 'A browser')} offered it to every PC`);
+  send(res, 200, { rollout: rolloutInfo() });
 }
 
 // ---------------------------------------------------------------- API: misc
@@ -5153,6 +5483,9 @@ const FEATURES = [
   'connections', // (1.17.0: GET /api/connections + test, devices' Tailscale state, tailscaleKey alerts)
   'history', // (1.18.0: each device's history, POST/GET /api/devices/…/history, powerLoss alerts)
   'speed-test', // (1.18.0: /api/speedtest/down|up|result, POST /api/connections/{id}/speed, the `speed-test` event)
+  'staged-updates', // (1.19.0: a Windows build goes to one PC first; settings `stagedUpdates`, `rollout`; POST /api/updates/release)
+  'setup-check', // (1.20.0: GET /api/setup, `setup` alerts, status startsWithWindows/startWanted)
+  'device-logs', // (1.20.0: POST /api/devices/{id}/log, the `log-request` event, POST /api/devices/me/log)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -5221,12 +5554,13 @@ const SETTING_RULES = {
   },
   retentionDays: v => { if (!Number.isInteger(v) || v < 0 || v > 3650) throw httpError(400, 'retentionDays must be 0 (keep forever) to 3650'); return v; },
   maxItems: v => { if (!Number.isInteger(v) || v < 0 || v > 100_000) throw httpError(400, 'maxItems must be 0 (no limit) to 100000'); return v; },
+  stagedUpdates: v => { if (typeof v !== 'boolean') throw httpError(400, 'stagedUpdates must be true or false'); return v; }, // (1.19)
   // Partial: only the given kinds change. offline is the full list of watched device ids.
   alerts: v => {
     if (!isPlainObject(v)) throw httpError(400, 'alerts must be an object like {"battery": true, "offline": ["<device id>"]}');
     const next = alertSettings();
     for (const [key, value] of Object.entries(v)) {
-      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss'].includes(key)) {
+      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss', 'setup'].includes(key)) {
         if (typeof value !== 'boolean') throw httpError(400, `alerts.${key} must be true or false`);
         next[key] = value;
       } else if (key === 'offline') {
@@ -5299,6 +5633,7 @@ async function patchSettings(req, res) {
   persistSettings();
   if (Object.keys(changes).length) log.info(`Settings changed by ${by}: ${Object.keys(changes).join(', ')}`);
   if ('retentionDays' in changes || 'maxItems' in changes) setImmediate(sweep);
+  if (changes.stagedUpdates === false && activeRollout()) await releaseRollout('one PC first was turned off'); // (1.19)
   broadcast('settings', publicSettings());
   send(res, 200, publicSettings());
 }
@@ -6432,6 +6767,9 @@ const routes = [
   ['GET', '/api/devices/me/history/since', getHistorySince],
   ['POST', '/api/devices/me/history', postHistory],
   ['GET', `/api/devices/${DEV}/history`, getHistory],
+  ['POST', '/api/devices/me/log', postDeviceLog],
+  ['POST', `/api/devices/${DEV}/log`, askDeviceLog],
+  ['GET', '/api/setup', getSetup],
   ['GET', `/api/devices/${DEV}/backups`, getDeviceBackups],
   ['GET', '/api/backups', getBackups],
   ['POST', '/api/backups', postBackup],
@@ -6494,6 +6832,7 @@ const routes = [
   ['GET', '/api/pair', pairInfo],
   ['POST', '/api/password', setPassword],
   ['GET', '/api/updates', getUpdates],
+  ['POST', '/api/updates/release', releaseUpdate],
   ['GET', '/api/login-requests', listLoginRequests],
   ['POST', '/api/login-requests/(approve|deny)', answerLoginRequest],
   ['GET', '/api/qr\\.svg', qrSvg],
@@ -6841,7 +7180,7 @@ function serve() {
   refreshTailnet(true);
   tailscaleUrl();
   distSeen = distSignature();
-  appUpdates().then(u => { lastUpdatesSent = JSON.stringify(u); }).catch(() => {});
+  appUpdates().then(u => { lastUpdatesSent = JSON.stringify(u); noticeWindowsBuild(u); }).catch(() => {});
   watchDist();
 
   server = http.createServer((req, res) => {
@@ -6874,6 +7213,7 @@ function serve() {
   setInterval(() => tailscaleUrl(), 5 * 60e3).unref();
   setInterval(() => { if (settings.pendingMove) tailscaleUrl().then(tryPendingMove); }, 30_000).unref();
   setInterval(() => { watchDist(); checkDist(); }, FAST_TIMEOUTS ? 2000 : 60_000).unref();
+  setInterval(rolloutTick, FAST_TIMEOUTS ? 300 : 30_000).unref(); // (1.19)
   setInterval(() => checkServerDisk().catch(() => {}), FAST_TIMEOUTS ? 1000 : 10 * 60e3).unref();
   setTimeout(() => checkServerDisk().catch(() => {}), FAST_TIMEOUTS ? 200 : 60_000).unref();
   for (const id of alertSettings().offline) if (devices[id]) watchOffline(id);
@@ -6907,6 +7247,11 @@ function serve() {
     scheduleBackups().catch(err => log.warn(`Backups couldn't be planned: ${err.message}`));
     // (1.18) This server's own PC's history from Windows: a power loss here is known before anyone signs in.
     if (OWN_HISTORY) setTimeout(() => readOwnHistory().catch(err => log.warn(`This server's PC's history couldn't be read from Windows: ${err.message}`)), FAST_TIMEOUTS ? 300 : 15_000).unref();
+    // (1.20) The setup check: 2 minutes in (devices have come back), then every 6 hours.
+    if (SETUP_AUTO) {
+      setTimeout(() => runSetupCheck(), FAST_TIMEOUTS ? 500 : 120_000).unref();
+      setInterval(() => runSetupCheck(), SETUP_EVERY_MS).unref();
+    }
     console.log(`\n  This computer:  http://localhost:${PORT}`);
     if (lan) console.log(`  Local network:  ${lan}`);
     if (remote) console.log(`  Address:        ${remote}`);

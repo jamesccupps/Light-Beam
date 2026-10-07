@@ -712,6 +712,9 @@ namespace Beam
                 case "speed-test": // Beam 1.18: another device asked this PC for a speed test (Settings → Connections)
                     SpeedTest.Run(this, Json.Str(d, "id"));
                     break;
+                case "log-request": // Beam 1.20: another device asked for this PC's Beam log (Device info → Beam log)
+                    DeviceLog.Send(this, Json.Str(d, "id"));
+                    break;
                 case "upload": // a file still arriving (Beam 1.4 servers can already serve what has arrived)
                     OnUploadProgress(d);
                     break;
