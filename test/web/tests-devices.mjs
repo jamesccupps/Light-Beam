@@ -350,6 +350,61 @@ export default function register(test) {
     await page.evaluate(`$('#settingsDlg').close()`);
   }, { timeout: 60000 });
 
+  test('updates one PC first (1.19): Settings → Server says where a new Windows build is, and can offer it to every PC', async ctx => {
+    const page = await ctx.signedIn();
+    await recordToasts(page);
+    await page.waitFor(`serverHas('staged-updates')`, 8000, 'the server offers it');
+    await page.evaluate(`openSettings('server')`);
+    await page.waitFor(`/A new version goes to one PC first/.test($('#set-server')?.textContent || '')`, 8000, 'the switch');
+    const now = Date.now();
+    const show = rollout => page.evaluate(`serverSettings = { ...serverSettings, rollout: ${JSON.stringify(rollout)} }; renderSettings(); $('#set-server').textContent`);
+    let text = await show({ version: '1.14.0', pilot: 'hostpc00120', pilotName: 'Desktop', since: now - 120e3, installedAt: now - 60e3, releaseAt: now + 540e3, released: null, halted: null, running: 1, pcs: 7 });
+    assert(/Desktop runs Beam for Windows 1\.14\.0 since .+\. The other PCs get it at .+ if it keeps running\./.test(text), text);
+    assert(/Offer it to every PC now/.test(text), 'the button');
+    text = await show({ version: '1.15.0', pilot: 'hostpc00120', pilotName: 'Desktop', since: now - 120e3, installedAt: null, releaseAt: null, released: null, halted: { at: now, problem: 'it didn’t start' }, running: 0, pcs: 7 });
+    assert(/Beam for Windows 1\.15\.0 didn’t work on Desktop \(it didn’t start\), so the other PCs kept the version they have\./.test(text) && /Offer it to every PC anyway/.test(text), text);
+    text = await show({ version: '1.14.0', pilot: 'hostpc00120', pilotName: 'Desktop', since: now - 3600e3, installedAt: now - 3000e3, releaseAt: null, released: now - 2400e3, halted: null, running: 6, pcs: 7 });
+    assert(/went to every PC 40 min ago \(6 of 7 PCs run it\)/.test(text) && !/Offer it to every PC/.test(text), text);
+    // the button asks the server (here a real one, with nothing waiting: it says so)
+    await show({ version: '1.15.0', pilot: 'hostpc00120', pilotName: 'Desktop', since: now - 120e3, installedAt: null, releaseAt: null, released: null, halted: null, running: 0, pcs: 7 });
+    await page.evaluate(`[...$('#set-server').querySelectorAll('button')].find(b => /Offer it to every PC now/.test(b.textContent)).click()`);
+    await page.waitFor(`__toasts.some(t => /No Windows build is waiting to go to every PC/.test(t))`, 5000, 'the server’s answer');
+    await page.evaluate(`$('#settingsDlg').close()`);
+  });
+
+  test('setup check and a PC’s log (1.20): Settings → Server → Setup lists the checks; Device info → Beam log shows the PC’s answer', async ctx => {
+    const page = await ctx.signedIn();
+    await recordToasts(page);
+    await page.waitFor(`serverHas('setup-check') && serverHas('device-logs')`, 8000, 'the server offers them');
+    await page.evaluate(`openSettings('server')`);
+    await page.waitFor(`$$('#set-server .setup-list li').length >= 2`, 10000, 'the checks');
+    const rows = await page.evaluate(`[...$$('#set-server .setup-list li')].map(li => li.textContent)`);
+    assert(rows.some(t => /^Room on the server’s disk/.test(t.replace(/'/g, '’'))) && rows.some(t => /^Devices reach Beam over https/.test(t)), JSON.stringify(rows));
+    assert(/Checked [^.]+\. Beam looks again every 6 hours/.test(await page.evaluate(`$('#set-server').textContent`)), 'when (the first ask, or an earlier one in a long run)');
+    await page.evaluate(`[...$('#set-server').querySelectorAll('button')].find(b => b.textContent === 'Check again').click()`);
+    await page.waitFor(`[...$('#set-server').querySelectorAll('button')].some(b => b.textContent === 'Check again' && !b.disabled)`, 8000, 'checked again');
+    await page.evaluate(`$('#settingsDlg').close()`);
+    // a PC with Beam for Windows 1.14: its log, asked from here, answered by it (a stand-in) through the server
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Shop PC', 'windows', ctx.nextIp(), '1.14.0');
+    await pc.me();
+    const stream = pc.stream();
+    ctx.defer(() => stream.close());
+    await page.waitFor(`deviceById('${pc.id}')?.online === true && deviceById('${pc.id}')?.can?.log === true`, 8000, 'online, and can send its log');
+    await page.evaluate(`openDeviceInfo(deviceById('${pc.id}'))`);
+    await page.waitFor(`[...$('#genFoot').querySelectorAll('button')].some(b => b.textContent.trim() === 'Beam log')`, 5000, 'the button');
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent.trim() === 'Beam log').click()`);
+    const deadline = Date.now() + 8000;
+    let req;
+    while (!(req = stream.events.find(e => e.event === 'log-request')) && Date.now() < deadline) await ctx.sleep(100);
+    assert(req, 'the PC was asked');
+    const text = '2026-10-07 21:00:00.000  Events: connected\n2026-10-07 21:00:01.000  History: nothing new\n';
+    await pc.post('/api/devices/me/log', { id: req.data.id, name: 'beam.log', text });
+    await page.waitFor(`$('#genTitle')?.textContent === 'Shop PC: beam.log' && /History: nothing new/.test($('#genBody pre.logs')?.textContent || '')`, 8000, 'the log shown');
+    const foot = await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].map(b => b.textContent.trim())`);
+    assert(foot.includes('Copy') && foot.includes('Save'), JSON.stringify(foot));
+    await page.evaluate(`$('#genDlg').close()`);
+  });
+
   test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {
     const { page } = await hostPage(ctx, { state: {} });
     await page.waitFor(`paired && hostState.ready`);

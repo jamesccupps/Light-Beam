@@ -31,6 +31,9 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   (a Windows update, your antivirus, you, a program), power losses, blue screens, when someone signed in after,
   Beam's own crashes and the times it was offline, on each PC's page, with an alert when a PC comes back from a power
   loss or a crash; and a speed test of Beam's own way in Connections, for this device or a PC asked from another.
+- **Updates one PC at a time, a setup check, a PC's log** (Beam 1.20, the Windows app 1.14): a new Windows build goes to
+  one PC first and to the others once it has run there for 10 minutes (one that fails there goes no further unless you
+  say so); Beam checks its own setup every 6 hours and alerts when something is wrong; a PC's Beam log from any device.
 
 ## Next
 - **Remote control, further:** less delay where the measurement shows it goes (the first measurements, a PC 25 ms

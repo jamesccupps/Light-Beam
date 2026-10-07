@@ -19,6 +19,7 @@ async function openSettings(section = 'device') {
   settingsSection = section;
   backupState = null; // (1.8.1: the Server section asks again)
   connState = null; // (1.17: so does Connections)
+  setupView = null; // (1.20: and the setup check)
   const dlg = $('#settingsDlg');
   renderSettings();
   if (!dlg.open) dlg.showModal();
@@ -511,8 +512,71 @@ function sectionServer() {
   if (serverHas('move')) buttons.push(el('button', { class: 'btn small-btn', type: 'button', onclick: moveServer }, 'Move Beam to a new address…'));
   buttons.push(el('button', { class: 'btn small-btn danger ghost', type: 'button', onclick: deleteEverything }, 'Delete every item…'));
   parts.push(row(...buttons));
+  parts.push(...setupRows());
+  parts.push(...updatesRows());
   if (serverHas('backups')) parts.push(...backupRows());
   return parts;
+}
+
+// ---------------------------------------------------------------- the setup check (1.20)
+// What Beam found when it last looked at its own setup (GET /api/setup): each check with what to do when it's wrong.
+
+let setupView = null; // the last answer, or { error }; `loading` while it asks
+
+async function loadSetup(refresh = false) {
+  setupView = { ...(setupView || {}), loading: true };
+  if (refresh && $('#settingsDlg').open) renderSettings();
+  try { setupView = await apiJson(`api/setup${refresh ? '?refresh=1' : ''}`); } catch (err) { setupView = { error: friendlyError(err) }; }
+  if ($('#settingsDlg').open) renderSettings();
+}
+
+function setupRows() {
+  if (!serverHas('setup-check')) return [];
+  const head = el('h4', {}, 'Setup');
+  if (!setupView) { loadSetup(); return [head, note('Checking…')]; }
+  if (setupView.error) return [head, note(`The setup check couldn’t run: ${setupView.error}`)];
+  const checks = setupView.checks || [];
+  if (!checks.length) return [head, note(setupView.loading ? 'Checking…' : 'Nothing to check yet.')];
+  return [
+    head,
+    el('ul', { class: 'alert-list setup-list' }, ...checks.map(c => el('li', { class: c.ok === false ? 'warn-row' : '' },
+      icon(c.ok === true ? 'check' : c.ok === false ? 'alert' : 'help'),
+      el('span', { class: 'alert-text history-text' }, el('span', {}, c.title), el('span', { class: 'muted small' }, c.detail), c.fix ? el('span', { class: 'small' }, c.fix) : '')))),
+    note(`Checked ${timeAgo(setupView.at)}. Beam looks again every 6 hours and alerts when something goes wrong.`),
+    row(el('button', { class: 'btn small-btn', type: 'button', disabled: Boolean(setupView.loading), onclick: () => loadSetup(true) }, setupView.loading ? 'Checking…' : 'Check again')),
+  ];
+}
+
+// ---------------------------------------------------------------- Windows app updates, one PC first (1.19)
+
+function rolloutText(r) {
+  const what = `Beam for Windows ${r.version}`;
+  if (r.halted) return `${what} didn’t work on ${r.pilotName || 'the PC that tried it'} (${r.halted.problem}), so the other PCs kept the version they have.`;
+  if (r.released) return `${what} went to every PC ${timeAgo(r.released)} (${r.running} of ${plural(r.pcs, 'PC')} run it).`;
+  if (r.installedAt) return `${r.pilotName} runs ${what} since ${clock(r.installedAt)}. The other PCs get it at ${clock(r.releaseAt)} if it keeps running.`;
+  if (r.pilot) return `${what} went to ${r.pilotName} first ${timeAgo(r.since)}. The others get it once it has run there for 10 minutes.`;
+  return `${what} waits for a PC to connect and try it first.`;
+}
+
+function updatesRows() {
+  const s = serverSettings;
+  if (!serverHas('staged-updates') || !s || !('stagedUpdates' in s)) return [];
+  const r = s.rollout;
+  return [
+    el('h4', {}, 'Windows app updates'),
+    toggle('A new version goes to one PC first', s.stagedUpdates, v => patchServerSettings({ stagedUpdates: v }), { hint: 'This server’s own PC tries it first (or the PC seen last). The others get it once it has run there for 10 minutes; if it fails there, it goes no further.' }),
+    r && note(rolloutText(r)),
+    r && !r.released && row(el('button', { class: 'btn small-btn', type: 'button', onclick: releaseRollout }, r.halted ? 'Offer it to every PC anyway' : 'Offer it to every PC now')),
+  ].filter(Boolean);
+}
+
+async function releaseRollout() {
+  try {
+    await apiJson('api/updates/release', jsonBody({}));
+    toast('Offered to every PC: each installs it when it can.');
+    await loadServerSettings();
+  } catch (err) { toast(friendlyError(err), { error: true }); }
+  if ($('#settingsDlg').open) renderSettings();
 }
 
 // ---------------------------------------------------------------- the server's backups (1.8.1)

@@ -86,7 +86,28 @@ function deviceActions(d) {
   acts.push(...rcActions(d));
   // In the Windows app it opens directly (Beam for Windows 1.3+); in a browser it's a .rdp file.
   if (can.remoteDesktop && (!HOST || (hostHas('remoteDesktop') && rdpHost(d)))) acts.push({ label: 'Remote Desktop', icon: 'screen', action: () => remoteDesktop(d) });
+  // (1.20) its Beam log, from anywhere (Beam for Windows 1.14+)
+  if (can.log && d.online && d.id !== me.id && serverHas('device-logs')) acts.push({ label: 'Beam log', icon: 'file', action: () => showDeviceLog(d) });
   return acts;
+}
+
+// (1.20) The end of a PC's beam.log, asked from its Beam app through the server (nothing kept there).
+async function showDeviceLog(d) {
+  toast(`Asking ${d.name} for its Beam log…`, { ms: 4000 });
+  let r;
+  try { r = await apiJson(`api/devices/${encodeURIComponent(d.id)}/log`, jsonBody({})); } catch (err) { toast(friendlyError(err), { error: true }); return; }
+  const pre = el('pre', { class: 'logs' }, r.text || '(empty)');
+  const copy = el('button', { class: 'btn', type: 'button', onclick: async () => {
+    try { await navigator.clipboard.writeText(r.text || ''); toast('Copied'); } catch { toast('Copying didn’t work here: use Save', { error: true }); }
+  } }, icon('copy'), 'Copy');
+  const save = el('button', { class: 'btn', type: 'button', onclick: () => {
+    const a = el('a', { href: URL.createObjectURL(new Blob([r.text || ''], { type: 'text/plain' })), download: `${d.name} ${r.name || 'beam.log'}` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+  } }, icon('download'), 'Save');
+  openDialog({ title: `${d.name}: ${r.name || 'beam.log'}`, body: [note(`The last ${formatSize(r.size || 0)}, as of ${clock(r.at || Date.now())}.`), pre], wide: true, buttons: [copy, save] });
+  pre.scrollTop = pre.scrollHeight;
 }
 
 async function ringDevice(d, stop = false) {
@@ -183,6 +204,8 @@ function openDeviceInfo(d, { refresh = false } = {}) {
     s.battery && Number.isFinite(s.battery.level) && ['Battery', `${Math.round(s.battery.level)}%${s.battery.charging ? ', charging' : ''}`, lowBattery(s.battery)],
     s.storage && Number.isFinite(s.storage.free) && ['Storage', `${formatSize(s.storage.free)} free${s.storage.total ? ` of ${formatSize(s.storage.total)}` : ''}`, lowStorage(s.storage)],
     ['System', s.os || PLATFORM_NAME[d.platform] || d.platform],
+    // (1.20) whether Windows' own startup list has its Beam app
+    typeof s.startsWithWindows === 'boolean' && ['Starts with Windows', s.startsWithWindows ? 'Yes' : s.startWanted === false ? 'No (turned off in its settings)' : 'No', !s.startsWithWindows && s.startWanted !== false],
     beamVersionOf(d) && ['Beam', beamVersionOf(d)],
     (d.tailscale?.dns || d.tailscale?.ip) && ['Tailscale', d.tailscale.dns || d.tailscale.ip],
     key && ['Tailscale sign-in', key.text, key.low],
@@ -323,6 +346,7 @@ function sectionAlerts() {
     toggle('The Beam server’s disk is almost full', a.serverDisk, v => setAlerts({ serverDisk: v })),
     typeof a.tailscaleKey === 'boolean' && toggle('A Tailscale sign-in is running out', a.tailscaleKey, v => setAlerts({ tailscaleKey: v }), { hint: 'Two weeks and three days before, for your devices and this server.' }), // (1.17)
     typeof a.powerLoss === 'boolean' && toggle('A PC lost power or crashed', a.powerLoss, v => setAlerts({ powerLoss: v }), { hint: 'When it’s back on after a power loss, a freeze, a blue screen or being forced off.' }), // (1.18)
+    typeof a.setup === 'boolean' && toggle('Something in Beam’s setup is wrong', a.setup, v => setAlerts({ setup: v }), { hint: 'The setup check (Settings → Server) looks every 6 hours: servers starting with Windows, Tailscale, backups, every PC up to date and starting with Windows.' }), // (1.20)
     field('Devices going offline', note(watched.length ? `Watching ${watched.join(', ')}.` : 'None yet. Turn it on for a device under Devices.')),
     el('h4', {}, 'Recent alerts'),
   ];

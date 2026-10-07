@@ -137,6 +137,15 @@ try {
   check(asked.status === 200 && answer?.speed?.down > 0 && answer?.speed?.up > 0,
     `B runs a speed test when asked: ${answer?.speed ? `${answer.speed.down} Mbit/s down, ${answer.speed.up} up` : JSON.stringify(answer)} in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
   check(!!(await b.waitLog(/Speed test \(another device asked\): [\d.]+ Mbit\/s down, [\d.]+ Mbit\/s up/, 5000)), '...and logs it');
+
+  // (1.20 + app 1.14) The setup check's fields in its status, and its log when another device asks.
+  let st = null;
+  for (let i = 0; i < 50 && typeof st?.startsWithWindows !== 'boolean'; i++) { st = (await owner('/api/devices')).devices.find(d => d.id === b.id)?.status; if (typeof st?.startsWithWindows !== 'boolean') await sleep(200); }
+  check(typeof st?.startsWithWindows === 'boolean' && typeof st?.startWanted === 'boolean', `B says whether it starts with Windows (${st?.startsWithWindows}, wanted ${st?.startWanted})`);
+  const logAnswer = await fetch(`${base}/api/devices/${b.id}/log`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: '{}' });
+  const logBody = await logAnswer.json().catch(() => null);
+  check(logAnswer.status === 200 && /Events: connected/.test(logBody?.text || '') && logBody?.name === 'beam.log', `B sends its beam.log when asked (${logBody?.size ?? '?'} bytes${logAnswer.status !== 200 ? `: ${JSON.stringify(logBody)}` : ''})`);
+  check(!!(await b.waitLog(/Log: sent the end of beam\.log/, 5000)), '...and logs that it did');
   await b.quit();
 } catch (err) {
   failures.push(err.message);

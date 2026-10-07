@@ -167,6 +167,12 @@ address, so the browser becomes part of that device instead of a separate entry.
   (with the stop code), being forced off, when it was back on and when someone signed in after, Beam's own crashes, and
   the times Beam saw the device offline for 10 minutes or more. A PC sends it when its Beam app connects; the server's
   own PC reads its own when the server starts (`BEAM_OWN_HISTORY=off` turns that off).
+- **Beam log** (in a PC's Device info): the end of that PC's Beam log, sent by its Beam app when you ask, from any of
+  your devices. Nothing is kept on the server, and Beam never writes message text, keys or sign-ins into its log.
+- **Setup check** (Settings → Server → Setup): Beam looks at its own setup every 6 hours and alerts when something is
+  wrong: the servers start when Windows does, Tailscale runs unattended, devices come in over https, backups are
+  recent, there's room on the disk, every PC runs the latest Beam and starts it with Windows, no Tailscale sign-in runs
+  out soon. Each line says what to do when it's wrong (`BEAM_SETUP_CHECK=off` turns the automatic look off).
 - **Connections** (Settings → Connections): how the Beam server reaches each device over Tailscale: direct on the same
   network, direct over the internet, through a peer relay, or through Tailscale's relay (slower), with **Test** to
   check it now and the delay. It also shows when each Tailscale sign-in runs out: turn off key expiry in Tailscale's
@@ -311,7 +317,9 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Links open themselves** (optional, Settings → This PC → "Open links sent to this PC automatically"): a link you
   send to this PC by itself opens in the browser right away.
 - **Updates** install themselves from your server. If a new version fails to start, Beam goes back to the previous one
-  on its own.
+  on its own. A new version goes to one PC first (the server's own, when its Beam app is on); the others get it once it
+  has run there for 10 minutes, and not at all if it failed there, unless you offer it to them anyway (Settings →
+  Server, which can also turn this off).
 
 **Android app**
 

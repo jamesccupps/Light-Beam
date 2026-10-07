@@ -123,6 +123,7 @@ namespace Beam
             if (StorageChanged(Part(last, "storage"), Part(body, "storage"))) return true;
             if (!Equals(Val(last, "os"), Val(body, "os")) || !Equals(Val(last, "remoteDesktop"), Val(body, "remoteDesktop"))) return true;
             if (!Equals(Val(last, "remoteControl"), Val(body, "remoteControl")) || !Equals(Val(last, "locked"), Val(body, "locked"))) return true;
+            if (!Equals(Val(last, "startsWithWindows"), Val(body, "startsWithWindows")) || !Equals(Val(last, "startWanted"), Val(body, "startWanted"))) return true;
             return string.Join(",", (string[])last["macs"]) != string.Join(",", (string[])body["macs"]);
         }
 
@@ -142,6 +143,13 @@ namespace Beam
                 {
                     body["remoteControl"] = app.Cfg.AllowRemoteControl;
                     body["locked"] = app.Rc.Locked;
+                }
+                // Beam 1.20 (app 1.14): for the setup check, whether Windows' own startup list has this app (and whether
+                // its user wants it there). Only to a server that knows them: others answer 400.
+                if (app.ServerHas("setup-check"))
+                {
+                    body["startsWithWindows"] = Autostart.IsEnabled(app.Cfg);
+                    body["startWanted"] = app.Cfg.AutostartWanted != false;
                 }
                 if (!force && !Changed(body)) return;
                 bool gone = !body.ContainsKey("battery") && Part(last, "battery") != null;
