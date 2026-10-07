@@ -16,7 +16,8 @@ control a PC's screen from another device). Server 1.8.1 adds `backups` (the app
 and 1.13 `fast-links` (a fast link for a file, made by Beam Family on the same machine; listed when `BEAM_FAMILY_URL`
 is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keyboard and mouse across PCs) and 1.17
 `connections` (how the server reaches each device over Tailscale, the devices' Tailscale state and `tailscaleKey`
-alerts). Use each one only when its flag is there; everything older keeps working.
+alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
+device and the server). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -531,21 +532,62 @@ The server watches for trouble and tells every client:
   per stage and key (a renewed key, or expiry turned off, starts over). `device` is the device's Beam app (one per
   machine), or `null` for the server's own machine: when that one runs out, no device can reach Beam until it's
   renewed. Checked whenever the server looks at tailscaled (every 5 minutes).
+- **powerLoss (1.18):** a PC came back on after a power loss or a freeze, a blue screen or a forced power-off (see
+  Each PC's history): once per start of Windows, and only when the server learns of it within a day. The text says when
+  it went down and came back, and when nobody has signed in on it since (its Beam app isn't running yet).
 - **(1.17)** An offline alert says why when tailscaled knows ("…: the PC is still on Tailscale, so Beam itself isn't
   running there", "…: Tailscale can't reach it either (off, asleep or without internet)", "…: its Tailscale sign-in has
   run out").
 
 Each alert is the event `alert { "id", "kind", "device", "level": "warn" | "info", "text", "at" }`:
-- `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`, `tailscaleKey` (1.17);
+- `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`, `tailscaleKey` (1.17), `powerLoss` (1.18);
 - `device` is the device it is about (`null` for `serverDisk` and the server's own `tailscaleKey`);
 - `text` is ready to show.
 
 The last 100 are kept (`GET /api/alerts` → `{ "alerts": [...] }`, newest first). They are also written to the server
 log and pushed through ntfy when that is configured. **Clients ignore alerts about themselves** (`alert.device === me`),
-except `serverDisk` and `tailscaleKey` (the apps don't watch their own Tailscale key).
+except `serverDisk`, `tailscaleKey` (the apps don't watch their own Tailscale key) and `powerLoss` (1.18: why this PC
+restarted).
 
-The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "offline": ["<device id>", …] }`,
+The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "offline": ["<device id>", …] }`,
 changed with `PATCH /api/settings`; see Settings. Crossings are logged even when that kind of alert is turned off.
+
+### Each PC's history (1.18)
+Feature `history`. What happened to a device, newest first: a PC's restarts and shutdowns and who asked, power losses,
+blue screens, when someone signed in after, and Beam's own crashes, from Windows' own records; and the spells Beam saw
+a device offline for 10 minutes or more.
+
+| Method & path | Result |
+|---|---|
+| `GET /api/devices/me/history/since` | `{ "System": "<ISO>" \| null, "Application": "<ISO>" \| null }`: the newest record the server keeps from the calling PC, per log. Report from a minute before it (the server keeps each record once); with `null`, from 30 days back |
+| `POST /api/devices/me/history` | `{ "events": [Record...] }` (600 at most, body 4 MB at most) → `{ "added", "since" }`. Records of other kinds, older than 120 days or in the future are skipped. A new power loss, blue screen or forced power-off raises a `powerLoss` alert (see Alerts) |
+| `GET /api/devices/{id}/history?days=30` | `{ "device", "name", "entries": [Entry...], "up", "at" }`: 1–120 days (30 unless asked). `up`: `{ "since", "kind", "text" }`, the latest start of Windows, or `null` |
+
+A **Record** is one of Windows' event records as the PC read it: `{ "log": "System" | "Application", "id": <event id>,
+"provider": "<provider name>", "time": "<ISO>", "rec": <record number>, "data": ["<each value as text>", ...] }`: dates
+as ISO in UTC, byte arrays as `"hex:…"` (the first 64 bytes). The kinds the server takes (`WANTED` in lib/history.js):
+- System: `User32` 1074 (a restart or shutdown asked for: the program, the reason, the type), `Microsoft-Windows-Kernel-Power`
+  41 (started again without a clean shutdown), `EventLog` 6008 (Windows' estimate of when it went down: the second
+  SYSTEMTIME of its binary value), `Microsoft-Windows-Kernel-General` 12 and 13 (Windows started, shut down),
+  `Microsoft-Windows-WER-SystemErrorReporting` 1001 (a blue screen's stop code), `Microsoft-Windows-Winlogon` 7001
+  (someone signed in);
+- Application: `Application Error` 1000, `.NET Runtime` 1026 and `Application Hang` 1002, only the app's own
+  (Beam.exe at the app's own path; a 1026 only with a 1000 of its own from the same moment).
+
+An **Entry**: `{ "at", "kind", "text", "detail"?, "by"?, "down"?, "downEstimate"?, "up"?, "signedIn"?, "count"?,
+"until"?, "ongoing"? }`, times in ms:
+- `restart`, `shutdown` (`by`: `update`, `antivirus`, `you`, `program`, `unknown`), `power-loss`, `crash` (a blue
+  screen; `detail`: its stop code), `forced-off`, `start` (nothing known before it): one start of Windows each: how it
+  went down (`down`; with `downEstimate`, Windows' last note of it running, so "after"), when it was back (`up`) and the
+  first sign-in after (`signedIn`). Restarts for one Windows update, one after another within 20 minutes, are one entry
+  with `count`;
+- `app-crash` (`detail`: the .NET exception, else the error code), `app-hang`: Beam itself;
+- `offline`: Beam saw it offline from `at` to `until` (`ongoing` while it still is).
+
+The server's own PC (a Windows server with Tailscale on, unless `BEAM_OWN_HISTORY=off`) reads its own System log at
+start (PowerShell's Get-WinEvent, as the server's account), for its Beam app's device (the Windows app on this machine):
+a power loss there is known, and alerted, before anyone signs in. `BEAM_TEST_OWN_EVENTS` (a JSON file of records)
+stands in for Windows in tests.
 
 ### Items
 | Method & path | Result |
@@ -684,7 +726,8 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `settings` | **(v3)** the settings object, after a change |
 | `moved` | **(v3)** `{ "movedTo" }`: Beam moved (see above); the stream closes |
 | `ring` | **(1.3)** `{ "device", "by", "from", "stop", "at" }`: ring (or stop ringing) the device `device`; everyone else ignores it |
-| `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk` and `tailscaleKey` (1.17) |
+| `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk`, `tailscaleKey` (1.17) and `powerLoss` (1.18) |
+| `speed-test` | **(1.18)** `{ "id" }`, to the asked device's own streams only (at once): run a speed test (see Speed tests) and send the result with this `id` |
 | `notification`, `notification-removed`, `notification-request`, `notification-request-done` | **(1.5)** see Phone notifications; only the devices concerned get them, urgent on background streams |
 | `rc-request`, `rc-signal`, `rc-end`, `rc-disable` | **(1.6)** see Remote control; only the devices named get them, urgent on background streams |
 | `rc-sessions` | **(1.6)** the remote control sessions going on, to everyone (not urgent) |
@@ -1036,8 +1079,12 @@ signed-in request, unless configured.
 | `POST /api/logout` | Signs this browser out: revokes its token, clears the cookie, and sends `Clear-Site-Data: "cache", "storage"` (v3) |
 | `GET /api/logs?lines=200` | **(v3)** `{ "lines": [...] }`, the end of the server log (`data/logs/server.log`). **(1.14.3)** `403` for a session-only sign-in, as backups |
 | `GET /api/alerts` | **(1.3)** `{ "alerts": [Alert...] }`, the last 100, newest first (see Alerts) |
-| `GET /api/connections` | **(1.17, feature `connections`)** how tailscaled on this server reaches each device's machine: `{ "tailscale": true, "server": { "name", "keyExpiry", "expired"? }, "machines": [{ "id", "name", "platform", "online", "machine": { "name", "ip", "self"?, "online", "lastSeen"?, "keyExpiry", "expired"? }, "path" }], "at" }`. One row per machine, named after its Beam app (a browser on it shares the row; `online` when any of them is). `path`: `{ "via": "direct", "lan" }` (lan: an address of the same network), `{ "via": "peer-relay" }` or `{ "via": "relay", "relay": "nyc" }` (Tailscale's relay, by region), plus `at` and, from a test, `ms` and `tested: true`; `null` until tailscaled has used a path to it (an idle machine has none). `tailscale: false` (and no `server`) when the server doesn't see Tailscale |
+| `GET /api/connections` | **(1.17, feature `connections`)** how tailscaled on this server reaches each device's machine: `{ "tailscale": true, "server": { "name", "keyExpiry", "expired"? }, "machines": [{ "id", "name", "platform", "online", "machine": { "name", "ip", "self"?, "online", "lastSeen"?, "keyExpiry", "expired"? }, "path" }], "at" }`. One row per machine, named after its Beam app (a browser on it shares the row; `online` when any of them is). `path`: `{ "via": "direct", "lan" }` (lan: an address of the same network), `{ "via": "peer-relay" }` or `{ "via": "relay", "relay": "nyc" }` (Tailscale's relay, by region), plus `at` and, from a test, `ms` and `tested: true`; `null` until tailscaled has used a path to it (an idle machine has none). `tailscale: false` (and no `server`) when the server doesn't see Tailscale **(1.18)** Each machine also has `speed` (its devices' latest speed test, `{ "down", "up", "at" }` in Mbit/s, or `null`), `speedTest: true` when its Beam app can be asked for one (Windows 1.13 or later), and `here: true` for the asking device's own machine (that one tests in its own page) |
 | `POST /api/connections/{id}/test` | **(1.17)** three disco pings to that device's machine now (`tailscale ping`; about 3 s, longer for a machine that doesn't answer) → `{ "path": { "via", "lan"?, "relay"?, "ms", "at", "tested": true } }` (the way of the last answer, the middle delay of the answers that took it; a sleeping phone answers slower), or `{ "path": null }` when nothing answered. One test per machine at a time (a second request gets the same answer). `409` for a device without a Tailscale machine, or the server's own |
+| `POST /api/connections/{id}/speed` | **(1.18, feature `speed-test`)** asks that device's Beam app (Windows 1.13 or later, online) for a speed test now: the event `speed-test { id }` goes to it; it tests and answers through `POST /api/speedtest/result` with that `id` → `{ "speed": { "down", "up", "at" } }`. `409` when it can't (too old, offline, already testing, the asking device itself) or didn't finish within a minute |
+| `GET /api/speedtest/down?bytes=N` | **(1.18)** N bytes of noise (8 MB unless asked, 64 MB at most), `no-store`, never compressed |
+| `POST /api/speedtest/up` | **(1.18)** a body of test data (64 MB at most; `413` beyond), read and dropped → `{ "bytes" }` |
+| `POST /api/speedtest/result` | **(1.18)** `{ "down", "up" }` (Mbit/s, what this device measured), `"id"` when it was asked → `{ "speed" }`, kept as its latest. A test: requests one after another, each bigger while they're quick (256 KB up to 16 MB), for about 3 s each way and 64 MB at most each, through the address the device's transfers use |
 | `POST /api/events/poke` | **(1.4)** see Background streams |
 | `POST /api/clear-cache` | **(1.4, feature `clear-cache`)** no sign-in needed, changes nothing on the server → `204` with `Clear-Site-Data: "cache"` (and `Cache-Control: no-store`): the browser drops what it cached from this Beam (thumbnails, files viewed inline, which are cached for a year). Call it after a `401` confirmed to come from your own Beam, once you have wiped your data. Only from Beam's own pages: a `Sec-Fetch-Site` other than `same-origin`, or a foreign `Origin`, gets `403 { reason: "csrf" }` |
 | `GET /api/metrics` | **(1.4)** how the server is doing (see Metrics). **(1.14.3)** `403` for a session-only sign-in, as backups |

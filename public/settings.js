@@ -253,18 +253,80 @@ function pathLine(p) {
 
 function connRow(m) {
   const testing = connTesting.has(m.id);
+  const speeding = connSpeeding.get(m.id);
   const key = keyExpiryLine(m.machine);
   const reach = m.machine.online === false
     ? `Tailscale can’t reach it now${m.machine.lastSeen ? ` (last seen ${timeAgo(m.machine.lastSeen)})` : ''}`
     : testing ? 'Testing…' : pathLine(m.path);
+  // (1.18) a speed test: this device's own in this page; a PC's Beam app (Windows 1.13+) when asked
+  const canSpeed = serverHas('speed-test') && m.machine.online !== false && (m.here || (m.speedTest && m.online));
   return el('li', { class: 'device-row', 'data-conn': m.id },
     avatar(m.id),
     el('div', { class: 'dev-body' },
-      el('strong', {}, m.name),
+      el('strong', {}, m.name, m.here ? el('span', { class: 'muted small' }, ' · this device') : ''),
       el('span', { class: 'muted small block conn-path' }, reach),
+      (speeding || m.speed) && el('span', { class: 'muted small block conn-speed' }, speeding || speedLine(m.speed)),
       key && el('span', { class: `muted small block conn-key${key.low ? ' low' : ''}` }, `Tailscale sign-in: ${key.text}`),
       m.machine.online !== false && el('div', { class: 'dev-actions' },
-        el('button', { class: 'btn small-btn', type: 'button', disabled: testing, onclick: () => testConnection(m) }, icon('refresh'), testing ? 'Testing…' : 'Test'))));
+        el('button', { class: 'btn small-btn', type: 'button', disabled: testing, onclick: () => testConnection(m) }, icon('refresh'), testing ? 'Testing…' : 'Test'),
+        canSpeed && el('button', { class: 'btn small-btn', type: 'button', disabled: Boolean(speeding), onclick: () => testSpeed(m) }, icon('download'), speeding ? 'Testing speed…' : 'Test speed'))));
+}
+
+// ---- speed tests (1.18): through the server's own address, as transfers go; about 3 s each way, 64 MB at most each
+
+const connSpeeding = new Map(); // device id -> what the row says while it tests
+const SPEED_SECONDS = 3;
+const SPEED_MAX = 64 * 1024 * 1024;
+const mbitText = v => (v >= 100 ? `${Math.round(v)}` : v >= 10 ? v.toFixed(0) : v.toFixed(1));
+const speedLine = s => `Speed: ${mbitText(s.down)} Mbit/s down · ${mbitText(s.up)} Mbit/s up · tested ${timeAgo(s.at)}`;
+
+// Mbit/s one way: requests one after another, each bigger while they're quick, for about 3 s.
+async function measureSpeed(dir) {
+  let bytes = 0;
+  let size = 256 * 1024;
+  const start = performance.now();
+  while (performance.now() - start < SPEED_SECONDS * 1000 && bytes < SPEED_MAX) {
+    const t0 = performance.now();
+    if (dir === 'down') {
+      const res = await api(`api/speedtest/down?bytes=${size}&n=${randomId(4)}`, { cache: 'no-store' });
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+      }
+    } else {
+      // (a Blob: the browser sends it from its own process, about twice as fast as a buffer handed over from the page)
+      await api('api/speedtest/up', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Blob([new Uint8Array(size)]) });
+      bytes += size;
+    }
+    const took = performance.now() - t0;
+    if (took < 700) size = Math.min(size * 4, 16 * 1024 * 1024);
+    else if (took < 1500) size = Math.min(size * 2, 16 * 1024 * 1024);
+  }
+  return (bytes * 8) / ((performance.now() - start) / 1000) / 1e6;
+}
+
+async function testSpeed(m) {
+  const row = () => connState?.machines?.find(x => x.id === m.id);
+  const show = text => { if (text) connSpeeding.set(m.id, text); else connSpeeding.delete(m.id); if ($('#settingsDlg').open) renderSettings(); };
+  try {
+    let speed;
+    if (m.here) {
+      show('Testing download speed…');
+      const down = await measureSpeed('down');
+      show('Testing upload speed…');
+      const up = await measureSpeed('up');
+      speed = (await apiJson('api/speedtest/result', jsonBody({ down, up }))).speed;
+    } else {
+      show(`Asking ${m.name} to test (about 10 seconds)…`);
+      speed = (await apiJson(`api/connections/${encodeURIComponent(m.id)}/speed`, jsonBody({}))).speed;
+    }
+    if (row() && speed) row().speed = speed;
+  } catch (err) {
+    toast(friendlyError(err), { error: true });
+  }
+  show(null);
 }
 
 async function testConnection(m) {

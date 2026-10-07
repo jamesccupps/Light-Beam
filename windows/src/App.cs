@@ -80,6 +80,7 @@ namespace Beam
         public RemoteControl Rc;          // Beam 1.6: this PC being controlled from another device
         public KvmController Kvm;         // Beam 1.12: this PC's keyboard and mouse working the PCs beside it
         public SettingsBackups Backups;   // Beam 1.8.1: this PC's settings kept on the server too, and put back
+        public PcHistory History;         // Beam 1.18 (app 1.13): Windows' record of restarts, power losses and crashes, sent
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
         FamilyWindow family;                     // (1.10) Beam Family in a window of its own
         bool familyPending, familyPendingQuiet;  // asked for (--family, an update) before the server said where Family is
@@ -160,6 +161,7 @@ namespace Beam
             Rc = new RemoteControl(this);
             Kvm = new KvmController(this);
             Backups = new SettingsBackups(this);
+            History = new PcHistory(this);
 
             up = new Uploader(() => Api, j => { var s = j.State; Post(() => OnUploadChanged(j, s)); }, j => { });
             down = new Downloader(() => Api, j => { var s = j.State; Post(() => OnDownloadChanged(j, s)); }, OnDownloadProgress);
@@ -578,6 +580,7 @@ namespace Beam
                 if (!updateChecked) { updateChecked = true; CheckForUpdates(false, null); }
                 RenewSignIn(); // once, for a sign-in that was ever kept in clear
                 Backups.Check(); // (1.8.1) an earlier install's settings offered once; then this one's go up
+                History.Report(false); // (1.13) what Windows recorded since the server's copy (at most hourly)
             }
             catch (Exception ex) { Log.Error("Catch-up", ex); }
             finally
@@ -705,6 +708,9 @@ namespace Beam
                     break;
                 case "alert":
                     OnAlert(d);
+                    break;
+                case "speed-test": // Beam 1.18: another device asked this PC for a speed test (Settings → Connections)
+                    SpeedTest.Run(this, Json.Str(d, "id"));
                     break;
                 case "upload": // a file still arriving (Beam 1.4 servers can already serve what has arrived)
                     OnUploadProgress(d);
@@ -1082,7 +1088,7 @@ namespace Beam
         {
             string id = Json.Str(d, "id"), kind = Json.Str(d, "kind") ?? "alert", device = Json.Str(d, "device"), text = Json.Str(d, "text");
             if (string.IsNullOrEmpty(text)) return;
-            if (device != null && device == Me && kind != "serverDisk") return;
+            if (device != null && device == Me && kind != "serverDisk" && kind != "powerLoss") return; // (1.13: why this PC restarted, shown here too)
             if (id != null && !alertsShown.Add(id)) return;
             bool warn = Json.Str(d, "level") == "warn";
             string conv = device != null && device != Me && DeviceById(device) != null ? device : null;
@@ -2714,6 +2720,7 @@ namespace Beam
             if (o.TestRc != null && Cfg.CustomPath) Rc.TestCommand(o.TestRc);
             if (o.TestKvm != null && Cfg.CustomPath) Kvm.TestCommand(o.TestKvm);
             if (o.TestBackups != null && Cfg.CustomPath) Backups.TestCommand(o.TestBackups);
+            if (o.TestHistory != null && Cfg.CustomPath) History.TestCommand(o.TestHistory);
             if (o.TestBridge != null && Cfg.CustomPath) TestBridge(o.TestBridge);
             if (o.TestOpenRemote != null && Cfg.CustomPath) { string err = OpenRemote(o.TestOpenRemote); if (err != null) Log.Write("Remote control: (test) " + err); }
             if (o.Family) OpenFamilyWhenKnown(o.Updated != null || o.UpdateFailed != null); // (after an update: without the focus)

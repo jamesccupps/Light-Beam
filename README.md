@@ -161,10 +161,18 @@ address, so the browser becomes part of that device instead of a separate entry.
   nearly full, or a Tailscale sign-in is about to run out (two weeks and three days before; the server's own matters
   most: when it runs out, no device can reach Beam). For the devices you pick in Settings → Devices, also when one goes
   offline (with why, when Tailscale can tell: the PC is on but Beam isn't running, or it's off or asleep) and comes back.
+  Also when a PC is back on after losing power, freezing, a blue screen or being forced off.
+- **History** (in Device info): what happened to a device, newest first, from Windows' own records: each restart and
+  shutdown and who asked (a Windows update, your antivirus, you, a program), power losses and freezes, blue screens
+  (with the stop code), being forced off, when it was back on and when someone signed in after, Beam's own crashes, and
+  the times Beam saw the device offline for 10 minutes or more. A PC sends it when its Beam app connects; the server's
+  own PC reads its own when the server starts (`BEAM_OWN_HISTORY=off` turns that off).
 - **Connections** (Settings → Connections): how the Beam server reaches each device over Tailscale: direct on the same
   network, direct over the internet, through a peer relay, or through Tailscale's relay (slower), with **Test** to
   check it now and the delay. It also shows when each Tailscale sign-in runs out: turn off key expiry in Tailscale's
-  admin console for PCs that stay put. A device that's offline says why on its line and in Device info.
+  admin console for PCs that stay put. A device that's offline says why on its line and in Device info. **Test speed**
+  measures how fast Beam's own way is, both ways, about 3 seconds each (64 MB at most each): this device's in its own
+  page, and a PC's when its Beam app is asked from another device.
 
 **Speed and battery**
 
@@ -476,6 +484,7 @@ node server.js help            # all commands
 - **Stats:** `GET /api/metrics` (signed in) shows memory and CPU, how long requests take, how often each device's
   connection is woken, and how much the server writes to disk.
 - **Alerts** are kept in `data/alerts.json` (the last 100) and also go to ntfy if it's configured.
+- **Each device's history** is kept in `data/history.json` (120 days, part of exports and backups).
 - **Wake-on-LAN** packets go out from the server itself, so the server must be on the same network as the PCs it
   wakes. In Docker that needs host networking. `BEAM_WOL_TARGETS` (a list of `address[:port]`) overrides where they're
   sent.
