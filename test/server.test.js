@@ -2157,10 +2157,10 @@ test('QW-E: battery and storage alerts fire once and re-arm; settings; alerts.js
     assert.equal(JSON.parse(fs.readFileSync(path.join(s.data, 'alerts.json'), 'utf8')).length, 4);
     // settings
     let r = await s.req('GET', '/api/settings', { headers: desk });
-    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, offline: [] });
+    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, offline: [] });
     r = await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify({ alerts: { battery: false } }) });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, offline: [] }, 'partial changes keep the rest');
+    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, offline: [] }, 'partial changes keep the rest');
     for (const bad of [{ alerts: { battery: 'no' } }, { alerts: { nope: true } }, { alerts: { offline: 'phone' } }, { alerts: [] }]) {
       assert.equal((await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify(bad) })).status, 400, JSON.stringify(bad));
     }
@@ -2336,6 +2336,246 @@ test('1.17 lib/tailscale: reading `tailscale ping` and `tailscale status`', asyn
   const facts = t.machineFacts({ Self: { TailscaleIPs: ['100.64.0.1'], KeyExpiry: '2027-03-28T23:40:29Z' }, Peer: { a: { TailscaleIPs: ['100.64.0.2', 'fd7a:115c:a1e0::2'], Online: false, LastSeen: '0001-01-01T00:00:00Z', KeyExpiry: '2020-01-01T00:00:00Z' } } }, Date.parse('2026-10-06T00:00:00Z'));
   assert.deepEqual(facts.get('100.64.0.1'), { online: true, lastSeen: null, keyExpiry: Date.parse('2027-03-28T23:40:29Z'), expired: false, path: null, self: true });
   assert.deepEqual(facts.get('fd7a:115c:a1e0::2'), { online: false, lastSeen: null, keyExpiry: Date.parse('2020-01-01T00:00:00Z'), expired: true, path: null, self: false });
+});
+
+// ---------------------------------------------------------------- 1.18 each PC's history
+
+// Windows' records as a PC's Beam app sends them (lib/history.js), made up: `at` is ms, data as text.
+const winRec = (provider, id, at, data = [], rec = Math.floor(at / 1000) % 1e7 + id) => ({ log: provider === 'Application Error' || provider === '.NET Runtime' || provider === 'Application Hang' ? 'Application' : 'System', id, provider, time: new Date(at).toISOString(), rec, data });
+const ask = (at, exe, type = 'restart', reason = 'Other (Planned)', comment = '') => winRec('User32', 1074, at, [`C:\\Windows\\${exe} (OFFICE-PC)`, 'OFFICE-PC', reason, '0x80000000', type, comment, 'OFFICE-PC\\robin']);
+const stopped = at => winRec('Microsoft-Windows-Kernel-General', 13, at, [new Date(at).toISOString()]);
+const started = at => winRec('Microsoft-Windows-Kernel-General', 12, at + 300, ['10', '0', '28000', '3151', '0', '0', new Date(at).toISOString()]);
+const signedIn = at => winRec('Microsoft-Windows-Winlogon', 7001, at, ['1', 'S-1-5-21-1000-1000-1000-1001']);
+const unclean = (at, bugcheck = 0, button = '0') => winRec('Microsoft-Windows-Kernel-Power', 41, at, [String(bugcheck), '0', '0', '0', '0', '0', button, '0']);
+// Event 6008: two SYSTEMTIMEs (local, UTC) of when Windows last noted it running, as "hex:…"
+function lastAlive(at, alive) {
+  const st = ms => { const d = new Date(ms); const b = Buffer.alloc(16); [d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDay(), d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()].forEach((v, i) => b.writeUInt16LE(v, i * 2)); return b; };
+  return winRec('EventLog', 6008, at, ['2:14:51 AM', '\u200e10/\u200e7/\u200e2026', '', '', '38408', '', '', `hex:${Buffer.concat([st(alive - 4 * 3600e3), st(alive), Buffer.alloc(32)]).toString('hex')}`]);
+}
+
+test('1.18 lib/history: explaining Windows’ records (restarts and who asked, power losses, blue screens, Beam’s crashes)', async () => {
+  const h = require(path.join(ROOT, 'lib', 'history.js'));
+  const now = Date.now();
+  const H = 3600e3;
+  const d3 = now - 72 * H;
+  const d2 = now - 48 * H;
+  const lost = now - 3 * H;
+  const records = [
+    ask(d3, 'SystemApps\\StartMenuExperienceHost.exe', 'power off', 'Other (Unplanned)'), stopped(d3 + 20e3), started(d3 + 11 * H), signedIn(d3 + 11 * H + 60e3),
+    // Windows Update restarts twice in a row, then ESET once: two lines
+    ask(d2, 'uus\\AMD64\\MoNotificationUx.exe', 'restart', 'Operating System: Service pack (Planned)'), stopped(d2 + 90e3), started(d2 + 120e3),
+    ask(d2 + 180e3, 'servicing\\TrustedInstaller.exe', 'restart', 'Operating System: Upgrade (Planned)'), stopped(d2 + 200e3), started(d2 + 220e3), signedIn(d2 + 480e3),
+    ask(d2 + 600e3, 'Program Files\\ESET\\ESET Security\\ekrn.exe', 'restart', 'Other (Planned)', 'Reason: update was prepared.'), stopped(d2 + 610e3), started(d2 + 640e3), signedIn(d2 + 700e3),
+    // a power loss: no clean shutdown; Windows last noted it running 20 s before it started again; nobody signed in
+    started(lost), unclean(lost + 3000), lastAlive(lost + 9000, lost - 20e3),
+    winRec('Microsoft-Windows-Something', 1, lost), // not a kind Beam asks for
+  ];
+  const kept = h.mergeEvents([], records, now);
+  assert.equal(kept.added, records.length - 1, 'the unknown kind is skipped');
+  assert.equal(h.mergeEvents(kept.events, records, now).added, 0, 'each record once');
+  assert.equal(h.sinceOf(kept.events).System, new Date(lost + 9000).toISOString());
+  assert.equal(h.sinceOf(kept.events).Application, null);
+  assert.equal(h.normalizeEvent(winRec('User32', 1074, now - 200 * 86400e3, [])), null, 'older than 120 days');
+
+  const { entries, up } = h.explain(kept.events, [], { at: now });
+  const t = entries.map(e => pick(e, ['kind', 'text', 'detail', 'count', 'by']));
+  assert.deepEqual(t, [
+    { kind: 'power-loss', text: 'Lost power or froze (no warning)' },
+    { kind: 'restart', text: 'Restarted by ESET', detail: 'Update was prepared', by: 'antivirus' },
+    { kind: 'restart', text: 'Restarted 2 times for a Windows update', count: 2, by: 'update' },
+    { kind: 'shutdown', text: 'Shut down from the Start menu', by: 'you' },
+  ]);
+  assert.equal(entries[0].down, lost - 20e3);
+  assert.equal(entries[0].downEstimate, true);
+  assert.equal(entries[0].up, lost);
+  assert.equal(entries[0].signedIn, undefined, 'nobody signed in after it');
+  assert.equal(entries[2].up, d2 + 220e3, 'the merged line ends at the last start');
+  assert.equal(entries[2].signedIn, d2 + 480e3);
+  assert.equal(entries[3].down, d3 + 20e3);
+  assert.equal(entries[3].signedIn, d3 + 11 * H + 60e3);
+  assert.deepEqual(up, { since: lost, kind: 'power-loss', text: 'Lost power or froze (no warning)' });
+
+  // a blue screen (its stop code by name), a forced power-off, and Beam's own crash with its .NET exception
+  const blue = now - 2 * H;
+  const forced = now - H;
+  const more = [
+    started(blue), unclean(blue + 3000, 159), winRec('Microsoft-Windows-WER-SystemErrorReporting', 1001, blue + 120e3, ['0x0000009f (0x0000000000000003, 0xffffb00000000000)', 'C:\\WINDOWS\\MEMORY.DMP', 'a1b2c3']),
+    started(forced), unclean(forced + 3000, 0, '134317570089233306'),
+    winRec('Application Error', 1000, now - 30 * 60e3, ['Beam.exe', '1.13.0.0', '0', 'KERNELBASE.dll', '10.0', '0', 'e0434352', '0x0', '0x1f2c', '0', 'C:\\Users\\robin\\AppData\\Local\\Programs\\Beam\\Beam.exe']),
+    winRec('.NET Runtime', 1026, now - 30 * 60e3 + 400, ['Application: Beam.exe\nFramework Version: v4.0.30319\nDescription: The process was terminated due to an unhandled exception.\nException Info: System.NullReferenceException\n   at Beam.KvmLink.Send()']),
+  ];
+  const all = h.mergeEvents(kept.events, more, now).events;
+  const e2 = h.explain(all, [{ from: now - 10 * H, until: now - 9 * H }], { at: now }).entries;
+  assert.deepEqual(pick(e2.find(e => e.kind === 'crash'), ['text', 'detail']), { text: 'Crashed with a blue screen', detail: 'Stop code 0x0000009F (DRIVER_POWER_STATE_FAILURE)' });
+  assert.equal(e2.find(e => e.kind === 'forced-off').text, 'Forced off with the power button');
+  assert.deepEqual(pick(e2.find(e => e.kind === 'app-crash'), ['text', 'detail']), { text: 'Beam crashed', detail: 'System.NullReferenceException' });
+  assert.deepEqual(pick(e2.find(e => e.kind === 'offline'), ['at', 'until']), { at: now - 10 * H, until: now - 9 * H });
+  assert.deepEqual(e2.map(e => e.at), e2.map(e => e.at).slice().sort((a, b) => b - a), 'newest first');
+
+  // alerts: the power loss, the blue screen and the forced power-off of the last day, each once
+  const alertable = h.alertable(e2, [], now);
+  assert.deepEqual(alertable.map(e => e.kind).sort(), ['crash', 'forced-off', 'power-loss']);
+  assert.deepEqual(h.alertable(e2, alertable.map(e => `up:${e.up}`), now), []);
+  assert.deepEqual(h.alertable(e2, [], now + 2 * 86400e3), [], 'learned more than a day later: no alert');
+
+  // spells offline: 10 minutes or more
+  assert.equal(h.addSpell([], now - 5 * 60e3, now, now).length, 0);
+  assert.equal(h.addSpell([], now - 15 * 60e3, now, now).length, 1);
+  assert.equal(h.lastAliveOf(lastAlive(now, now - 61e3)), now - 61e3);
+});
+
+test('1.18 each PC’s history: this server’s own PC at start, a PC’s report, alerts once, spells offline', async () => {
+  const H = 3600e3;
+  let s = await startServer('hist118', 8792);
+  const K = s.key;
+  const own = app(K, 'hostpc00018', 'Office PC', 'windows'); // (from this machine: the server's own PC)
+  const shop = app(K, 'shoppc00018', 'Shop Desktop', 'windows', from('100.64.18.2'));
+  const laptop = app(K, 'laptop00018', 'Robin Laptop', 'windows', from('100.64.18.5'));
+  const camera = app(K, 'camerapc018', 'Office Desktop', 'windows', from('100.64.18.4'));
+  for (const hd of [own, shop, laptop, camera]) assert.equal((await s.req('GET', '/api/me', { headers: hd })).status, 200);
+  // (a stop on Windows is abrupt: the devices must be on disk first)
+  await waitFor(() => { try { return Object.keys(JSON.parse(fs.readFileSync(path.join(s.data, 'devices.json'), 'utf8'))).length === 4; } catch { return false; } });
+  await s.stop();
+
+  // this server's own PC lost power 2 hours ago; the laptop was offline 30 minutes and Camera has been for 20
+  const lost = Date.now() - 2 * H;
+  const ownFile = path.join(TMP, 'hist118-own.json');
+  fs.writeFileSync(ownFile, JSON.stringify([started(lost), unclean(lost + 3000), lastAlive(lost + 9000, lost - 15e3)]));
+  fs.writeFileSync(path.join(TMP, 'hist118', 'data', 'history.json'), JSON.stringify({
+    laptop00018: { events: [], spells: [], alerted: [], offlineFrom: Date.now() - 30 * 60e3 },
+    camerapc018: { events: [], spells: [], alerted: [], offlineFrom: Date.now() - 20 * 60e3 },
+  }));
+  s = await startServer('hist118', 8792, { keep: true, env: { BEAM_TEST_OWN_EVENTS: ownFile } });
+  try {
+    const info = (await s.req('GET', '/api/info', { headers: shop })).json;
+    assert.ok(info.features.includes('history'));
+    assert.equal(info.settings.alerts.powerLoss, true);
+    const powerAlerts = async () => (await s.req('GET', '/api/alerts', { headers: shop })).json.alerts.filter(a => a.kind === 'powerLoss');
+    let pa = await waitFor(async () => { const a = await powerAlerts(); return a.length && a; });
+    assert.equal(pa[0].device, 'hostpc00018');
+    assert.match(pa[0].text, /^Office PC went down without warning after .+ \(it lost power or froze\) and started again at .+\. Nobody has signed in on it since, so its Beam app isn’t running yet\.$/);
+    assert.match(s.out, /Office PC \(this server's PC\): 3 new records for its history, from Windows/);
+    let hist = (await s.req('GET', '/api/devices/hostpc00018/history', { headers: shop })).json;
+    assert.equal(hist.name, 'Office PC');
+    assert.deepEqual(pick(hist.entries[0], ['kind', 'down', 'downEstimate', 'up']), { kind: 'power-loss', down: lost - 15e3, downEstimate: true, up: lost });
+    assert.equal(hist.up.kind, 'power-loss');
+
+    // another PC reports: from scratch, a blue screen an hour ago and an older restart; a record of another kind is skipped
+    let r = await s.req('GET', '/api/devices/me/history/since', { headers: shop });
+    assert.deepEqual(r.json, { System: null, Application: null });
+    const blue = Date.now() - H;
+    const report = [ask(blue - 50 * H, 'servicing\\TrustedInstaller.exe'), stopped(blue - 50 * H + 60e3), started(blue - 50 * H + 90e3),
+      started(blue), unclean(blue + 3000, 0x124), signedIn(blue + 5 * 60e3), winRec('Microsoft-Windows-Something', 7, blue)];
+    r = await post(s, '/api/devices/me/history', { events: report }, shop);
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.json.added, 6);
+    assert.equal(r.json.since.System, new Date(blue + 5 * 60e3).toISOString());
+    pa = await waitFor(async () => { const a = await powerAlerts(); return a.length >= 2 && a; });
+    assert.match(pa[0].text, /^Shop Desktop crashed with a blue screen \(stop code 0x00000124 \(WHEA_UNCORRECTABLE_ERROR\)\) and started again at [^.]+\.$/);
+    assert.match(s.out, /Shop Desktop sent 6 new records for its history/);
+    r = await post(s, '/api/devices/me/history', { events: report }, shop);
+    assert.equal(r.json.added, 0, 'the same records again');
+    await sleep(300);
+    assert.equal((await powerAlerts()).length, 2, 'alerted once');
+    hist = (await s.req('GET', '/api/devices/shoppc00018/history?days=7', { headers: laptop })).json;
+    assert.deepEqual(hist.entries.map(e => e.kind), ['crash', 'restart']);
+    assert.equal(hist.entries[0].signedIn, blue + 5 * 60e3);
+
+    // alerts off: logged, not alerted
+    r = await s.req('PATCH', '/api/settings', { headers: json(shop), body: JSON.stringify({ alerts: { powerLoss: false } }) });
+    assert.equal(r.json.alerts.powerLoss, false);
+    const forced = Date.now() - 10 * 60e3;
+    r = await post(s, '/api/devices/me/history', { events: [started(forced), unclean(forced + 3000, 0, '1')] }, shop);
+    assert.equal(r.json.added, 2);
+    await waitFor(() => /Shop Desktop was forced off with its power button and started again at/.test(s.out));
+    assert.equal((await powerAlerts()).length, 2);
+
+    // bad reports
+    assert.equal((await post(s, '/api/devices/me/history', { events: 'no' }, shop)).status, 400);
+    assert.equal((await post(s, '/api/devices/me/history', { events: new Array(601).fill(started(blue)) }, shop)).status, 400);
+
+    // spells offline: the laptop comes back after 30 minutes away; Camera is still away (20 minutes)
+    const st = await openEvents(s.port, laptop);
+    await st.wait('hello');
+    hist = (await s.req('GET', '/api/devices/laptop00018/history', { headers: shop })).json;
+    const spell = hist.entries.find(e => e.kind === 'offline');
+    assert.ok(spell && spell.until - spell.at >= 29 * 60e3 && !spell.ongoing, JSON.stringify(hist.entries));
+    st.close();
+    r = await s.req('GET', '/api/devices/camerapc018/history', { headers: shop });
+    assert.equal(r.status, 200, r.body);
+    hist = r.json;
+    assert.equal(hist.entries[0]?.kind, 'offline', JSON.stringify(hist));
+    assert.equal(hist.entries[0].ongoing, true);
+
+    // a device that's removed takes its history along
+    assert.equal((await s.req('DELETE', '/api/devices/camerapc018', { headers: shop })).status, 204);
+    assert.equal((await s.req('GET', '/api/devices/camerapc018/history', { headers: shop })).status, 404);
+    await sleep(300);
+    const saved = JSON.parse(fs.readFileSync(path.join(s.data, 'history.json'), 'utf8'));
+    assert.ok(!saved.camerapc018 && saved.shoppc00018.events.length === 8, Object.keys(saved).join());
+  } finally { await s.stop(); }
+});
+
+test('1.18 speed tests: test data both ways, a device’s result kept on its Connections row, a PC’s app asked to test', async () => {
+  const s = await startServer('speed118', 8793);
+  try {
+    const K = s.key;
+    const v113 = { 'X-Beam-App-Version': '1.13.0' };
+    const laptop = app(K, 'laptop00118', 'Robin Laptop', 'windows', { ...v113, ...from('100.64.19.5') });
+    const shop = app(K, 'shoppc00118', 'Shop Desktop', 'windows', { ...v113, ...from('100.64.19.2') });
+    const old = app(K, 'oldpc000118', 'Old PC', 'windows', { 'X-Beam-App-Version': '1.12.7', ...from('100.64.19.3') });
+    const phone = app(K, 'phone000118', 'Robin Phone', 'android', { 'X-Beam-App-Version': '1.13.0', ...from('100.64.19.4') });
+    for (const h of [laptop, shop, old, phone]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('speed-test'));
+
+    // test data: down (noise, never cached), up (read and dropped)
+    let r = await s.req('GET', '/api/speedtest/down?bytes=1048577', { headers: laptop, raw: true });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.length, 1048577);
+    assert.equal(r.headers['cache-control'], 'no-store');
+    assert.equal(r.headers['content-type'], 'application/octet-stream');
+    assert.ok(new Set(r.body.subarray(0, 4096)).size > 200, 'noise, not zeros');
+    r = await s.req('POST', '/api/speedtest/up', { headers: { ...laptop, 'Content-Type': 'application/octet-stream' }, body: Buffer.alloc(3 * 1024 * 1024) });
+    assert.deepEqual(r.json, { bytes: 3 * 1024 * 1024 });
+    assert.equal((await s.req('GET', '/api/speedtest/down', { headers: {} })).status, 401, 'signed in only');
+
+    // a device's own result: kept, on its machine's row
+    r = await post(s, '/api/speedtest/result', { down: 123.456, up: 45.66 }, laptop);
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(pick(r.json.speed, ['down', 'up']), { down: 123.5, up: 45.7 });
+    assert.equal((await post(s, '/api/speedtest/result', { down: 'fast' }, laptop)).status, 400);
+    assert.match(s.out, /Robin Laptop tested its speed to this server: 123\.5 Mbit\/s down, 45\.7 Mbit\/s up/);
+    const rows = (await s.req('GET', '/api/connections', { headers: laptop })).json.machines;
+    const row = id => rows.find(m => m.id === id);
+    assert.deepEqual(pick(row('laptop00118'), ['here', 'speedTest']), { here: true, speedTest: true });
+    assert.equal(row('laptop00118').speed.down, 123.5);
+    assert.equal(row('shoppc00118').here, undefined);
+    assert.equal(row('oldpc000118').speedTest, undefined, 'Beam for Windows before 1.13 can’t be asked');
+    assert.equal(row('phone000118').speedTest, undefined, 'nor a phone');
+
+    // asking a PC's app: it gets `speed-test`, tests, answers with that id; the one who asked gets the result
+    const st = await openEvents(s.port, shop);
+    await st.wait('hello');
+    const asked = post(s, '/api/connections/shoppc00118/speed', {}, phone);
+    const ev = await st.wait('speed-test');
+    assert.match(ev.data.id, /^[a-f0-9]{16}$/);
+    assert.equal((await post(s, '/api/connections/shoppc00118/speed', {}, laptop)).status, 409, 'one test at a time');
+    await post(s, '/api/speedtest/result', { down: 300, up: 40, id: ev.data.id }, shop);
+    r = await asked;
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(pick(r.json.speed, ['down', 'up']), { down: 300, up: 40 });
+    assert.match(s.out, /Robin Phone asked Shop Desktop for a speed test/);
+    // ...and when it can't
+    let e = await post(s, '/api/connections/oldpc000118/speed', {}, phone);
+    assert.equal(e.status, 409);
+    assert.match(e.json.error, /needs Beam for Windows 1\.13\.0 or later/);
+    assert.match((await post(s, '/api/connections/laptop00118/speed', {}, phone)).json.error, /Robin Laptop is offline/);
+    assert.match((await post(s, '/api/connections/shoppc00118/speed', {}, shop)).json.error, /tests its own speed itself/);
+    e = await post(s, '/api/connections/shoppc00118/speed', {}, phone); // (it never answers this time)
+    assert.equal(e.status, 409);
+    assert.match(e.json.error, /didn’t finish a speed test within a minute/);
+    st.close();
+  } finally { await s.stop(); }
 });
 
 // ---------------------------------------------------------------- 1.4 protocol additions (plan/speed.md P1–P6)

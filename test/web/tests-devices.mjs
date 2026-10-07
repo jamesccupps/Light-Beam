@@ -268,6 +268,88 @@ export default function register(test) {
     await page.evaluate(`$('#genDlg').close()`);
   });
 
+  test('history (1.18): a PC’s Device info shows what happened (a power loss, a Windows Update restart, when someone signed in) and since when it’s up', async ctx => {
+    const page = await ctx.signedIn();
+    await page.waitFor(`serverHas('history')`, 8000, 'the server offers it');
+    const pc = app(ctx, 'Garage PC', 'windows');
+    await pc.me();
+    const H = 3600e3;
+    const now = Date.now();
+    const rec = (provider, id, at, data = []) => ({ log: 'System', id, provider, time: new Date(at).toISOString(), rec: Math.floor(at / 1000) % 1e7 + id, data });
+    const start = at => rec('Microsoft-Windows-Kernel-General', 12, at, ['10', '0', '0', '0', '0', '0', new Date(at).toISOString()]);
+    const lost = now - 2 * H;
+    const upd = now - 26 * H;
+    const r = await pc.post('/api/devices/me/history', { events: [
+      rec('User32', 1074, upd, ['C:\\Windows\\uus\\AMD64\\MoNotificationUx.exe (GARAGE)', 'GARAGE', 'Operating System: Service pack (Planned)', '0x80020010', 'restart', '', 'GARAGE\\robin']),
+      rec('Microsoft-Windows-Kernel-General', 13, upd + 60e3, [new Date(upd + 60e3).toISOString()]), start(upd + 90e3),
+      rec('Microsoft-Windows-Winlogon', 7001, upd + 90e3 + 28 * 60e3, ['1', 'S-1-5-21-1-1-1-1001']),
+      start(lost), rec('Microsoft-Windows-Kernel-Power', 41, lost + 3000, ['0', '0', '0', '0', '0', '0', '0']),
+    ] });
+    eq(r.added, 6, JSON.stringify(r));
+    ctx.defer(pc.online()); // ("Up since" shows only while it's online)
+    await page.waitFor(`deviceById('${pc.id}')?.online === true`, 8000, 'online');
+    await page.evaluate(`openDeviceInfo(deviceById('${pc.id}'))`);
+    await page.waitFor(`$('#genBody .history-list li') !== null`, 8000, 'the history');
+    const rows = await page.evaluate(`[...$$('#genBody .history-list li')].map(li => [li.className, li.textContent])`);
+    eq(rows.length, 2, JSON.stringify(rows));
+    assert(/Lost power or froze \(no warning\)/.test(rows[0][1]) && /back up/.test(rows[0][1]) && /nobody has signed in since/.test(rows[0][1]), rows[0][1]);
+    eq(rows[0][0], 'warn-row', 'a power loss stands out');
+    assert(/Restarted for a Windows update/.test(rows[1][1]) && /signed in .+ \(28 min later\)/.test(rows[1][1]), rows[1][1]);
+    const facts = await page.evaluate(`[...$('#genBody').querySelectorAll('dt')].map(dt => [dt.textContent, dt.nextElementSibling.textContent, dt.nextElementSibling.classList.contains('low')])`);
+    const up = facts.find(f => f[0] === 'Up since');
+    assert(up && /, after a power loss or freeze$/.test(up[1]) && up[2] === true, JSON.stringify(facts));
+    await page.evaluate(`$('#genDlg').close()`);
+    await page.evaluate(`openSettings('alerts')`);
+    await page.waitFor(`/A PC lost power or crashed/.test($('#settingsDlg').textContent)`, 5000, 'the alert’s switch');
+    await page.evaluate(`$('#settingsDlg').close()`);
+  });
+
+  test('speed test (1.18): Connections tests this device in the page (real test data to the server) and asks a PC’s app', async ctx => {
+    const page = await ctx.signedIn();
+    await recordToasts(page);
+    await page.waitFor(`serverHas('speed-test')`, 8000, 'the server offers it');
+    await page.waitFor(`navigator.serviceWorker.controller !== null`, 8000, 'the service worker took over (before the interception)');
+    const meId = await page.evaluate(`me.id`);
+    const now = Date.now();
+    const list = { tailscale: true, server: { name: 'beam-host', keyExpiry: null }, at: now, machines: [
+      { id: meId, name: 'This laptop', platform: 'web', online: true, machine: { name: 'laptop', ip: '100.64.20.5', online: true, keyExpiry: null }, path: null, speed: null, here: true },
+      { id: 'shoppc00120', name: 'Shop Desktop', platform: 'windows', online: true, machine: { name: 'shop', ip: '100.64.20.2', online: true, keyExpiry: null }, path: null, speed: { down: 812.4, up: 38, at: now - 3600e3 }, speedTest: true },
+      { id: 'phone000120', name: 'Robin Phone', platform: 'android', online: true, machine: { name: 'phone', ip: '100.64.20.4', online: true, keyExpiry: null }, path: null, speed: null },
+    ] };
+    const seen = [];
+    page.on(m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      const { url, method } = m.params.request;
+      seen.push([method, new URL(url).pathname]);
+      const body = method === 'GET' ? list : { speed: { down: 95.2, up: 21.3, at: Date.now() } };
+      page.send('Fetch.fulfillRequest', { requestId: m.params.requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }], body: Buffer.from(JSON.stringify(body)).toString('base64') }).catch(() => {});
+    });
+    await page.send('Fetch.enable', { patterns: [{ urlPattern: '*api/connections*', requestStage: 'Request' }] });
+    ctx.defer(() => page.send('Fetch.disable').catch(() => {}));
+    await page.evaluate(`openSettings('connections')`);
+    const sec = `$('#set-connections')`;
+    await page.waitFor(`${sec}?.querySelectorAll('.conn-list .device-row').length === 3`, 8000, 'three rows');
+    const buttons = await page.evaluate(`[...${sec}.querySelectorAll('.device-row')].map(r => [r.querySelector('strong').textContent, [...r.querySelectorAll('button')].map(b => b.textContent.trim())])`);
+    eq(buttons, [['This laptop · this device', ['Test', 'Test speed']], ['Shop Desktop', ['Test', 'Test speed']], ['Robin Phone', ['Test']]], 'Test speed for this device and a PC’s app (not the phone)');
+    assert(/Speed: 812 Mbit\/s down · 38 Mbit\/s up · tested 1 h ago/.test(await page.evaluate(`${sec}.textContent`)), 'the PC’s last result');
+    // this device: real test data to the scratch server, about 3 s each way
+    const t0 = Date.now();
+    await page.evaluate(`[...${sec}.querySelectorAll('.device-row')][0].querySelectorAll('button')[1].click()`);
+    await page.waitFor(`/Testing download speed…/.test(${sec}.textContent)`, 3000, 'it says what it does');
+    await page.waitFor(`/Speed: [\\d.]+ Mbit\\/s down · [\\d.]+ Mbit\\/s up · tested just now/.test([...${sec}.querySelectorAll('.device-row')][0].textContent)`, 20000, 'this device’s result');
+    const took = Date.now() - t0;
+    assert(took < 15000, `about 3 s each way at most, or 64 MB each way when quicker (${took} ms)`);
+    console.log(`        (this PC through loopback: ${await page.evaluate(`[...${sec}.querySelectorAll('.device-row')][0].querySelector('.conn-speed').textContent`)})`);
+    const kept = await fetch(`${ctx.srv.base}/api/devices`, { headers: { Authorization: `Bearer ${ctx.srv.key}` } }).then(r => r.json());
+    assert(kept.devices.some(d => d.id === meId), 'the page’s device');
+    // a PC's app: asked through the server (answered here by the interception)
+    await page.evaluate(`[...${sec}.querySelectorAll('.device-row')][1].querySelectorAll('button')[1].click()`);
+    await page.waitFor(`/Speed: 95 Mbit\\/s down · 21 Mbit\\/s up · tested just now/.test([...${sec}.querySelectorAll('.device-row')][1].textContent)`, 8000, 'the PC’s new result');
+    assert(seen.some(([m, p]) => m === 'POST' && p === '/api/connections/shoppc00120/speed'), JSON.stringify(seen));
+    eq(await page.evaluate(`__toasts.filter(t => /error|couldn/i.test(t))`), [], 'no errors');
+    await page.evaluate(`$('#settingsDlg').close()`);
+  }, { timeout: 60000 });
+
   test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {
     const { page } = await hostPage(ctx, { state: {} });
     await page.waitFor(`paired && hostState.ready`);

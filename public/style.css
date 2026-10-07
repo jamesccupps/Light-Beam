@@ -438,6 +438,10 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .alert-list .i { width: 17px; height: 17px; margin-top: 2px; color: var(--muted); }
 .alert-list .warn-row .i { color: var(--warn); }
 .alert-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* (1.18) a device's history: the headline, then its times and details under it */
+.history h4 { margin: 14px 0 2px; }
+.history-text { display: flex; flex-direction: column; gap: 2px; }
+.history-list li > .muted.small:last-child { white-space: nowrap; }
 .toast.warn { background: #8f5a0a; color: #fff; }
 /* A device picker (or the conversation list) still waiting for the device list: nothing to tap by mistake. */
 .devices-loading { display: flex; align-items: center; gap: 10px; padding: 14px 12px; color: var(--muted); font-size: 14px; list-style: none; }

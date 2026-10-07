@@ -173,9 +173,12 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   const s = d.status || {};
   const why = offlineWhy(d);
   const key = keyExpiryLine(d.tailscale);
+  const up = d.online && historyCache.get(d.id)?.data?.up;
+  if (!refresh || !historyCache.has(d.id)) loadHistory(d.id); // (1.18) on every open; a refresh keeps what's there
   const rows = [
     ['Status', d.online ? 'Online' : `Offline, last seen ${timeAgo(d.lastSeen)}`],
     why && ['Why', why.long, why.low],
+    up && ['Up since', `${historyWhen(up.since)}${UP_AFTER[up.kind] ? `, ${UP_AFTER[up.kind]}` : ''}`, INCIDENTS.has(up.kind) && Date.now() - up.since < 86400e3],
     isRinging(d.id) && ['Ringing', 'Now'],
     s.battery && Number.isFinite(s.battery.level) && ['Battery', `${Math.round(s.battery.level)}%${s.battery.charging ? ', charging' : ''}`, lowBattery(s.battery)],
     s.storage && Number.isFinite(s.storage.free) && ['Storage', `${formatSize(s.storage.free)} free${s.storage.total ? ` of ${formatSize(s.storage.total)}` : ''}`, lowStorage(s.storage)],
@@ -187,7 +190,7 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   ].filter(Boolean);
   const facts = el('dl', { class: 'facts' }, ...rows.flatMap(([k, v, low]) => [el('dt', {}, k), el('dd', { class: low ? 'low' : null }, v)]));
   const buttons = deviceActions(d).map(a => el('button', { class: 'btn', type: 'button', disabled: Boolean(a.disabled), onclick: () => a.action() }, icon(a.icon), a.label));
-  const body = [facts, alertsSupported() && offlineAlertToggle(d)].filter(Boolean);
+  const body = [facts, alertsSupported() && offlineAlertToggle(d), historySection(d)].filter(Boolean);
   if (refresh) {
     const focusables = () => [...dlg.querySelectorAll('button, input')];
     const at = focusables().indexOf(document.activeElement);
@@ -204,6 +207,70 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   if (!serverSettings && serverHas('settings')) loadServerSettings().then(() => openDeviceInfo(deviceById(d.id), { refresh: true }));
 }
 
+// ---------------------------------------------------------------- history (1.18)
+// What happened to a device, newest first (GET /api/devices/{id}/history): a PC's restarts and shutdowns and who asked,
+// power losses, blue screens, when someone signed in after, Beam's own crashes; and the spells Beam saw it offline.
+
+const historyCache = new Map(); // device id -> { data, error, at, all }
+const INCIDENTS = new Set(['power-loss', 'crash', 'forced-off', 'app-crash', 'app-hang']);
+const HISTORY_ICON = { 'power-loss': 'bolt', crash: 'alert', 'forced-off': 'power', restart: 'refresh', shutdown: 'power', start: 'power', 'app-crash': 'alert', 'app-hang': 'clock', offline: 'offline' };
+const UP_AFTER = { 'power-loss': 'after a power loss or freeze', crash: 'after a blue screen', 'forced-off': 'after being forced off', restart: 'after a restart', shutdown: 'after being shut down' };
+const historyWhen = ts => (dayKey(ts) === dayKey(Date.now()) ? clock(ts) : `${dateFormat({ month: 'short', day: 'numeric' }).format(ts)}, ${clock(ts)}`);
+const historyClock = (ts, ref) => (dayKey(ts) === dayKey(ref) ? clock(ts) : historyWhen(ts));
+const spellLength = ms => formatDuration(ms / 1000);
+
+async function loadHistory(id) {
+  if (!serverHas('history')) return;
+  const c = historyCache.get(id) || {};
+  if (c.loading) return;
+  historyCache.set(id, { ...c, loading: true });
+  try {
+    const data = await apiJson(`api/devices/${encodeURIComponent(id)}/history`);
+    historyCache.set(id, { data, at: Date.now(), all: c.all });
+  } catch (err) {
+    historyCache.set(id, { ...c, loading: false, error: friendlyError(err) });
+  }
+  refreshDeviceInfo();
+}
+
+function historyRow(e, latestUp) {
+  const lines = [];
+  let head = e.text;
+  if (e.kind === 'offline') {
+    if (e.ongoing) head = 'Beam is offline';
+    lines.push(`${historyClock(e.at, e.at)} – ${e.ongoing ? 'now' : historyClock(e.until, e.at)} (${spellLength(e.until - e.at)})`);
+  } else if (e.up) {
+    const parts = [];
+    if (e.down) parts.push(`went down ${e.downEstimate ? 'after ' : ''}${historyClock(e.down, e.at)}`);
+    parts.push(`${e.kind === 'shutdown' ? 'on again' : 'back up'} ${historyClock(e.up, e.at)}${e.down && e.up - e.down >= 60e3 ? ` (${spellLength(e.up - e.down)} later)` : ''}`);
+    if (e.signedIn) parts.push(`signed in ${historyClock(e.signedIn, e.at)}${e.signedIn - e.up >= 5 * 60e3 ? ` (${spellLength(e.signedIn - e.up)} later)` : ''}`);
+    else if (e.up === latestUp) parts.push('nobody has signed in since');
+    lines.push(parts.join(' · '));
+  }
+  if (e.detail) lines.push(e.detail);
+  return el('li', { class: INCIDENTS.has(e.kind) ? 'warn-row' : '' },
+    icon(HISTORY_ICON[e.kind] || 'clock'),
+    el('span', { class: 'alert-text history-text' }, el('span', {}, head), ...lines.map(l => el('span', { class: 'muted small' }, l))),
+    el('span', { class: 'muted small' }, historyWhen(e.at)));
+}
+
+function historySection(d) {
+  if (!serverHas('history')) return null;
+  const c = historyCache.get(d.id);
+  const head = el('h4', {}, 'History');
+  if (!c?.data) return el('div', { class: 'history' }, head, note(c?.error ? `Beam couldn’t get it: ${c.error}` : 'Loading…'));
+  const list = c.data.entries || [];
+  if (!list.length) {
+    return el('div', { class: 'history' }, head, note(d.platform === 'windows'
+      ? 'Nothing yet. A PC sends Windows’ record of its restarts and crashes when its Beam app (1.13 or later) connects.'
+      : 'Nothing yet. Times Beam saw it offline for 10 minutes or more show up here.'));
+  }
+  const shown = c.all ? list : list.slice(0, 8);
+  return el('div', { class: 'history' }, head,
+    el('ul', { class: 'alert-list history-list' }, ...shown.map(e => historyRow(e, c.data.up?.since))),
+    list.length > shown.length && el('button', { class: 'btn', type: 'button', onclick: () => { c.all = true; refreshDeviceInfo(); } }, `Show all ${list.length}`));
+}
+
 // ---------------------------------------------------------------- alerts
 
 const alertsSupported = () => Boolean(serverSettings?.alerts) || serverHas('alerts');
@@ -213,7 +280,7 @@ function onAlertEvent(a) {
   if (!a || !a.text) return;
   if (recentAlerts) recentAlerts = [a, ...recentAlerts.filter(x => x.id !== a.id)].slice(0, 100); // the history has them all
   if ($('#settingsDlg').open) renderSettings();
-  if (a.device && a.device === me.id && a.kind !== 'serverDisk' && a.kind !== 'tailscaleKey') return; // the device itself tells its user (not about its Tailscale key)
+  if (a.device && a.device === me.id && !['serverDisk', 'tailscaleKey', 'powerLoss'].includes(a.kind)) return; // the device itself tells its user (not about its Tailscale key or a power loss)
   if (!document.hidden) {
     toast(a.text, { warn: a.level === 'warn', ms: 9000, action: a.device && deviceById(a.device) ? 'Show' : null, onAction: () => { openConv(a.device); } });
   } else if (!HOST && 'Notification' in window && Notification.permission === 'granted') {
@@ -255,6 +322,7 @@ function sectionAlerts() {
     toggle('A device is running out of storage', a.storage, v => setAlerts({ storage: v }), { hint: 'Less than 2 GB (or 5%) free.' }),
     toggle('The Beam server’s disk is almost full', a.serverDisk, v => setAlerts({ serverDisk: v })),
     typeof a.tailscaleKey === 'boolean' && toggle('A Tailscale sign-in is running out', a.tailscaleKey, v => setAlerts({ tailscaleKey: v }), { hint: 'Two weeks and three days before, for your devices and this server.' }), // (1.17)
+    typeof a.powerLoss === 'boolean' && toggle('A PC lost power or crashed', a.powerLoss, v => setAlerts({ powerLoss: v }), { hint: 'When it’s back on after a power loss, a freeze, a blue screen or being forced off.' }), // (1.18)
     field('Devices going offline', note(watched.length ? `Watching ${watched.join(', ')}.` : 'None yet. Turn it on for a device under Devices.')),
     el('h4', {}, 'Recent alerts'),
   ];

@@ -27,15 +27,12 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Connections** (Beam 1.17): how the server reaches each device over Tailscale (direct, a peer relay or Tailscale's
   relay) with a test and its delay, alerts before a Tailscale sign-in runs out, and why a device is offline (the PC is
   on but Beam isn't running, or it's off or asleep).
+- **Each PC's history and a speed test** (Beam 1.18, the Windows app 1.13): every restart and shutdown and who asked
+  (a Windows update, your antivirus, you, a program), power losses, blue screens, when someone signed in after,
+  Beam's own crashes and the times it was offline, on each PC's page, with an alert when a PC comes back from a power
+  loss or a crash; and a speed test of Beam's own way in Connections, for this device or a PC asked from another.
 
 ## Next
-- **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;
-  several separate families on one server, each its own site, and guests who see only the channels they're given.
-- **Servers that talk to each other** (with several families): other people's family servers and Beams, linked only
-  when both owners allow it: a channel shared between two families, files sent to another person's devices like
-  AirDrop, or one of your devices shared with someone (they can send files to it, or control it remotely, as you
-  choose), each side keeping its own data. Over Tailscale (sharing just the server's machine) or the public link
-  (servers signing their requests), big files going direct.
 - **Remote control, further:** less delay where the measurement shows it goes (the first measurements, a PC 25 ms
   away over the internet: 92–146 ms from a click to the picture, half of it in the PC's screen capture; 60 fps saved
   25 ms, and Windows' hardware H.264 path added 30): the capture step split and shortened, 60 fps in Auto, the
@@ -45,6 +42,13 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
 - **Builds and releases** with GitHub Actions.
+- **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;
+  several separate families on one server, each its own site, and guests who see only the channels they're given.
+- **Servers that talk to each other** (with several families): other people's family servers and Beams, linked only
+  when both owners allow it: a channel shared between two families, files sent to another person's devices like
+  AirDrop, or one of your devices shared with someone (they can send files to it, or control it remotely, as you
+  choose), each side keeping its own data. Over Tailscale (sharing just the server's machine) or the public link
+  (servers signing their requests), big files going direct.
 
 ## Later
 - **Everyday:** an optional automatic clipboard, photo backup, fetching a file from another device, folder sync, the

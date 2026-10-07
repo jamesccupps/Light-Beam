@@ -61,6 +61,7 @@ namespace Beam
         public bool TestOffscreen;             // tests (custom --config only): every window opens off-screen, unfocused
         public int TestRcLeaseSec;             // tests (custom --config only): the remote control lease interval
         public string TestTailscaleExe, TestTailscaleArgs; // tests (custom --config only): a fake `tailscale` CLI
+        public string TestHistoryEvents;       // tests (custom --config only, 1.13): Windows' records from this JSON file instead
         public int WebViewReleaseSec = 180;    // the hidden messenger window's web view is released after this
         public string BadUpdateVersion;        // an update that failed its health check; skipped until a newer one
         public bool AutostartInitialized;      // "start with Windows" was set up once; the user owns it from then on
@@ -240,6 +241,7 @@ namespace Beam
                     c.TestRcLeaseSec = (int)Math.Max(0, Json.Long(d, "testRcLeaseSec", 0));
                     c.TestTailscaleExe = Json.Str(d, "testTailscaleExe");
                     c.TestTailscaleArgs = Json.Str(d, "testTailscaleArgs");
+                    c.TestHistoryEvents = Json.Str(d, "testHistoryEvents");
                 }
                 c.WebViewReleaseSec = (int)Math.Max(5, Json.Long(d, "webViewReleaseSec", 180));
                 c.BadUpdateVersion = Json.Str(d, "badUpdateVersion");

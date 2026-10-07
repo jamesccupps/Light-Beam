@@ -25,6 +25,8 @@ const { createLogger } = require('./lib/log');
 const { writeFileDurable, writeFileDurableSync, loadState, jsonWriter, storeStats, syncDir } = require('./lib/store');
 const { createOutbound } = require('./lib/outbound');
 const { makePrivate } = require('./lib/private-dir');
+const pcHistory = require('./lib/history');
+const winevents = require('./lib/winevents');
 const { version: VERSION } = require('./package.json');
 
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch {}
@@ -75,6 +77,7 @@ const FILE = {
   pid: path.join(DATA_DIR, 'server.pid'),
   stop: path.join(DATA_DIR, 'stop-requested'),
   alerts: path.join(DATA_DIR, 'alerts.json'),
+  history: path.join(DATA_DIR, 'history.json'), // (1.18) each device's history
 };
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DIST_DIR = path.resolve(env.BEAM_DIST || path.join(__dirname, 'dist'));
@@ -389,6 +392,9 @@ let settings = {}; // see SETTING_DEFAULTS, plus learned values (owners, public 
 let readMarks = {}; // device id -> { conversation id or "all" -> time last read }
 let tokenStore = { tokens: {}, pairing: {} }; // sha256(secret) -> record
 let alerts = []; // newest first, at most MAX_ALERTS (data/alerts.json)
+// (1.18) device id -> { events: [Windows' records, lib/history.js], spells: [{ from, until }], alerted: [keys],
+// offlineFrom? } (data/history.json)
+let history = {};
 const uploads = new Map(); // id -> upload session (see createUpload)
 let dataHealth = { itemsSource: 'new' };
 
@@ -402,7 +408,8 @@ const persistRead = jsonWriter(FILE.read, () => readMarks, { log });
 const persistSettings = jsonWriter(FILE.settings, () => settings, { log });
 const persistPassword = jsonWriter(FILE.password, () => password, { log });
 const persistAlerts = jsonWriter(FILE.alerts, () => alerts, { log });
-const WRITERS = [persist, persistDevices, persistAliases, persistTokens, persistRead, persistSettings, persistPassword, persistAlerts];
+const persistHistory = jsonWriter(FILE.history, () => history, { log, delay: FAST_TIMEOUTS ? 100 : 2000 });
+const WRITERS = [persist, persistDevices, persistAliases, persistTokens, persistRead, persistSettings, persistPassword, persistAlerts, persistHistory];
 
 function flushAll(timeoutMs = 5000) {
   return Promise.race([Promise.all(WRITERS.map(w => w.flush())), sleep(timeoutMs)]);
@@ -469,6 +476,8 @@ function validateDevices(obj) {
     if (isPlainObject(d.rcDisable)) out[id].rcDisable = { at: Number(d.rcDisable.at) || 0, from: typeof d.rcDisable.from === 'string' ? d.rcDisable.from : null };
     delete out[id].keyHash;
     if (typeof d.keyHash === 'string' && /^[a-f0-9]{64}$/.test(d.keyHash)) out[id].keyHash = d.keyHash;
+    delete out[id].speed; // (1.18) its latest speed test
+    if (isPlainObject(d.speed) && [d.speed.down, d.speed.up, d.speed.at].every(Number.isFinite)) out[id].speed = { down: d.speed.down, up: d.speed.up, at: d.speed.at };
     delete out[id].rcMachine;
     if (isPlainObject(d.rcMachine) && typeof d.rcMachine.machine === 'string' && typeof d.rcMachine.profile === 'string' && d.rcMachine.profile) {
       out[id].rcMachine = { machine: d.rcMachine.machine, profile: d.rcMachine.profile, node: typeof d.rcMachine.node === 'string' ? d.rcMachine.node : null, at: Number(d.rcMachine.at) || 0 };
@@ -487,6 +496,20 @@ function validateDevices(obj) {
 
 function validateAlerts(list) {
   return list.filter(a => isPlainObject(a) && typeof a.id === 'string' && typeof a.kind === 'string' && typeof a.text === 'string' && Number.isFinite(a.at)).slice(0, MAX_ALERTS);
+}
+
+// (1.18) Only well-formed records and spells; anything else in a device's history is dropped.
+function validateHistory(obj) {
+  const out = {};
+  for (const [id, h] of Object.entries(obj)) {
+    if (!DEVICE_ID.test(id) || !isPlainObject(h)) continue;
+    const events = (Array.isArray(h.events) ? h.events : []).filter(e => isPlainObject(e) && typeof e.log === 'string' && typeof e.provider === 'string'
+      && Number.isInteger(e.id) && Number.isFinite(e.time) && Array.isArray(e.data) && e.data.every(d => typeof d === 'string'));
+    const spells = (Array.isArray(h.spells) ? h.spells : []).filter(s => isPlainObject(s) && Number.isFinite(s.from) && Number.isFinite(s.until));
+    const alerted = (Array.isArray(h.alerted) ? h.alerted : []).filter(k => typeof k === 'string').slice(-30);
+    out[id] = { events, spells, alerted, ...(Number.isFinite(h.offlineFrom) && { offlineFrom: h.offlineFrom }) };
+  }
+  return out;
 }
 
 function validateAliases(obj) {
@@ -617,6 +640,7 @@ function openData() {
     fatal(`${lost.join(' and ')} in ${DATA_DIR} couldn't be read (kept as .broken-<time>) and BEAM_REQUIRE_DATA=1, so Beam won't start without ${them}. Restore ${them} from a backup (or, to start without ${them}, delete the .broken file).`);
   }
   alerts = loadState(FILE.alerts, { fallback: [], validate: validateAlerts, log }).value;
+  history = loadState(FILE.history, { fallback: {}, validate: validateHistory, log }).value;
   indexTokens();
   if (itemsNeedSave || loaded.source === 'tmp' || loaded.source === 'bak') persist();
 }
@@ -1469,6 +1493,15 @@ function mergeDevice(fromId, toId, reason) {
   }
   if (tokensChanged) persistTokens();
   mergeReadMarks(fromId, toId);
+  if (history[fromId]) { // (1.18) a reinstall keeps the PC's history
+    const from = history[fromId];
+    const to = historyOf(toId);
+    to.events = pcHistory.mergeEvents(to.events, from.events, now()).events;
+    to.spells = [...to.spells, ...(from.spells || [])].sort((a, b) => a.from - b.from).slice(-300);
+    to.alerted = [...new Set([...to.alerted, ...(from.alerted || [])])].slice(-30);
+    delete history[fromId];
+    persistHistory();
+  }
   for (const r of loginRequests.values()) if (r.deviceId === fromId) r.deviceId = toId;
   const open = presence.get(fromId);
   if (open) {
@@ -1579,6 +1612,7 @@ function forgetDeviceNow(id, reason) {
   delete devices[id];
   for (const [a, b] of Object.entries(aliases)) if (b === id) delete aliases[a];
   if (readMarks[id]) { delete readMarks[id]; persistRead(); }
+  if (history[id]) { delete history[id]; persistHistory(); } // (1.18)
   if (settings.alerts?.offline?.includes(id)) {
     settings.alerts.offline = settings.alerts.offline.filter(d => d !== id);
     persistSettings();
@@ -1746,6 +1780,7 @@ function noteOnline(id, req, url) {
     offlinePending.delete(id);
     return;
   }
+  endOfflineSpell(id); // (1.18) a spell of 10 minutes or more goes into its history
   onlineSince.set(id, now());
   const d = devices[id];
   const version = appVersionOf(req, url) || d?.appVersion || '';
@@ -1761,6 +1796,7 @@ function noteOffline(id) {
   const timer = setTimeout(() => {
     offlinePending.delete(id);
     if (isOnline(id)) return;
+    startOfflineSpell(id, leftAt);
     const since = onlineSince.get(id);
     onlineSince.delete(id);
     log.info(`${whoName(id)} went offline${since ? ` after ${durationText(leftAt - since)} online` : ''}`);
@@ -2107,6 +2143,7 @@ function alertSettings() {
     storage: a.storage !== false,
     serverDisk: a.serverDisk !== false,
     tailscaleKey: a.tailscaleKey !== false, // (1.17)
+    powerLoss: a.powerLoss !== false, // (1.18) a PC came back from a power loss, a blue screen or a forced power-off
     offline: Array.isArray(a.offline) ? a.offline.filter(id => typeof id === 'string') : [],
   };
 }
@@ -2222,7 +2259,9 @@ const pathText = p => (p.via === 'direct' ? (p.lan ? 'direct on the same network
   : p.via === 'peer-relay' ? 'through a peer relay' : `through Tailscale's relay${p.relay ? ` (${p.relay})` : ''}`);
 
 // One row per machine, named after its Beam app (a browser on it shares the row): online when any of them is.
-function connectionList() {
+// (1.18) Also its latest speed test (any of its devices'), whether its app can be asked for one, and `here` for the
+// asking device's own machine (that one tests in its own page).
+function connectionList(askingId = null) {
   const machines = new Map(); // machine key -> { t: tailscaleOf, list: [device] }
   for (const d of Object.values(devices)) {
     const t = tailscaleOf(d);
@@ -2235,21 +2274,23 @@ function connectionList() {
   return [...machines].map(([key, { t, list }]) => {
     const d = list.find(x => APP_PLATFORMS.has(x.platform)) || list[0];
     const self = tsFacts.get(t.ip)?.self === true;
+    const speed = list.map(x => x.speed).filter(Boolean).sort((a, b) => b.at - a.at)[0] || null;
     return {
       id: d.id, name: d.name, platform: d.platform, online: list.some(x => isOnline(x.id)),
       machine: { name: t.name, ip: t.ip, ...(self && { self: true }), ...tsStateOf(t.ip) },
       path: self ? null : tsPaths.get(key) || null,
+      speed, ...(canTestSpeed(d) && { speedTest: true }), ...(askingId && list.some(x => x.id === askingId) && { here: true }),
     };
   }).sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name));
 }
 
-async function getConnections(req, res) {
+async function getConnections(req, res, _m, url) {
   await refreshTailnet(true);
   const self = [...tsFacts.values()].find(f => f.self);
   send(res, 200, {
     tailscale: Boolean(self),
     ...(self && { server: { name: tsSelfName, keyExpiry: self.keyExpiry, ...(self.expired && { expired: true }) } }),
-    machines: connectionList(),
+    machines: connectionList(resolveAlias(deviceIdOf(req, url) || '')),
     at: now(),
   });
 }
@@ -2277,6 +2318,197 @@ async function testConnection(req, res, [id], url) {
     log.info(`${by} tested the connection to ${target.name}: ${pathText(path)}, ${r.ms} ms`);
   }
   send(res, 200, { path });
+}
+
+// ---------------------------------------------------------------- speed tests (1.18)
+// How fast Beam's own way is between a device and this server (web Settings → Connections; the user: "we should do the
+// history for each pc and the speed test"): the device downloads and uploads test data through the address its
+// transfers use, about 3 s each way (64 MB at most each), and reports what it measured, kept as its latest. Another
+// device can ask a PC's Beam app (Windows 1.13 or later) to test now: the `speed-test` event, answered with the result.
+
+const SPEED_MAX_BYTES = 64 * MB;
+const SPEED_ANSWER_MS = FAST_TIMEOUTS ? 5000 : 60_000;
+const SPEED_APP_MIN = '1.13.0';
+let speedNoise = null; // 1 MB of random bytes, sent over and over: nothing on the way can compress it
+const speedAsks = new Map(); // request id -> { target, done(speed) }
+
+const canTestSpeed = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, SPEED_APP_MIN);
+
+// GET /api/speedtest/down?bytes=N: N bytes of noise (8 MB unless asked; 64 MB at most), never cached.
+function speedDown(req, res, _m, url) {
+  const bytes = Math.min(SPEED_MAX_BYTES, Math.max(1, Math.floor(Number(url.searchParams.get('bytes')) || 8 * MB)));
+  speedNoise ||= crypto.randomBytes(MB);
+  res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': bytes, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  let left = bytes;
+  res.once('close', () => { left = 0; });
+  const pump = () => {
+    while (left > 0) {
+      const chunk = left >= MB ? speedNoise : speedNoise.subarray(0, left);
+      left -= chunk.length;
+      if (!res.write(chunk)) return void res.once('drain', pump);
+    }
+    if (!res.writableEnded) res.end();
+  };
+  pump();
+}
+
+// POST /api/speedtest/up: reads the body (64 MB at most) and keeps none of it. { bytes }.
+async function speedUp(req, res) {
+  let bytes = 0;
+  await new Promise((resolve, reject) => {
+    req.on('data', c => {
+      bytes += c.length;
+      if (bytes > SPEED_MAX_BYTES) { reject(httpError(413, 'A speed test sends 64 MB at most')); req.destroy(); }
+    });
+    req.once('end', resolve);
+    req.once('error', reject);
+    req.once('close', resolve); // (a sender that gave up: nothing to answer)
+  });
+  send(res, 200, { bytes });
+}
+
+// POST /api/speedtest/result { down, up (Mbit/s), id? (when asked) }: what this device measured.
+async function speedResult(req, res, _m, url) {
+  const d = devices[deviceIdOf(req, url)];
+  if (!d) throw httpError(400, 'X-Beam-Device-Id is required');
+  const body = await readJson(req);
+  const mbps = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1e6 ? Math.round(v * 10) / 10 : null);
+  const down = mbps(body.down);
+  const up = mbps(body.up);
+  if (down === null || up === null) throw httpError(400, 'Expected {"down": <Mbit/s>, "up": <Mbit/s>}');
+  d.speed = { down, up, at: now() };
+  persistDevices();
+  log.info(`${d.name} tested its speed to this server: ${down} Mbit/s down, ${up} Mbit/s up`);
+  const ask = typeof body.id === 'string' ? speedAsks.get(body.id) : null;
+  if (ask && ask.target === d.id) ask.done(d.speed);
+  send(res, 200, { speed: d.speed });
+}
+
+// POST /api/connections/{id}/speed: asks that device's Beam app (Windows 1.13 or later, online) to test now. { speed },
+// or 409 when it can't or didn't finish within a minute (not 504: the apps take that for "the server is unreachable").
+async function askSpeedTest(req, res, [id], url) {
+  const target = targetDevice(id);
+  await readJson(req, { optional: true });
+  const by = resolveAlias(deviceIdOf(req, url) || '');
+  if (target.id === by) throw httpError(409, 'This device tests its own speed itself');
+  if (!canTestSpeed(target)) throw httpError(409, `${target.name} can’t run a speed test when asked (that needs Beam for Windows ${SPEED_APP_MIN} or later)`);
+  if (!isOnline(target.id)) throw httpError(409, `${target.name} is offline`);
+  if ([...speedAsks.values()].some(a => a.target === target.id)) throw httpError(409, `${target.name} is testing already`);
+  const askId = crypto.randomBytes(8).toString('hex');
+  log.info(`${whoName(by, 'A browser')} asked ${target.name} for a speed test`);
+  const speed = await new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), SPEED_ANSWER_MS);
+    speedAsks.set(askId, { target: target.id, done: s => { clearTimeout(timer); resolve(s); } });
+    sendTo(new Set([target.id]), 'speed-test', { id: askId });
+  });
+  speedAsks.delete(askId);
+  if (!speed) throw httpError(409, `${target.name} didn’t finish a speed test within a minute`);
+  send(res, 200, { speed });
+}
+
+// ---------------------------------------------------------------- each PC's history (1.18)
+// What happened to a device, newest first (web: its Device info; the user: "we should do the history for each pc"):
+// Windows' records of each restart or shutdown and who asked, power losses, blue screens and sign-ins, and Beam's own
+// crashes, sent by the PC's Beam app when it connects (lib/history.js explains them); this server's own PC's, read at
+// start (lib/winevents.js), so a power loss here is known before anyone signs in; and the spells Beam saw a device
+// offline for 10 minutes or more. A PC that comes back from a power loss, a blue screen or a forced power-off raises a
+// `powerLoss` alert (once, and only when Beam learns of it within a day).
+
+const OWN_HISTORY = Boolean(env.BEAM_TEST_OWN_EVENTS) || (process.platform === 'win32' && env.BEAM_OWN_HISTORY !== 'off' && env.BEAM_TAILSCALE !== 'off');
+const historyOf = id => (history[id] ||= { events: [], spells: [], alerted: [] });
+const keepsSpells = id => APP_PLATFORMS.has(devices[id]?.platform) && devices[id]?.platform !== 'cli';
+
+function startOfflineSpell(id, from) {
+  if (!keepsSpells(id)) return;
+  historyOf(id).offlineFrom = from;
+  persistHistory();
+}
+
+function endOfflineSpell(id) {
+  const h = history[id];
+  if (!Number.isFinite(h?.offlineFrom)) return;
+  h.spells = pcHistory.addSpell(h.spells, h.offlineFrom, now(), now());
+  delete h.offlineFrom;
+  persistHistory();
+}
+
+// "2:14 AM", or "Oct 6, 2:14 AM" when it isn't today (this server's time zone: the household's).
+function clockText(ms) {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return d.toDateString() === new Date(now()).toDateString() ? time : `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
+function incidentText(device, e) {
+  const back = `started again at ${clockText(e.up)}`;
+  const text = e.kind === 'crash' ? `${device.name} crashed with a blue screen${e.detail ? ` (${e.detail.replace(/^Stop code/, 'stop code')})` : ''} and ${back}`
+    : e.kind === 'forced-off' ? `${device.name} was forced off with its power button and ${back}`
+      : `${device.name} went down without warning${e.down ? ` after ${clockText(e.down)}` : ''} (it lost power or froze) and ${back}`;
+  return `${text}.${e.signedIn ? '' : ' Nobody has signed in on it since, so its Beam app isn’t running yet.'}`;
+}
+
+// Adds a PC's records to its history; a new power loss, blue screen or forced power-off alerts. Returns how many were new.
+function ingestHistory(device, records) {
+  const h = historyOf(device.id);
+  const { events, added } = pcHistory.mergeEvents(h.events, records, now());
+  h.events = events;
+  if (!added) return 0;
+  const { entries } = pcHistory.explain(h.events, [], { at: now(), days: 2 });
+  for (const e of pcHistory.alertable(entries, h.alerted, now())) {
+    h.alerted = [...h.alerted, `up:${e.up}`].slice(-30);
+    const text = incidentText(device, e);
+    if (alertSettings().powerLoss) raiseAlert('powerLoss', device.id, 'warn', text);
+    else log.warn(text);
+  }
+  persistHistory();
+  return added;
+}
+
+// GET /api/devices/me/history/since: where this PC's next report starts ({ System, Application }: ISO or null).
+function getHistorySince(req, res, _m, url) {
+  const id = deviceIdOf(req, url);
+  if (!devices[id]) throw httpError(400, 'X-Beam-Device-Id is required');
+  send(res, 200, pcHistory.sinceOf(history[id]?.events));
+}
+
+// POST /api/devices/me/history { events: [{ log, id, provider, time, rec, data }] }: Windows' records on this PC (the
+// kinds lib/history.js WANTED lists; others are skipped). { added, since }.
+async function postHistory(req, res, _m, url) {
+  const device = devices[deviceIdOf(req, url)];
+  if (!device) throw httpError(400, 'X-Beam-Device-Id is required');
+  const body = await readJson(req, { limit: 4 * MB });
+  if (!Array.isArray(body.events) || body.events.length > pcHistory.MAX_REPORT) throw httpError(400, `Expected {"events": [...]} with at most ${pcHistory.MAX_REPORT} records`);
+  const added = ingestHistory(device, body.events);
+  if (added) log.info(`${device.name} sent ${added} new record${added === 1 ? '' : 's'} for its history`);
+  send(res, 200, { added, since: pcHistory.sinceOf(history[device.id]?.events) });
+}
+
+// GET /api/devices/{id}/history[?days=30]: { device, name, entries (newest first), up, at }.
+function getHistory(req, res, [id], url) {
+  const target = targetDevice(id);
+  const days = Math.min(120, Math.max(1, Math.floor(Number(url.searchParams.get('days')) || 30)));
+  const h = history[target.id];
+  // (offline now for 10 minutes or more: that spell too, still going)
+  const ongoing = Number.isFinite(h?.offlineFrom) && !isOnline(target.id) && now() - h.offlineFrom >= pcHistory.SPELL_MIN_MS;
+  const spells = [...(h?.spells || []), ...(ongoing ? [{ from: h.offlineFrom, until: now() }] : [])];
+  const { entries, up } = pcHistory.explain(h?.events || [], spells, { at: now(), days });
+  if (ongoing) for (const e of entries) if (e.kind === 'offline' && e.at === h.offlineFrom) e.ongoing = true;
+  send(res, 200, { device: target.id, name: target.name, entries, up, at: now() });
+}
+
+// This server's own PC (its Beam app's device), whose records the server can read itself.
+function ownPc() {
+  return Object.values(devices).filter(d => d.machine === 'host' && d.platform === 'windows' && !d.temporary)
+    .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0))[0] || null;
+}
+
+async function readOwnHistory() {
+  const pc = ownPc();
+  if (!pc) return;
+  const since = pcHistory.sinceOf(history[pc.id]?.events).System;
+  const from = since ? Date.parse(since) - 60e3 : now() - 30 * 86400e3;
+  const added = ingestHistory(pc, await winevents.readOwnEvents({ since: new Date(from).toISOString(), env }));
+  if (added) log.info(`${pc.name} (this server's PC): ${added} new record${added === 1 ? '' : 's'} for its history, from Windows`);
 }
 
 // ---------------------------------------------------------------- phone notifications (1.5)
@@ -4919,6 +5151,8 @@ const FEATURES = [
   'replies', 'reactions', 'edit', // (1.14.0)
   'kvm', // (1.16.0: a remote control session of kind kvm, a PC's keyboard and mouse shared with another)
   'connections', // (1.17.0: GET /api/connections + test, devices' Tailscale state, tailscaleKey alerts)
+  'history', // (1.18.0: each device's history, POST/GET /api/devices/…/history, powerLoss alerts)
+  'speed-test', // (1.18.0: /api/speedtest/down|up|result, POST /api/connections/{id}/speed, the `speed-test` event)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -4992,7 +5226,7 @@ const SETTING_RULES = {
     if (!isPlainObject(v)) throw httpError(400, 'alerts must be an object like {"battery": true, "offline": ["<device id>"]}');
     const next = alertSettings();
     for (const [key, value] of Object.entries(v)) {
-      if (['battery', 'storage', 'serverDisk', 'tailscaleKey'].includes(key)) {
+      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss'].includes(key)) {
         if (typeof value !== 'boolean') throw httpError(400, `alerts.${key} must be true or false`);
         next[key] = value;
       } else if (key === 'offline') {
@@ -5810,7 +6044,7 @@ function helloProof(url) {
 
 // ---------------------------------------------------------------- export / import
 
-const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|apps\/(Beam\.exe|beam\.apk)(\.json)?)$/;
+const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|apps\/(Beam\.exe|beam\.apk)(\.json)?)$/;
 
 // Everything a Beam is, as a .tar.gz: the key, server id, settings, sign-ins, devices, items and their files.
 // Leaves out unfinished uploads, logs and temporary files. items.json comes last and lists only the items whose
@@ -5832,6 +6066,7 @@ async function writeExport(out, state, extra = {}) {
     await writer.addBuffer('tokens.json', JSON.stringify(state.tokens));
     await writer.addBuffer('read.json', JSON.stringify(state.read));
     await writer.addBuffer('alerts.json', JSON.stringify(state.alerts || []));
+    await writer.addBuffer('history.json', JSON.stringify(state.history || {})); // (1.18)
     const kept = [];
     for (const item of state.items) {
       let ok = true;
@@ -5860,7 +6095,7 @@ async function addStored(writer, name, file) {
 }
 
 function snapshotState() {
-  return structuredClone({ key: KEY, serverId: SERVER_ID, settings, password, devices, aliases, tokens: tokenStore, read: readMarks, alerts, items });
+  return structuredClone({ key: KEY, serverId: SERVER_ID, settings, password, devices, aliases, tokens: tokenStore, read: readMarks, alerts, history, items });
 }
 
 async function exportApi(req, res, _m, url) {
@@ -6194,6 +6429,9 @@ const routes = [
   ['PUT', '/api/devices/me/settings', putDeviceSettings],
   ['PUT', '/api/devices/me/backup', putDeviceBackup],
   ['GET', '/api/devices/me/backups', getDeviceBackups],
+  ['GET', '/api/devices/me/history/since', getHistorySince],
+  ['POST', '/api/devices/me/history', postHistory],
+  ['GET', `/api/devices/${DEV}/history`, getHistory],
   ['GET', `/api/devices/${DEV}/backups`, getDeviceBackups],
   ['GET', '/api/backups', getBackups],
   ['POST', '/api/backups', postBackup],
@@ -6222,6 +6460,10 @@ const routes = [
   ['GET', '/api/alerts', getAlerts],
   ['GET', '/api/connections', getConnections],
   ['POST', `/api/connections/${DEV}/test`, testConnection],
+  ['POST', `/api/connections/${DEV}/speed`, askSpeedTest],
+  ['GET', '/api/speedtest/down', speedDown],
+  ['POST', '/api/speedtest/up', speedUp],
+  ['POST', '/api/speedtest/result', speedResult],
   ['GET', '/api/metrics', getMetrics],
   ['GET', '/api/items', listItems],
   ['DELETE', '/api/items', clearItems],
@@ -6663,6 +6905,8 @@ function serve() {
     setTimeout(() => logStatus().catch(() => {}), 60_000).unref();
     setInterval(() => logStatus().catch(() => {}), 3600e3).unref();
     scheduleBackups().catch(err => log.warn(`Backups couldn't be planned: ${err.message}`));
+    // (1.18) This server's own PC's history from Windows: a power loss here is known before anyone signs in.
+    if (OWN_HISTORY) setTimeout(() => readOwnHistory().catch(err => log.warn(`This server's PC's history couldn't be read from Windows: ${err.message}`)), FAST_TIMEOUTS ? 300 : 15_000).unref();
     console.log(`\n  This computer:  http://localhost:${PORT}`);
     if (lan) console.log(`  Local network:  ${lan}`);
     if (remote) console.log(`  Address:        ${remote}`);
