@@ -1428,7 +1428,8 @@ export default function register(test) {
     await pc.js(`fakePc.send('ctl', { t: 'started', at: { banner: 70, page: 120, offer: 150, answer: 310, connected: 340, checked: 350, capture: 680, picture: 930, bogus: 5 }, warm: true }); true`);
     await page.waitFor(`rc.start.pc`, 5000, 'the PC\'s steps');
     const st = await page.evaluate(`rcStartText()`);
-    assert(/^\d+\.\d\d s to the picture · on .+: banner 0\.07 · its page 0\.12 · offer 0\.15 · answer 0\.31 · connected 0\.34 · checked 0\.35 · capture 0\.68 · picture out 0\.93 \(its page was warm\)$/.test(st), `the details' Start: ${st}`);
+    // (1.17: this page's own steps too, before the PC's)
+    assert(/^\d+\.\d\d s to the picture · here: asked \d+\.\d\d · offer \d+\.\d\d · answered \d+\.\d\d · connected \d+\.\d\d · on [^:]+: banner 0\.07 · its page 0\.12 · offer 0\.15 · answer 0\.31 · connected 0\.34 · checked 0\.35 · capture 0\.68 · picture out 0\.93 \(its page was warm\)$/.test(st), `the details' Start: ${st}`);
     assert((await page.evaluate(`rcUi.details.textContent`)).includes(`Start${st}`), 'in the details');
     eq(page.errors, [], 'no page errors');
     // A phone draws its own pointer (the trackpad's ring): it never asks the PC to hide its own.
