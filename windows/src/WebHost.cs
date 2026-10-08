@@ -138,6 +138,15 @@ namespace Beam
             PrepareLoader(cfg);
         }
 
+        // (1.15) A browser argument for a page served under a made-up name (SetVirtualHostNameToFolderMapping): that name
+        // doesn't exist, and Edge is told so. Each navigation to it looked the name up first, and Windows takes ~1.3 s to
+        // give up on a name without a dot (LLMNR, NetBIOS): every remote control start and every keyboard-and-mouse link
+        // page waited for it (research\rc-start: 1.14–1.27 s to the page; 9–73 ms with this).
+        public static string NoLookup(string host)
+        {
+            return "--host-resolver-rules=\"MAP " + host + " ~NOTFOUND\"";
+        }
+
         // The installed WebView2 Runtime's version, or null when there is none.
         public static string RuntimeVersion(Config cfg)
         {

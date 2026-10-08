@@ -67,6 +67,17 @@ namespace Beam
         public long RestartedFor;        // (1.11.4) the display change a capture that ended was started again for
         public bool Kvm;                 // (1.12) the viewer's own keyboard and mouse work this PC: no capture, no picture
         public bool Here;                // ...and its pointer is on this PC now (the viewer says)
+        // (1.15) The start, step by step, in ms since the request reached this PC: told once (beam.log, and the viewer's
+        // details) when the first picture has gone out (a kvm session: when it's checked).
+        public readonly Stopwatch Clock = Stopwatch.StartNew();
+        public readonly List<KeyValuePair<string, long>> Marks = new List<KeyValuePair<string, long>>();
+        public bool StartTold, HostWarm;
+
+        public void Mark(string step)
+        {
+            if (StartTold || Marks.Any(x => x.Key == step)) return;
+            Marks.Add(new KeyValuePair<string, long>(step, Clock.ElapsedMilliseconds));
+        }
 
         public string Label
         {
@@ -409,6 +420,7 @@ namespace Beam
             catch (Exception ex) { Log.Error("Remote control: the banner", ex); }
             if (s.Banner == null || !s.Banner.Up) { End(s, "failed", "the banner couldn't be shown"); return; }
             Log.Write("Remote control: banner up: " + s.Label + (kvm ? " shares its keyboard and mouse" + (s.Banner.IsShown ? "" : " (folded into the tray, as chosen at this PC)") : " is controlling this PC"));
+            s.Mark("banner");
             if (testClickOnShow) { testClickOnShow = false; s.Banner.ClickStopForTest(); } // must be ignored (the 500 ms guard)
             s.State = RcState.Starting;
             app.MarkChanged();
@@ -439,7 +451,7 @@ namespace Beam
             var m = new Dictionary<string, object>();
             m["t"] = "signal";
             m["kind"] = kind;
-            if (kind == "answer") m["sdp"] = Json.Str(d, "sdp");
+            if (kind == "answer") { m["sdp"] = Json.Str(d, "sdp"); s.Mark("answer"); }
             if (kind == "candidates") m["candidates"] = Json.Get(d, "candidates");
             s.Host.Post(m);
         }
@@ -538,6 +550,7 @@ namespace Beam
                 return;
             }
             if (current != s || s.Host != host) { var ignored = host.Close(); return; }
+            s.HostWarm = host.Reused;
             Log.Write("Remote control: " + (s.Kvm ? "its page (no capture: keyboard and mouse only) is " : "capture host ") + (host.Reused ? "reused" : "up") +
                 " (WebView2 " + host.RuntimeVersion + (s.Kvm ? "" : ", " + layout.SourceName(s.Screen)) + ")");
             // A capture that hangs (a wrong source name hangs silently) or never connects ends the session.
@@ -695,14 +708,28 @@ namespace Beam
             switch (t)
             {
                 case "ready":
+                    s.Mark("page");
                     host.StartCapture(StartConfig(s));
+                    break;
+                case "capturing": // (1.15) the capture is there (its size follows); the connection was started meanwhile
+                    s.Mark("capture");
                     break;
                 case "captured":
                     Log.Write("Remote control: capturing " + Json.Long(m, "w", 0) + "×" + Json.Long(m, "h", 0));
                     s.State = s.State == RcState.Live ? RcState.Live : RcState.Connecting;
                     var layout = DesktopLayout.Current();
                     int found = MatchScreen(layout, s.Screen, (int)Json.Long(m, "w", 0), (int)Json.Long(m, "h", 0));
-                    if (found != s.Screen) { Log.Write("Remote control: the captured screen looks like screen " + (found + 1) + ", not " + (s.Screen + 1)); s.Screen = found; injector.Screen = found; }
+                    if (found != s.Screen)
+                    {
+                        Log.Write("Remote control: the captured screen looks like screen " + (found + 1) + ", not " + (s.Screen + 1));
+                        s.Screen = found;
+                        injector.Screen = found;
+                        if (s.Verified) SendDisplay(s); // (1.15: the hello can go first now; it named the other one)
+                    }
+                    break;
+                case "first-frame": // (1.15) the start's last step
+                    s.Mark("picture");
+                    TellStart(s);
                     break;
                 case "signal":
                     QueueSignal(s, m);
@@ -753,8 +780,31 @@ namespace Beam
             if (s.Settings != null) c["settings"] = s.Settings; // (a new capture page after a switch of screens: as before)
             c["video"] = !s.VideoOff;
             if (s.Kvm) c["kvm"] = true; // (1.12: no capture at all)
+            // (1.15) The screen's size in its physical pixels: the picture's scale before the capture's own frames say.
+            var sc = DesktopLayout.Current().Screen(s.Screen);
+            if (sc != null) { c["w"] = sc.W; c["h"] = sc.H; }
             return c;
         }
+
+        // (1.15) How the start went, once: one line in beam.log, and the steps to the viewer (its details show them).
+        void TellStart(RcSession s)
+        {
+            if (s.StartTold || s.Marks.Count == 0) return;
+            s.StartTold = true;
+            long last = s.Marks.Max(x => x.Value);
+            Log.Write("Remote control: " + (s.Kvm ? "the keyboard-and-mouse link was up " : "the first picture went out ") + Secs(last) + " s after the request (" +
+                string.Join(" · ", s.Marks.Select(x => x.Key + " " + Secs(x.Value))) + (s.HostWarm ? "; its page was warm" : "") + ")");
+            if (s.Kvm) return; // (the laptop has nothing to show it in)
+            var at = new Dictionary<string, object>();
+            foreach (var x in s.Marks) at[x.Key] = x.Value;
+            var m = new Dictionary<string, object>();
+            m["t"] = "started";
+            m["at"] = at;
+            m["warm"] = s.HostWarm;
+            SendCtl(s, m);
+        }
+
+        static string Secs(long ms) { return (ms / 1000.0).ToString("0.00", CultureInfo.InvariantCulture); }
 
         // The captured frame's size, matched to a screen (several monitors: Chromium's "Screen N" order is a best guess).
         static int MatchScreen(DesktopLayout l, int expected, int w, int h)
@@ -802,7 +852,11 @@ namespace Beam
                 while (s.Signals.Count > 0 && current == s && s.State != RcState.Ended)
                 {
                     var body = s.Signals.Dequeue();
-                    try { await s.Api.Call(HttpMethod.Post, "/api/rc/sessions/" + s.Id + "/signal", body, 15, CancellationToken.None); }
+                    try
+                    {
+                        await s.Api.Call(HttpMethod.Post, "/api/rc/sessions/" + s.Id + "/signal", body, 15, CancellationToken.None);
+                        if (Json.Str(body, "kind") == "offer") s.Mark("offer");
+                    }
                     catch (ApiException ex)
                     {
                         if (ex.Status == 410 || ex.Status == 404) { if (current == s) End(s, null, "the server ended it (signal answered " + ex.Status + ")"); return; }
@@ -821,6 +875,7 @@ namespace Beam
             string pc = Json.Str(m, "pc");
             if (pc == "failed") { End(s, "failed", "the connection failed"); return; }
             if (pc != "connected") return;
+            s.Mark("connected");
             string remote = Json.Str(m, "remoteIp");
             var host = s.Host;
             string why = RcPolicy.PeerRefusal(remote, s.Ip4, s.Ip6);
@@ -834,6 +889,7 @@ namespace Beam
             if (why != null) { End(s, "failed", "the connection's peer failed the check: " + why + " (a " + (Json.Str(m, "type") ?? "?") + " candidate)"); return; }
             if (s.Verified) return; // a new path to the same peer (an ICE restart)
             s.Verified = true;
+            s.Mark("checked");
             if (host != null) host.InputAllowed = true; // (OnInput, on the page's thread, takes input from now on)
             s.LastPong = DateTime.Now;
             var hello = new Dictionary<string, object>();
@@ -870,6 +926,7 @@ namespace Beam
                     // (1.12.4) A PC the KVM uses: its host stays warm after this session, and is warmed from Beam's start.
                     if (!app.Cfg.RcKvmTarget) { app.Cfg.RcKvmTarget = true; app.Cfg.Save(); }
                     RcHost.KeepWarm();
+                    TellStart(s);
                 }
                 else
                 {

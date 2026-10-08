@@ -249,10 +249,12 @@ function fakePcMain(cfg) {
   // (1.12.6) A delay probe, as Beam's PC side answers it: `on` shows the square (magenta), each probe after turns it,
   // `off` takes it away; the answer says the colour and the PC's own time (made up here: 1.5 ms).
   pcs.probeColor = null;
+  pcs.probeCap = null; // (1.15) its own capture's time for each probe, when a test makes one up (a Windows app 1.15 says)
   pcs.onProbe = m => {
     if (m.off) { pcs.probeColor = null; return; }
     pcs.probeColor = m.on ? 'magenta' : pcs.probeColor === 'magenta' ? 'green' : 'magenta';
     pcs.send('ctl', { t: 'probe', n: m.n, color: pcs.probeColor, ms: 1.5, x: 0, y: 0, size: 32 });
+    if (pcs.probeCap != null && !m.on) pcs.send('ctl', { t: 'probe-cap', n: m.n, ms: pcs.probeCap });
   };
 
   pcs.onCtl = m => {
@@ -396,7 +398,7 @@ export default function register(test) {
     const page = await ctx.signedIn();
     const meId = await page.evaluate('me.id');
     const open = async id => { await page.goto('about:blank'); await page.goto(`${ctx.srv.base}/#remote=${id}`); };
-    const ended = () => page.waitFor(`rc.state === 'ended' && rc.end && [rc.end.reason, document.querySelector('.rc-card').textContent]`, 15000, 'ended');
+    const ended = () => page.waitFor(`rc.state === 'ended' && rc.end ? [rc.end.reason, document.querySelector('.rc-card').textContent] : rc.state + ': ' + rc.step`, 15000, 'ended');
     await open('nosuchdevice42');
     eq((await ended())[0], 'unknown', 'a device Beam doesn’t know');
     eq(await page.evaluate(`getComputedStyle($('#app')).display`), 'none', 'none of the chat app shows');
@@ -1350,7 +1352,7 @@ export default function register(test) {
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 60000 });
 
-  test('remote control 1.12.6: the PC\'s pointer drawn here with a mouse (the PC hides its own; a phone keeps its own), and the delay measured end to end', async ctx => {
+  test('remote control 1.12.6: the PC\'s pointer drawn here with a mouse (the PC hides its own; a phone keeps its own), and the delay measured end to end (1.15: Edge\'s capture apart; the start, step by step)', async ctx => {
     const pc = await fakePc(ctx, { caps: ['settings', 'video', 'cursor', 'probe'] });
     const page = await viewer(ctx, pc.id);
     await live(page, pc);
@@ -1389,6 +1391,26 @@ export default function register(test) {
     eq(await pc.js('fakePc.probeColor'), null, 'the square is gone');
     const text = await page.evaluate(`rcUi.details.hidden ? '' : rcUi.details.textContent`);
     assert(/Measured\d+ ms from a click to the picture \(median of \d+\): to the PC/.test(text), `the details say it: ${text.slice(text.indexOf('Measured'), text.indexOf('Measured') + 160)}`);
+    assert(!/\(Edge /.test(text), 'a PC that doesn\'t time its own capture: no split');
+    // (1.15) A PC that does (`probe-cap`: from the probe reaching it to its own capture showing the colour): less its own
+    // 1.5 ms to put the square on its screen, that's Edge's capture; the rest of the capture step is the queue.
+    await pc.js(`fakePc.probeCap = 2.5; true`);
+    await page.evaluate(`rcMeasure(); true`);
+    await page.waitFor(`rc.measured && rc.measured.n >= 8 && !rc.measuring`, 40000, 'measured again');
+    const m2 = await page.evaluate(`rc.measured`);
+    assert(m2.capture != null, `the capture step is known here: ${JSON.stringify(m2)}`);
+    eq(m2.edge, 1, `Edge's capture: the PC's 2.5 less its own 1.5 (${JSON.stringify(m2)})`);
+    const text2 = await page.evaluate(`rcUi.details.textContent`);
+    assert(/capture [\d.]+ \(Edge [\d.]+ \+ queue [\d.]+\)/.test(text2), `the details split it: ${text2.slice(text2.indexOf('Measured'), text2.indexOf('Measured') + 220)}`);
+    // (1.15) The start: this page's own time to the picture, and the PC's steps (its `started`; a made-up step is left out).
+    const mine = await page.evaluate(`rc.start.at`);
+    assert(['asked', 'offer', 'answered', 'connected', 'picture'].every(k => Number.isFinite(mine[k])) && mine.asked <= mine.offer && mine.offer <= mine.picture,
+      `this page's steps: ${JSON.stringify(mine)}`);
+    await pc.js(`fakePc.send('ctl', { t: 'started', at: { banner: 70, page: 120, offer: 150, answer: 310, connected: 340, checked: 350, capture: 680, picture: 930, bogus: 5 }, warm: true }); true`);
+    await page.waitFor(`rc.start.pc`, 5000, 'the PC\'s steps');
+    const st = await page.evaluate(`rcStartText()`);
+    assert(/^\d+\.\d\d s to the picture · on .+: banner 0\.07 · its page 0\.12 · offer 0\.15 · answer 0\.31 · connected 0\.34 · checked 0\.35 · capture 0\.68 · picture out 0\.93 \(its page was warm\)$/.test(st), `the details' Start: ${st}`);
+    assert((await page.evaluate(`rcUi.details.textContent`)).includes(`Start${st}`), 'in the details');
     eq(page.errors, [], 'no page errors');
     // A phone draws its own pointer (the trackpad's ring): it never asks the PC to hide its own.
     const pc2 = await fakePc(ctx, { caps: ['settings', 'video', 'cursor', 'probe'] });

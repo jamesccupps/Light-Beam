@@ -558,6 +558,16 @@ try {
   console.log(`  connected in ${Date.now() - t0} ms`);
   const frames = await waitFor(async () => { const n = await evalIn('V.frames()'); return n > 10 ? n : null; }, 10000, 250);
   check(!!frames, `video flows (${frames || 0} frames decoded by the viewer; none stored)`);
+  {
+    // 1.15: the start, step by step, once: in beam.log, and to the viewer (`started`, ms since the request got here).
+    const line = await waitLog(/the first picture went out [\d.]+ s after the request \(/, from, 5000);
+    check(!!line && /\(banner [\d.]+ · page [\d.]+ · .*picture [\d.]+/.test(line), `beam.log: the start, step by step (${line ? line.replace(/.*went out /, '') : 'none'})`);
+    const st = await waitCtl('started', t0, 5000);
+    const steps = st && st.at ? Object.keys(st.at) : [];
+    // (warm: the page the session before this one parked, 2 minutes)
+    check(!!st && ['banner', 'page', 'offer', 'answer', 'connected', 'checked', 'capture', 'picture'].every(k => steps.includes(k) && st.at[k] >= 0 && st.at[k] <= st.at.picture) && st.warm === true,
+      `...and the viewer is told (${st ? JSON.stringify(st) : 'nothing'})`);
+  }
   const stats = await waitCtl('stats', t0, 6000, m => !!m.codec);
   check(!!stats, `the host sends stats with its encoder (${stats ? stats.codec + ' / ' + stats.encoder + ', ' + stats.w + '×' + stats.h : 'none'})`);
   const state = await waitCtl('state', t0, 4000);
@@ -648,6 +658,9 @@ try {
   await send('in', { t: 'probe', n: 1 });
   const p1 = await waitCtl('probe', tp, 5000, m => m.n === 1);
   check(!!p1 && p1.color === 'green' && p1.ms > 0 && p1.ms < 1000, `a probe turns it green: the PC's time from the probe to its screen (${p1 ? p1.ms + ' ms' : 'no answer'})`);
+  // 1.15: the PC's page saw the green in its own capture (a clone of it): less the PC's time above, Edge's capture.
+  const cap1 = await waitCtl('probe-cap', tp, 3000, m => m.n === 1);
+  check(!!cap1 && cap1.ms > 0 && cap1.ms < 1000, `...its own capture showed it ${cap1 ? cap1.ms + ' ms' : 'never'} after the probe got there (Edge's capture about ${cap1 && p1 ? Math.round(cap1.ms - p1.ms) + ' ms' : '-'})`);
   seen = await waitFor(async () => ((await evalIn(`V.color(32, ${mon.w})`)) === 'green' ? Date.now() : null), 5000, 20);
   check(!!seen, `...in the picture ${seen ? seen - tp : '-'} ms after the probe was sent (polled, so roughly)`);
   await send('in', { t: 'probe', off: true });

@@ -130,8 +130,9 @@ namespace Beam
             // The spike's flags (plan/rd-spike-results.md): pick this screen without a picker; the blink flag is insurance
             // (capture is started with a user gesture through DevTools anyway).
             // (1.11) and WebRTC's sender field trial that puts playout delay 0 on every frame (the viewer shows it at once).
+            // (1.15) and no lookup of the page's own name (1.3 s of every start).
             o.AdditionalBrowserArguments = "--auto-select-desktop-capture-source=\"" + source + "\" --disable-blink-features=GetDisplayMediaRequiresUserActivation" +
-                " --force-fieldtrials=WebRTC-ForceSendPlayoutDelay/min_ms:0,max_ms:0/";
+                " --force-fieldtrials=WebRTC-ForceSendPlayoutDelay/min_ms:0,max_ms:0/ " + WebHost.NoLookup(HostName);
             o.Language = "en-US"; // the source names are English
             o.AllowSingleSignOnUsingOSPrimaryAccount = false;
             var env = await CoreWebView2Environment.CreateAsync(null, folder, o);
@@ -216,7 +217,8 @@ namespace Beam
             try { m = Json.ParseObject(e.WebMessageAsJson); }
             catch { return; }
             if (m == null) return;
-            if (Json.Str(m, "t") == "captured") Captured = true;
+            string t = Json.Str(m, "t");
+            if (t == "capturing" || t == "captured") Captured = true; // (1.15: "capturing" first, its size after)
             Raise(m);
         }
 

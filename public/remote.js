@@ -213,7 +213,10 @@ function rcBuild() {
   const video = el('video', { class: 'rc-video', playsinline: true, autoplay: true, disablepictureinpicture: true, disableremoteplayback: true, hidden: true, 'aria-label': 'The remote screen' });
   video.muted = true;
   video.defaultMuted = true;
-  video.addEventListener('loadeddata', () => { if (!rc.frames) { rc.frames = true; rcLayout(); rcRender(); } });
+  video.addEventListener('loadeddata', () => {
+    if (typeof video.requestVideoFrameCallback !== 'function') rcStartMark('picture'); // (else the frame's own time: rcWatchFrames)
+    if (!rc.frames) { rc.frames = true; rcLayout(); rcRender(); }
+  });
   video.addEventListener('resize', () => rcLayout());
   const stage = el('div', { class: 'rc-stage' }, video);
   const cursor = el('div', { class: 'rc-cursor', hidden: true, 'aria-hidden': 'true' });
@@ -271,9 +274,13 @@ async function rcConnect({ retry = false } = {}) {
   rcSetState('connecting', 'Checking your sign-in…');
   if (!rc.id) return rcEnded('unknown');
   if (!window.RTCPeerConnection) return rcEnded('unsupported');
+  // (1.15) This attempt's start, step by step: the first from the page's own start (opening it), later ones from now.
+  rc.start = { t0: rc.start ? performance.now() : 0, at: {}, pc: null, warm: false };
   try {
-    // Who we are and what the server can do, once per page (the PC's record each time).
+    // Who we are and what the server can do, once per page (the PC's record each time). (1.15) The two side by side: each
+    // was a round trip of its own before the PC was even asked.
     if (!rc.device) {
+      const infoP = apiJson('api/info', { timeout: 15000 }).catch(err => ({ err }));
       const res = await fetch(url('api/me'), { headers: idHeaders(), credentials: 'same-origin', signal: AbortSignal.timeout(10000) }).catch(() => null);
       if (gen !== rc.gen) return;
       if (!res || res.status >= 502) return rcEnded('unreachable');
@@ -282,8 +289,9 @@ async function rcConnect({ retry = false } = {}) {
       const m = await res.json().catch(() => ({}));
       if (!HOST && DEVICE_ID.test(m.you || '')) me.id = m.you; // (in memory: this page stores nothing)
       if (m.auth?.session || m.temporary) return rcEnded('temporary');
-      const info = await apiJson('api/info', { timeout: 15000 });
+      const info = await infoP;
       if (gen !== rc.gen) return;
+      if (info.err) throw info.err;
       server.api = Number(info.api) || 2;
       server.version = info.version || '';
       if (Array.isArray(info.features)) server.features = new Set(info.features);
@@ -298,7 +306,8 @@ async function rcConnect({ retry = false } = {}) {
     rcSetDevice(d);
     if (d.id === me.id) return rcEnded('self');
     if (d.status?.locked === true) return rcEnded('locked');
-    // The event stream first: the PC's offer comes on it, and signals aren't kept for anyone who isn't listening.
+    // The event stream first: the PC's offer comes on it, and signals aren't kept for anyone who isn't listening. (Only
+    // for a PC that's there: on plain http each open stream holds one of the browser's 6 connections to the server.)
     rcSetState('connecting', 'Connecting to Beam…');
     await rcOpenStream();
     if (gen !== rc.gen) return;
@@ -307,12 +316,13 @@ async function rcConnect({ retry = false } = {}) {
     try { s = await apiJson('api/rc/sessions', jsonBody({ device: rc.id })); }
     catch (err) { if (gen === rc.gen) rcEndedFromError(err); return; }
     if (gen !== rc.gen) { rcPostEnd(s.id, 'stopped'); return; }
+    rcStartMark('asked');
     // Only Tailscale addresses: the server attests nothing else, and nothing else is accepted.
     const host = { id: String(s.host?.id || rc.id), name: s.host?.name, ip4: rcIsTailscale(s.host?.ip4) ? s.host.ip4 : null, ip6: rcIsTailscale(s.host?.ip6) ? s.host.ip6 : null };
     if (!host.ip4 && !host.ip6) { rcPostEnd(s.id, 'failed'); return rcEnded('no-tailscale'); }
     rcSetSession({ id: String(s.id), host, you: s.you || {} });
     rcCreatePeer();
-    // (the PC starts its screen: about 2 s warm, 3 s cold, up to about 12 s; the offer timeout leaves more)
+    // (the PC's offer: about 0.2 s after its banner with a warm page, 1 s cold, up to about 12 s; the timeout leaves more)
     rcSetState('connecting', `Starting ${rc.name}’s screen…`);
     rcTimer('offer', () => rcFail('no-offer'), RC_OFFER_MS);
     for (const m of rc.early.splice(0)) rcOnSignal(m);
@@ -321,6 +331,13 @@ async function rcConnect({ retry = false } = {}) {
     if (err.status === 401) return rcEnded('signed-out');
     rcEnded(err.offline ? 'unreachable' : 'error', { text: friendlyError(err) });
   }
+}
+
+// (1.15) The start's steps here, in ms since this attempt began, once each (the PC's own come with its `started`):
+// asked (the server answered), offer, answered, connected (both checks passed here), picture (the first frame shown).
+function rcStartMark(step, at = performance.now()) {
+  const s = rc.start;
+  if (s && s.at[step] == null) s.at[step] = Math.max(0, Math.round(at - s.t0));
 }
 
 // The Windows app's viewer window ends the session when it's closed: it's told which one is on (or none).
@@ -642,6 +659,7 @@ async function rcOnOffer(sdp) {
   const gen = rc.gen;
   const current = () => gen === rc.gen && rc.pc === pc;
   rcClearTimer('offer');
+  rcStartMark('offer');
   try {
     const { sdp: clean, candidates } = rcStripCandidates(sdp);
     await pc.setRemoteDescription({ type: 'offer', sdp: clean });
@@ -655,6 +673,7 @@ async function rcOnOffer(sdp) {
     await pc.setLocalDescription(answer);
     if (!current()) return;
     await rcSignal('answer', { sdp: answer.sdp });
+    rcStartMark('answered');
     if (rc.state === 'connecting') rcSetState('connecting', `Connecting directly to ${rc.name} over Tailscale…`);
     if (!rc.verified) rcTimer('ice', () => rcFail('no-ice'), RC_ICE_MS);
   } catch (err) {
@@ -885,6 +904,7 @@ async function rcCheckPeer() {
   rc.verified = true;
   rc.retries = 0;
   rcClearTimer('offer');
+  rcStartMark('connected');
   rcUi.video.hidden = false;
   rcSetState('live');
   // The PC says hello once its own check passed; one that never does isn't going to let input in (start over).
@@ -984,6 +1004,7 @@ function rcWatchFrames(v) {
   const gen = v.rcFrameGen = (v.rcFrameGen || 0) + 1;
   const tick = (now, m) => {
     if (v.rcFrameGen !== gen) return;
+    rcStartMark('picture', m.expectedDisplayTime || now); // (1.15: the first frame shown)
     const d = m.captureTime ? m.expectedDisplayTime - m.captureTime : null;
     if (d != null && d >= 0 && d < 10000 && rc.delays.length < 600) rc.delays.push(d);
     if (rc.probe && !rc.probe.frame) rcProbeLook(v, m);
@@ -1007,7 +1028,7 @@ async function rcMeasure() {
   if (!rc.caps.includes('probe') || !rcLive()) { toast('Measuring the delay needs Beam 1.12.6 or later on the PC, and control of it.'); return; }
   if (typeof v.requestVideoFrameCallback !== 'function') { toast('This browser can’t time the picture’s frames, so it can’t measure the delay.'); return; }
   const gen = rc.gen;
-  rc.measuring = { got: [] };
+  rc.measuring = { got: [], caps: {} };
   rc.measured = null;
   if (!rc.pic.details) rcSetPic('details', true);
   rcRenderDetails();
@@ -1020,8 +1041,11 @@ async function rcMeasure() {
       rcRenderDetails();
     }
     if (rc.gen === gen && rc.measuring) {
-      rc.measured = rcMeasureSum(rc.measuring.got);
-      if (!rc.measured) toast('No probe came back in time, so the delay couldn’t be measured.');
+      await new Promise(r => setTimeout(r, 200)); // (the PC's word on its own capture of the last one, if it's late)
+      if (rc.gen === gen && rc.measuring) {
+        rc.measured = rcMeasureSum(rc.measuring.got, rc.measuring.caps);
+        if (!rc.measured) toast('No probe came back in time, so the delay couldn’t be measured.');
+      }
     }
   } catch (e) {
     toast(e.message);
@@ -1042,7 +1066,7 @@ function rcProbe(n, on) {
     p.check = () => {
       if (!p.answer || !p.frame) return;
       const f = p.frame;
-      finish({ total: f.shown - p.t0, pc: p.answer.ms, received: Number.isFinite(f.received) ? f.received - p.t0 : null, decode: f.decode,
+      finish({ n, total: f.shown - p.t0, pc: p.answer.ms, received: Number.isFinite(f.received) ? f.received - p.t0 : null, decode: f.decode,
         shown: Number.isFinite(f.received) ? f.shown - f.received - (f.decode || 0) : null });
     };
     rc.probe = p;
@@ -1079,8 +1103,9 @@ function rcProbeColor(v, r) {
   return null;
 }
 
-// The probes' medians, each step's own.
-function rcMeasureSum(got) {
+// The probes' medians, each step's own. (1.15) `caps`: the PC's own capture showing each probe's colour, from the probe
+// reaching its page (a Windows app 1.15): less its time to put the square on its screen, that's Edge's capture.
+function rcMeasureSum(got, caps = {}) {
   if (!got.length) return null;
   const med = list => { const a = list.filter(Number.isFinite).sort((x, y) => x - y); return a.length ? a[a.length >> 1] : null; };
   const rtt = rc.rtt ?? rc.pair?.rtt;
@@ -1089,12 +1114,28 @@ function rcMeasureSum(got) {
   // (on the PC's screen → here, per probe: the capture, encoding, sending and the way back)
   const out = got.map(g => (g.received != null && g.pc != null && half != null ? g.received - half - g.pc : null));
   const way = med(out);
+  const capture = way != null ? Math.max(0, way - half - (enc || 0) - (send || 0)) : null;
+  const edge = med(got.map(g => (Number.isFinite(caps[g.n]) && g.pc != null ? Math.max(0, caps[g.n] - g.pc) : null)));
   return {
     n: got.length, at: Date.now(), total: med(got.map(g => g.total)), toPc: half, pc: med(got.map(g => g.pc)),
-    capture: way != null ? Math.max(0, way - half - (enc || 0) - (send || 0)) : null, enc, send, back: way != null ? half : null,
+    capture, edge: capture != null ? edge : null, enc, send, back: way != null ? half : null,
     decode: med(got.map(g => g.decode)), shown: med(got.map(g => g.shown)),
     rest: way == null ? Math.max(0, med(got.map(g => g.total)) - (half || 0) - (med(got.map(g => g.pc)) || 0)) : null,
   };
+}
+
+// (1.15) The PC's steps of a start (its `started`, a Windows app 1.15), as the details name them, in the order they came.
+const RC_PC_STEPS = ['banner', 'page', 'offer', 'answer', 'connected', 'checked', 'capture', 'picture'];
+const RC_PC_STEP_NAMES = { banner: 'banner', page: 'its page', offer: 'offer', answer: 'answer', connected: 'connected', checked: 'checked', capture: 'capture', picture: 'picture out' };
+
+// "1.42 s to the picture · on Desktop: banner 0.07 · its page 0.12 · …" (seconds since this page asked; the PC's since
+// the request got there).
+function rcStartText() {
+  const s = rc.start;
+  if (!s || s.at.picture == null) return '';
+  const sec = v => (v / 1000).toFixed(2);
+  const pc = s.pc ? Object.entries(s.pc).sort((a, b) => a[1] - b[1]).map(([k, v]) => `${RC_PC_STEP_NAMES[k] || k} ${sec(v)}`) : [];
+  return `${sec(s.at.picture)} s to the picture${pc.length ? ` · on ${rc.name || 'the PC'}: ${pc.join(' · ')}${s.warm ? ' (its page was warm)' : ''}` : ''}`;
 }
 
 // The result for the details: "48 ms from a click to the picture: to the PC 2 · …".
@@ -1105,7 +1146,8 @@ function rcMeasuredText() {
   const ms = v => `${v < 10 ? Math.round(v * 10) / 10 : Math.round(v)}`;
   const parts = [
     m.toPc != null && `to the PC ${ms(m.toPc)}`, m.pc != null && `on its screen ${ms(m.pc)}`,
-    m.capture != null && `capture ${ms(m.capture)}`, m.enc != null && m.capture != null && `encode ${ms(m.enc)}`, m.send != null && m.capture != null && `send ${ms(m.send)}`,
+    m.capture != null && `capture ${ms(m.capture)}${m.edge != null ? ` (Edge ${ms(Math.min(m.edge, m.capture))} + queue ${ms(Math.max(0, m.capture - m.edge))})` : ''}`,
+    m.enc != null && m.capture != null && `encode ${ms(m.enc)}`, m.send != null && m.capture != null && `send ${ms(m.send)}`,
     m.back != null && `back ${ms(m.back)}`, m.decode != null && `decode ${ms(m.decode)}`, m.shown != null && `shown ${ms(m.shown)}`,
     m.rest != null && `the rest ${ms(m.rest)}`,
   ].filter(Boolean);
@@ -1228,6 +1270,18 @@ function rcOnCtl(data) {
         rc.probe.answer = { color: m.color, ms: Number.isFinite(m.ms) ? Math.max(0, Math.min(m.ms, 5000)) : null };
         if (Number.isFinite(m.size) && m.size > 0 && m.size <= 256) rc.probeRect = { x: Number(m.x) || 0, y: Number(m.y) || 0, size: m.size };
         rc.probe.check();
+      }
+      break;
+    case 'probe-cap': // (a Windows app 1.15) the PC's own capture showed that probe's colour this long after it got there
+      if (rc.measuring && Number.isInteger(m.n) && m.n > 0 && m.n <= RC_PROBES && Number.isFinite(m.ms)) rc.measuring.caps[m.n] = Math.max(0, Math.min(m.ms, 5000));
+      break;
+    case 'started': // (a Windows app 1.15) how the PC's side of the start went: ms since the request got there, per step
+      if (rc.start && !rc.start.pc && m.at && typeof m.at === 'object') {
+        const at = {};
+        for (const k of RC_PC_STEPS) if (Number.isFinite(m.at[k]) && m.at[k] >= 0 && m.at[k] < 600000) at[k] = Math.round(m.at[k]);
+        rc.start.pc = at;
+        rc.start.warm = m.warm === true;
+        rcRenderDetails();
       }
       break;
     case 'path': // (1.14.2, a Windows app 1.11) how Tailscale reaches this viewer: direct, or through a relay
@@ -2678,6 +2732,7 @@ function rcRenderDetails() {
     ['Delay', [s.picMs != null && `about ${rcLag()} ms from a touch to the picture`, s.picMs != null && `${s.picMs} ms from the PC’s screen to this one`,
       rtt != null && `${rtt} ms round trip`, s.jitterMs != null && `${s.jitterMs} ms buffered here`, h?.lost != null && `${h.lost}% lost`].filter(Boolean).join(' · ')],
     ['Measured', rcMeasuredText()],
+    ['Start', rcStartText()],
     ['Limited by', rc.qlr && rc.qlr !== 'none' ? (rc.qlr === 'cpu' ? 'the PC’s processor' : rc.qlr === 'bandwidth' ? 'the network' : rc.qlr) : 'nothing'],
     ['Path', rcPathText()],
   ].filter(([, v]) => v);

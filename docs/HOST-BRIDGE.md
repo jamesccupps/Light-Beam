@@ -402,6 +402,8 @@ and (Windows 1.12.4) `clip` (id 3, ordered: clipboard pictures; a side before it
     applies at once, on the same connection (a codec change re-offers with the same `o=` id). 0 and `auto` leave it to
     the PC. `vw` × `vh` is the viewer's picture area in physical pixels, zoom included: the picture is sent no
     larger. Auto: sharp text while the screen is still, smooth motion while it's busy, Data saver on mobile data.
+    (Windows 1.15) Auto's sharp text goes up to 60 fps as well (was 30): a click's change waits half as long for the
+    next frame, and a still screen sends nothing more for it. "Sharp text" chosen by hand stays 30.
   - `{ t: "fit", on: true, w, h, dpr, scale }` fits the PC's screen to the viewer's picture area (physical pixels):
     the monitor's best mode; `{ t: "fit", on: false }` puts it back, as does the session's end. The PC answers
     `{ t: "display", monitors, monitor, fitted, note? }` with the new sizes (input maps to them; the viewer holds input
@@ -469,6 +471,20 @@ and (Windows 1.12.4) `clip` (id 3, ordered: clipboard pictures; a side before it
   (requestVideoFrameCallback) for the colour and shows the medians in its details: half the round trip each way, the
   PC's `ms`, the capture (what's left), encoding and sending (the PC's stats now carry `encMs` and `sendMs`), decoding
   and the wait to be shown. The square goes after 20 s without a probe, at the session's end or a switch of screens.
+  (Windows 1.15) The PC's capture page also watches its own captured frames meanwhile (a clone of the capture through
+  MediaStreamTrackProcessor) and says, for each probe after the first, `{ t: "probe-cap", n, ms }`: from the probe
+  reaching the page to a captured frame showing its colour. Less the PC's own `ms`, that's Edge's capture; the viewer
+  shows the capture as "capture 53 (Edge 30 + queue 23)", the queue being the rest (the wait before the encoder).
+- **The start, step by step (Windows 1.15, web viewer too):** the PC tells, once a session (when its first frame has
+  gone out), `{ t: "started", at: { banner, page, offer, answer, connected, checked, capture, picture }, warm }`: ms
+  since the request reached it (the banner up; its capture page ready; its offer out; the viewer's answer in;
+  connected; its peer check passed; the capture there; the first frame out), `warm` when its capture page was kept
+  from an earlier session; the same line goes in its beam.log ("the first picture went out 0.93 s after the request
+  (…)"; a kvm session: "the keyboard-and-mouse link was up …", nothing sent). The viewer's details show "Start: 1.42 s
+  to the picture · on <PC>: banner 0.07 · …": its own time from opening the remote screen (or Reconnect) to its first
+  frame shown, and the PC's steps. Since 1.15 the PC's connection starts while its capture does (the capture joins
+  with replaceTrack, no new offer), so `checked` can come before `capture`, and the hello's `monitor` may be followed by
+  a `display` when the capture turns out to be another screen.
 - **Screens:** `{ t: "monitor", id }` restarts the capture as a new connection. The new `offer` has a different SDP
   `o=` session id, so the viewer answers it with a fresh RTCPeerConnection. An offer with the same `o=` id is a
   renegotiation on the same connection: an ICE restart (after `restart`, or 3 s of `disconnected`), or a switch to

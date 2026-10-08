@@ -54,6 +54,7 @@ namespace Beam
             var o = new CoreWebView2EnvironmentOptions();
             o.Language = "en-US";
             o.AllowSingleSignOnUsingOSPrimaryAccount = false;
+            o.AdditionalBrowserArguments = WebHost.NoLookup(HostName); // (1.15: the page in 0.1 s, not 1.3)
             var env = await CoreWebView2Environment.CreateAsync(null, folder, o);
             if (closed) return;
             RuntimeVersion = env.BrowserVersionString;

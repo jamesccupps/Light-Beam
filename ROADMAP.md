@@ -34,13 +34,16 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Updates one PC at a time, a setup check, a PC's log** (Beam 1.20, the Windows app 1.14): a new Windows build goes to
   one PC first and to the others once it has run there for 10 minutes (one that fails there goes no further unless you
   say so); Beam checks its own setup every 6 hours and alerts when something is wrong; a PC's Beam log from any device.
+- **Remote control starts faster** (the Windows app 1.15): over a second less for every remote control and shared
+  mouse start (the PC's own pages no longer wait for Windows to look up their made-up names), the connection made
+  while the capture starts, Auto at 60 fps, and each start shown step by step in the viewer's details.
 
 ## Next
 - **Remote control, further:** less delay where the measurement shows it goes (the first measurements, a PC 25 ms
   away over the internet: 92–146 ms from a click to the picture, half of it in the PC's screen capture; 60 fps saved
-  25 ms, and Windows' hardware H.264 path added 30): the capture step split and shortened, 60 fps in Auto, the
-  viewer's wait to show a frame; then a Lowest delay mode, capture straight into the hardware encoder, decoding on the
-  phone with WebCodecs, full-colour text, sound.
+  25 ms, and Windows' hardware H.264 path added 30; the Windows app 1.15 splits the capture step into Edge's own and
+  the wait before the encoder): the capture step shortened, the viewer's wait to show a frame; then a Lowest delay
+  mode, capture straight into the hardware encoder, decoding on the phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
