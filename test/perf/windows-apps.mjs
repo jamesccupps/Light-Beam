@@ -167,6 +167,12 @@ try {
   check(r.status === 200 && JSON.stringify(r.json.asked) === '["Test PC"]', `install on all PCs: the PC is asked (${r.text.slice(0, 120)})`);
   check(!!(await pc.waitLog(/Apps: asks whoever is here before installing Beam Test Tool/, from)), 'the PC asks whoever is there first (not allowed yet)');
   check(!!(await waitState(tool.id, pc.id, 'asked')), '...and says so: "asked"');
+  // (1.16.1) The question opens by itself (near the clock, on top), and Beam's window knows it's waiting (its bar)
+  check(!!(await pc.waitLog(/Apps: the question about Beam Test Tool is on the screen \(by itself\)/, from)), 'the question opens by itself');
+  let at = pc.mark();
+  pc.forward(['--test-bridge', JSON.stringify({ type: 'getSettings', id: 'test-asks' })]);
+  const asks = await pc.waitLog(/Bridge test reply: .*"id":"test-asks"/, at);
+  check(!!asks && asks.includes(`"appAsks":[{"id":"${tool.id}"`) && asks.includes('"name":"Beam Test Tool"'), `...and the window's bar has it (settings.appAsks) (${(asks || '').match(/"appAsks":[^\]]*\]/)?.[0]})`);
   pc.forward(['--test-apps', `answer:${tool.id}:install`]);
   let s = await waitState(tool.id, pc.id, 'installed');
   const toolExe = path.join(pc.cfgDir, 'Programs', 'Beam Test Tool', 'BeamTestTool.exe');
@@ -180,8 +186,12 @@ try {
   from = pc.mark();
   await call('POST', `/api/apps/${kit.id}/install`, { devices: [pc.id] });
   check(!!(await waitState(kit.id, pc.id, 'asked')), 'the .zip: asked again');
-  pc.forward(['--test-apps', `answer:${kit.id}:notnow`]);
-  check(!!(await waitState(kit.id, pc.id, 'declined')), 'Not now: the server hears "declined"');
+  // (1.16.1) Not now from Beam's window (its bar: the bridge's appAsk): answered, its question gone, the bar empty
+  at = pc.mark();
+  pc.forward(['--test-bridge', JSON.stringify({ type: 'appAsk', id: 'test-notnow', app: kit.id, choice: 'notnow' })]);
+  check(!!(await waitState(kit.id, pc.id, 'declined')), 'Not now (from the window\'s bar): the server hears "declined"');
+  const after = await pc.waitLog(/Bridge test reply: .*"id":"test-notnow"/, at);
+  check(!!after && after.includes('"appAsks":[]'), '...and nothing is waiting any more');
   await call('POST', `/api/apps/${kit.id}/install`, { devices: [pc.id] });
   check(!!(await waitState(kit.id, pc.id, 'asked')), 'asked once more');
   pc.forward(['--test-apps', `answer:${kit.id}:always`]);

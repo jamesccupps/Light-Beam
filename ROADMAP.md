@@ -39,15 +39,17 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   while the capture starts, Auto at 60 fps, and each start shown step by step in the viewer's details.
 - **Apps on every PC** (Beam 1.21, the Windows app 1.16): your own apps from a GitHub repository's releases (checked
   against the checksum the release publishes), a file you send, or winget, installed on all your PCs from one page;
-  each PC asks once before Beam installs anything there, installs for its user only (never as administrator), and says
-  how it went; new GitHub releases reach the PCs that have the app.
+  each PC asks once before Beam installs anything there (the question opens on the PC by itself, the Windows app
+  1.16.1), installs for its user only (never as administrator), and says how it went; new GitHub releases reach the
+  PCs that have the app.
 
 ## Next
-- **Remote control, further:** less delay where the measurement shows it goes (the first measurements, a PC 25 ms
-  away over the internet: 92–146 ms from a click to the picture, half of it in the PC's screen capture; 60 fps saved
-  25 ms, and Windows' hardware H.264 path added 30; the Windows app 1.15 splits the capture step into Edge's own and
-  the wait before the encoder): the capture step shortened, the viewer's wait to show a frame; then a Lowest delay
-  mode, capture straight into the hardware encoder, decoding on the phone with WebCodecs, full-colour text, sound.
+- **Remote control, further:** less delay where the measurement shows it goes. At 60 fps (the Windows app 1.15), a PC
+  25 ms away over the internet: 83 ms from a click to the picture (92–146 ms before), of which 28 is the network, 27 the
+  PC's screen capture inside Edge (nothing waits before the encoder any more) and 25 the viewer's own wait to show a
+  frame. Next: that wait (decoding the frames in the page and drawing them straight to the screen) and a faster start
+  (the capture page kept ready, the first picture sent at a higher bitrate); then a Lowest delay mode, capture straight
+  into the hardware encoder, decoding on the phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Linux, Raspberry Pi first:** today a Pi uses the web app in its browser, or the command-line client headless

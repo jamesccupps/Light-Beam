@@ -145,6 +145,10 @@ window.addEventListener('pointerdown', e => { lastPointer = e.pointerType || 'mo
 
 function openMenu(entries, at, { label = 'Actions', quick = null } = {}) {
   const menu = $('#menu');
+  // (1.16.1) A menu from inside an open dialog goes into it: a modal dialog sits above the page and leaves the rest
+  // inert, so Settings → Apps' "Install on…" opened its list unseen behind Settings.
+  const host = (at instanceof Element && at.closest('dialog[open]')) || document.body;
+  if (menu.parentElement !== host) host.append(menu);
   menuReturnFocus = document.activeElement;
   const buttons = [];
   const nodes = quick ? [quick] : []; // (1.14.0: a row of quick reactions on top)
@@ -205,6 +209,8 @@ function bindMenu() {
   window.addEventListener('resize', closeMenu);
   // Only the user scrolling closes it: a message arriving (the thread scrolls itself) mustn't pull it away.
   for (const type of ['wheel', 'touchmove']) $('#thread').addEventListener(type, closeMenu, { passive: true });
+  // (1.16.1) And scrolling a dialog the menu is in (not the menu's own list).
+  for (const d of $$('dialog')) for (const type of ['wheel', 'touchmove']) d.addEventListener(type, e => { if (!menu.contains(e.target)) closeMenu(); }, { passive: true });
 
   // Right-click / long-press on a message: Beam's menu (Shift+right-click still gives the browser's).
   $('#thread').addEventListener('contextmenu', e => {

@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -209,6 +209,14 @@ namespace Beam
                     if (!app.Cfg.AppsAllowed) app.Apps.Toggle("Settings on this PC");
                     Reply(id, Obj("settings", app.SettingsObject()));
                     break;
+                case "appAsk": // (1.16.1) the window's bar: an app waiting here brings up its question (installing is agreed
+                               // only there, at this PC), or is answered Not now
+                {
+                    string askId = Json.Str(m, "app");
+                    if (Json.Str(m, "choice") == "notnow") app.Apps.Answer(askId, "notnow"); else app.Apps.ShowAsk(askId);
+                    Reply(id, Obj("settings", app.SettingsObject()));
+                    break;
+                }
                 case "restoreSettings": // Beam 1.8.1: the native choice of backups (SettingsBackups)
                     app.Backups.ShowChoices();
                     Reply(id, null);
