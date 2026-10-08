@@ -105,6 +105,8 @@ namespace Beam
                 string folder = Path.Combine(cfg.WebViewFolder, "RemoteView");
                 Directory.CreateDirectory(folder);
                 var o = new CoreWebView2EnvironmentOptions();
+                // (1.17: --disable-gpu-vsync was tried, as Edge itself shows the page's own drawing sooner without vsync;
+                // in a web view hosted like this one it made no difference: Beam-dev\research\rc-display.)
                 o.AdditionalBrowserArguments = "--force-fieldtrials=WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/";
                 o.AllowSingleSignOnUsingOSPrimaryAccount = false;
                 environment = CoreWebView2Environment.CreateAsync(null, folder, o);

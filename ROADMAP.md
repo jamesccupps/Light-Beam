@@ -42,14 +42,17 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   each PC asks once before Beam installs anything there (the question opens on the PC by itself, the Windows app
   1.16.1), installs for its user only (never as administrator), and says how it went; new GitHub releases reach the
   PCs that have the app.
+- **Less remote control delay** (the Windows app 1.17): measured at a desk (a PC 25 ms away over the internet, 83 ms
+  from a click to the picture: 28 of it the network, 27 the PC's capture inside Edge, 25 the viewer's own wait to show a
+  frame), so: the viewer draws each frame the moment it's decoded, into a low-latency canvas, instead of waiting for
+  the browser's video player (on a 143 Hz screen, a change seen after 34 ms instead of 54 in the Windows app's viewer,
+  43 in Edge), and a faster start (every PC that allows remote control keeps its capture page ready, about 150 MB, and
+  the first picture starts at the speed the network had last time).
 
 ## Next
-- **Remote control, further:** less delay where the measurement shows it goes. At 60 fps (the Windows app 1.15), a PC
-  25 ms away over the internet: 83 ms from a click to the picture (92–146 ms before), of which 28 is the network, 27 the
-  PC's screen capture inside Edge (nothing waits before the encoder any more) and 25 the viewer's own wait to show a
-  frame. Next: that wait (decoding the frames in the page and drawing them straight to the screen) and a faster start
-  (the capture page kept ready, the first picture sent at a higher bitrate); then a Lowest delay mode, capture straight
-  into the hardware encoder, decoding on the phone with WebCodecs, full-colour text, sound.
+- **Remote control, further:** what's left of the delay is the network and the PC's capture inside Edge (a capture of
+  Beam's own might take 10–15 ms off it, for a lot of work): a Lowest delay mode, capture straight into the hardware
+  encoder, decoding on the phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Linux, Raspberry Pi first:** today a Pi uses the web app in its browser, or the command-line client headless

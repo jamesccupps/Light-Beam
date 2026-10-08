@@ -247,7 +247,8 @@ try {
   check(!!(await waitLog(inst.laptop, /Keyboard and mouse: on \(test\): KVM Test SHOP to the left of this PC/, nl, 10000)), 'the laptop turns it on, SHOP to its left');
   check(!!(await waitLog(inst.pc, /KVM Test Laptop asks to share its keyboard and mouse with this PC/, n, 15000)), 'SHOP hears a kvm request');
   check(!!(await waitLog(inst.pc, /banner up: KVM Test Laptop \(kvm-test-machine · .*\) shares its keyboard and mouse$/, n, 10000)), 'SHOP shows its banner (no banner, no session)');
-  check(!!(await waitLog(inst.pc, /its page \(no capture: keyboard and mouse only\) is up/, n, 20000)), 'SHOP starts its page without any capture');
+  // (1.17: a PC that allows remote control warms its page when it's allowed, so the session reuses that one)
+  check(!!(await waitLog(inst.pc, /its page \(no capture: keyboard and mouse only\) is (up|reused)/, n, 20000)), 'SHOP starts its page without any capture');
   check(!!(await waitLog(inst.pc, /KVM Test Laptop's keyboard and mouse can reach this PC \(peer .* is kvm-test-machine, checked\)/, n, 30000)), 'SHOP checked the peer: the laptop can reach it');
   const ready = await waitLog(inst.laptop, /Keyboard and mouse: KVM Test SHOP is ready \(/, nl, 30000);
   check(!!ready, `the laptop checked its peer and has Shop's screens: ${ready ? ready.replace(/.*is ready /, '') : 'not ready'}`);

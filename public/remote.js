@@ -218,7 +218,8 @@ function rcBuild() {
     if (!rc.frames) { rc.frames = true; rcLayout(); rcRender(); }
   });
   video.addEventListener('resize', () => rcLayout());
-  const stage = el('div', { class: 'rc-stage' }, video);
+  const canvas = el('canvas', { class: 'rc-canvas', hidden: true, 'aria-hidden': 'true' }); // (1.17: the picture drawn here, rcFast)
+  const stage = el('div', { class: 'rc-stage' }, video, canvas);
   const cursor = el('div', { class: 'rc-cursor', hidden: true, 'aria-hidden': 'true' });
   const fx = el('div', { class: 'rc-fxs', 'aria-hidden': 'true' }); // (taps, the hold ring)
   const notice = el('div', { class: 'rc-notice', role: 'status', hidden: true });
@@ -236,7 +237,7 @@ function rcBuild() {
   const keys = el('div', { class: 'rc-keys', hidden: true });
   const root = el('div', { id: 'remote', class: 'rc' }, bar, el('div', { class: 'rc-body' }, stage, fx, cursor, details, notice, overlay, help), keys, sink);
   document.body.prepend(root);
-  Object.assign(rcUi, { root, bar, name, chip, tools, stage, video, cursor, fx, notice, overlay, help, card, sink, keys, details });
+  Object.assign(rcUi, { root, bar, name, chip, tools, stage, video, canvas, cursor, fx, notice, overlay, help, card, sink, keys, details });
   rcBindInput();
   rcBuildKeyStrip();
   rcRender();
@@ -420,7 +421,10 @@ function rcTeardown({ endSession = false, reason = 'stopped' } = {}) {
   rc.resolving = 0;
   rc.resolveSpent = 0;
   rcWakeRelease();
+  rcFastStop();
+  rc.track = null;
   if (rcUi.video) rcUi.video.hidden = true;
+  if (rcUi.canvas) rcUi.canvas.hidden = true;
 }
 
 // The peer connection and what belongs to it (also when a new connection replaces it in the same session).
@@ -621,6 +625,8 @@ function rcCreatePeer() {
     v.srcObject = e.streams[0] || new MediaStream([e.track]);
     v.play().catch(() => {});
     rcWatchFrames(v);
+    rc.track = e.track;
+    rcFastStart(e.track); // (1.17)
   };
   pc.onicecandidate = e => { if (mine()) rcLocalCandidate(e.candidate); };
   pc.onconnectionstatechange = () => { if (mine()) rcOnConnState(); };
@@ -1005,9 +1011,16 @@ function rcWatchFrames(v) {
   const tick = (now, m) => {
     if (v.rcFrameGen !== gen) return;
     rcStartMark('picture', m.expectedDisplayTime || now); // (1.15: the first frame shown)
-    const d = m.captureTime ? m.expectedDisplayTime - m.captureTime : null;
+    // (1.17: drawn by this page, the frame was on its way to the screen when it was drawn)
+    const shownAt = (rcFast.on && rcFast.drawn.get(m.rtpTimestamp)) || m.expectedDisplayTime;
+    const d = m.captureTime ? shownAt - m.captureTime : null;
     if (d != null && d >= 0 && d < 10000 && rc.delays.length < 600) rc.delays.push(d);
-    if (rc.probe && !rc.probe.frame) rcProbeLook(v, m);
+    const p = rc.probe;
+    if (p && !p.frame && p.fast && (p.fast.rtp == null || p.fast.rtp === m.rtpTimestamp)) {
+      // (1.17) The probe's frame, drawn by this page (rcFastDraw): its receive time and decoding are this callback's.
+      p.frame = { shown: p.fast.shown, received: p.fast.rtp != null ? m.receiveTime : null, decode: Number.isFinite(m.processingDuration) ? m.processingDuration * 1000 : null, drawn: true };
+      p.check();
+    } else if (p && !p.frame && !rcFast.on) rcProbeLook(v, m);
     v.requestVideoFrameCallback(tick);
   };
   v.requestVideoFrameCallback(tick);
@@ -1067,7 +1080,7 @@ function rcProbe(n, on) {
       if (!p.answer || !p.frame) return;
       const f = p.frame;
       finish({ n, total: f.shown - p.t0, pc: p.answer.ms, received: Number.isFinite(f.received) ? f.received - p.t0 : null, decode: f.decode,
-        shown: Number.isFinite(f.received) ? f.shown - f.received - (f.decode || 0) : null });
+        shown: Number.isFinite(f.received) ? f.shown - f.received - (f.decode || 0) : null, drawn: f.drawn === true });
     };
     rc.probe = p;
     if (!rcSend('in', on ? { t: 'probe', n, on: true } : { t: 'probe', n })) finish(null);
@@ -1086,8 +1099,9 @@ function rcProbeLook(v, m) {
 // The colour in the middle of the square, in the frame shown now: magenta, green, or null (anything else).
 function rcProbeColor(v, r) {
   const mon = rc.monitors.find(x => x.id === rc.monitor);
-  if (!mon?.w || !v.videoWidth) return null;
-  const k = v.videoWidth / mon.w;
+  const vw = v.videoWidth ?? v.displayWidth; // (the <video>, or a decoded frame: 1.17's rcFastDraw)
+  if (!mon?.w || !vw) return null;
+  const k = vw / mon.w;
   const half = Math.max(1, r.size * k / 4);
   const cx = (r.x + r.size / 2) * k, cy = (r.y + r.size / 2) * k;
   let c = rcUi.probeCanvas;
@@ -1119,7 +1133,7 @@ function rcMeasureSum(got, caps = {}) {
   return {
     n: got.length, at: Date.now(), total: med(got.map(g => g.total)), toPc: half, pc: med(got.map(g => g.pc)),
     capture, edge: capture != null ? edge : null, enc, send, back: way != null ? half : null,
-    decode: med(got.map(g => g.decode)), shown: med(got.map(g => g.shown)),
+    decode: med(got.map(g => g.decode)), shown: med(got.map(g => g.shown)), drawn: got.some(g => g.drawn),
     rest: way == null ? Math.max(0, med(got.map(g => g.total)) - (half || 0) - (med(got.map(g => g.pc)) || 0)) : null,
   };
 }
@@ -1148,7 +1162,7 @@ function rcMeasuredText() {
     m.toPc != null && `to the PC ${ms(m.toPc)}`, m.pc != null && `on its screen ${ms(m.pc)}`,
     m.capture != null && `capture ${ms(m.capture)}${m.edge != null ? ` (Edge ${ms(Math.min(m.edge, m.capture))} + queue ${ms(Math.max(0, m.capture - m.edge))})` : ''}`,
     m.enc != null && m.capture != null && `encode ${ms(m.enc)}`, m.send != null && m.capture != null && `send ${ms(m.send)}`,
-    m.back != null && `back ${ms(m.back)}`, m.decode != null && `decode ${ms(m.decode)}`, m.shown != null && `shown ${ms(m.shown)}`,
+    m.back != null && `back ${ms(m.back)}`, m.decode != null && `decode ${ms(m.decode)}`, m.shown != null && `${m.drawn ? 'drawn' : 'shown'} ${ms(m.shown)}`,
     m.rest != null && `the rest ${ms(m.rest)}`,
   ].filter(Boolean);
   return `${Math.round(m.total)} ms from a click to the picture (median of ${m.n}): ${parts.join(' · ')}`;
@@ -2379,7 +2393,103 @@ function rcApplyView() {
   const zoom = v.s / v.base;
   if (Math.abs(zoom - rc.zoom) > 0.01) rcPicSoon(); // (zoomed in, the PC sends more of its pixels: 1.8)
   rc.zoom = zoom;
+  rcFastDraw(false);
   rcDrawPointer();
+}
+
+// ---------------------------------------------------------------- the picture drawn here (Windows app 1.17 + the viewer)
+
+// (1.17) Where the browser can, this page draws the picture itself: each frame as it's decoded, into a
+// "desynchronized" canvas over the stage, at the stage's size in device pixels (one scaled by CSS reached the screen
+// late now and then). That skips the browser's own wait to show a video frame (the user's desk: "shown 25" of 83 ms).
+// On Desktop's 143 Hz screen, a change reached the screen 43 ms after it was made instead of 54 (median of 60, the
+// screen's own capture watching), and never later; in a web view hosted as the Windows app's viewer is, 34 against 54
+// (Beam-dev\research\rc-display). The <video> stays, hidden: its frame callbacks keep the delay's figures, and it's
+// the picture again in 1:1, on a phone or tablet, or with "Show each frame as it arrives" off (the Picture panel).
+const rcFast = { on: false, gen: 0, reader: null, clone: null, frame: null, g: null, key: '', drawn: new Map(), first: false };
+
+const rcFastWanted = () => typeof MediaStreamTrackProcessor === 'function' && rc.pic.fast !== false && rc.fit !== '1:1' && !rcPhone();
+
+// On or off for the session's track (`ontrack`, Fit/1:1, the setting); the frames come from a copy of the track.
+async function rcFastStart(track) {
+  rcFastStop();
+  if (!track || track.readyState === 'ended' || !rcFastWanted()) return;
+  const gen = rcFast.gen;
+  let reader;
+  try {
+    rcFast.clone = track.clone();
+    reader = rcFast.reader = new MediaStreamTrackProcessor({ track: rcFast.clone }).readable.getReader();
+  } catch {
+    rcFastStop();
+    return;
+  }
+  rcFastShow(true);
+  for (;;) {
+    let r;
+    try { r = await reader.read(); } catch { break; }
+    if (r.done) break;
+    if (gen !== rcFast.gen) { r.value.close(); break; }
+    rcFast.frame?.close();
+    rcFast.frame = r.value;
+    rcFastDraw(true);
+  }
+  if (gen === rcFast.gen) rcFastStop();
+}
+
+function rcFastStop() {
+  rcFast.gen++;
+  try { rcFast.reader?.cancel(); } catch {}
+  try { rcFast.clone?.stop(); } catch {}
+  try { rcFast.frame?.close(); } catch {}
+  Object.assign(rcFast, { reader: null, clone: null, frame: null, key: '', first: false });
+  rcFast.drawn.clear();
+  rcFastShow(false);
+}
+
+function rcFastShow(on) {
+  rcFast.on = on;
+  rcUi.stage?.classList.toggle('fast', on);
+}
+
+// The last frame, where rcV puts the picture (`fresh`: a new frame, else the view changed).
+function rcFastDraw(fresh) {
+  const f = rcFast.frame;
+  const v = rcV;
+  if (!rcFast.on || !f || !v.base) return;
+  const c = rcUi.canvas;
+  const d = window.devicePixelRatio || 1;
+  const W = Math.max(1, Math.round(v.SW * d));
+  const H = Math.max(1, Math.round(v.SH * d));
+  if (c.width !== W || c.height !== H) {
+    c.width = W;
+    c.height = H;
+    c.style.width = `${W / d}px`; // (exactly its pixels: never scaled)
+    c.style.height = `${H / d}px`;
+  }
+  const g = rcFast.g || (rcFast.g = c.getContext('2d', { desynchronized: true, alpha: false }));
+  if (!g) return;
+  const x = v.ox * d, y = v.oy * d, w = v.W * v.s * d, h = v.H * v.s * d;
+  const key = `${W}x${H} ${x} ${y} ${w} ${h}`;
+  if (key !== rcFast.key) { g.fillStyle = getComputedStyle(rcUi.root).backgroundColor || '#000'; g.fillRect(0, 0, W, H); rcFast.key = key; } // (bars as the page's)
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(f, x, y, w, h);
+  if (!fresh) return;
+  const now = performance.now();
+  const rtp = rcFastRtp(f);
+  if (rtp != null) {
+    rcFast.drawn.set(rtp, now);
+    if (rcFast.drawn.size > 120) rcFast.drawn.delete(rcFast.drawn.keys().next().value);
+  }
+  if (!rcFast.first) { rcFast.first = true; rcStartMark('picture', now); }
+  const p = rc.probe;
+  if (p && !p.frame && !p.fast && rcProbeColor(f, rc.probeRect || { x: 0, y: 0, size: 32 }) === (p.n % 2 ? 'green' : 'magenta')) {
+    // (its receive time and decoding come with the video's own callback for the same frame: rcWatchFrames)
+    p.fast = { shown: now, rtp };
+  }
+}
+
+function rcFastRtp(f) {
+  try { const r = f.metadata?.().rtpTimestamp; return Number.isFinite(r) ? r : null; } catch { return null; }
 }
 
 // Zoom to scale `s` keeping the point at (cx, cy) in the window where it is.
@@ -2418,6 +2528,7 @@ function rcLayout() {
   const v = rcUi.video;
   const stage = rcUi.stage;
   if (!v) return;
+  if (rc.track && rcFast.on !== rcFastWanted()) { if (rcFast.on) rcFastStop(); else rcFastStart(rc.track); } // (1.17: not in 1:1)
   const one = rc.fit === '1:1' && !rcPhone();
   stage.classList.toggle('one-to-one', one);
   if (one) {
@@ -2588,7 +2699,7 @@ function rcLoadPic() {
   const q = p && typeof p === 'object' ? p : {};
   const one = key => (RC_PIC[key].some(([v]) => v === q[key]) ? q[key] : RC_PIC[key][0][0]);
   return { mode: one('mode'), size: one('size'), fps: one('fps'), kbps: one('kbps'), codec: one('codec'), fitPc: typeof q.fitPc === 'boolean' ? q.fitPc : null, fitScale: q.fitScale === true, details: q.details === true,
-    pointer: q.pointer !== false };
+    pointer: q.pointer !== false, fast: q.fast !== false };
 }
 const rcPicLabel = (key, v) => RC_PIC[key].find(([x]) => x === v)?.[1] || String(v);
 // (1.12.7) Off unless chosen: a new resolution makes some of the PC's apps (Windows' Settings) lay out wrong until
@@ -2600,6 +2711,7 @@ function rcSetPic(key, value) {
   store.setJson(`beam.rc.pic.${RC_ID}`, rc.pic);
   if (key === 'fitPc' || key === 'fitScale') rcSendFit();
   else if (key === 'pointer') rcSendPointer();
+  else if (key === 'fast') rcFastStart(rc.track); // (1.17: this page's own)
   else if (key !== 'details') rcSendPic();
   rcRenderBar();
   rcRenderDetails();
@@ -2698,6 +2810,8 @@ function rcShowSettings() {
     !full && note(`More settings (picture size, frame rate, data limit, codec) need Beam 1.8 or later on ${n}.`),
     rc.caps.includes('cursor') && !rcPhone() && toggle('Draw the pointer here', rc.pic.pointer !== false, v => rcSetPic('pointer', v),
       { hint: `Your pointer moves at once, in ${n}’s shape (arrow, text, hand…), and ${n} hides its own while you control it. Turn this off while someone is watching ${n}’s own screen.` }),
+    typeof MediaStreamTrackProcessor === 'function' && !rcPhone() && toggle('Show each frame as it arrives', rc.pic.fast !== false, v => rcSetPic('fast', v),
+      { hint: 'Beam draws the picture itself, without the browser’s own wait to show a video frame: less delay. Turn it off if the picture tears or stutters here.' }),
     toggle('Show details', rc.pic.details, v => rcSetPic('details', v), { hint: 'Picture size, frames, data rate, codec, delay and losses, over the picture.' }),
     rc.caps.includes('probe') && field('Delay', el('div', {},
       el('button', { class: 'btn', type: 'button', disabled: Boolean(rc.measuring), onclick: () => { $('#genDlg').close('ok'); rcMeasure(); } }, 'Measure the delay'),
@@ -3009,6 +3123,7 @@ function rcRender() {
   overlay.hidden = !parts;
   card.replaceChildren(...(parts || []).filter(Boolean));
   video.hidden = !rc.verified;
+  rcUi.canvas.hidden = !rc.verified;
   rcKeyboardLock();
 }
 

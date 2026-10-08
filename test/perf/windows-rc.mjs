@@ -454,6 +454,10 @@ try {
   rc(`allow:${viewerId}`);
   check(!!(await waitLog(/Remote control: allowed on this PC \(test\), for Test Phone$/, from, 8000)), 'turned on, for the ticked device only');
   check(!!(await waitLog(/Test Phone is pinned to the Tailscale machine rc-test-machine/, from, 15000)), 'the device is pinned to its Tailscale machine (this PC\'s own whois)');
+  // 1.17: a PC that allows remote control keeps a capture host warm, its page having asked for the codecs once.
+  check(!!(await waitLog(/keeping a capture host warm \(remote control turned on\)/, from, 5000)), 'turned on: a capture host is kept warm (1.17)');
+  const primed = await waitLog(/the warm capture host has its codecs \(\d+, \d+ ms\)/, from, 20000);
+  check(!!primed && !!(await waitLog(/capture host kept warm for the next session/, from, 5000)), `...its page asked for the codecs once, then parked (${primed ? primed.replace(/.*has its codecs /, '') : 'no'})`);
   pc = await waitFor(async () => { const d = await pcRecord(); return d && d.can && d.can.remoteControl ? d : null; }, 10000);
   check(!!pc && pc.status.remoteControl === true && pc.status.locked === false, 'the status report says so at once: can.remoteControl true');
   const cfg1 = readConfig();
@@ -517,7 +521,7 @@ try {
   const unresolved = await waitLog(/the connection's peer failed the check: the connection's peer address is unknown/, from, 30000);
   check(!!unresolved, 'a viewer that withholds its candidates (peer-reflexive, its address unreadable) is hung up on');
   check(count(/is controlling this PC \(peer/, from) === 0 && inputLines().length === 0, '...without ever going live');
-  await waitLog(/capture stopped|capture host closed$/, from, 12000);
+  await waitLog(/capture stopped|capture host closed$|capture host kept warm for the next session/, from, 12000);
   keepCandidates = false;
   await endViewer();
 
@@ -544,6 +548,7 @@ try {
   check(count(/Remote control: input through recording$/) >= 1 && count(/input through SendInput/) === 0, 'a --config instance injects through the recording backend, never SendInput');
   const verifiedLine = await waitLog(/Test Phone is controlling this PC \(peer .* is rc-test-machine, checked\)/, from, 20000);
   check(!!verifiedLine, 'connected, and the peer passed the check (its address is the attested one, its node the pinned one)');
+  check(!!(await waitLog(/Remote control page: the first picture starts at 4000 kbps$/, from, 5000)), 'the first picture starts at 4 Mbps: nothing known about this viewer yet (1.17)');
   const hello = await waitCtl('hello', t0, 10000);
   check(!!hello && hello.role === 'host' && Array.isArray(hello.monitors) && hello.monitors.length > 0, `the viewer got the host's hello (${hello ? hello.monitors.length + ' screen(s)' : 'none'})`);
   check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video","clipimg","cursor","probe"]' && hello.fitted === false,
@@ -830,7 +835,9 @@ try {
   check(!!(await waitLog(/Test Phone stopped controlling this PC after \d+ s \(the banner's Stop\)/, from, 5000)), 'beam.log: who, how long, how it ended');
   check(!!(await waitLog(/this PC's pointer is back to normal \(the session ended\)/, from, 3000)), 'its pointer is back to normal (1.12.6)');
   check(!!(await waitLog(/the shared screen back to 2560×1440 at 150% \(the session ended\)$/, from, 5000)) && !readConfig().rcDisplayRestore, 'the fitted screen is put back when the session ends (1.8)');
-  check(!!(await waitLog(/capture stopped \(its host is kept 2 minutes for a reconnect\)/, from, 5000)), 'the capture stopped at once (its host is kept 2 minutes for a reconnect)');
+  check(!!(await waitLog(/capture stopped; capture host kept warm for the next session/, from, 5000)), 'the capture stopped at once (1.17: its host kept warm, as this PC allows remote control)');
+  const netKept = (readConfig().rcNet || {})[viewerId];
+  check(netKept > 0, `the network this viewer had is kept for its next start (1.17: ${netKept} kbps)`);
   await endViewer();
   console.log(`  that session ran ${Math.round((Date.now() - t0) / 1000)} s`);
 
@@ -852,11 +859,17 @@ try {
   }
   check(!!(await waitLog(/capture host reused/, from, 10000)), 'a session soon after the last one reuses its warm capture host');
   check(!!(await waitLog(/a screen capture was allowed/, from, 15000)), '...and the session goes on');
+  {
+    const start = await waitLog(/the first picture starts at (\d+) kbps \(this viewer had (\d+) kbps last time\)/, from, 15000);
+    const [, kbps, had] = (start && start.match(/starts at (\d+) kbps \(this viewer had (\d+) kbps/)) || [];
+    check(!!start && Number(had) === netKept && Number(kbps) === Math.max(300, Math.min(Math.round(netKept * 0.8), 8000)),
+      `...its first picture starts from what this viewer had last time (1.17: ${start ? start.replace(/.*starts at /, '') : 'no'})`);
+  }
   const sid2 = live.id;
   rc('kill');
   const killed = await viewerEvents.wait('rc-end', d => d.id === sid2, 8000);
   check(!!killed && killed.reason === 'stopped' && !!(await waitLog(/Remote control: kill switch \(test\)/, from, 2000)), 'the kill switch ends it at once');
-  check(!!(await waitLog(/capture stopped|capture host closed$/, from, 12000)), '...and the capture stops');
+  check(!!(await waitLog(/capture stopped|capture host closed$|capture host kept warm for the next session/, from, 12000)), '...and the capture stops');
   await endViewer();
 
   // 8b. (1.11.4) Windows' Stop sharing with no display change lately ends it, as before (one just after a change starts
@@ -879,7 +892,7 @@ try {
   await startServer();
   const leaseEnd = await waitLog(/the server ended it \(lease answered 404\)/, from, 25000);
   check(!!leaseEnd, 'after a server restart the next lease gets 404: the PC ends the session');
-  check(!!(await waitLog(/capture stopped|capture host closed$/, from, 12000)), '...and stops capturing');
+  check(!!(await waitLog(/capture stopped|capture host closed$|capture host kept warm for the next session/, from, 12000)), '...and stops capturing');
   live = null;
   viewerEvents.close();
   viewerEvents = await openEvents(VIEWER());
@@ -915,7 +928,7 @@ try {
   r = await call(OTHER(), 'DELETE', `/api/devices/${viewerId}`);
   check(r.status === 200 || r.status === 204, `the viewer device is removed (${r.status})`);
   check(!!(await waitLog(/stopped controlling this PC .*\((revoked|its device was removed)|request ended before it was live \((revoked|its device was removed)/, from, 8000)), 'the session ends with the device');
-  check(!!(await waitLog(/capture stopped|capture host closed$/, from, 12000)), '...and the capture stops');
+  check(!!(await waitLog(/capture stopped|capture host closed$|capture host kept warm for the next session/, from, 12000)), '...and the capture stops');
   live = null;
 
   // 12. The viewer window: a profile of its own; the sign-in is a cookie, never a URL.
