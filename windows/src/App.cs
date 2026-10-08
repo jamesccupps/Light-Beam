@@ -263,6 +263,14 @@ namespace Beam
             if (!uiTimer.Enabled) { uiResting = false; uiTimer.Start(); }
         }
 
+        // (1.16.1) An app's question came or went, or Let Beam install apps changed: the page (its bar, This PC) and the
+        // tray menu hear it.
+        public void AppsChanged()
+        {
+            if (SettingsChanged != null) SettingsChanged();
+            MarkChanged();
+        }
+
         void Tick()
         {
             // Transfer progress for the page, a few times a second. An early download waiting for its sender has none.
@@ -1426,12 +1434,6 @@ namespace Beam
             notifier.Show(title, text, null, title);
         }
 
-        // (1.16) One that does something when clicked (an app waiting for an answer here).
-        public void Notify(string title, string text, Action onClick)
-        {
-            notifier.Show(title, text, onClick, title);
-        }
-
         // ------------------------------------------------------------------ updates
 
         void SetUpdateState(string state, string version, string error)
@@ -2404,6 +2406,17 @@ namespace Beam
             s["allowRemoteControl"] = ServerHas("remote-control") ? (object)Cfg.AllowRemoteControl : null;
             // Beam 1.21 (null: the server has no apps). As for remote control: the page can turn it off, never on.
             s["appsAllowed"] = ServerHas("apps") ? (object)Cfg.AppsAllowed : null;
+            // (1.16.1) Apps waiting for an answer here, oldest first: the page's bar (read-only; answered in the question).
+            s["appAsks"] = ServerHas("apps") ? (object)Apps.Asks.OrderBy(a => a.At).Select(a =>
+            {
+                var o = new Dictionary<string, object>();
+                o["id"] = a.Id;
+                o["name"] = a.Name;
+                o["version"] = a.Version;
+                o["by"] = a.By;
+                o["source"] = a.Source;
+                return (object)o;
+            }).ToArray() : null;
             s["remoteControlDevices"] = Cfg.RemoteControlDevices.Select(a =>
             {
                 var o = new Dictionary<string, object>();

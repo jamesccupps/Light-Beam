@@ -424,14 +424,23 @@ export default function register(test) {
     await page.evaluate(`sendAppFile(new File([new Uint8Array([77, 90, 0, 1])], 'tool${name}.exe'), null)`);
     await page.waitFor(`[...$$('#set-apps .app-row')].some(r => r.textContent.includes('tool${name}') && r.textContent.includes('a file you sent · tool${name}.exe, 4 B'))`, 8000, 'the file app listed');
     const appId = await page.evaluate(`appsState.apps.find(a => a.name === 'tool${name}').id`);
+    const asks = () => stream.events.filter(e => e.event === 'app-install' && e.data.id === appId).length;
+    // (1.16.1) Install on…: the list of PCs opens inside Settings, on top (it opened unseen behind it), and asks that PC
+    await page.evaluate(`$('#set-apps .app-row[data-app="${appId}"] [data-act="install-on"]').click()`);
+    await page.waitFor(`!$('#menu').hidden && $('#menu').parentElement === $('#settingsDlg')`, 5000, 'Install on…: the list, in Settings');
+    eq(await page.evaluate(`(() => { const b = [...$$('#menu .menu-item')].find(x => x.textContent.includes('Shop PC')); if (!b) return 'no Shop PC';
+      const r = b.getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('.menu-item') === b || 'covered'; })()`), true, 'Shop PC in the list, on top');
+    await page.evaluate(`[...$$('#menu .menu-item')].find(x => x.textContent.includes('Shop PC')).click()`);
+    for (const until = Date.now() + 8000; !asks() && Date.now() < until;) await ctx.sleep(100);
+    assert(asks() === 1, 'Install on… → Shop PC: the PC was asked');
+    await page.waitFor(`$('#menu').hidden && $('#settingsDlg').open`, 3000, 'the list closed, Settings still open');
     // Install on all PCs: the PC is asked; it asks whoever is there; then it's installed
     await page.evaluate(`$('#set-apps .app-row[data-app="${appId}"] [data-act="install-all"]').click()`);
-    let ask;
-    for (const until = Date.now() + 8000; !(ask = stream.events.find(e => e.event === 'app-install' && e.data.id === appId)) && Date.now() < until;) await ctx.sleep(100);
-    assert(ask, 'the PC was asked');
+    for (const until = Date.now() + 8000; asks() < 2 && Date.now() < until;) await ctx.sleep(100);
+    assert(asks() === 2, 'Install on all PCs: the PC was asked');
     await page.waitFor(`__toasts.some(t => /tool${name}: asked .*Shop PC/.test(t))`, 5000, 'the toast');
     await pc.post('/api/devices/me/apps', { id: appId, state: 'asked' });
-    await page.waitFor(`/Shop PC: waiting for someone at the PC to allow it/.test($('#set-apps .app-row[data-app="${appId}"]')?.textContent || '')`, 8000, 'asked, shown');
+    await page.waitFor(`/Shop PC: waiting for an answer at the PC \\(Beam shows the question there\\)/.test($('#set-apps .app-row[data-app="${appId}"]')?.textContent || '')`, 8000, 'asked, shown');
     await pc.post('/api/devices/me/apps', { id: appId, state: 'installed', version: '1.0' });
     await page.waitFor(`/Shop PC: installed 1\\.0Uninstall/.test($('#set-apps .app-row[data-app="${appId}"]')?.textContent || '')`, 8000, 'installed, shown, with Uninstall');
     // Uninstall (confirmed): asked of the PC; gone from the list once it says so
@@ -460,6 +469,21 @@ export default function register(test) {
     await host.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings.appsAllowed === false)`, 3000, 'off: setSettings');
     await host.evaluate(`hostState.settings.appsAllowed = false; renderSettings()`);
     await host.waitFor(`/Beam asks here before installing an app/.test($('#set-pc')?.textContent || '')`, 5000, 'off');
+    // (1.16.1) An app waiting for an answer at this PC: a bar at the top of the window (not only a notification and the
+    // tray menu). Install… brings up the app's own question; Not now answers; the bar goes when the app says so.
+    await host.evaluate(`$('#settingsDlg').close(); hostState.settings.appAsks = [{ id: 'old1', name: 'Slate' }]; renderBanner()`);
+    assert(!(await host.evaluate(`!!$('#banner [data-app-ask]')`)), 'an app without appAsk: no bar');
+    const { page: asking } = await hostPage(ctx, { features: ['transfers', 'localFiles', 'settings', 'openPanel', 'allowApps', 'appAsk'],
+      settings: { appsAllowed: false, appAsks: [{ id: 'app1', name: 'Slate', version: '0.3.0', by: 'Desktop', source: 'GitHub example/slate' }] } });
+    await asking.waitFor(`paired && hostState.ready`);
+    await asking.waitFor(`!$('#banner').hidden && /Install Slate 0\\.3\\.0 on this PC\\? Desktop asked for it\\./.test($('#banner').textContent)`, 5000, 'the bar');
+    await asking.evaluate(`$('#banner [data-act="app-ask"]').click()`);
+    await asking.waitFor(`__host.log.some(m => m.type === 'appAsk' && m.app === 'app1' && !m.choice)`, 3000, 'Install…: the app’s own question');
+    await asking.evaluate(`$('#banner [data-act="app-notnow"]').click()`);
+    await asking.waitFor(`__host.log.some(m => m.type === 'appAsk' && m.app === 'app1' && m.choice === 'notnow')`, 3000, 'Not now');
+    await asking.evaluate(`__host.emit({ type: 'settings', settings: { ...hostState.settings, appAsks: [] } })`);
+    await asking.waitFor(`$('#banner').hidden`, 3000, 'answered: the bar goes');
+    eq(asking.errors, [], 'no page errors (the bar)');
   });
 
   test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {

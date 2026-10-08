@@ -198,6 +198,7 @@ namespace Beam
         void Ask(string id, Dictionary<string, object> info, string by)
         {
             string name = Json.Str(info, "name") ?? "an app";
+            bool again = Asks.Any(x => x.Id == id); // (asked again, as after a reconnect: the same question, no new window)
             Asks.RemoveAll(x => x.Id == id);
             var ask = new AppAsk();
             ask.Id = id;
@@ -208,17 +209,48 @@ namespace Beam
             Asks.Add(ask);
             Log.Write("Apps: asks whoever is here before installing " + name + (by != null ? " (asked by " + by + ")" : ""));
             var ignored = Report(id, "asked", null, null);
-            app.Notify("Install " + name + "?", (by ?? "One of your devices") + " asks to install " + name + " on this PC. Click to choose (or Beam's tray menu).", () => ShowAsk(id));
-            app.MarkChanged();
+            app.AppsChanged();
+            // (1.16.1) The question opens by itself, near the clock and on top: a notification and the tray menu were easy
+            // to miss (the user: "thats not a very good place to put notifications"). One at a time, the next once it's
+            // answered; Beam's window shows what's waiting too (its bar).
+            if (!again) ShowNext();
         }
 
+        // The question for one app, brought up from the tray menu, Beam's window or its Apps page.
         public void ShowAsk(string id)
+        {
+            ShowAsk(id, true);
+        }
+
+        // asked: someone asked for it (it takes the focus); else it came by itself: on top without taking the keyboard,
+        // its buttons awake after a moment (a click meant for something else can't answer it).
+        void ShowAsk(string id, bool asked)
         {
             var ask = Asks.FirstOrDefault(x => x.Id == id);
             if (ask == null) return;
-            if (askForm != null && !askForm.IsDisposed) askForm.Close();
-            askForm = new AppAskForm(this, ask, Environment.UserName);
-            askForm.Show();
+            if (askForm != null && !askForm.IsDisposed)
+            {
+                if (askForm.AskId == id) { if (asked) askForm.BringUp(); return; }
+                if (!asked) return; // (the next once this one is answered)
+                askForm.Close();
+            }
+            var form = new AppAskForm(this, ask, Environment.UserName, !asked);
+            form.FormClosed += (s, e) =>
+            {
+                if (askForm == form) askForm = null;
+                if (form.Answered) app.Post(ShowNext);
+            };
+            askForm = form;
+            Log.Write("Apps: the question about " + ask.Name + " is on the screen" + (asked ? "" : " (by itself)"));
+            form.ShowNearTray();
+        }
+
+        // The oldest question still waiting, by itself, when none is open (none once Beam may install without asking).
+        void ShowNext()
+        {
+            if (Cfg.AppsAllowed || (askForm != null && !askForm.IsDisposed)) return;
+            var next = Asks.OrderBy(x => x.At).FirstOrDefault();
+            if (next != null) ShowAsk(next.Id, false);
         }
 
         // The answer at this PC: "install" (this once), "always" (and every request from now on), "notnow".
@@ -227,7 +259,9 @@ namespace Beam
             var ask = Asks.FirstOrDefault(x => x.Id == id);
             if (ask == null) return;
             Asks.Remove(ask);
-            app.MarkChanged();
+            // (answered elsewhere, as Not now in Beam's window: its question goes too)
+            if (askForm != null && !askForm.IsDisposed && askForm.AskId == id && !askForm.Answered) { askForm.Answered = true; askForm.Close(); }
+            app.AppsChanged();
             if (choice == "notnow")
             {
                 Log.Write("Apps: not now for " + ask.Name + " (the choice at this PC)");
@@ -252,7 +286,7 @@ namespace Beam
             Cfg.AppsAllowed = on;
             Cfg.Save();
             Log.Write("Apps: " + (on ? "Beam may install apps on this PC without asking" : "Beam asks before installing apps on this PC") + " (" + from + ")");
-            app.MarkChanged();
+            app.AppsChanged();
         }
 
         // The tray's "Let Beam install apps": on through a confirmation, off at once.
@@ -811,11 +845,22 @@ namespace Beam
         }
     }
 
-    // "Install <app>?": the question at this PC (Install, Always allow, Not now).
+    // "Install <app>?": the question at this PC (Install, Always allow, Not now). (1.16.1) Near the clock and on top, as a
+    // sign-in request's; one that came by itself doesn't take the keyboard, and its buttons wake after a second.
     class AppAskForm : DialogBase
     {
-        public AppAskForm(AppInstaller apps, AppAsk ask, string user) : base("Install " + ask.Name + "?", 480)
+        public readonly string AskId;
+        public bool Answered;
+        readonly bool automatic;
+        readonly System.Windows.Forms.Timer arm = new System.Windows.Forms.Timer();
+
+        public AppAskForm(AppInstaller apps, AppAsk ask, string user, bool automatic) : base("Install " + ask.Name + "?", 480)
         {
+            AskId = ask.Id;
+            this.automatic = automatic;
+            TopMost = true;
+            ShowInTaskbar = !Ui.TestOffscreen; // (a test's never shows anywhere)
+            StartPosition = FormStartPosition.Manual;
             AddLabel("Install " + ask.Name + (ask.Version != null ? " " + ask.Version : "") + "?", Ui.Title, false, Ui.S(10));
             AddLabel((ask.By ?? "One of your devices") + " asks to install " + ask.Name + " on this PC, for " + user + " (" + ask.Source + ").", Ui.Font, true, Ui.S(10));
             AddLabel("Always allow: apps you install from Beam's Apps page then go onto this PC without asking, each with a notice. " +
@@ -827,18 +872,51 @@ namespace Beam
             install.SetBounds(ClientSize.Width - Pad - install.Width, y, install.Width, install.Height);
             always.SetBounds(install.Left - Ui.S(10) - always.Width, y, always.Width, always.Height);
             later.SetBounds(Pad, y, later.Width, later.Height);
-            string id = ask.Id;
-            // (closed with × or Esc: still waiting, in the tray menu)
-            install.Click += (s, e) => { apps.Answer(id, "install"); Close(); };
-            always.Click += (s, e) => { apps.Answer(id, "always"); Close(); };
-            later.Click += (s, e) => { apps.Answer(id, "notnow"); Close(); };
+            // (closed with × or Esc: still waiting, in Beam's window and its tray menu)
+            install.Click += (s, e) => Choose(apps, "install");
+            always.Click += (s, e) => Choose(apps, "always");
+            later.Click += (s, e) => Choose(apps, "notnow");
             ClientSize = new Size(ClientSize.Width, y + install.Height + Pad);
+            if (automatic)
+            {
+                install.Enabled = always.Enabled = later.Enabled = false;
+                arm.Interval = 1000;
+                arm.Tick += (s, e) => { arm.Stop(); install.Enabled = always.Enabled = later.Enabled = true; };
+            }
         }
 
-        protected override void OnShown(EventArgs e)
+        void Choose(AppInstaller apps, string choice)
         {
-            base.OnShown(e);
-            if (!Ui.TestOffscreen) Native.SetForegroundWindow(Handle);
+            if (Answered) return;
+            Answered = true;
+            apps.Answer(AskId, choice);
+            Close();
+        }
+
+        // Bottom right, above the taskbar.
+        public void ShowNearTray()
+        {
+            var wa = Screen.PrimaryScreen.WorkingArea;
+            Location = new Point(Math.Max(wa.Left, wa.Right - Width - Ui.S(16)), Math.Max(wa.Top, wa.Bottom - Height - Ui.S(16)));
+            Ui.PlaceForTest(this);
+            Show();
+            if (automatic) arm.Start(); else BringUp();
+        }
+
+        public void BringUp()
+        {
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            if (Ui.TestOffscreen) return;
+            Activate();
+            Native.SetForegroundWindow(Handle);
+        }
+
+        protected override bool ShowWithoutActivation { get { return automatic || Ui.TestOffscreen; } }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) arm.Dispose();
+            base.Dispose(disposing);
         }
 
         protected override void OnKeyDown(KeyEventArgs e)

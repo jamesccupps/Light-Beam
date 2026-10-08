@@ -87,6 +87,7 @@ function applyHostState(state) {
   hostState.localFiles = new Set(Object.entries(state.localFiles || {}).filter(([, v]) => v).map(([k]) => k));
   refreshPending();
   patchAllFileActions();
+  renderBanner(); // (1.16.1: apps waiting for an answer here)
   if ($('#settingsDlg').open) renderSettings();
   hostViewing();
 }
@@ -123,6 +124,7 @@ function onHostEvent(m) {
     case 'settings':
       hostState.settings = m.settings || hostState.settings;
       if (m.settings?.deviceName && cleanName(m.settings.deviceName) !== me.name) setDeviceName(m.settings.deviceName, { chosen: true });
+      renderBanner(); // (1.16.1: an app's question came or went)
       if ($('#settingsDlg').open) renderSettings();
       break;
     case 'update':

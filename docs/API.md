@@ -645,7 +645,8 @@ Feature `apps`. The user's own apps, which Beam installs on their PCs (the Windo
 app comes from a GitHub repository's latest published release, from a file sent here, or from winget. Each PC installs
 it for its signed-in user, never raising itself to administrator (an installer that needs that gets Windows' own prompt
 there), and only once someone at that PC has allowed it: until then a request makes the PC ask (Install / Always allow /
-Not now; the app's `appsAllowed`, turned on only at the PC, see HOST-BRIDGE). Adding, changing, installing and
+Not now; the app's `appsAllowed`, turned on only at the PC, see HOST-BRIDGE; from the Windows app 1.16.1 the question
+opens there by itself, near the clock, and the app's window shows a bar until it's answered). Adding, changing, installing and
 removing need a device signed in for good (`403 { reason: "temporary" }` for a session-only one). `data/apps.json`, the
 files in `data/app-files/<id>/` (both in exports and backups).
 

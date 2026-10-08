@@ -56,10 +56,12 @@ function appRow(a) {
     a.checkError && el('p', { class: 'warn small' }, `The last check for a new release failed: ${a.checkError}`),
     where.length > 0 && el('ul', { class: 'plain app-where' }, ...where.map(({ d, s }) => el('li', { class: 'small' },
       el('span', {}, `${d.name}: ${appStateText(s, d)}`),
-      s.state === 'installed' && el('button', { class: 'linkish', type: 'button', onclick: () => uninstallApp(a, d) }, 'Uninstall')))),
+      s.state === 'installed' && el('button', { class: 'linkish', type: 'button', onclick: () => uninstallApp(a, d) }, 'Uninstall'),
+      // (1.16.1) This PC's own question: the Windows app's window for it
+      s.state === 'asked' && d.id === me.id && hostHas('appAsk') && el('button', { class: 'linkish', type: 'button', onclick: () => hostDo('appAsk', { app: a.id }) }, 'Answer…')))),
     el('div', { class: 'dev-actions' },
       ready && pcs.length > 0 && button('Install on all PCs', 'download', () => installApp(a, 'all'), { 'data-act': 'install-all' }),
-      ready && notYet.length > 0 && button('Install on…', null, e => openMenu(notYet.map(d => ({ label: d.name, icon: 'monitor', action: () => installApp(a, [d.id]) })), menuAt(e), { label: 'Install on' })),
+      ready && notYet.length > 0 && button('Install on…', null, e => openMenu(notYet.map(d => ({ label: d.name, icon: 'monitor', action: () => installApp(a, [d.id]) })), menuAt(e), { label: 'Install on' }), { 'data-act': 'install-on' }),
       a.kind === 'github' && a.state !== 'fetching' && button(a.state === 'failed' ? 'Try again' : 'Check for a new version', 'refresh', () => checkApp(a)),
       a.kind === 'file' && button('Send a new version…', 'upload', () => pickAppFile(a)),
       el('button', { class: 'btn small-btn ghost', type: 'button', onclick: () => removeApp(a) }, 'Remove…')),
@@ -71,7 +73,7 @@ function appStateText(s, d) {
   switch (s.state) {
     case 'installed': return `installed${v}`;
     case 'pending': return d.online ? `asked${s.version ? ` (has${v})` : ''}` : 'asked: when it’s online';
-    case 'asked': return 'waiting for someone at the PC to allow it';
+    case 'asked': return d.id === me.id ? 'waiting for an answer on this PC' : 'waiting for an answer at the PC (Beam shows the question there)';
     case 'installing': return 'installing…';
     case 'failed': return `couldn’t install: ${s.error || 'no reason given'}`;
     case 'declined': return 'not now (chosen at the PC)';

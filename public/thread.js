@@ -843,6 +843,15 @@ function bannerParts() {
     parts.push(el('div', { class: 'banner-row' }, icon('refresh'), el('span', { class: 'banner-text' }, 'Beam was updated.'),
       el('button', { class: 'btn small-btn primary', type: 'button', onclick: () => location.reload() }, 'Reload')));
   }
+  // (the Windows app 1.16.1) Apps waiting for an answer at this PC (the user: the question was only in a
+  // notification and the tray menu). Installing is agreed in the app's own question window, which Install… brings up;
+  // Not now can be said from here.
+  for (const q of (HOST && hostHas('appAsk') && hostState.settings?.appAsks) || []) {
+    parts.push(el('div', { class: 'banner-row', 'data-app-ask': q.id }, icon('download'),
+      el('span', { class: 'banner-text' }, el('strong', {}, `Install ${q.name}${q.version ? ` ${q.version}` : ''} on this PC? `), `${q.by || 'One of your devices'} asked for it.`),
+      el('button', { class: 'btn small-btn primary', type: 'button', 'data-act': 'app-ask', onclick: () => hostDo('appAsk', { app: q.id }) }, 'Install…'),
+      el('button', { class: 'btn small-btn ghost', type: 'button', 'data-act': 'app-notnow', onclick: () => hostDo('appAsk', { app: q.id, choice: 'notnow' }) }, 'Not now')));
+  }
   return parts;
 }
 
