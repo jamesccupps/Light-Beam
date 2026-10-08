@@ -37,6 +37,10 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Remote control starts faster** (the Windows app 1.15): over a second less for every remote control and shared
   mouse start (the PC's own pages no longer wait for Windows to look up their made-up names), the connection made
   while the capture starts, Auto at 60 fps, and each start shown step by step in the viewer's details.
+- **Apps on every PC** (Beam 1.21, the Windows app 1.16): your own apps from a GitHub repository's releases (checked
+  against the checksum the release publishes), a file you send, or winget, installed on all your PCs from one page;
+  each PC asks once before Beam installs anything there, installs for its user only (never as administrator), and says
+  how it went; new GitHub releases reach the PCs that have the app.
 
 ## Next
 - **Remote control, further:** less delay where the measurement shows it goes (the first measurements, a PC 25 ms

@@ -450,6 +450,14 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .device-list li { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .device-list li:last-child { border-bottom: 0; }
 .dev-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* (1.21) Settings → Apps */
+.app-list { list-style: none; margin: 8px 0; padding: 0; }
+.app-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.app-row:last-child { border-bottom: 0; }
+.app-row p { margin: 2px 0; overflow-wrap: anywhere; }
+.app-where { margin: 4px 0 6px; }
+.app-where li { display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; }
+.app-row .field { margin-top: 6px; }
 
 /* ---------- lightbox ---------- */
 .lightbox { width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: rgba(8, 9, 12, .94); color: #fff; overflow: hidden; }

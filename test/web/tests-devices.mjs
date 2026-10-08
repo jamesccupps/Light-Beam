@@ -405,6 +405,63 @@ export default function register(test) {
     await page.evaluate(`$('#genDlg').close()`);
   });
 
+  test('apps (1.21): Settings → Apps adds an app (winget, a file), installs it on all PCs (a PC asks first, then says it’s installed) and uninstalls it; This PC’s switch', async ctx => {
+    const page = await ctx.signedIn();
+    await recordToasts(page);
+    await page.waitFor(`serverHas('apps')`, 8000, 'the server offers it');
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Shop PC', 'windows', ctx.nextIp(), '1.16.0');
+    await pc.me();
+    const stream = pc.stream();
+    ctx.defer(() => stream.close());
+    await page.waitFor(`deviceById('${pc.id}')?.online === true && deviceById('${pc.id}')?.can?.apps === true`, 8000, 'online, and can install apps');
+    await page.evaluate(`openSettings('apps')`);
+    await page.waitFor(`/No apps yet/.test($('#set-apps')?.textContent || '') || $$('#set-apps .app-row').length > 0`, 8000, 'the section');
+    // winget: typed and added
+    const name = `Pkg${ctx.uid()}`;
+    await page.evaluate(`(() => { const i = $('#set-apps input[aria-label="winget id"]'); i.value = 'Test.${name}'; $('#set-apps [data-act="add-winget"]').click(); })()`);
+    await page.waitFor(`[...$$('#set-apps .app-row')].some(r => r.textContent.includes('${name}') && r.textContent.includes('winget Test.${name}'))`, 8000, 'the winget app listed');
+    // a file, sent from the page
+    await page.evaluate(`sendAppFile(new File([new Uint8Array([77, 90, 0, 1])], 'tool${name}.exe'), null)`);
+    await page.waitFor(`[...$$('#set-apps .app-row')].some(r => r.textContent.includes('tool${name}') && r.textContent.includes('a file you sent · tool${name}.exe, 4 B'))`, 8000, 'the file app listed');
+    const appId = await page.evaluate(`appsState.apps.find(a => a.name === 'tool${name}').id`);
+    // Install on all PCs: the PC is asked; it asks whoever is there; then it's installed
+    await page.evaluate(`$('#set-apps .app-row[data-app="${appId}"] [data-act="install-all"]').click()`);
+    let ask;
+    for (const until = Date.now() + 8000; !(ask = stream.events.find(e => e.event === 'app-install' && e.data.id === appId)) && Date.now() < until;) await ctx.sleep(100);
+    assert(ask, 'the PC was asked');
+    await page.waitFor(`__toasts.some(t => /tool${name}: asked .*Shop PC/.test(t))`, 5000, 'the toast');
+    await pc.post('/api/devices/me/apps', { id: appId, state: 'asked' });
+    await page.waitFor(`/Shop PC: waiting for someone at the PC to allow it/.test($('#set-apps .app-row[data-app="${appId}"]')?.textContent || '')`, 8000, 'asked, shown');
+    await pc.post('/api/devices/me/apps', { id: appId, state: 'installed', version: '1.0' });
+    await page.waitFor(`/Shop PC: installed 1\\.0Uninstall/.test($('#set-apps .app-row[data-app="${appId}"]')?.textContent || '')`, 8000, 'installed, shown, with Uninstall');
+    // Uninstall (confirmed): asked of the PC; gone from the list once it says so
+    await page.evaluate(`[...$('#set-apps .app-row[data-app="${appId}"]').querySelectorAll('button')].find(b => b.textContent === 'Uninstall').click()`);
+    await page.waitFor(`/Uninstall tool${name} from Shop PC\\?/.test($('#genTitle')?.textContent || '')`, 5000, 'confirm');
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent === 'Uninstall').click()`);
+    let un;
+    for (const until = Date.now() + 8000; !(un = stream.events.find(e => e.event === 'app-uninstall' && e.data.id === appId)) && Date.now() < until;) await ctx.sleep(100);
+    assert(un, 'the PC was asked to uninstall');
+    await pc.post('/api/devices/me/apps', { id: appId, state: 'removed' });
+    await page.waitFor(`!/Shop PC:/.test($('#set-apps .app-row[data-app="${appId}"]')?.textContent || 'Shop PC:')`, 8000, 'gone from the PC');
+    // Remove the winget app from Beam
+    const wgId = await page.evaluate(`appsState.apps.find(a => a.source === 'Test.${name}').id`);
+    await page.evaluate(`[...$('#set-apps .app-row[data-app="${wgId}"]').querySelectorAll('button')].find(b => b.textContent === 'Remove…').click()`);
+    await page.waitFor(`/Remove ${name} from Beam\\?/.test($('#genTitle')?.textContent || '')`, 5000, 'confirm');
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent === 'Remove').click()`);
+    await page.waitFor(`!$('#set-apps .app-row[data-app="${wgId}"]')`, 8000, 'removed');
+    await page.evaluate(`$('#settingsDlg').close()`);
+    eq(page.errors, [], 'no page errors');
+    // The Windows app's This PC: on → "Ask first again" turns it off; off → the app's own confirmation.
+    const { page: host } = await hostPage(ctx, { state: {} });
+    await host.waitFor(`paired && hostState.ready`);
+    await host.evaluate(`hostState.settings.appsAllowed = true; openSettings('pc')`);
+    await host.waitFor(`/without asking, each with a notice/.test($('#set-pc')?.textContent || '')`, 5000, 'on');
+    await host.evaluate(`[...$('#set-pc').querySelectorAll('button')].find(b => /Ask first again/.test(b.textContent)).click()`);
+    await host.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings.appsAllowed === false)`, 3000, 'off: setSettings');
+    await host.evaluate(`hostState.settings.appsAllowed = false; renderSettings()`);
+    await host.waitFor(`/Beam asks here before installing an app/.test($('#set-pc')?.textContent || '')`, 5000, 'off');
+  });
+
   test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {
     const { page } = await hostPage(ctx, { state: {} });
     await page.waitFor(`paired && hostState.ready`);

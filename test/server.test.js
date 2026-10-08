@@ -1961,8 +1961,8 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     assert.equal(d.status.macs, undefined);
     // (1.17: + Tailscale's own view of the machine: the fake says nothing about Online or a key expiry)
     assert.deepEqual(d.tailscale, { name: 'gaming-pc', dns: 'gaming-pc.tail1234.ts.net', ip: '100.64.50.1', online: false, keyExpiry: null });
-    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false });
-    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false });
+    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false });
+    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false });
     // a partial report keeps the rest; null clears a field
     r = await put({ battery: null });
     assert.equal(r.status, 204);
@@ -2755,6 +2755,186 @@ test('1.20 a PC’s log from anywhere: asked through the server, answered by the
     assert.match(r.json.error, /didn’t send its log in time/);
     st.close();
   } finally { await s.stop(); }
+});
+
+// (1.21) A stand-in for GitHub: repos['owner/repo'] = { tag, files: { name: content }, away: { name: url } } answers
+// /repos/<o>/<r>/releases/latest; each file downloads through one redirect, as GitHub's do.
+async function fakeGithub() {
+  const gh = { repos: {}, hits: [] };
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://github.test');
+    gh.hits.push(u.pathname);
+    let m = /^\/repos\/([^/]+)\/([^/]+)\/releases\/latest$/.exec(u.pathname);
+    if (m) {
+      const repo = gh.repos[`${m[1]}/${m[2]}`];
+      if (!repo) { res.writeHead(404, { 'Content-Type': 'application/json' }); return res.end('{"message":"Not Found"}'); }
+      const assets = Object.entries(repo.files).map(([name, data]) => ({
+        name, size: Buffer.byteLength(data), browser_download_url: repo.away?.[name] || `${gh.base}/download/${m[1]}/${m[2]}/${encodeURIComponent(name)}`,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ tag_name: repo.tag, assets }));
+    }
+    m = /^\/download\/([^/]+)\/([^/]+)\/(.+)$/.exec(u.pathname);
+    if (m) {
+      res.writeHead(302, { Location: `${gh.base}/objects/${m[1]}/${m[2]}/${m[3]}` });
+      return res.end();
+    }
+    m = /^\/objects\/([^/]+)\/([^/]+)\/(.+)$/.exec(u.pathname);
+    const data = m && gh.repos[`${m[1]}/${m[2]}`]?.files[decodeURIComponent(m[3])];
+    if (data === undefined) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': Buffer.byteLength(data) });
+    res.end(data);
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  gh.base = `http://127.0.0.1:${server.address().port}`;
+  gh.close = () => new Promise(r => server.close(r));
+  return gh;
+}
+
+test('1.21 apps on every PC: from GitHub (checked against its release’s checksum), a file or winget; the PCs asked (offline ones when they connect), their reports, a new version, uninstall, remove', async () => {
+  const sha = b => crypto.createHash('sha256').update(b).digest('hex');
+  const gh = await fakeGithub();
+  const exe = Buffer.concat([Buffer.from('MZ'), crypto.randomBytes(70000)]);
+  gh.repos['robin/Slate'] = { tag: 'v0.3.0', files: { 'Slate.exe': exe, 'Slate.exe.sha256': `${sha(exe)}  Slate.exe\n` } };
+  gh.repos['robin/Bad'] = { tag: 'v1.0.0', files: { 'Bad.exe': exe, 'Bad.exe.sha256': `${'0'.repeat(64)}  Bad.exe\n` } };
+  gh.repos['robin/Linux'] = { tag: 'v1.0.0', files: { 'tool-linux-x64.tar.gz': 'x' } };
+  gh.repos['robin/Away'] = { tag: 'v1.0.0', files: { 'Away.exe': exe }, away: { 'Away.exe': 'http://127.0.0.1:1/Away.exe' } };
+  gh.repos['robin/Plain'] = { tag: 'v2.0', files: { 'plain-win-x64.zip': 'PK-zip', 'plain-macos.zip': 'PK' } };
+  const s = await startServer('apps121', 8795, { env: { BEAM_GITHUB_API: gh.base } });
+  try {
+    const K = s.key;
+    const laptop = app(K, 'laptop00121', 'Robin Laptop', 'windows', { 'X-Beam-App-Version': '1.16.0', ...from('100.64.24.5') });
+    const shop = app(K, 'shoppc00121', 'Shop Desktop', 'windows', { 'X-Beam-App-Version': '1.16.0', ...from('100.64.24.2') });
+    const old = app(K, 'oldpc000121', 'Old PC', 'windows', { 'X-Beam-App-Version': '1.15.0', ...from('100.64.24.3') });
+    const phone = app(K, 'phone000121', 'Robin Phone', 'android', { 'X-Beam-App-Version': '1.13.0', ...from('100.64.24.4') });
+    for (const h of [laptop, shop, old, phone]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('apps'));
+    const devs = (await s.req('GET', '/api/devices', { headers: laptop })).json.devices;
+    assert.deepEqual(['laptop00121', 'shoppc00121', 'oldpc000121', 'phone000121'].map(id => devs.find(d => d.id === id).can.apps), [true, true, false, false], 'can.apps: the Windows app 1.16 or later');
+    const list = async () => (await s.req('GET', '/api/apps', { headers: phone })).json.apps;
+    const ready = id => waitFor(async () => { const a = (await list()).find(x => x.id === id); return a && a.state !== 'fetching' ? a : null; }, 8000);
+    const add = async (body, status = 201) => { const r = await post(s, '/api/apps', body, laptop); assert.equal(r.status, status, r.body); return r.json; };
+
+    // From GitHub: the release's Slate.exe through a redirect, matching its Slate.exe.sha256.
+    const added = await add({ github: 'https://github.com/robin/Slate' });
+    assert.equal(added.app.state, 'fetching');
+    const slateId = added.app.id;
+    let slate = await ready(slateId);
+    assert.deepEqual(pick(slate, ['name', 'kind', 'source', 'version', 'state', 'checksum']), { name: 'Slate', kind: 'github', source: 'robin/Slate', version: '0.3.0', state: 'ready', checksum: 'Slate.exe.sha256' });
+    assert.deepEqual(slate.file, { name: 'Slate.exe', size: exe.length, sha256: sha(exe), type: 'exe' });
+    let r = await s.req('GET', `/api/apps/${slateId}/file`, { headers: shop, raw: true });
+    assert.ok(r.status === 200 && r.body.equals(exe), 'the PCs download it from here');
+    assert.match(s.out, /Robin Laptop added the app Slate \(GitHub robin\/Slate\)/);
+    assert.match(s.out, /Slate 0\.3\.0: Slate\.exe \([^)]+\) fetched from GitHub robin\/Slate, matching the SHA-256 in Slate\.exe\.sha256/);
+    assert.match((await add({ github: 'robin/slate' }, 409)).error, /one of Beam's apps already/);
+    assert.match((await add({ github: 'not a repo' }, 400)).error, /owner\/repo/);
+    // Refused: a checksum that doesn't match, no release, no Windows file, a file somewhere other than GitHub.
+    const failed = async (repo, why) => {
+      const a = await ready((await add({ github: repo })).app.id);
+      assert.equal(a.state, 'failed', repo);
+      assert.match(a.error, why, repo);
+      assert.equal(a.file, null);
+    };
+    await failed('robin/Bad', /Bad\.exe doesn't match the SHA-256 its release publishes/);
+    await failed('robin/None', /no published release/);
+    await failed('robin/Linux', /has no Windows file/);
+    await failed('robin/Away', /only downloads from GitHub, not 127\.0\.0\.1:1/);
+    assert.ok(!fs.readdirSync(path.join(s.data, 'app-files'), { recursive: true }).some(f => /Bad|Away|incoming/.test(f)), 'nothing of those kept');
+    // No checksum published: still fetched (and it says so); the Windows .zip, not the Mac one.
+    const plain = await ready((await add({ github: 'robin/Plain' })).app.id);
+    assert.deepEqual([plain.state, plain.version, plain.file.name, plain.file.type, plain.checksum], ['ready', '2.0', 'plain-win-x64.zip', 'zip', null]);
+    // A file sent here, and winget.
+    r = await s.req('PUT', '/api/apps/file?name=tool-setup.msi&label=Tool&version=1.2', { headers: { ...laptop, 'Content-Type': 'application/octet-stream' }, body: Buffer.from('MSI file') });
+    assert.equal(r.status, 201, r.body);
+    const tool = r.json.app;
+    assert.deepEqual([tool.kind, tool.name, tool.version, tool.file.name, tool.file.type, tool.file.size], ['file', 'Tool', '1.2', 'tool-setup.msi', 'msi', 8]);
+    assert.equal((await s.req('PUT', '/api/apps/file?name=notes.txt', { headers: { ...laptop, 'Content-Type': 'application/octet-stream' }, body: 'x' })).status, 400, 'only .exe, .msi and .zip');
+    const zip = (await add({ winget: '7zip.7zip' })).app;
+    assert.deepEqual([zip.kind, zip.name, zip.source, zip.state, zip.file], ['winget', '7zip', '7zip.7zip', 'ready', null]);
+    assert.equal((await add({ winget: 'x; del *' }, 400)).error.includes('package id'), true);
+    // Its settings: a zip's program, a setup's switches; nothing that leaves the folder or adds a line.
+    assert.equal((await s.req('PATCH', `/api/apps/${plain.id}`, { headers: json(laptop), body: JSON.stringify({ run: '../x.exe' }) })).status, 400);
+    assert.equal((await s.req('PATCH', `/api/apps/${tool.id}`, { headers: json(laptop), body: JSON.stringify({ args: '/S\n/D' }) })).status, 400);
+    r = await s.req('PATCH', `/api/apps/${plain.id}`, { headers: json(laptop), body: JSON.stringify({ run: 'bin\\plain.exe', name: 'Plain tool' }) });
+    assert.deepEqual([r.status, r.json.app.run, r.json.app.name], [200, 'bin/plain.exe', 'Plain tool']);
+
+    // Install on every PC that can: the laptop now, the shop when it connects; an old app or a phone can't.
+    const lst = await openEvents(s.port, laptop);
+    await lst.wait('hello');
+    r = await post(s, `/api/apps/${slateId}/install`, { devices: 'all' }, phone);
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual([r.json.asked.sort(), r.json.cannot], [['Robin Laptop', 'Shop Desktop'], []]);
+    assert.equal((await lst.wait('app-install')).data.id, slateId);
+    assert.match((await post(s, `/api/apps/${slateId}/install`, { devices: ['oldpc000121', 'phone000121'] }, laptop)).json.error, /Old PC, Robin Phone can’t install apps \(that needs Beam for Windows 1\.16\.0 or later\)/);
+    assert.match(s.out, /Robin Phone asked (Robin Laptop, Shop Desktop|Shop Desktop, Robin Laptop) to install Slate 0\.3\.0/);
+    const report = (h, body) => post(s, '/api/devices/me/apps', { id: slateId, ...body }, h);
+    assert.equal((await report(laptop, { state: 'asked' })).status, 204);
+    assert.equal((await list()).find(a => a.id === slateId).on.laptop00121.state, 'asked');
+    assert.equal((await report(laptop, { state: 'installed', version: '0.3.0' })).status, 204);
+    assert.equal((await report(laptop, { state: 'sideways' })).status, 400);
+    slate = (await list()).find(a => a.id === slateId);
+    assert.deepEqual(pick(slate.on.laptop00121, ['state', 'version']), { state: 'installed', version: '0.3.0' });
+    assert.equal(slate.on.shoppc00121.state, 'pending', 'the shop: asked when it connects');
+    assert.match(s.out, /Robin Laptop installed Slate 0\.3\.0/);
+    const sst = await openEvents(s.port, shop);
+    assert.equal((await sst.wait('app-install')).data.id, slateId, 'asked as it connected');
+    assert.equal((await report(shop, { state: 'failed', error: 'no room on C:' })).status, 204);
+    assert.match(s.out, /Shop Desktop couldn't install Slate: no room on C:/);
+    // What the laptop has at its start: Slate updated itself (its own version now).
+    assert.equal((await s.req('PUT', '/api/devices/me/apps', { headers: json(laptop), body: JSON.stringify({ apps: [{ id: slateId, version: '0.3.1' }] }) })).status, 204);
+    assert.equal((await list()).find(a => a.id === slateId).on.laptop00121.version, '0.3.1');
+
+    // A new release: fetched on Check, and offered to the PCs that have it.
+    const exe2 = Buffer.concat([Buffer.from('MZ'), crypto.randomBytes(5000)]);
+    gh.repos['robin/Slate'] = { tag: 'v0.4.0', files: { 'Slate.exe': exe2, 'Slate.exe.sha256': `${sha(exe2)}  Slate.exe\n` } };
+    const before = lst.events.length;
+    r = await post(s, `/api/apps/${slateId}/check`, {}, laptop);
+    assert.deepEqual([r.status, r.json.app.version, r.json.app.file.sha256], [200, '0.4.0', sha(exe2)]);
+    assert.ok(lst.events.slice(before).some(e => e.event === 'app-install' && e.data.id === slateId && e.data.update === true), 'the laptop is offered the new one');
+    assert.deepEqual(pick((await list()).find(a => a.id === slateId).on.laptop00121, ['state', 'version']), { state: 'pending', version: '0.3.1' });
+    r = await s.req('GET', `/api/apps/${slateId}/file`, { headers: shop, raw: true });
+    assert.ok(r.body.equals(exe2), 'the new file in place of the old');
+    assert.deepEqual(fs.readdirSync(path.join(s.data, 'app-files', slateId)), ['Slate.exe']);
+    assert.equal((await report(laptop, { state: 'installed', version: '0.4.0' })).status, 204);
+
+    // Uninstall from the laptop: asked, then gone once it says so; removed there by hand: gone too.
+    r = await post(s, `/api/apps/${slateId}/uninstall`, { devices: ['laptop00121'] }, phone);
+    assert.deepEqual([r.status, r.json.asked], [200, ['Robin Laptop']]);
+    assert.equal((await lst.wait('app-uninstall')).data.id, slateId);
+    assert.equal((await list()).find(a => a.id === slateId).on.laptop00121.state, 'removing');
+    assert.equal((await report(laptop, { state: 'removed' })).status, 204);
+    assert.equal((await list()).find(a => a.id === slateId).on.laptop00121, undefined);
+    assert.match(s.out, /Robin Laptop uninstalled Slate/);
+    assert.equal((await post(s, `/api/apps/${slateId}/uninstall`, { devices: ['laptop00121'] }, phone)).status, 409, 'not there');
+    await report(laptop, { state: 'installed', version: '0.4.0' });
+    await s.req('PUT', '/api/devices/me/apps', { headers: json(laptop), body: JSON.stringify({ apps: [] }) });
+    assert.equal((await list()).find(a => a.id === slateId).on.laptop00121, undefined, 'removed there by hand');
+
+    // A sign-in for this browser session only can't add apps or ask PCs to install them.
+    await post(s, '/api/password', { password: 'apps pass' }, laptop);
+    const login = await post(s, '/api/login', { secret: 'apps pass', remember: false }, { ...sameOrigin, Cookie: 'beam_device_id=borrowed121' });
+    assert.equal(login.status, 204);
+    const borrowed = cookie(cookieValue(login), 'borrowed121', { ...sameOrigin, 'X-Beam-Platform': 'web', 'X-Beam-Device': 'Library PC' });
+    r = await post(s, '/api/apps', { winget: 'Git.Git' }, borrowed);
+    assert.deepEqual([r.status, r.json.reason], [403, 'temporary'], r.body);
+    assert.equal((await post(s, `/api/apps/${slateId}/install`, { devices: 'all' }, borrowed)).status, 403);
+
+    // Kept across a restart; removing an app takes its file from the server.
+    await s.stop();
+    const s2 = await startServer('apps121', 8795, { env: { BEAM_GITHUB_API: gh.base }, keep: true });
+    try {
+      const names = (await s2.req('GET', '/api/apps', { headers: laptop })).json.apps.map(a => a.name).sort();
+      assert.deepEqual(names, ['7zip', 'Away', 'Bad', 'Linux', 'None', 'Plain tool', 'Slate', 'Tool']);
+      assert.equal((await s2.req('DELETE', `/api/apps/${tool.id}`, { headers: laptop })).status, 204);
+      assert.ok(!fs.existsSync(path.join(s2.data, 'app-files', tool.id)), 'its file is gone');
+      assert.equal((await s2.req('GET', `/api/apps/${tool.id}/file`, { headers: laptop })).status, 404);
+    } finally { await s2.stop(); }
+    lst.close();
+    sst.close();
+  } finally {
+    await s.stop();
+    await gh.close();
+  }
 });
 
 // ---------------------------------------------------------------- 1.4 protocol additions (plan/speed.md P1–P6)

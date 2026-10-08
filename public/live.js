@@ -91,6 +91,7 @@ function connect() {
   on('upload-cancelled', ({ id }) => dropIncoming(id));
   on('ring', onRingEvent);
   on('alert', onAlertEvent);
+  on('apps', onAppsEvent); // (1.21: Settings → Apps reads the list again)
   on('rc-sessions', onRcSessions); // (who controls which PC, for Settings; the viewer has its own stream: remote.js)
   on('notification', onPhoneNotification);
   on('notification-removed', onPhoneNotificationRemoved);

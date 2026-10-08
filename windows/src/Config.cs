@@ -42,6 +42,9 @@ namespace Beam
         public string InstallId;               // Beam 1.8.1: this install's own id (its settings backups on the server go by it)
         public bool RestoreChecked;            // ...and an earlier install's backup was looked for (offered once)
         public List<RcAllowed> RemoteControlDevices = new List<RcAllowed>(); // ...and the devices that may (pinned to their Tailscale node)
+        public bool AppsAllowed;               // Beam 1.21 (app 1.16) "Let Beam install apps": off until someone at this PC allows it
+        public List<InstalledApp> InstalledApps = new List<InstalledApp>(); // ...and what Beam installed here
+        public string TestWinget;              // tests (custom --config only, 1.16): a stand-in for winget (an .exe or .cmd)
         public bool AutoSave = true;
         public long MaxSaveMB = 2048;
         public string SaveFolder;
@@ -223,6 +226,14 @@ namespace Beam
                         var a = RcAllowed.Parse(Json.Obj(o));
                         if (a != null && !c.RemoteControlDevices.Any(x => x.Id == a.Id)) c.RemoteControlDevices.Add(a);
                     }
+                c.AppsAllowed = Json.Bool(d, "appsAllowed", false);
+                var appList = Json.Get(d, "installedApps") as object[];
+                if (appList != null)
+                    foreach (var o in appList)
+                    {
+                        var a = InstalledApp.From(o);
+                        if (a != null && !c.InstalledApps.Any(x => x.Id == a.Id)) c.InstalledApps.Add(a);
+                    }
                 c.AutoSave = Json.Bool(d, "autoSave", true);
                 c.MaxSaveMB = Math.Max(1, Json.Long(d, "maxSaveMB", 2048));
                 c.SaveFolder = Json.Str(d, "saveFolder");
@@ -242,6 +253,7 @@ namespace Beam
                     c.TestTailscaleExe = Json.Str(d, "testTailscaleExe");
                     c.TestTailscaleArgs = Json.Str(d, "testTailscaleArgs");
                     c.TestHistoryEvents = Json.Str(d, "testHistoryEvents");
+                    c.TestWinget = Json.Str(d, "testWinget");
                 }
                 c.WebViewReleaseSec = (int)Math.Max(5, Json.Long(d, "webViewReleaseSec", 180));
                 c.BadUpdateVersion = Json.Str(d, "badUpdateVersion");
@@ -366,6 +378,8 @@ namespace Beam
                 d["installId"] = InstallId;
                 d["restoreChecked"] = RestoreChecked;
                 d["remoteControlDevices"] = RemoteControlDevices.Select(x => (object)x.ToJson()).ToArray();
+                if (AppsAllowed) d["appsAllowed"] = true; else d.Remove("appsAllowed");
+                if (InstalledApps.Count > 0) d["installedApps"] = InstalledApps.Select(x => (object)x.ToJson()).ToArray(); else d.Remove("installedApps");
                 d["autoSave"] = AutoSave;
                 d["maxSaveMB"] = MaxSaveMB;
                 d["saveFolder"] = SaveFolder;

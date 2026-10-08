@@ -14,7 +14,7 @@ const zlib = require('node:zlib');
 const dgram = require('node:dgram');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { Readable } = require('node:stream');
+const { Readable, Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { promisify } = require('node:util');
 const { monitorEventLoopDelay, performance } = require('node:perf_hooks');
@@ -28,6 +28,7 @@ const { makePrivate } = require('./lib/private-dir');
 const pcHistory = require('./lib/history');
 const winevents = require('./lib/winevents');
 const winsetup = require('./lib/winsetup');
+const appsLib = require('./lib/apps');
 const { version: VERSION } = require('./package.json');
 
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch {}
@@ -64,6 +65,7 @@ const DIR = {
   uploads: path.join(DATA_DIR, 'uploads'),
   logs: path.join(DATA_DIR, 'logs'),
   orphaned: path.join(DATA_DIR, 'orphaned'),
+  appFiles: path.join(DATA_DIR, 'app-files'), // (1.21) the apps' files, one folder per app
 };
 const FILE = {
   items: path.join(DATA_DIR, 'items.json'),
@@ -79,6 +81,7 @@ const FILE = {
   stop: path.join(DATA_DIR, 'stop-requested'),
   alerts: path.join(DATA_DIR, 'alerts.json'),
   history: path.join(DATA_DIR, 'history.json'), // (1.18) each device's history
+  apps: path.join(DATA_DIR, 'apps.json'), // (1.21) the user's apps, and where each is installed
 };
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DIST_DIR = path.resolve(env.BEAM_DIST || path.join(__dirname, 'dist'));
@@ -396,6 +399,7 @@ let alerts = []; // newest first, at most MAX_ALERTS (data/alerts.json)
 // (1.18) device id -> { events: [Windows' records, lib/history.js], spells: [{ from, until }], alerted: [keys],
 // offlineFrom? } (data/history.json)
 let history = {};
+let apps = []; // (1.21) the user's apps (data/apps.json; see "apps on every PC")
 const uploads = new Map(); // id -> upload session (see createUpload)
 let dataHealth = { itemsSource: 'new' };
 
@@ -410,7 +414,8 @@ const persistSettings = jsonWriter(FILE.settings, () => settings, { log });
 const persistPassword = jsonWriter(FILE.password, () => password, { log });
 const persistAlerts = jsonWriter(FILE.alerts, () => alerts, { log });
 const persistHistory = jsonWriter(FILE.history, () => history, { log, delay: FAST_TIMEOUTS ? 100 : 2000 });
-const WRITERS = [persist, persistDevices, persistAliases, persistTokens, persistRead, persistSettings, persistPassword, persistAlerts, persistHistory];
+const persistApps = jsonWriter(FILE.apps, () => apps, { log });
+const WRITERS = [persist, persistDevices, persistAliases, persistTokens, persistRead, persistSettings, persistPassword, persistAlerts, persistHistory, persistApps];
 
 function flushAll(timeoutMs = 5000) {
   return Promise.race([Promise.all(WRITERS.map(w => w.flush())), sleep(timeoutMs)]);
@@ -644,6 +649,7 @@ function openData() {
   }
   alerts = loadState(FILE.alerts, { fallback: [], validate: validateAlerts, log }).value;
   history = loadState(FILE.history, { fallback: {}, validate: validateHistory, log }).value;
+  apps = loadState(FILE.apps, { fallback: [], validate: validateApps, log }).value; // (1.21)
   indexTokens();
   if (itemsNeedSave || loaded.source === 'tmp' || loaded.source === 'bak') persist();
 }
@@ -1508,6 +1514,14 @@ function mergeDevice(fromId, toId, reason) {
     delete history[fromId];
     persistHistory();
   }
+  let appsMoved = false; // (1.21) what a reinstalled PC had installed
+  for (const app of apps) {
+    if (!app.on[fromId]) continue;
+    if (!app.on[toId]) app.on[toId] = app.on[fromId];
+    delete app.on[fromId];
+    appsMoved = true;
+  }
+  if (appsMoved) persistApps();
   for (const r of loginRequests.values()) if (r.deviceId === fromId) r.deviceId = toId;
   const open = presence.get(fromId);
   if (open) {
@@ -1619,6 +1633,7 @@ function forgetDeviceNow(id, reason) {
   for (const [a, b] of Object.entries(aliases)) if (b === id) delete aliases[a];
   if (readMarks[id]) { delete readMarks[id]; persistRead(); }
   if (history[id]) { delete history[id]; persistHistory(); } // (1.18)
+  if (apps.some(a => a.on[id])) { for (const a of apps) delete a.on[id]; persistApps(); } // (1.21)
   if (settings.alerts?.offline?.includes(id)) {
     settings.alerts.offline = settings.alerts.offline.filter(d => d !== id);
     persistSettings();
@@ -1986,6 +2001,7 @@ function capabilitiesOf(device, ts = tailscaleOf(device)) {
     remoteDesktop: device.platform === 'windows' && device.status?.remoteDesktop === true && Boolean(ts?.dns || ts?.ip),
     remoteControl: rcAllowed(device) && device.status?.locked !== true,
     log: canSendLog(device), // (1.20) its Beam app sends its log when asked
+    apps: canInstallApps(device), // (1.21) its Beam app installs Beam's apps (once allowed there)
   };
 }
 
@@ -2693,6 +2709,471 @@ async function postDeviceLog(req, res, _m, url) {
   const text = body.text.length > LOG_MAX_BYTES ? body.text.slice(-LOG_MAX_BYTES) : body.text;
   ask.done({ name: statusText(body.name).slice(0, 80) || 'beam.log', text, size: Buffer.byteLength(text), at: now() });
   send(res, 204);
+}
+
+// ---------------------------------------------------------------- apps on every PC (1.21)
+// The user's own apps on their PCs (the user: "i want to be able to easily install it on all my beam devices", for
+// their Slate). An app comes from a GitHub repository's latest release (its Windows file, checked against the
+// checksum the release publishes when it publishes one), from a file sent here, or from winget (each PC runs winget
+// itself). A PC installs it for its signed-in user and never raises itself to administrator (an installer that needs
+// that gets Windows' own prompt there), and only once someone at that PC has allowed Beam to: the first request asks
+// there (Install, Always allow, Not now; the user's choice: "Allow once per PC"). Any device signed in for good may
+// add apps and ask; the PCs say how it went. data/apps.json; the files in data/app-files/<id>/.
+
+const APPS_APP_MIN = '1.16.0';
+const APP_MAX_BYTES = 2048 * MB;
+const APPS_MAX = 50;
+const APPS_CHECK_MS = 6 * 3600e3;
+const GITHUB_API = (env.BEAM_GITHUB_API || 'https://api.github.com').replace(/\/+$/, '');
+const APP_ID = /^[a-f0-9]{8}$/;
+const APP_KINDS = new Set(['github', 'file', 'winget']);
+// pending: asked here, not yet there (offline: asked when it connects); asked: waiting for someone at the PC to allow
+// it; removing: asked to uninstall. The rest come from the PC.
+const APP_ON_STATES = new Set(['pending', 'asked', 'installing', 'installed', 'failed', 'declined', 'removing']);
+const APP_REPORTS = new Set(['asked', 'installing', 'installed', 'failed', 'declined', 'removed']);
+const appFetches = new Map(); // app id -> the GitHub fetch under way
+
+const canInstallApps = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, APPS_APP_MIN);
+
+// Only well-formed apps, and per device only the states above; an app whose first fetch a restart cut short says so
+// (Check again fetches it).
+function validateApps(list) {
+  const out = [];
+  const str = (v, max) => (typeof v === 'string' && v ? v.slice(0, max) : null);
+  for (const a of Array.isArray(list) ? list : []) {
+    if (!isPlainObject(a) || !APP_ID.test(a.id) || !APP_KINDS.has(a.kind) || typeof a.name !== 'string' || out.some(x => x.id === a.id)) continue;
+    const f = a.file;
+    const file = isPlainObject(f) && typeof f.name === 'string' && f.name && appsLib.safeFileName(f.name) === f.name && appsLib.fileTypeOf(f.name) === f.type
+      && Number.isSafeInteger(f.size) && f.size > 0 && /^[a-f0-9]{64}$/.test(f.sha256 || '') ? { name: f.name, size: f.size, sha256: f.sha256, type: f.type } : null;
+    if (a.kind === 'file' && !file) continue;
+    const on = {};
+    for (const [d, s] of Object.entries(isPlainObject(a.on) ? a.on : {})) {
+      if (!DEVICE_ID.test(d) || !isPlainObject(s) || !APP_ON_STATES.has(s.state)) continue;
+      on[d] = { state: s.state, at: Number(s.at) || 0, ...(str(s.version, 40) && { version: str(s.version, 40) }), ...(str(s.error, 300) && { error: str(s.error, 300) }) };
+    }
+    const ready = a.kind === 'winget' || Boolean(file);
+    out.push({
+      id: a.id, kind: a.kind, name: appsLib.appName(a.name) || 'App', source: str(a.source, 200), version: str(a.version, 40), file,
+      state: ready ? 'ready' : 'failed', ...(!ready && { error: str(a.error, 300) || 'Beam restarted while it was fetching it: Check again' }),
+      ...(str(a.asset, 200) && { asset: str(a.asset, 200) }), ...(str(a.run, 200) && { run: str(a.run, 200) }), ...(str(a.args, 300) && { args: str(a.args, 300) }),
+      ...(Array.isArray(a.choices) && { choices: a.choices.filter(c => typeof c === 'string').slice(0, 8) }),
+      ...(a.kind === 'github' && { checksum: str(a.checksum, 200) }), ...(str(a.checkError, 300) && { checkError: str(a.checkError, 300) }),
+      addedBy: str(a.addedBy, 64), addedAt: Number(a.addedAt) || 0, checkedAt: Number(a.checkedAt) || 0, updatedAt: Number(a.updatedAt) || 0, on,
+    });
+  }
+  return out;
+}
+
+function appById(id) {
+  const app = apps.find(a => a.id === id);
+  if (!app) throw httpError(404, 'No such app');
+  return app;
+}
+
+// Who may add, change, install and remove apps: a device signed in for good (not for a browser session only).
+function appsCaller(req, url) {
+  if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t manage apps', { reason: 'temporary' });
+  const me = resolveAlias(deviceIdOf(req, url) || '');
+  if (devices[me]?.temporary) throw httpError(403, 'A device signed in for this session only can’t manage apps', { reason: 'temporary' });
+  return me;
+}
+
+function publicApp(a) {
+  const on = {};
+  for (const [d, s] of Object.entries(a.on || {})) if (devices[d]) on[d] = s;
+  return {
+    id: a.id, kind: a.kind, name: a.name, source: a.source, version: a.version, file: a.file, state: a.state,
+    ...(a.asset && { asset: a.asset }), ...(a.run && { run: a.run }), ...(a.args && { args: a.args }),
+    ...(a.error && { error: a.error }), ...(a.checkError && { checkError: a.checkError }), ...(a.choices && { choices: a.choices }),
+    ...(a.kind === 'github' && { checksum: a.checksum || null }),
+    addedAt: a.addedAt, addedBy: a.addedBy, checkedAt: a.checkedAt || 0, updatedAt: a.updatedAt || 0, on,
+  };
+}
+
+const broadcastApps = () => broadcast('apps', { at: now() });
+
+function newApp({ kind, name, source, by }) {
+  let id;
+  do id = crypto.randomBytes(4).toString('hex'); while (apps.some(a => a.id === id));
+  return { id, kind, name, source, version: null, file: null, state: 'ready', addedBy: by || null, addedAt: now(), checkedAt: 0, updatedAt: 0, on: {} };
+}
+
+// A release's files come from GitHub's own addresses only (and in tests the stand-in API's), at every redirect.
+function githubAllowed(u) {
+  let url;
+  try { url = new URL(u); } catch { return false; }
+  if (env.BEAM_GITHUB_API && url.origin === new URL(GITHUB_API).origin) return true;
+  return url.protocol === 'https:' && (url.hostname === 'github.com' || url.hostname === 'api.github.com' || url.hostname.endsWith('.githubusercontent.com'));
+}
+
+async function githubFetch(u, { timeoutMs = 20_000, accept = 'application/octet-stream' } = {}) {
+  let url = u;
+  for (let hop = 0; hop < 6; hop++) {
+    if (!githubAllowed(url)) throw new Error(`Beam only downloads from GitHub, not ${(() => { try { return new URL(url).host; } catch { return 'that address'; } })()}`);
+    const res = await fetch(url, {
+      redirect: 'manual', signal: AbortSignal.timeout(timeoutMs),
+      headers: { Accept: accept, 'User-Agent': `Beam/${VERSION}`, 'X-GitHub-Api-Version': '2022-11-28' },
+    });
+    const to = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+    if (!to) return res;
+    res.body?.cancel().catch(() => {});
+    url = new URL(to, url).href;
+  }
+  throw new Error('GitHub redirected too many times');
+}
+
+async function githubJson(pathname) {
+  const res = await githubFetch(`${GITHUB_API}${pathname}`, { accept: 'application/vnd.github+json' });
+  if (res.status === 404) throw new Error('GitHub has no published release for it (or the repository is private)');
+  if (res.status === 403 || res.status === 429) throw new Error('GitHub’s limit of requests for this hour was reached: try again later');
+  if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+  return res.json();
+}
+
+async function githubText(u) {
+  const res = await githubFetch(u);
+  if (!res.ok) throw new Error(`its checksum file: GitHub answered ${res.status}`);
+  const text = await res.text();
+  if (text.length > 1e6) throw new Error('its checksum file is too big');
+  return text;
+}
+
+// A file into data/app-files/<id>/ (in place of an older version once it's whole), its SHA-256 worked out on the way:
+// { name, size, sha256, type }. `expected`: the SHA-256 it must have (a release's own); idleMs: how long the input
+// may send nothing.
+async function storeAppFile(app, input, name, { expected = null, declared = 0, idleMs = 0 } = {}) {
+  const disk = await diskInfo();
+  if (disk && declared + DISK_MARGIN > disk.free) throw httpError(507, `Not enough space on the Beam server for ${name} (${formatSize(declared)})`);
+  const dir = path.join(DIR.appFiles, app.id);
+  await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+  const part = path.join(dir, `.incoming-${crypto.randomBytes(4).toString('hex')}`);
+  const hash = crypto.createHash('sha256');
+  let size = 0;
+  const idle = idleMs ? setTimeout(() => input.destroy(new Error('nothing arrived for a minute')), idleMs) : null;
+  try {
+    const count = new Transform({
+      transform(chunk, _enc, cb) {
+        idle?.refresh();
+        size += chunk.length;
+        if (size > APP_MAX_BYTES) return cb(httpError(413, `An app's file is ${formatSize(APP_MAX_BYTES)} at most`));
+        hash.update(chunk);
+        cb(null, chunk);
+      },
+    });
+    await pipeline(input, count, fs.createWriteStream(part, { mode: 0o600 }));
+    clearTimeout(idle);
+    const sha256 = hash.digest('hex');
+    if (!size) throw httpError(400, `${name} is empty`);
+    if (expected && sha256 !== expected) throw httpError(422, `${name} doesn't match the SHA-256 its release publishes`);
+    const fh = await fsp.open(part, 'r+');
+    try { await fh.sync(); } finally { await fh.close(); }
+    await fsp.rename(part, path.join(dir, name));
+    for (const f of await fsp.readdir(dir)) if (f !== name && !f.startsWith('.incoming-')) await fsp.rm(path.join(dir, f), { force: true }); // (the old version's)
+    return { name, size, sha256, type: appsLib.fileTypeOf(name) };
+  } catch (err) {
+    clearTimeout(idle);
+    await fsp.rm(part, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
+// An app from GitHub: its latest release's Windows file (the one named `asset` when chosen), checked against the
+// release's checksum when it publishes one. A new version goes to the PCs that have the app. In the background:
+// an `apps` event when it's done.
+function fetchGithubApp(app) {
+  if (appFetches.has(app.id)) return appFetches.get(app.id);
+  const run = (async () => {
+    const was = app.state;
+    try {
+      const [owner, repo] = app.source.split('/');
+      const release = await githubJson(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest`);
+      const version = appsLib.versionOfTag(release?.tag_name);
+      const { asset, candidates } = appsLib.pickAsset(release, repo, app.asset);
+      app.checkedAt = now();
+      if (!asset) throw new Error(app.asset ? `its latest release (${release?.tag_name || '?'}) has no ${app.asset}` : `its latest release (${release?.tag_name || '?'}) has no Windows file (.exe, .msi or .zip)`);
+      if (candidates.length > 1 && !app.asset) app.choices = candidates.slice(0, 8).map(a => a.name);
+      else delete app.choices;
+      const name = appsLib.safeFileName(asset.name);
+      if (!name) throw new Error(`its file's name (${asset.name}) won't do`);
+      if (app.file && app.version === version && app.file.name === name) { // nothing new
+        delete app.checkError;
+        app.state = 'ready';
+        return;
+      }
+      if (Number.isFinite(asset.size) && asset.size > APP_MAX_BYTES) throw new Error(`${asset.name} is over ${formatSize(APP_MAX_BYTES)}`);
+      const sums = appsLib.checksumAsset(release, asset.name);
+      const expected = sums ? appsLib.checksumIn(await githubText(sums.browser_download_url), asset.name) : null;
+      if (sums && !expected) throw new Error(`${sums.name} doesn't give ${asset.name}'s SHA-256`);
+      const res = await githubFetch(asset.browser_download_url, { timeoutMs: 30 * 60e3 });
+      if (!res.ok || !res.body) throw new Error(`downloading ${asset.name}: GitHub answered ${res.status}`);
+      const old = app.version;
+      const file = await storeAppFile(app, Readable.fromWeb(res.body), name, { expected, declared: Number(asset.size) || 0 });
+      if (!apps.includes(app)) { // (removed from Beam while it downloaded: nothing of it stays)
+        await fsp.rm(path.join(DIR.appFiles, app.id), { recursive: true, force: true }).catch(() => {});
+        return;
+      }
+      app.file = file;
+      app.version = version || null;
+      app.checksum = sums ? sums.name : null;
+      app.state = 'ready';
+      app.updatedAt = now();
+      delete app.error;
+      delete app.checkError;
+      log.info(`${app.name} ${version || ''}: ${name} (${formatSize(app.file.size)}) fetched from GitHub ${app.source}${expected ? `, matching the SHA-256 in ${sums.name}` : ' (its release publishes no checksum)'}`);
+      if (old && old !== app.version) updateInstalled(app);
+    } catch (err) {
+      app.checkedAt = now();
+      const why = String(err?.message || err).slice(0, 300);
+      if (was === 'ready' && app.file) app.checkError = why; // (the version it has stays installable)
+      else { app.state = 'failed'; app.error = why; }
+      log.warn(`${app.name}: couldn't get its latest release from GitHub ${app.source}: ${why}`);
+    } finally {
+      appFetches.delete(app.id);
+      persistApps();
+      broadcastApps();
+    }
+  })();
+  appFetches.set(app.id, run);
+  return run;
+}
+
+// Every 6 hours (and 3 minutes after a start): a new release of each GitHub app.
+function checkGithubApps() {
+  for (const a of apps) if (a.kind === 'github' && now() - (a.checkedAt || 0) > APPS_CHECK_MS - 60e3) fetchGithubApp(a);
+}
+
+// A new version: each PC that has the app (installed through Beam, or found there) gets it too. A PC that updated it
+// itself (Slate does) only says so.
+function updateInstalled(app) {
+  const ids = Object.entries(app.on || {}).filter(([d, s]) => s.state === 'installed' && canInstallApps(devices[d])).map(([d]) => d);
+  if (!ids.length) return;
+  for (const d of ids) app.on[d] = { ...app.on[d], state: 'pending', at: now() };
+  persistApps();
+  sendTo(new Set(ids), 'app-install', { id: app.id, update: true });
+  log.info(`${app.name} ${app.version || ''}: offered to ${ids.map(d => devices[d].name).join(', ')}, which have it`);
+}
+
+// GET /api/apps: { apps } (every signed-in device: the Apps page).
+function listApps(req, res) {
+  send(res, 200, { apps: apps.map(publicApp) }, { 'Cache-Control': 'no-store' });
+}
+
+// POST /api/apps { github: "owner/repo" or a github.com address, asset?, name? } | { winget: "Publisher.App", name? }:
+// 201 { app }. A GitHub app is fetched in the background (state "fetching" until then).
+async function addApp(req, res, _m, url) {
+  const me = appsCaller(req, url);
+  const body = await readJson(req);
+  if (apps.length >= APPS_MAX) throw httpError(409, `Beam keeps ${APPS_MAX} apps at most`);
+  let app;
+  if (body.github !== undefined) {
+    const repo = appsLib.parseGithubRepo(body.github);
+    if (!repo) throw httpError(400, 'github must be "owner/repo" or a github.com address');
+    const source = `${repo.owner}/${repo.repo}`;
+    if (apps.some(a => a.kind === 'github' && a.source.toLowerCase() === source.toLowerCase())) throw httpError(409, `${repo.repo} is one of Beam's apps already`);
+    if (body.asset !== undefined && (typeof body.asset !== 'string' || body.asset.length > 200 || !appsLib.fileTypeOf(body.asset))) throw httpError(400, 'asset must be the name of an .exe, .msi or .zip in the release');
+    app = newApp({ kind: 'github', name: appsLib.appName(body.name) || appsLib.appName(repo.repo), source, by: me });
+    if (body.asset) app.asset = body.asset;
+    app.state = 'fetching';
+  } else if (body.winget !== undefined) {
+    if (!appsLib.isWingetId(body.winget)) throw httpError(400, 'winget must be a package id, like "7zip.7zip" (winget search shows them)');
+    if (apps.some(a => a.kind === 'winget' && a.source.toLowerCase() === body.winget.toLowerCase())) throw httpError(409, `${body.winget} is one of Beam's apps already`);
+    app = newApp({ kind: 'winget', name: appsLib.appName(body.name) || appsLib.appName(body.winget.split('.').slice(1).join(' ')) || body.winget, source: body.winget, by: me });
+  } else {
+    throw httpError(400, 'Expected {"github": "owner/repo"} or {"winget": "Publisher.App"} (a file: PUT /api/apps/file?name=)');
+  }
+  apps.push(app);
+  persistApps();
+  log.info(`${whoName(me, 'A device')} added the app ${app.name} (${app.kind === 'github' ? `GitHub ${app.source}` : `winget ${app.source}`})`);
+  broadcastApps();
+  if (app.kind === 'github') fetchGithubApp(app);
+  send(res, 201, { app: publicApp(app) });
+}
+
+// PUT /api/apps/file?name=<the file's name>[&label=<the app's name>][&version=][&app=<id>]: the body is an .exe, .msi or
+// .zip (2 GB at most): a new app, or (app=) a new version of a file app. 201 { app }.
+async function putAppFile(req, res, _m, url) {
+  const me = appsCaller(req, url);
+  const name = appsLib.safeFileName(url.searchParams.get('name'));
+  if (!name || !appsLib.fileTypeOf(name)) throw httpError(400, 'name must be the name of an .exe, .msi or .zip file');
+  const declared = Number(req.headers['content-length']) || 0;
+  if (declared > APP_MAX_BYTES) throw httpError(413, `An app's file is ${formatSize(APP_MAX_BYTES)} at most`);
+  const id = url.searchParams.get('app');
+  const existing = id ? appById(id) : null;
+  if (existing && existing.kind !== 'file') throw httpError(409, `${existing.name} comes from ${existing.kind === 'github' ? 'GitHub' : 'winget'}, not from a file`);
+  if (!existing && apps.length >= APPS_MAX) throw httpError(409, `Beam keeps ${APPS_MAX} apps at most`);
+  const app = existing || newApp({ kind: 'file', name: appsLib.appName(url.searchParams.get('label')) || appsLib.appName(name.replace(/\.[^.]+$/, '')) || 'App', source: null, by: me });
+  // (an upload route: no 30 s limit for the whole body, but 60 s without data ends it)
+  const file = await storeAppFile(app, req, name, { declared, idleMs: BODY_IDLE_MS });
+  const version = (url.searchParams.get('version') || '').trim().replace(/[^\w.+-]/g, '').slice(0, 40) || null;
+  app.file = file;
+  app.version = version;
+  app.updatedAt = now();
+  if (!existing) apps.push(app);
+  persistApps();
+  log.info(`${whoName(me, 'A device')} ${existing ? 'sent a new version of' : 'added'} the app ${app.name}${version ? ` ${version}` : ''} (${name}, ${formatSize(file.size)})`);
+  broadcastApps();
+  if (existing) updateInstalled(app);
+  send(res, existing ? 200 : 201, { app: publicApp(app) });
+}
+
+// PATCH /api/apps/{id} { name?, run?, args?, asset? }: its name; the program in a .zip that the shortcut starts (run);
+// the switches a setup program is run with (args); another of a GitHub release's files (asset: fetched again).
+async function editApp(req, res, [id], url) {
+  appsCaller(req, url);
+  const app = appById(id);
+  const body = await readJson(req);
+  if (body.name !== undefined) app.name = appsLib.appName(body.name) || app.name;
+  if (body.run !== undefined) {
+    if (body.run !== null && (typeof body.run !== 'string' || body.run.length > 200 || !/\.exe$/i.test(body.run) || /(^|[\\/])\.\.([\\/]|$)|^[\\/]|:/.test(body.run))) throw httpError(400, 'run must be the path of an .exe inside the .zip');
+    if (body.run) app.run = body.run.replace(/\\/g, '/'); else delete app.run;
+  }
+  if (body.args !== undefined) {
+    if (body.args !== null && (typeof body.args !== 'string' || body.args.length > 300 || /[\r\n\0]/.test(body.args))) throw httpError(400, 'args must be one line of switches');
+    if (body.args) app.args = body.args.trim(); else delete app.args;
+  }
+  let refetch = false;
+  if (body.asset !== undefined) {
+    if (app.kind !== 'github') throw httpError(400, 'Only an app from GitHub has a release to pick a file from');
+    if (body.asset !== null && (typeof body.asset !== 'string' || body.asset.length > 200 || !appsLib.fileTypeOf(body.asset))) throw httpError(400, 'asset must be the name of an .exe, .msi or .zip in the release');
+    if ((body.asset || null) !== (app.asset || null)) {
+      if (body.asset) app.asset = body.asset; else delete app.asset;
+      app.file = null;
+      app.version = null;
+      app.state = 'fetching';
+      refetch = true;
+    }
+  }
+  persistApps();
+  broadcastApps();
+  if (refetch) fetchGithubApp(app);
+  send(res, 200, { app: publicApp(app) });
+}
+
+// DELETE /api/apps/{id}: gone from Beam and its file from the server (the PCs keep what they installed: Uninstall
+// first to remove it there).
+async function deleteApp(req, res, [id], url) {
+  const me = appsCaller(req, url);
+  const app = appById(id);
+  apps = apps.filter(a => a !== app);
+  persistApps();
+  await fsp.rm(path.join(DIR.appFiles, app.id), { recursive: true, force: true }).catch(() => {});
+  log.info(`${whoName(me, 'A device')} removed the app ${app.name} from Beam`);
+  broadcastApps();
+  send(res, 204);
+}
+
+// POST /api/apps/{id}/check: a GitHub app's latest release now. { app } once it's done.
+async function checkApp(req, res, [id], url) {
+  appsCaller(req, url);
+  const app = appById(id);
+  if (app.kind !== 'github') throw httpError(400, 'Only an app from GitHub has releases to check');
+  if (app.state !== 'ready') app.state = 'fetching';
+  broadcastApps();
+  await fetchGithubApp(app);
+  send(res, 200, { app: publicApp(app) });
+}
+
+// GET /api/apps/{id}/file: the app's file, for the PCs installing it.
+async function getAppFile(req, res, [id]) {
+  const app = appById(id);
+  if (!app.file) throw httpError(404, `${app.name} has no file${app.kind === 'winget' ? ' (winget installs it)' : ' yet'}`);
+  await serveFile(req, res, path.join(DIR.appFiles, app.id, app.file.name), app.file.name, 'application/octet-stream', false, { cache: 'no-cache' });
+}
+
+// Which PCs a request names: the list, or "all" (every PC that can install apps).
+function appTargets(body) {
+  if (body.devices === 'all') return Object.values(devices).filter(d => canInstallApps(d) && !d.temporary);
+  if (!Array.isArray(body.devices) || !body.devices.length || body.devices.length > 100) throw httpError(400, 'devices must be a list of device ids, or "all"');
+  return [...new Set(body.devices.map(x => resolveAlias(String(x))))].map(x => devices[x]).filter(Boolean);
+}
+
+// POST /api/apps/{id}/install { devices: [...] | "all" }: each of those PCs (the Windows app 1.16 or later) is asked to
+// install it; one that's offline when it connects. { app, asked: [names], cannot: [names] }.
+async function installApp(req, res, [id], url) {
+  const me = appsCaller(req, url);
+  const app = appById(id);
+  const body = await readJson(req);
+  if (app.state !== 'ready') throw httpError(409, app.state === 'fetching' ? `${app.name} is still being fetched from GitHub` : `${app.name} isn't ready: ${app.error || 'check it again'}`);
+  const targets = appTargets(body);
+  const can = targets.filter(canInstallApps);
+  const cannot = targets.filter(d => !canInstallApps(d)).map(d => d.name);
+  if (!can.length) throw httpError(409, `${cannot.length ? `${cannot.join(', ')} can’t install apps` : 'No PC can install apps'} (that needs Beam for Windows ${APPS_APP_MIN} or later)`);
+  for (const d of can) app.on[d.id] = { ...(app.on[d.id]?.version && { version: app.on[d.id].version }), state: 'pending', at: now() };
+  persistApps();
+  sendTo(new Set(can.map(d => d.id)), 'app-install', { id: app.id });
+  log.info(`${whoName(me, 'A device')} asked ${can.map(d => d.name).join(', ')} to install ${app.name}${app.version ? ` ${app.version}` : ''}`);
+  broadcastApps();
+  send(res, 200, { app: publicApp(app), asked: can.map(d => d.name), cannot });
+}
+
+// POST /api/apps/{id}/uninstall { devices }: those PCs remove what Beam installed there. { app, asked }.
+async function uninstallApp(req, res, [id], url) {
+  const me = appsCaller(req, url);
+  const app = appById(id);
+  const body = await readJson(req);
+  const targets = appTargets(body).filter(d => app.on[d.id] && canInstallApps(d));
+  if (!targets.length) throw httpError(409, `${app.name} isn't installed on ${body.devices === 'all' ? 'any PC' : 'that PC'} through Beam`);
+  for (const d of targets) app.on[d.id] = { ...app.on[d.id], state: 'removing', at: now() };
+  persistApps();
+  sendTo(new Set(targets.map(d => d.id)), 'app-uninstall', { id: app.id });
+  log.info(`${whoName(me, 'A device')} asked ${targets.map(d => d.name).join(', ')} to uninstall ${app.name}`);
+  broadcastApps();
+  send(res, 200, { app: publicApp(app), asked: targets.map(d => d.name) });
+}
+
+// POST /api/devices/me/apps { id, state, version?, error? }: a PC says how an install or a removal went
+// (asked: waiting for someone at it to allow it; declined: Not now there).
+// PUT /api/devices/me/apps { apps: [{ id, version }] }: what Beam installed there and is still there (at its start).
+async function reportApps(req, res, _m, url) {
+  const d = devices[deviceIdOf(req, url)];
+  if (!d) throw httpError(400, 'X-Beam-Device-Id is required');
+  const body = await readJson(req, { limit: 64 * 1024 });
+  const ver = v => (typeof v === 'string' && v ? v.trim().slice(0, 40) : null);
+  if (req.method === 'PUT') {
+    if (!Array.isArray(body.apps)) throw httpError(400, 'Expected {"apps": [{"id", "version"}]}');
+    const have = new Map(body.apps.filter(x => isPlainObject(x) && typeof x.id === 'string').slice(0, 200).map(x => [x.id, ver(x.version)]));
+    let changed = false;
+    for (const app of apps) {
+      const s = app.on[d.id];
+      if (have.has(app.id)) {
+        if (!s || s.state === 'installed' || s.state === 'failed') {
+          const next = { state: 'installed', at: s?.state === 'installed' ? s.at : now(), ...(have.get(app.id) && { version: have.get(app.id) }) };
+          if (JSON.stringify(next) !== JSON.stringify(s)) { app.on[d.id] = next; changed = true; }
+        }
+      } else if (s?.state === 'installed') { // (removed there by hand)
+        delete app.on[d.id];
+        changed = true;
+      }
+    }
+    if (changed) { persistApps(); broadcastApps(); }
+    return send(res, 204);
+  }
+  const app = apps.find(a => a.id === body.id);
+  if (!app) throw httpError(404, 'No such app');
+  if (!APP_REPORTS.has(body.state)) throw httpError(400, `state must be one of: ${[...APP_REPORTS].join(', ')}`);
+  const error = typeof body.error === 'string' && body.error ? statusText(body.error).slice(0, 300) : null;
+  if (body.state === 'removed') delete app.on[d.id];
+  else app.on[d.id] = { state: body.state, at: now(), ...(ver(body.version) && { version: ver(body.version) }), ...(error && { error }) };
+  persistApps();
+  broadcastApps();
+  const v = ver(body.version) ? ` ${ver(body.version)}` : '';
+  if (body.state === 'installed') log.info(`${d.name} installed ${app.name}${v}`);
+  else if (body.state === 'removed') log.info(`${d.name} uninstalled ${app.name}`);
+  else if (body.state === 'failed') log.warn(`${d.name} couldn't install ${app.name}: ${error || 'no reason given'}`);
+  else if (body.state === 'declined') log.info(`Someone at ${d.name} chose not to install ${app.name} now`);
+  else if (body.state === 'asked') log.info(`${d.name} asks whoever is there before installing ${app.name}`);
+  send(res, 204);
+}
+
+// A PC that connects: what it was asked meanwhile (or asked again after a restart there).
+function appsOnConnect(c) {
+  const d = devices[c.deviceId];
+  if (!canInstallApps(d)) return;
+  for (const app of apps) {
+    const s = app.on[d.id]?.state;
+    if (s === 'pending' || s === 'asked') writeTo(c, `event: app-install\ndata: ${JSON.stringify({ id: app.id })}\n\n`);
+    else if (s === 'removing') writeTo(c, `event: app-uninstall\ndata: ${JSON.stringify({ id: app.id })}\n\n`);
+  }
 }
 
 // ---------------------------------------------------------------- phone notifications (1.5)
@@ -5422,6 +5903,7 @@ function events(req, res, _m, url) {
     broadcastDevices();
     if (kind === 'app') rcOnConnect(client);
     if (kind === 'app') offerUpdateOnConnect(client, req, url);
+    if (kind === 'app') appsOnConnect(client); // (1.21) installs or removals asked while it was away
   }
   res.on('close', () => {
     clearTimeout(client.beat);
@@ -5486,6 +5968,7 @@ const FEATURES = [
   'staged-updates', // (1.19.0: a Windows build goes to one PC first; settings `stagedUpdates`, `rollout`; POST /api/updates/release)
   'setup-check', // (1.20.0: GET /api/setup, `setup` alerts, status startsWithWindows/startWanted)
   'device-logs', // (1.20.0: POST /api/devices/{id}/log, the `log-request` event, POST /api/devices/me/log)
+  'apps', // (1.21.0: /api/apps (GitHub, files, winget), `app-install`/`app-uninstall`, /api/devices/me/apps, `can.apps`)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -6379,7 +6862,7 @@ function helloProof(url) {
 
 // ---------------------------------------------------------------- export / import
 
-const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|apps\/(Beam\.exe|beam\.apk)(\.json)?)$/;
+const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|apps\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|app-files\/[a-f0-9]{8}\/[A-Za-z0-9_()+-][A-Za-z0-9._ ()+-]{0,99}|apps\/(Beam\.exe|beam\.apk)(\.json)?)$/;
 
 // Everything a Beam is, as a .tar.gz: the key, server id, settings, sign-ins, devices, items and their files.
 // Leaves out unfinished uploads, logs and temporary files. items.json comes last and lists only the items whose
@@ -6413,6 +6896,14 @@ async function writeExport(out, state, extra = {}) {
     for (const name of Object.values(APPS)) {
       for (const f of [name, `${name}.json`]) await addStored(writer, `apps/${f}`, path.join(DIST_DIR, f));
     }
+    // (1.21) The user's apps with their files (one whose file didn't make it in has none: a file app is left out, a
+    // GitHub one fetches it again)
+    const keptApps = [];
+    for (const a of state.apps || []) {
+      if (a.file && !(await addStored(writer, `app-files/${a.id}/${a.file.name}`, path.join(DIR.appFiles, a.id, a.file.name)))) a.file = null;
+      keptApps.push(a);
+    }
+    await writer.addBuffer('apps.json', JSON.stringify(keptApps));
     await writer.addBuffer('items.json', JSON.stringify(kept));
     await writer.finish();
     return { items: kept.length, bytes: writer.bytes };
@@ -6430,7 +6921,7 @@ async function addStored(writer, name, file) {
 }
 
 function snapshotState() {
-  return structuredClone({ key: KEY, serverId: SERVER_ID, settings, password, devices, aliases, tokens: tokenStore, read: readMarks, alerts, history, items });
+  return structuredClone({ key: KEY, serverId: SERVER_ID, settings, password, devices, aliases, tokens: tokenStore, read: readMarks, alerts, history, apps, items });
 }
 
 async function exportApi(req, res, _m, url) {
@@ -6769,6 +7260,17 @@ const routes = [
   ['GET', `/api/devices/${DEV}/history`, getHistory],
   ['POST', '/api/devices/me/log', postDeviceLog],
   ['POST', `/api/devices/${DEV}/log`, askDeviceLog],
+  ['POST', '/api/devices/me/apps', reportApps], // (1.21) apps on every PC
+  ['PUT', '/api/devices/me/apps', reportApps],
+  ['GET', '/api/apps', listApps],
+  ['POST', '/api/apps', addApp],
+  ['PUT', '/api/apps/file', putAppFile],
+  ['PATCH', '/api/apps/([a-f0-9]{8})', editApp],
+  ['DELETE', '/api/apps/([a-f0-9]{8})', deleteApp],
+  ['POST', '/api/apps/([a-f0-9]{8})/check', checkApp],
+  ['GET', '/api/apps/([a-f0-9]{8})/file', getAppFile],
+  ['POST', '/api/apps/([a-f0-9]{8})/install', installApp],
+  ['POST', '/api/apps/([a-f0-9]{8})/uninstall', uninstallApp],
   ['GET', '/api/setup', getSetup],
   ['GET', `/api/devices/${DEV}/backups`, getDeviceBackups],
   ['GET', '/api/backups', getBackups],
@@ -6854,7 +7356,7 @@ const routes = [
 const MOVE_SCOPE_PATHS = new Set(['/api/admin/export', '/api/move']);
 // While a move is being prepared, these still work (everything else that changes data waits).
 const FROZEN_OK = /^\/api\/(move|login|logout|autopair|login-requests|events\/poke|rc\/sessions)(\/|$)/;
-const UPLOAD_ROUTE = /^\/api\/(uploads\/[a-f0-9]{16}|file)$/;
+const UPLOAD_ROUTE = /^\/api\/(uploads\/[a-f0-9]{16}|file|apps\/file)$/;
 
 // ---------------------------------------------------------------- static app
 
@@ -7251,6 +7753,11 @@ function serve() {
     if (SETUP_AUTO) {
       setTimeout(() => runSetupCheck(), FAST_TIMEOUTS ? 500 : 120_000).unref();
       setInterval(() => runSetupCheck(), SETUP_EVERY_MS).unref();
+    }
+    // (1.21) The apps from GitHub: a new release, 3 minutes in and then every 6 hours (tests ask with Check).
+    if (!FAST_TIMEOUTS) {
+      setTimeout(checkGithubApps, 180_000).unref();
+      setInterval(checkGithubApps, APPS_CHECK_MS).unref();
     }
     console.log(`\n  This computer:  http://localhost:${PORT}`);
     if (lan) console.log(`  Local network:  ${lan}`);
