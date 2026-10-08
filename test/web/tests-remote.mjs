@@ -649,7 +649,9 @@ export default function register(test) {
     await page.evaluate(`[...document.querySelectorAll('#genBody label.check')].find(l => /^Bigger text/.test(l.textContent)).querySelector('input').click(); true`);
     await pc.page.waitFor(`fakePc.rec.ctl.filter(m => m.t === 'fit').at(-1)?.scale === true`, 5000, 'a fit with the scaling (Bigger text)');
     // Fit off: asked for, and the PC's own sizes come back.
-    await page.evaluate(`[...document.querySelectorAll('#genBody label.check')].find(l => /^Fit /.test(l.textContent)).querySelector('input').click(); $('#genDlg').close(); true`);
+    // (1.17) ...and the panel's × closes it (the viewer's page never wired its dialogs' ×: only Done worked)
+    await page.evaluate(`[...document.querySelectorAll('#genBody label.check')].find(l => /^Fit /.test(l.textContent)).querySelector('input').click(); $('#genDlg [data-close]').click(); true`);
+    await page.waitFor(`!$('#genDlg').open`, 3000, 'the Picture panel\'s × closes it');
     await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'fit' && m.on === false)`, 5000, 'fit off');
     await page.waitFor(`!rc.fitted && rc.monitors[0].w === 2560`, 5000, 'back to 2560×1440');
     // Hidden: no frames; seen again: frames.

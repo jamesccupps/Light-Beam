@@ -3,6 +3,23 @@
 
 const WEB_VERSION = '1.6.0';
 
+// Every dialog's × closes it, and so does a click on the dimmed area around it (not a sign-in approval: Esc there means
+// "decide later"). Both ends of the click count: a text selection dragged out of the dialog doesn't close it. (1.17:
+// the remote control viewer's page binds these too: its Picture panel's × did nothing there.)
+function bindDialogs() {
+  for (const b of $$('[data-close]')) b.addEventListener('click', () => b.closest('dialog').close());
+  for (const dlg of $$('dialog.dlg')) {
+    if (dlg.id === 'approveDlg') continue;
+    const outside = e => {
+      const r = dlg.getBoundingClientRect();
+      return e.target === dlg && (e.clientX < r.left || e.clientX >= r.right || e.clientY < r.top || e.clientY >= r.bottom);
+    };
+    let downOutside = false;
+    dlg.addEventListener('pointerdown', e => { downOutside = outside(e); });
+    dlg.addEventListener('click', e => { if (downOutside && outside(e)) dlg.close(); downOutside = false; });
+  }
+}
+
 function bindUI() {
   const box = $('#text');
   box.addEventListener('input', onComposerInput);
@@ -65,19 +82,7 @@ function bindUI() {
   $('#pairBtn').addEventListener('click', openPairDialog);
   $('#settingsBtn').addEventListener('click', () => openSettings());
   $('#meBtn').addEventListener('click', async () => { await openSettings('device'); $('#set-device input')?.focus(); });
-  for (const b of $$('[data-close]')) b.addEventListener('click', () => b.closest('dialog').close());
-  // A click on the dimmed area around a dialog closes it, as its × does (not a sign-in approval: Esc there means
-  // "decide later"). Both ends of the click count: a text selection dragged out of the dialog doesn't close it.
-  for (const dlg of $$('dialog.dlg')) {
-    if (dlg.id === 'approveDlg') continue;
-    const outside = e => {
-      const r = dlg.getBoundingClientRect();
-      return e.target === dlg && (e.clientX < r.left || e.clientX >= r.right || e.clientY < r.top || e.clientY >= r.bottom);
-    };
-    let downOutside = false;
-    dlg.addEventListener('pointerdown', e => { downOutside = outside(e); });
-    dlg.addEventListener('click', e => { if (downOutside && outside(e)) dlg.close(); downOutside = false; });
-  }
+  bindDialogs();
 
   $('#copyAddressBtn').addEventListener('click', () => copyText($('#pairAddress').textContent, 'Address copied'));
   $('#pairLinkBox').addEventListener('toggle', () => { if ($('#pairLinkBox').open) showPairingLink(); });
