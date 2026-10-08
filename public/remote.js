@@ -149,6 +149,7 @@ function startRemote() {
   rcBuild();
   if (HOST) rcBindHost();
   bindMenu();
+  bindDialogs(); // (1.17: the chat app's bindUI never runs here, so the Picture panel's × did nothing)
   window.addEventListener('hashchange', () => location.reload());
   window.addEventListener('pagehide', () => rcLeave());
   window.addEventListener('pageshow', e => { if (e.persisted) rcConnect(); });
