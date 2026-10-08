@@ -23,7 +23,11 @@
     saver: { fps: 15, kbps: 1500, hint: 'text', pref: 'maintain-resolution', box: [1280, 720] },
   };
   const AUTO_KBPS = { text: 15000, motion: 25000 };
+  // (1.15) Auto's sharp text at 60 fps too: a click's change waits half as long for the next captured frame (the user's
+  // desk, 2026-10-06: 117 ms from a click to the picture at 30 fps, 92 at 60). A still screen sends no more for it.
+  const AUTO_FPS = 60;
   let cfg = null, stream = null, track = null, pc = null, ch = null, tr = null;
+  const outStream = new MediaStream(); // (1.15) the picture's stream id, before the capture joins it
   let verified = false, hello = null, battery = false, h264First = false, cpuStrikes = 0;
   let settings = { mode: 'text', size: 'auto', vw: 0, vh: 0, fps: 0, kbps: 0, codec: 'auto', net: '' };
   let autoPick = 'text', busyTicks = 0, calmTicks = 0, videoOn = true, src = { w: 0, h: 0 }, codecsKey = '';
@@ -44,7 +48,7 @@
   function profile() {
     const mode = settings.mode === 'auto' ? (settings.net === 'cellular' ? 'saver' : autoPick) : settings.mode;
     const p = Object.assign({ name: mode }, PROFILES[mode] || PROFILES.text);
-    if (settings.mode === 'auto' && mode !== 'saver') p.kbps = AUTO_KBPS[mode];
+    if (settings.mode === 'auto' && mode !== 'saver') { p.kbps = AUTO_KBPS[mode]; p.fps = AUTO_FPS; }
     if (settings.fps) p.fps = settings.fps;
     if (settings.kbps) p.kbps = settings.kbps;
     return p;
@@ -99,6 +103,9 @@
   }
 
   // Beam starts this through DevTools with a user gesture. A wrong source name hangs silently: 5 s at most.
+  // (1.15) The connection starts at the same time (the offer, ICE, both peer checks: ~0.2 s on a home network, more
+  // across the internet), and the capture joins it when it's there (~0.6 s: replaceTrack, no new offer). Until then
+  // the screen's size is Beam's (`w`, `h`: its physical pixels); the capture's own frames say for sure a moment later.
   window.rcStart = async function (c) {
     if (cfg) return;
     cfg = c;
@@ -107,13 +114,16 @@
     else settings.mode = c.mode === 'motion' ? 'motion' : 'text';
     videoOn = c.video !== false;
     battery = !!c.battery;
+    if (c.w > 0 && c.h > 0) { const k = Math.min(1, 3840 / c.w, 2160 / c.h); src = { w: Math.round(c.w * k), h: Math.round(c.h * k) }; }
     let late = false, timer = 0;
     const capture = navigator.mediaDevices.getDisplayMedia({ video: constraints(), audio: false });
-    capture.then(s => { if (late) s.getTracks().forEach(t => t.stop()); }, () => {});
+    capture.then(s => { if (late || ended) s.getTracks().forEach(t => t.stop()); }, () => {});
+    const connecting = connect().catch(e => log('connect: ' + (e && e.name)));
     try {
       const r = await Promise.race([capture, new Promise(res => { timer = setTimeout(() => res('timeout'), 5000); })]);
       clearTimeout(timer);
       if (r === 'timeout') { late = true; post({ t: 'ended', reason: 'capture-timeout' }); return; }
+      if (ended) return; // (stopped by the line above)
       stream = r;
     } catch (e) {
       clearTimeout(timer);
@@ -123,10 +133,13 @@
     track = stream.getVideoTracks()[0];
     track.contentHint = profile().hint;
     track.onended = onTrackEnded;
+    post({ t: 'capturing' });
+    await connecting; // (the transceiver is there from its first line; the offer may still be on its way)
+    if (tr && !ended) { try { await tr.sender.replaceTrack(track); } catch (e) { log('the picture: ' + e.name); } }
+    if (videoOn && verified) watchFirstFrame();
     const size = await frameSize(stream); // getSettings() reports the constraint's maximum, not the screen
-    src = { w: size.w, h: size.h };
+    if (size.w > 0 && size.h > 0 && (size.w !== src.w || size.h !== src.h)) { src = { w: size.w, h: size.h }; applyParams(); }
     post({ t: 'captured', w: size.w, h: size.h });
-    await connect();
   };
 
   function frameSize(s) {
@@ -165,6 +178,7 @@
       const t = s.getVideoTracks()[0];
       t.contentHint = profile().hint;
       t.onended = onTrackEnded;
+      stopWatch(); // (its clone would keep the old capture going; the next probe watches the new one)
       try { if (tr) await tr.sender.replaceTrack(t); } catch (e) { log('replace track: ' + e.name); }
       stream = s;
       track = t;
@@ -209,12 +223,17 @@
     ch.clip.onmessage = e => { if (verified && typeof e.data === 'string' && e.data.length <= 80000) post({ t: 'clip', d: e.data }); };
     ch.ctl.onopen = () => { if (verified) sendHello(); };
     ch.ctl.onmessage = e => onCtl(e.data);
-    ch.in.onmessage = e => { if (verified && typeof e.data === 'string' && e.data.length <= 16384) post({ t: 'in', d: e.data }); };
+    ch.in.onmessage = e => {
+      if (!verified || typeof e.data !== 'string' || e.data.length > 16384) return;
+      if (e.data.indexOf('"probe"') !== -1) probeSeen(e.data); // (1.15: before Beam turns the square)
+      post({ t: 'in', d: e.data });
+    };
     ch.mv.onmessage = e => { if (verified && typeof e.data === 'string' && e.data.length <= 512) post({ t: 'mv', d: e.data }); };
     if (!kvm) {
       const p = profile();
-      // No video until Beam has checked the peer: the encoding starts inactive.
-      tr = pc.addTransceiver(track, { direction: 'sendonly', streams: [stream], sendEncodings: [{ active: false, maxBitrate: p.kbps * 1000, maxFramerate: p.fps, scaleResolutionDownBy: downscale(p) }] });
+      // No video until Beam has checked the peer: the encoding starts inactive. (1.15) And no capture yet: it joins
+      // once it's there (rcStart).
+      tr = pc.addTransceiver('video', { direction: 'sendonly', streams: [outStream], sendEncodings: [{ active: false, maxBitrate: p.kbps * 1000, maxFramerate: p.fps, scaleResolutionDownBy: downscale(p) }] });
       applyCodecs();
     }
     pc.onicecandidate = e => queueCandidate(e.candidate ? e.candidate.toJSON() : { candidate: '', sdpMid: null, sdpMLineIndex: null });
@@ -381,6 +400,24 @@
     earlyCtl.splice(0).forEach(onCtl);
     await applyParams(); // the video starts
     if (ch && ch.ctl.readyState === 'open') sendHello();
+    if (track && videoOn) watchFirstFrame(); // (else once the capture joins, or the viewer shows)
+  }
+
+  // (1.15) The first frame out after Beam's check: the start's last step, for Beam's log and the viewer's details. Once
+  // a page; at most 15 s.
+  let firstFrame = false, firstFrameTimer = 0;
+  function watchFirstFrame() {
+    if (firstFrame || firstFrameTimer || !tr || ended) return;
+    const until = Date.now() + 15000;
+    const look = async () => {
+      let sent = 0;
+      try { (await tr.sender.getStats()).forEach(r => { if (r.type === 'outbound-rtp' && r.kind === 'video') sent = r.framesSent || r.framesEncoded || 0; }); } catch (e) { }
+      firstFrameTimer = 0;
+      if (firstFrame || ended) return;
+      if (sent > 0) { firstFrame = true; post({ t: 'first-frame' }); return; }
+      if (Date.now() < until) firstFrameTimer = setTimeout(look, 20);
+    };
+    firstFrameTimer = setTimeout(look, 0);
   }
 
   function sendHello() {
@@ -523,6 +560,73 @@
     }
   }
 
+  // ------------------------------------------------------------------ the delay's capture step (1.15)
+
+  // While the viewer measures the delay (its probes come on `in`, and Beam turns a square in the top left corner of the
+  // screen for each), this page watches its own captured frames (a clone of the capture) for the square's new colour and
+  // says how long after the probe got here a frame showed it: `{ t: 'probe-cap', n, ms }`. Less Beam's own time to put
+  // it on the screen, that's Edge's capture; the rest of the viewer's capture step is the wait before the encoder.
+  let watch = null; // { reader, clone, want: { n, color, at } | null, timer }
+
+  function probeSeen(data) {
+    let m;
+    try { m = JSON.parse(data); } catch (e) { return; }
+    if (!m || m.t !== 'probe') return;
+    if (m.off) { stopWatch(); return; }
+    if (!watch) startWatch();
+    // (it shows magenta at `on`; each probe after turns it: odd ones green)
+    if (watch && !m.on && Number.isInteger(m.n) && m.n > 0) watch.want = { n: m.n, color: m.n % 2 ? 'green' : 'magenta', at: performance.now() };
+  }
+
+  function startWatch() {
+    if (watch || !track || ended || typeof MediaStreamTrackProcessor !== 'function' || typeof OffscreenCanvas !== 'function') return;
+    let clone, reader;
+    try {
+      clone = track.clone();
+      reader = new MediaStreamTrackProcessor({ track: clone }).readable.getReader();
+    } catch (e) { if (clone) clone.stop(); log('the capture watch: ' + e.name); return; }
+    const w = watch = { reader, clone, want: null, timer: 0 };
+    w.timer = setTimeout(() => { if (watch === w) stopWatch(); }, 60000); // (a measurement takes a few seconds)
+    const g = new OffscreenCanvas(2, 2).getContext('2d', { willReadFrequently: true });
+    (async () => {
+      try {
+        for (;;) {
+          const { value: f, done } = await reader.read();
+          if (done || watch !== w) { if (f) f.close(); break; }
+          const at = performance.now(), want = w.want;
+          if (want && squareColor(g, f) === want.color) {
+            w.want = null;
+            sendCtl({ t: 'probe-cap', n: want.n, ms: Math.round((at - want.at) * 10) / 10 });
+          }
+          f.close();
+        }
+      } catch (e) { } finally { try { clone.stop(); } catch (e) { } if (watch === w) watch = null; }
+    })();
+  }
+
+  function stopWatch() {
+    const w = watch;
+    watch = null;
+    if (!w) return;
+    clearTimeout(w.timer);
+    try { w.reader.cancel().catch(() => {}); } catch (e) { }
+    try { w.clone.stop(); } catch (e) { }
+  }
+
+  // The middle of the square (32 px of the screen's own, top left; the frame can be smaller than the screen): magenta,
+  // green or null. The viewer reads the same colours (remote.js rcProbeColor).
+  function squareColor(g, f) {
+    const k = Math.max(0.25, Math.min(4, cfg && cfg.w > 0 ? f.displayWidth / cfg.w : 1));
+    try { g.drawImage(f, 12 * k, 12 * k, 8 * k, 8 * k, 0, 0, 2, 2); } catch (e) { return null; }
+    const d = g.getImageData(0, 0, 2, 2).data;
+    let R = 0, G = 0, B = 0;
+    for (let i = 0; i < d.length; i += 4) { R += d[i]; G += d[i + 1]; B += d[i + 2]; }
+    R /= 4; G /= 4; B /= 4;
+    if (R > 150 && B > 150 && G < 110) return 'magenta';
+    if (G > 150 && R < 110 && B < 110) return 'green';
+    return null;
+  }
+
   // ------------------------------------------------------------------ the end
 
   function end(reason) {
@@ -531,6 +635,8 @@
     ended = true;
     verified = false;
     clipOut = [];
+    stopWatch();
+    clearTimeout(firstFrameTimer);
     clearInterval(statsTimer);
     if (stream) stream.getTracks().forEach(t => t.stop()); // the capture stops now
     setTimeout(() => { try { if (pc) pc.close(); } catch (e) { } pc = null; }, 200); // time for the bye to go out
@@ -551,6 +657,7 @@
       case 'video':
         videoOn = m.on !== false;
         applyParams().catch(() => {});
+        if (videoOn && verified && track) watchFirstFrame();
         break;
       case 'battery':
         battery = !!m.on;
