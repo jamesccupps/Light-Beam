@@ -50,6 +50,10 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   mode, capture straight into the hardware encoder, decoding on the phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
+- **Linux, Raspberry Pi first:** today a Pi uses the web app in its browser, or the command-line client headless
+  (`beam listen` receives files). Next: a one-line install that keeps it online as a service, its status on its page
+  (disk, uptime, CPU temperature) with alerts, waking the PCs on its own network, and the Apps page for Linux; later a
+  desktop app with a tray icon and remote control of a Linux desktop.
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
 - **Builds and releases** with GitHub Actions.
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;
