@@ -36,6 +36,7 @@ namespace Beam
         public string RcBannerSpot;            // Beam 1.7.4: where the remote-control banner was put ("screen|fx|fy", RcBannerPlace)
         public bool RcKvmBannerHidden;         // Beam 1.12: a kvm session's banner folded into the tray (chosen at this PC)
         public bool RcKvmTarget;               // Beam 1.12.4: a kvm session has been live here: its capture host is kept warm
+        public Dictionary<string, long> RcNet = new Dictionary<string, long>(); // (1.17) each viewer's network estimate last time (kbps): its first picture's start
         public bool KvmOn;                     // Beam 1.12: this PC's keyboard and mouse go over to the PCs beside it (KvmController)
         public List<KvmPlace> KvmPlaces = new List<KvmPlace>(); // ...where those PCs stand around it (1.12.5; 1.12's kvmLeft: a row to its left)
         public string RcDisplayRestore;        // Beam 1.8: a screen fitted to a viewer, as it was ("device|w|h|hz|percent", RcDisplay)
@@ -74,6 +75,8 @@ namespace Beam
         public List<string> KnownUrls = new List<string>(); // every address our Beam said it answers on (hello.urls)
 
         Dictionary<string, object> raw = new Dictionary<string, object>();
+
+        public const int RcNetMax = 20; // (viewers remembered at most)
 
         public static Dictionary<string, string> DefaultHotkeys()
         {
@@ -209,6 +212,13 @@ namespace Beam
                 c.RcBannerSpot = Json.Str(d, "rcBannerSpot");
                 c.RcKvmBannerHidden = Json.Bool(d, "rcKvmBannerHidden", false);
                 c.RcKvmTarget = Json.Bool(d, "rcKvmTarget", false);
+                var net = Json.Obj(Json.Get(d, "rcNet"));
+                if (net != null)
+                    foreach (var kv in net.Take(RcNetMax))
+                    {
+                        long kbps = Json.Long(net, kv.Key, 0);
+                        if (ValidId(kv.Key) && kbps > 0) c.RcNet[kv.Key] = kbps;
+                    }
                 c.KvmOn = Json.Bool(d, "kvmOn", false);
                 var places = Json.Get(d, "kvmPlaces") as object[];
                 if (places != null)
@@ -371,6 +381,7 @@ namespace Beam
                 if (!string.IsNullOrEmpty(RcBannerSpot)) d["rcBannerSpot"] = RcBannerSpot; else d.Remove("rcBannerSpot");
                 if (RcKvmBannerHidden) d["rcKvmBannerHidden"] = true; else d.Remove("rcKvmBannerHidden");
                 if (RcKvmTarget) d["rcKvmTarget"] = true; else d.Remove("rcKvmTarget");
+                if (RcNet.Count > 0) d["rcNet"] = RcNet.ToDictionary(kv => kv.Key, kv => (object)kv.Value); else d.Remove("rcNet");
                 d["kvmOn"] = KvmOn;
                 d["kvmPlaces"] = KvmPlaces.Select(p => (object)new Dictionary<string, object> { { "id", p.Id }, { "x", p.X }, { "y", p.Y } }).ToArray();
                 d.Remove("kvmLeft");

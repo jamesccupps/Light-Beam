@@ -72,6 +72,7 @@ namespace Beam
         public readonly Stopwatch Clock = Stopwatch.StartNew();
         public readonly List<KeyValuePair<string, long>> Marks = new List<KeyValuePair<string, long>>();
         public bool StartTold, HostWarm;
+        public long Avail;               // (1.17) the network's estimate lately (kbps, the page's stats): this viewer's next start
 
         public void Mark(string step)
         {
@@ -132,8 +133,10 @@ namespace Beam
             IDisplayBackend screens = app.Cfg.CustomPath ? (IDisplayBackend)new FakeDisplay() : new Win32Display(); // tests: nothing real changes
             display = new RcDisplay(screens, line => Log.Write("Remote control: the shared screen " + line));
             app.Post(RestoreLeftoverDisplay);
-            // (1.12.4) A PC the KVM has used keeps its capture host warm, from a little after Beam starts.
-            if (app.Cfg.RcKvmTarget)
+            // (1.12.4) A PC the KVM has used keeps its capture host warm, from a little after Beam starts. (1.17) So does every
+            // PC that allows remote control: a cold one took ~1.1 s longer at the user's desk (a browser process to start, and
+            // its first list of codecs; Beam-dev\research\rc-start\Probe2), for ~150 MB kept.
+            if (app.Cfg.AllowRemoteControl)
             {
                 var warm = new Timer();
                 warm.Interval = 20000;
@@ -226,6 +229,7 @@ namespace Beam
             Log.Write("Remote control: allowed on this PC (" + from + "), for " + Names(list));
             app.RcChanged("allowed");
             Pin(list, list);
+            WarmHost("remote control turned on"); // (1.17)
         }
 
         // The devices that may control this PC, changed at this PC (Settings → This PC, the tray menu): the ones that
@@ -254,6 +258,12 @@ namespace Beam
             if (current != null) End(current, "stopped", "remote control was turned off (" + from + ")");
             if (was) Log.Write("Remote control: turned off on this PC (" + from + ")");
             app.RcChanged("turned off");
+            // (1.17) No capture host kept warm for it: closed once a session's bye to its viewer has gone out (unless it's
+            // on again by then).
+            var off = new Timer();
+            off.Interval = 1500;
+            off.Tick += (s, e) => { off.Stop(); off.Dispose(); if (!app.Cfg.AllowRemoteControl) RcHost.CloseAll(); };
+            off.Start();
         }
 
         // The listed devices for these ids (devices this PC knows, never itself or a session-only sign-in); entries
@@ -568,11 +578,11 @@ namespace Beam
             watch.Start();
         }
 
-        // (1.12.4) The capture host a session here would take (the main screen's), started and parked (RcHost.Warm), on a PC
-        // the KVM has used: its next session starts without a browser process to start first.
+        // (1.12.4) The capture host a session here would take (the main screen's), started and parked (RcHost.Warm): the next
+        // session starts without a browser process to start first. (1.17) On every PC that allows remote control.
         void WarmHost(string why)
         {
-            if (!app.Cfg.AllowRemoteControl || !app.Cfg.RcKvmTarget || current != null || closing) return;
+            if (!app.Cfg.AllowRemoteControl || current != null || closing) return;
             var layout = DesktopLayout.Current();
             var primary = layout.Primary;
             var ignored = RcHost.Warm(app.Cfg, layout.SourceName(primary != null ? primary.Id : 0), app.DevTools);
@@ -748,6 +758,8 @@ namespace Beam
                     if (s.Verified) OnClipPart(s, Json.ParseObject(Json.Str(m, "d")));
                     break;
                 case "stats":
+                    long avail = Json.Long(m, "avail", 0);
+                    if (avail > 0 && s.Verified) s.Avail = avail; // (a connection that never passed the check has no say)
                     string codec = Json.Str(m, "codec"), enc = Json.Str(m, "encoder");
                     if (codec != null && codec + "/" + enc != s.Codec) { s.Codec = codec + "/" + enc; Log.Write("Remote control: video " + codec + (enc != null ? " (" + enc + ")" : "")); }
                     break;
@@ -783,6 +795,9 @@ namespace Beam
             // (1.15) The screen's size in its physical pixels: the picture's scale before the capture's own frames say.
             var sc = DesktopLayout.Current().Screen(s.Screen);
             if (sc != null) { c["w"] = sc.W; c["h"] = sc.H; }
+            // (1.17) The network this viewer had last time here (kbps): where its first picture starts
+            long net;
+            if (!s.Kvm && app.Cfg.RcNet.TryGetValue(s.ViewerId ?? "", out net) && net > 0) c["net"] = net;
             return c;
         }
 
@@ -1366,10 +1381,23 @@ namespace Beam
             }
             if (reason != null) PostEnd(s.Id, s.Api, reason);
             s.Here = false;
+            RememberNet(s);
             if (live && s.Kvm) Log.Write("Remote control: " + s.ViewerName + "'s keyboard and mouse stopped reaching this PC after " + Duration(DateTime.Now - s.LiveSince) + " (" + why + ")");
             else if (live) Log.Write("Remote control: " + s.ViewerName + " stopped controlling this PC after " + Duration(DateTime.Now - s.LiveSince) + " (" + why + ")");
             else Log.Write("Remote control: " + s.ViewerName + "'s request ended before it was live (" + why + ")");
             app.MarkChanged();
+        }
+
+        // (1.17) The network this viewer had (the last estimate of the session), for its next start here.
+        void RememberNet(RcSession s)
+        {
+            if (s.Kvm || s.Avail <= 0 || !Config.ValidId(s.ViewerId)) return;
+            long had;
+            if (app.Cfg.RcNet.TryGetValue(s.ViewerId, out had) && had == s.Avail) return;
+            app.Cfg.RcNet.Remove(s.ViewerId);
+            while (app.Cfg.RcNet.Count >= Config.RcNetMax) app.Cfg.RcNet.Remove(app.Cfg.RcNet.Keys.First());
+            app.Cfg.RcNet[s.ViewerId] = s.Avail;
+            app.Cfg.Save();
         }
 
         static string Duration(TimeSpan t)

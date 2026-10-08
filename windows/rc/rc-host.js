@@ -33,6 +33,7 @@
   let autoPick = 'text', busyTicks = 0, calmTicks = 0, videoOn = true, src = { w: 0, h: 0 }, codecsKey = '';
   let pendingRemote = [], outCands = [], candTimer = 0, restartTimer = 0, statsTimer = 0, prev = null, lastSelected = null;
   let codecNow = null, encoderNow = null, ended = false, candidatesIn = 0, candidatesAdded = 0, recapturing = null, kvm = false;
+  let startSet = false; // (1.17) the first answer has had its start bitrate
   // (1.12.4) Pictures through the clipboard: the `clip` channel of their own (on `ctl` a big one would hold up the pings),
   // Beam's parts sent as it drains (at most 1 MB waiting in it), the viewer's passed to Beam.
   let clipOut = [];
@@ -295,11 +296,42 @@
     pc.addIceCandidate(c).catch(e => log('a candidate: ' + e.name));
   }
 
+  // (1.17) The first picture at a few Mbps instead of WebRTC's own start, which sends the whole first frame slowly (the
+  // user's desk, 2026-10-08: 0.7 s between this PC's first frame going out and the laptop showing it; on one PC with no
+  // network between, 260 → 120 ms: Beam-dev\research\rc-start\bitrate). The network this viewer had here last time, a
+  // little under it (Beam passes it: `net`, kbps), else 4 Mbps; never over the profile's limit (Data saver's 1.5).
+  function startKbps() {
+    const net = Number(cfg && cfg.net) || 0;
+    return Math.max(300, Math.min(net > 0 ? Math.round(net * 0.8) : 4000, 8000, profile().kbps));
+  }
+
+  // `x-google-start-bitrate` on each video codec of the viewer's answer (the sending side takes it from there).
+  function withStartBitrate(sdp, kbps) {
+    const pts = [];
+    sdp.replace(/^a=rtpmap:(\d+) (AV1|H264|VP9|VP8)\/90000/gm, (all, pt) => { pts.push(pt); return all; });
+    let out = sdp;
+    for (const pt of pts) {
+      const fmtp = new RegExp('^(a=fmtp:' + pt + ' [^\\r\\n]*)', 'm');
+      if (fmtp.test(out)) out = out.replace(fmtp, (all, line) => line + ';x-google-start-bitrate=' + kbps);
+      else out = out.replace(new RegExp('^(a=rtpmap:' + pt + ' [^\\r\\n]*)(\\r?\\n)', 'm'), (all, line, eol) => line + eol + 'a=fmtp:' + pt + ' x-google-start-bitrate=' + kbps + eol);
+    }
+    return out;
+  }
+
   async function onSignal(m) {
     if (!pc) return;
     if (m.kind === 'answer') {
       if (pc.signalingState !== 'have-local-offer' || typeof m.sdp !== 'string') return;
-      await pc.setRemoteDescription({ type: 'answer', sdp: m.sdp });
+      // (1.17) The first answer only: a later one (a codec switch, an ICE restart) keeps the network's estimate.
+      if (!startSet && !kvm) {
+        startSet = true;
+        const kbps = startKbps();
+        try {
+          await pc.setRemoteDescription({ type: 'answer', sdp: withStartBitrate(m.sdp, kbps) });
+          log('the first picture starts at ' + kbps + ' kbps' + (cfg && cfg.net ? ' (this viewer had ' + cfg.net + ' kbps last time)' : ''));
+        } catch (e) { log('the start bitrate: ' + e.name); }
+      }
+      if (pc.signalingState === 'have-local-offer') await pc.setRemoteDescription({ type: 'answer', sdp: m.sdp });
       for (const c of pendingRemote.splice(0)) addCandidate(c);
       await applyParams();
     } else if (m.kind === 'candidates') {

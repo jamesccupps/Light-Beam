@@ -52,6 +52,7 @@ namespace Beam
         TaskCompletionSource<bool> exited;
         Task closing;
         volatile bool closed, ending;
+        TaskCompletionSource<bool> loaded;                  // (1.17) the page's first load
         bool reused, dead;
 
         public event Action<RcHost, Dictionary<string, object>> Message; // on the UI thread
@@ -97,6 +98,9 @@ namespace Beam
         // (1.12.4) A PC the KVM uses all day keeps a host warm, parked (a blank page, its gate shut, nobody listening): the
         // next session (the laptop turning it on, or after an update) starts without a browser process to start first
         // (Office Desktop took 4.6 s for that), and a parked host stays until closed. Nothing if a host is there already.
+        // (1.17) Every PC that allows remote control does it, and the page asks for the video codecs once before it parks:
+        // a fresh browser takes 0.2–0.4 s for that list here (more on a slower PC), and the next session's page then has
+        // it at once (Beam-dev\research\rc-start\Probe2: 228 ms after a warm start without it, 0.9 ms with it).
         public static Task Warm(Config cfg, string source, bool devTools)
         {
             return RcThread.Run(async () =>
@@ -105,11 +109,27 @@ namespace Beam
                 if (parkTimer != null) parkTimer.Stop();
                 if (parked != null || open.Count > 0) return; // (kept, or a session has one: one at a time)
                 var h = new RcHost(cfg, source, devTools, () => false);
+                h.ending = true; // (a parked host: nothing from its page counts, and its gate stays shut)
                 await h.StartHere();
                 if (h.closed || h.core == null || parked != null || open.Count > 1) { var ignored = h.CloseHere(false); return; }
-                h.ending = true; // (a parked host: nothing from its page counts)
+                await h.Prime();
+                if (h.closed || h.core == null || parked != null || open.Count > 1) { var ignored = h.CloseHere(false); return; }
                 h.Park();
             });
+        }
+
+        // (1.17) Once the page is there: its list of codecs, so the next one's is ready.
+        async Task Prime()
+        {
+            if (loaded != null) await Task.WhenAny(loaded.Task, Task.Delay(10000));
+            if (closed || core == null) return;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                string n = await core.ExecuteScriptAsync("RTCRtpSender.getCapabilities('video').codecs.length");
+                Log.Write("Remote control: the warm capture host has its codecs (" + n + ", " + sw.ElapsedMilliseconds + " ms)");
+            }
+            catch (Exception ex) { Log.Write("Remote control: the warm capture host couldn't list its codecs (" + ex.Message + ")"); }
         }
 
         public Task Start() { return RcThread.Run(StartHere); }
@@ -149,6 +169,8 @@ namespace Beam
             core = controller.CoreWebView2;
             Configure();
             core.SetVirtualHostNameToFolderMapping(HostName, page, CoreWebView2HostResourceAccessKind.Deny);
+            var first = loaded = new TaskCompletionSource<bool>(); // (1.17: a warm host primes the page once it's there)
+            core.NavigationCompleted += (s, e) => first.TrySetResult(e.IsSuccess);
             core.Navigate(PageUrl);
         }
 
@@ -318,7 +340,7 @@ namespace Beam
                 parkTimer.Tick += (s, e) => { parkTimer.Stop(); var p = parked; parked = null; if (p != null) { var ignored = p.CloseHere(false); } };
             }
             parkTimer.Stop();
-            if (keepParked) { Log.Write("Remote control: capture host kept warm for the next session"); return; }
+            if (keepParked) { Log.Write("Remote control: " + (Captured ? "capture stopped; " : "") + "capture host kept warm for the next session"); return; }
             parkTimer.Start();
             Log.Write("Remote control: capture stopped (its host is kept 2 minutes for a reconnect)");
         }

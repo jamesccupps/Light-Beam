@@ -658,7 +658,7 @@ export default function register(test) {
     await ctx.setHidden(page, false);
     await pc.page.waitFor(`fakePc.rec.ctl.filter(m => m.t === 'video').at(-1)?.on === true`, 5000, 'video on again');
     // Kept for this PC on this device: the next session starts with them.
-    eq(await page.evaluate(`JSON.parse(localStorage.getItem('beam.rc.pic.${pc.id}'))`), { mode: 'motion', size: 'auto', fps: 30, kbps: 10000, codec: 'h264', fitPc: false, fitScale: true, details: true, pointer: true }, 'kept for this PC');
+    eq(await page.evaluate(`JSON.parse(localStorage.getItem('beam.rc.pic.${pc.id}'))`), { mode: 'motion', size: 'auto', fps: 30, kbps: 10000, codec: 'h264', fitPc: false, fitScale: true, details: true, pointer: true, fast: true }, 'kept for this PC');
     const n0 = (await rec(pc, 'ctl')).length;
     await page.evaluate('location.reload(); true');
     await live(page, pc);
@@ -1402,6 +1402,25 @@ export default function register(test) {
     eq(m2.edge, 1, `Edge's capture: the PC's 2.5 less its own 1.5 (${JSON.stringify(m2)})`);
     const text2 = await page.evaluate(`rcUi.details.textContent`);
     assert(/capture [\d.]+ \(Edge [\d.]+ \+ queue [\d.]+\)/.test(text2), `the details split it: ${text2.slice(text2.indexOf('Measured'), text2.indexOf('Measured') + 220)}`);
+    // (1.17) The picture is drawn by this page itself: a desynchronized canvas at the stage's size in device pixels (the
+    // video laid out but unseen, still timing the frames); the probes' last step is "drawn" here. Fit 1:1, or "Show each
+    // frame as it arrives" off, gives the video back.
+    eq(await page.evaluate(`[rcFast.on, rcUi.stage.classList.contains('fast'), getComputedStyle(rcUi.video).visibility, getComputedStyle(rcUi.canvas).display]`),
+      [true, true, 'hidden', 'block'], 'drawn here: the canvas shows, the video is unseen');
+    eq(await page.evaluate(`(() => { const c = rcUi.canvas, d = devicePixelRatio || 1; return [c.width === Math.max(1, Math.round(rcV.SW * d)), c.height === Math.max(1, Math.round(rcV.SH * d)), c.getContext('2d').getContextAttributes().desynchronized]; })()`),
+      [true, true, true], 'the canvas: the stage\'s size in device pixels, desynchronized');
+    assert(await page.evaluate(`(() => { const c = rcUi.canvas; const g = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+      g.drawImage(c, Math.floor(c.width / 2), Math.floor(c.height / 2), 1, 1, 0, 0, 1, 1); const d = g.getImageData(0, 0, 1, 1).data; return d[0] + d[1] + d[2] > 0; })()`), 'the canvas has the picture');
+    eq(m2.drawn, true, `the probes' frames were drawn here (${JSON.stringify(m2)})`);
+    assert(/drawn [\d.]+/.test(text2) && !/shown [\d.]+/.test(text2), `the details say "drawn": ${text2.slice(text2.indexOf('Measured'), text2.indexOf('Measured') + 220)}`);
+    await page.evaluate(`rc.fit = '1:1'; rcLayout(); true`);
+    await page.waitFor(`!rcFast.on && getComputedStyle(rcUi.video).visibility === 'visible' && getComputedStyle(rcUi.canvas).display === 'none'`, 3000, '1:1: the video');
+    await page.evaluate(`rc.fit = 'fit'; rcLayout(); true`);
+    await page.waitFor(`rcFast.on && rcFast.frame !== null`, 3000, 'Fit: drawn here again');
+    await page.evaluate(`rcSetPic('fast', false); true`);
+    await page.waitFor(`!rcFast.on && getComputedStyle(rcUi.video).visibility === 'visible'`, 3000, 'the setting off: the video');
+    await page.evaluate(`rcSetPic('fast', true); true`);
+    await page.waitFor(`rcFast.on && rcFast.frame !== null`, 3000, 'on again');
     // (1.15) The start: this page's own time to the picture, and the PC's steps (its `started`; a made-up step is left out).
     const mine = await page.evaluate(`rc.start.at`);
     assert(['asked', 'offer', 'answered', 'connected', 'picture'].every(k => Number.isFinite(mine[k])) && mine.asked <= mine.offer && mine.offer <= mine.picture,

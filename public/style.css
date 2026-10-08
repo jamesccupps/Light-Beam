@@ -659,6 +659,11 @@ html.remote-mode .rc {
 .rc-video { position: absolute; left: 0; top: 0; display: block; max-width: none; background: #000; transform-origin: 0 0; will-change: transform; }
 .rc-stage.one-to-one { display: flex; overflow: auto; }
 .rc-stage.one-to-one .rc-video { position: static; flex: none; margin: auto; transform: none; will-change: auto; }
+/* (1.17) The picture drawn by the page itself (remote.js rcFast): over the stage, its size in device pixels and never
+   scaled; the video stays laid out (its place maps the pointer, its frame callbacks time the picture), unseen. */
+.rc-canvas { position: absolute; left: 0; top: 0; display: none; pointer-events: none; }
+.rc-stage.fast .rc-canvas:not([hidden]) { display: block; }
+.rc-stage.fast .rc-video { visibility: hidden; }
 /* The trackpad's pointer: a ring around the spot it clicks, drawn at once (the PC's own cursor follows into it). */
 .rc-cursor {
   position: absolute; left: 0; top: 0; width: 22px; height: 22px; margin: -11px 0 0 -11px; border: 2px solid #fff; border-radius: 50%;
