@@ -282,7 +282,9 @@ async function rcConnect({ retry = false } = {}) {
     // was a round trip of its own before the PC was even asked.
     if (!rc.device) {
       const infoP = apiJson('api/info', { timeout: 15000 }).catch(err => ({ err }));
-      const res = await fetch(url('api/me'), { headers: idHeaders(), credentials: 'same-origin', signal: AbortSignal.timeout(10000) }).catch(() => null);
+      const meP = fetch(url('api/me'), { headers: idHeaders(), credentials: 'same-origin', signal: AbortSignal.timeout(10000) }).catch(() => null);
+      rcPrimeWebRtc(); // (1.17: while those two are on their way)
+      const res = await meP;
       if (gen !== rc.gen) return;
       if (!res || res.status >= 502) return rcEnded('unreachable');
       if (res.status === 401) { if (HOST) hostPost('unauthorized'); return rcEnded('signed-out'); }
@@ -603,6 +605,18 @@ function rcOnEnd(m) {
 }
 
 // ---------------------------------------------------------------- WebRTC
+
+// (1.17) WebRTC made ready while this page signs in and asks for the PC: in a fresh browser (a new viewer window) the
+// first RTCPeerConnection took ~240 ms on Desktop, more on a laptop, and came just as the PC's offer did (the user's
+// desk: the PC had the answer 0.52 s after its offer). A WebRTC decoding query first: ~135 ms then, and the connection
+// ~3 ms after (Beam-dev\research\rc-start\AnswerProbe). Once a page.
+function rcPrimeWebRtc() {
+  if (rcPrimeWebRtc.done) return;
+  rcPrimeWebRtc.done = true;
+  try {
+    navigator.mediaCapabilities?.decodingInfo?.({ type: 'webrtc', video: { contentType: 'video/AV1', width: 1920, height: 1080, bitrate: 8e6, framerate: 60 } })?.catch?.(() => {});
+  } catch {}
+}
 
 function rcCreatePeer() {
   const pc = new RTCPeerConnection({ iceServers: [], bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
@@ -1142,14 +1156,18 @@ function rcMeasureSum(got, caps = {}) {
 const RC_PC_STEPS = ['banner', 'page', 'offer', 'answer', 'connected', 'checked', 'capture', 'picture'];
 const RC_PC_STEP_NAMES = { banner: 'banner', page: 'its page', offer: 'offer', answer: 'answer', connected: 'connected', checked: 'checked', capture: 'capture', picture: 'picture out' };
 
-// "1.42 s to the picture · on Desktop: banner 0.07 · its page 0.12 · …" (seconds since this page asked; the PC's since
-// the request got there).
+// "2.05 s to the picture · here: asked 0.42 · offer 0.60 · … · on Desktop: banner 0.07 · its page 0.12 · …". This
+// page's seconds count from its own start (a first attempt: the page's, its sign-in checks and the request included;
+// a later one: from Reconnect); the PC's from when the request got there. (1.17: this page's steps shown too.)
+const RC_HERE_STEPS = ['asked', 'offer', 'answered', 'connected'];
 function rcStartText() {
   const s = rc.start;
   if (!s || s.at.picture == null) return '';
   const sec = v => (v / 1000).toFixed(2);
+  const here = RC_HERE_STEPS.filter(k => s.at[k] != null).map(k => `${k} ${sec(s.at[k])}`);
   const pc = s.pc ? Object.entries(s.pc).sort((a, b) => a[1] - b[1]).map(([k, v]) => `${RC_PC_STEP_NAMES[k] || k} ${sec(v)}`) : [];
-  return `${sec(s.at.picture)} s to the picture${pc.length ? ` · on ${rc.name || 'the PC'}: ${pc.join(' · ')}${s.warm ? ' (its page was warm)' : ''}` : ''}`;
+  return `${sec(s.at.picture)} s to the picture${here.length ? ` · here: ${here.join(' · ')}` : ''}` +
+    `${pc.length ? ` · on ${rc.name || 'the PC'}: ${pc.join(' · ')}${s.warm ? ' (its page was warm)' : ''}` : ''}`;
 }
 
 // The result for the details: "48 ms from a click to the picture: to the PC 2 · …".
