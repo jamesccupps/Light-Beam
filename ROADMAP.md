@@ -48,6 +48,10 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   the browser's video player (on a 143 Hz screen, a change seen after 34 ms instead of 54 in the Windows app's viewer,
   43 in Edge), and a faster start (every PC that allows remote control keeps its capture page ready, about 150 MB, and
   the first picture starts at the speed the network had last time).
+- **Beam for Linux** (Beam 1.22, a Raspberry Pi first): one command in its terminal (`curl … /install/linux | bash`)
+  installs it as a service that starts with the computer and updates itself (signed like the Windows app); its page
+  shows its system, hardware, disk, how long it's been up, its processor's temperature and, on a Pi, its power supply
+  and throttling, with alerts when it's too hot or short of power; its log from any device.
 
 ## Next
 - **Remote control, further:** what's left of the delay is the network and the PC's capture inside Edge (a capture of
@@ -55,10 +59,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   encoder, decoding on the phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
-- **Linux, Raspberry Pi first:** today a Pi uses the web app in its browser, or the command-line client headless
-  (`beam listen` receives files). Next: a one-line install that keeps it online as a service, its status on its page
-  (disk, uptime, CPU temperature) with alerts, waking the PCs on its own network, and the Apps page for Linux; later a
-  desktop app with a tray icon and remote control of a Linux desktop.
+- **Linux, further:** an always-on Pi waking the PCs on its own network, the Apps page for Linux (.deb files, apt), a
+  script you allowed there run on request; later a desktop app with a tray icon and remote control of a Linux desktop.
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
 - **Builds and releases** with GitHub Actions.
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;

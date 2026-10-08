@@ -9,6 +9,20 @@ let recentAlerts = null;   // GET /api/alerts, newest first (loaded when Setting
 
 const lowBattery = b => b && Number.isFinite(b.level) && b.level <= 15 && !b.charging;
 const lowStorage = s => s && Number.isFinite(s.free) && s.free < Math.max(2 * 1024 ** 3, (s.total || 0) * 0.05);
+// (1.22) Beam for Linux: the CPU's temperature, and what a Raspberry Pi's firmware says (status.throttled { now, sinceBoot })
+const tooHot = s => Number.isFinite(s.temperature) && s.temperature >= 80;
+const underVoltage = t => (t?.now?.includes('undervoltage') ? 'now' : t?.sinceBoot?.includes('undervoltage') ? 'since' : '');
+const SLOWING = ['throttled', 'softLimit', 'capped'];
+function piPowerLine(t) {
+  if (!t) return null;
+  const under = underVoltage(t);
+  return under ? { text: `Too weak ${under === 'now' ? 'right now' : 'at times since it started'} (under-voltage): it needs a stronger power supply`, low: true } : { text: 'Fine' };
+}
+function piSpeedLine(t) {
+  if (t?.now?.some(f => SLOWING.includes(f))) return { text: `Slowing itself down right now${t.now.includes('softLimit') ? ' (too hot)' : ''}`, low: true };
+  if (t?.sinceBoot?.some(f => SLOWING.includes(f))) return { text: 'Slowed itself down at times since it started' };
+  return null;
+}
 const isRinging = id => (ringing.get(id) || 0) > Date.now();
 const beamVersionOf = d => d.appVersion || ''; // the Beam apps report it; browsers don't
 // Where Remote Desktop connects: the MagicDNS name, else the Tailscale address (the server only offers it with one).
@@ -58,6 +72,8 @@ function deviceFacts(d, { long = false } = {}) {
     facts.push({ label: 'Storage', text: long && s.storage.total ? `${formatSize(s.storage.free)} free of ${formatSize(s.storage.total)}` : `${formatSize(s.storage.free)} free`,
       icon: 'disk', cls: lowStorage(s.storage) ? 'low' : '', title: `Free storage${reported ? ` · ${reported}` : ''}` });
   }
+  if (Number.isFinite(s.temperature)) facts.push({ label: 'Temperature', text: `${Math.round(s.temperature)} °C`, cls: tooHot(s) ? 'low' : '', title: `CPU temperature${reported ? ` · ${reported}` : ''}` }); // (1.22)
+  if (underVoltage(s.throttled)) facts.push({ text: 'Power too weak', cls: 'low', title: piPowerLine(s.throttled).text });
   const v = beamVersionOf(d);
   if (v) facts.push({ text: `Beam ${v}` });
   facts.push({ text: s.os || PLATFORM_NAME[d.platform] || d.platform });
@@ -196,14 +212,21 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   const key = keyExpiryLine(d.tailscale);
   const up = d.online && historyCache.get(d.id)?.data?.up;
   if (!refresh || !historyCache.has(d.id)) loadHistory(d.id); // (1.18) on every open; a refresh keeps what's there
+  const power = piPowerLine(s.throttled); // (1.22)
+  const speed = piSpeedLine(s.throttled);
   const rows = [
     ['Status', d.online ? 'Online' : `Offline, last seen ${timeAgo(d.lastSeen)}`],
     why && ['Why', why.long, why.low],
     up && ['Up since', `${historyWhen(up.since)}${UP_AFTER[up.kind] ? `, ${UP_AFTER[up.kind]}` : ''}`, INCIDENTS.has(up.kind) && Date.now() - up.since < 86400e3],
+    !up && d.online && Number.isFinite(s.bootedAt) && ['Up since', historyWhen(s.bootedAt)], // (1.22) Beam for Linux says when it started
     isRinging(d.id) && ['Ringing', 'Now'],
     s.battery && Number.isFinite(s.battery.level) && ['Battery', `${Math.round(s.battery.level)}%${s.battery.charging ? ', charging' : ''}`, lowBattery(s.battery)],
     s.storage && Number.isFinite(s.storage.free) && ['Storage', `${formatSize(s.storage.free)} free${s.storage.total ? ` of ${formatSize(s.storage.total)}` : ''}`, lowStorage(s.storage)],
+    Number.isFinite(s.temperature) && ['Temperature', `${s.temperature} °C (its processor)`, tooHot(s)],
+    power && ['Power', power.text, power.low],
+    speed && ['Speed', speed.text, speed.low],
     ['System', s.os || PLATFORM_NAME[d.platform] || d.platform],
+    s.model && ['Hardware', s.model],
     // (1.20) whether Windows' own startup list has its Beam app
     typeof s.startsWithWindows === 'boolean' && ['Starts with Windows', s.startsWithWindows ? 'Yes' : s.startWanted === false ? 'No (turned off in its settings)' : 'No', !s.startsWithWindows && s.startWanted !== false],
     beamVersionOf(d) && ['Beam', beamVersionOf(d)],
@@ -347,6 +370,7 @@ function sectionAlerts() {
     typeof a.tailscaleKey === 'boolean' && toggle('A Tailscale sign-in is running out', a.tailscaleKey, v => setAlerts({ tailscaleKey: v }), { hint: 'Two weeks and three days before, for your devices and this server.' }), // (1.17)
     typeof a.powerLoss === 'boolean' && toggle('A PC lost power or crashed', a.powerLoss, v => setAlerts({ powerLoss: v }), { hint: 'When it’s back on after a power loss, a freeze, a blue screen or being forced off.' }), // (1.18)
     typeof a.setup === 'boolean' && toggle('Something in Beam’s setup is wrong', a.setup, v => setAlerts({ setup: v }), { hint: 'The setup check (Settings → Server) looks every 6 hours: servers starting with Windows, Tailscale, backups, every PC up to date and starting with Windows.' }), // (1.20)
+    typeof a.hardware === 'boolean' && toggle('A Raspberry Pi is too hot or short of power', a.hardware, v => setAlerts({ hardware: v }), { hint: 'Its processor at 80 °C or more, or a power supply too weak for it (Beam for Linux says).' }), // (1.22)
     field('Devices going offline', note(watched.length ? `Watching ${watched.join(', ')}.` : 'None yet. Turn it on for a device under Devices.')),
     el('h4', {}, 'Recent alerts'),
   ];

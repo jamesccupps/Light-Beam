@@ -486,6 +486,47 @@ export default function register(test) {
     eq(asking.errors, [], 'no page errors (the bar)');
   });
 
+  test('Beam for Linux (1.22): a Raspberry Pi’s page (temperature, power, speed, hardware, up since, its log); Add a device gives the command that installs it, once it’s built', async ctx => {
+    const page = await ctx.signedIn();
+    await page.waitFor(`serverHas('linux')`, 8000, 'the server offers it');
+    const pi = ctx.srv.device(`lin${ctx.uid()}${ctx.uid()}`, 'Garage Pi', 'linux', ctx.nextIp(), '1.0.0');
+    await pi.me();
+    eq((await pi.putStatus({ os: 'Raspberry Pi OS 12 (bookworm)', model: 'Raspberry Pi 5 Model B Rev 1.0', bootedAt: Date.now() - 5 * 3600e3, temperature: 82.5,
+      throttled: { now: ['softLimit'], sinceBoot: ['undervoltage', 'softLimit'] }, storage: { free: 20 * GB, total: 58 * GB } })).status, 204, 'status accepted');
+    ctx.defer(pi.online());
+    await page.waitFor(`deviceById('${pi.id}')?.online === true && deviceById('${pi.id}')?.status?.temperature === 82.5`, 8000, 'online, with its status');
+    await page.evaluate(`openConv('${pi.id}')`);
+    const head = await page.evaluate(`$('#threadSub').textContent`);
+    assert(/83 °C/.test(head) && /Power too weak/.test(head) && /Raspberry Pi OS 12/.test(head), `info line: ${head}`);
+    await page.evaluate(`openDeviceInfo(deviceById('${pi.id}'))`);
+    await page.waitFor(`$('#genDlg').open`, 3000, 'device info');
+    const facts = Object.fromEntries(await page.evaluate(`[...$('#genBody').querySelectorAll('dt')].map(dt => [dt.textContent, [dt.nextElementSibling.textContent, dt.nextElementSibling.classList.contains('low')]])`));
+    eq(facts.Temperature, ['82.5 °C (its processor)', true], 'too hot stands out');
+    assert(/^Too weak at times since it started \(under-voltage\)/.test(facts.Power?.[0]) && facts.Power[1], JSON.stringify(facts.Power));
+    assert(/^Slowing itself down right now \(too hot\)/.test(facts.Speed?.[0]), JSON.stringify(facts.Speed));
+    eq(facts.Hardware?.[0], 'Raspberry Pi 5 Model B Rev 1.0');
+    assert(facts['Up since'], `up since: ${JSON.stringify(facts)}`);
+    assert(await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].some(b => /Beam log/.test(b.textContent))`), 'its log, from anywhere');
+    await page.evaluate(`$('#genDlg').close()`);
+    // Add a device: the command, only once this Beam has Beam for Linux built
+    await page.evaluate(`openPairDialog()`);
+    await page.waitFor(`$('#pairDlg').open`, 3000, 'Add a device');
+    eq(await page.evaluate(`$('#linuxBox').hidden`), true, 'not built here: not offered');
+    await page.evaluate(`$('#pairDlg').close()`);
+    const built = path.join(ctx.srv.dist, 'beam-linux.js');
+    fs.writeFileSync(built, '// Beam for Linux\n');
+    fs.writeFileSync(`${built}.json`, JSON.stringify({ version: '1.0.0' }));
+    ctx.defer(() => { fs.rmSync(built, { force: true }); fs.rmSync(`${built}.json`, { force: true }); });
+    await page.evaluate(`openPairDialog()`);
+    await page.waitFor(`$('#pairDlg').open && !$('#linuxBox').hidden`, 5000, 'offered once built');
+    eq(await page.evaluate(`$('#linuxCmd').value`), `curl -fsSL ${ctx.srv.base}/install/linux | bash`);
+    await page.evaluate(`$('#pairDlg').close()`);
+    await page.evaluate(`openSettings('alerts')`);
+    await page.waitFor(`/A Raspberry Pi is too hot or short of power/.test($('#settingsDlg').textContent)`, 5000, 'the alert’s switch');
+    await page.evaluate(`$('#settingsDlg').close()`);
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {
     const { page } = await hostPage(ctx, { state: {} });
     await page.waitFor(`paired && hostState.ready`);

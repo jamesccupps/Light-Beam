@@ -2157,10 +2157,10 @@ test('QW-E: battery and storage alerts fire once and re-arm; settings; alerts.js
     assert.equal(JSON.parse(fs.readFileSync(path.join(s.data, 'alerts.json'), 'utf8')).length, 4);
     // settings
     let r = await s.req('GET', '/api/settings', { headers: desk });
-    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, offline: [] });
+    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, offline: [] });
     r = await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify({ alerts: { battery: false } }) });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, offline: [] }, 'partial changes keep the rest');
+    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, offline: [] }, 'partial changes keep the rest');
     for (const bad of [{ alerts: { battery: 'no' } }, { alerts: { nope: true } }, { alerts: { offline: 'phone' } }, { alerts: [] }]) {
       assert.equal((await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify(bad) })).status, 400, JSON.stringify(bad));
     }
@@ -2936,6 +2936,197 @@ test('1.21 apps on every PC: from GitHub (checked against its release’s checks
   } finally {
     await s.stop();
     await gh.close();
+  }
+});
+
+// ---------------------------------------------------------------- 1.22 Beam for Linux
+// The command-line client as an app: linux/build.mjs makes it into dist/beam-linux.js, signed (here with a throwaway key,
+// never the real one), and `beam agent` is what its service runs.
+
+const LINUX_KEY = path.join(TMP, 'linux-update-key.pem');
+const buildLinux = dist => execFileSync(process.execPath, [path.join(ROOT, 'linux', 'build.mjs'), '--out', dist], { env: cleanEnv({ BEAM_UPDATE_KEY: LINUX_KEY }), stdio: 'pipe' });
+// Another build of it in dist, as linux/build.mjs leaves one: the file, then its signed sidecar.
+function publishLinux(dist, text, version, key = LINUX_KEY) {
+  const file = path.join(dist, 'beam-linux.js');
+  fs.writeFileSync(`${file}.tmp`, text);
+  execFileSync(process.execPath, [path.join(ROOT, 'windows', 'update-key.mjs'), 'sign', `${file}.tmp`, version, `${file}.json.tmp`, 'linux'], { env: cleanEnv({ BEAM_UPDATE_KEY: key }), stdio: 'pipe' });
+  fs.renameSync(`${file}.tmp`, file);
+  fs.renameSync(`${file}.json.tmp`, `${file}.json`);
+}
+
+test('1.22 Beam for Linux on the server: its status (model, start, temperature, a Pi’s power), too hot and under-voltage alerted once, the installer and the app without a sign-in, its signed updates', async () => {
+  const s = await startServer('linux122', 8797);
+  try {
+    const K = s.key;
+    const admin = app(K, 'admin000122', 'Admin', 'windows', from('100.64.40.1'));
+    const pi = app(K, 'pi000000122', 'Garage Pi', 'linux', { 'X-Beam-App-Version': '1.0.0', 'X-Beam-Profile': 'ab'.repeat(16), ...from('100.64.40.2') });
+    assert.ok((await s.req('GET', '/api/info', { headers: admin })).json.features.includes('linux'));
+    const put = (headers, body) => s.req('PUT', '/api/devices/me/status', { headers: json(headers), body: JSON.stringify(body) });
+    const booted = Date.now() - 3600e3;
+    let r = await put(pi, { os: 'Raspberry Pi OS 12 (bookworm)', model: 'Raspberry Pi 5 Model B Rev 1.0', bootedAt: booted, temperature: 52.36, throttled: { now: [], sinceBoot: [] }, storage: { free: 20e9, total: 60e9 } });
+    assert.equal(r.status, 204, r.body);
+    const dev = (await s.req('GET', '/api/devices', { headers: admin })).json.devices.find(d => d.id === 'pi000000122');
+    assert.equal(dev.platform, 'linux');
+    assert.equal(dev.appVersion, '1.0.0');
+    assert.deepEqual(pick(dev.status, ['os', 'model', 'bootedAt', 'temperature', 'throttled']),
+      { os: 'Raspberry Pi OS 12 (bookworm)', model: 'Raspberry Pi 5 Model B Rev 1.0', bootedAt: booted, temperature: 52.4, throttled: { now: [], sinceBoot: [] } });
+    assert.equal(dev.can.log, true, 'Beam for Linux sends its log when asked');
+    for (const bad of [{ temperature: '52' }, { temperature: 200 }, { model: '' }, { bootedAt: 'yesterday' }, { bootedAt: Date.now() + 7 * 86400e3 },
+      { throttled: { now: ['melting'], sinceBoot: [] } }, { throttled: { now: [] } }]) {
+      assert.equal((await put(pi, bad)).status, 400, JSON.stringify(bad));
+    }
+    // Too hot: once, and again only after it cooled below 70 °C. A power supply too weak: once per start of the Pi.
+    const hardware = async () => (await s.req('GET', '/api/alerts', { headers: admin })).json.alerts.filter(a => a.kind === 'hardware');
+    await put(pi, { temperature: 84.6, throttled: { now: ['softLimit'], sinceBoot: ['softLimit'] } });
+    await put(pi, { temperature: 86 });
+    let got = await hardware();
+    assert.equal(got.length, 1);
+    assert.equal(got[0].text, 'Garage Pi is too hot: 85 °C, and it is slowing itself down');
+    assert.equal(got[0].device, 'pi000000122');
+    await put(pi, { temperature: 75 });
+    await put(pi, { temperature: 81 });
+    assert.equal((await hardware()).length, 1, 'not again until it cooled down');
+    await put(pi, { temperature: 60, throttled: { now: [], sinceBoot: [] } });
+    await put(pi, { temperature: 80 });
+    assert.equal((await hardware()).length, 2);
+    await put(pi, { temperature: 50, throttled: { now: [], sinceBoot: ['undervoltage'] } });
+    await put(pi, { throttled: { now: ['undervoltage'], sinceBoot: ['undervoltage'] } });
+    got = await hardware();
+    assert.equal(got.length, 3, 'under-voltage once per start');
+    assert.match(got[0].text, /^Garage Pi's power supply is too weak: under-voltage since it started/);
+    await put(pi, { bootedAt: booted + 3000e3 });
+    assert.equal((await hardware()).length, 4, 'and again after it started again');
+    assert.ok((await s.req('PATCH', '/api/settings', { headers: json(admin), body: JSON.stringify({ alerts: { hardware: false } }) })).status < 300);
+    await put(pi, { temperature: 90 });
+    assert.equal((await hardware()).length, 4, 'turned off: only in the log');
+    assert.match(s.out, /Garage Pi is too hot: 90 °C/);
+
+    // The installer and the app need no sign-in (that's how a new computer gets them); the script has this Beam's address.
+    r = await s.req('GET', '/install/linux');
+    assert.equal(r.status, 200);
+    assert.match(r.headers['content-type'], /^text\/plain/);
+    assert.ok(r.body.includes(`local beam_url='http://127.0.0.1:${s.port}'`), 'its own address in it');
+    assert.ok(!r.body.includes('__BEAM_URL__'));
+    r = await s.req('GET', '/install/linux', { headers: { ...from('100.64.40.3'), 'X-Forwarded-Host': 'beam.example.ts.net', 'X-Forwarded-Proto': 'https' } });
+    assert.ok(r.body.includes('local beam_url=\'https://beam.example.ts.net\''), 'the name tailscale serve was asked for');
+    assert.equal((await s.req('GET', '/install/linux', { headers: { Host: 'evil.example:80:80' } })).status, 400, 'only a plain host name goes into a script');
+    if (process.platform === 'linux') {
+      fs.writeFileSync(path.join(TMP, 'install-linux.sh'), (await s.req('GET', '/install/linux')).body);
+      const check = spawnSync('bash', ['-n', path.join(TMP, 'install-linux.sh')], { encoding: 'utf8' });
+      assert.equal(check.status, 0, check.stderr);
+    }
+    assert.equal((await s.req('GET', '/install/linux/beam.js')).status, 404, 'not built yet');
+    buildLinux(s.dist);
+    r = await s.req('GET', '/install/linux/beam.js');
+    assert.equal(r.status, 200);
+    const key = /^const UPDATE_KEY = '([A-Za-z0-9+/]{86}==)';$/m.exec(r.body)?.[1];
+    assert.ok(key, 'the build carries the public half of its update key');
+    assert.equal((await s.req('GET', '/api/info', { headers: admin })).json.apps.linux, true);
+    // Its updates: offered with a signature for Linux (the same one read as a Windows update doesn't pass), downloaded signed in.
+    const offer = (await s.req('GET', '/api/updates', { headers: pi })).json.linux;
+    assert.equal(offer.url, '/download/linux');
+    assert.equal(offer.version, /^const VERSION = '(.+)';$/m.exec(r.body)[1]);
+    assert.equal(offer.sha256, crypto.createHash('sha256').update(r.body).digest('hex'));
+    const xy = Buffer.from(key, 'base64');
+    const pub = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: xy.subarray(0, 32).toString('base64url'), y: xy.subarray(32).toString('base64url') }, format: 'jwk' });
+    const signed = prefix => crypto.verify('sha256', Buffer.from(`${prefix}\n${offer.version}\n${offer.sha256}\n${offer.size}`), { key: pub, dsaEncoding: 'ieee-p1363' }, Buffer.from(offer.sig, 'base64'));
+    assert.ok(signed('beam-linux-update'));
+    assert.ok(!signed('beam-windows-update'));
+    assert.equal((await s.req('GET', '/download/linux')).status, 401, 'updates need a sign-in');
+    r = await s.req('GET', '/download/linux', { headers: pi, raw: true });
+    assert.equal(r.status, 200);
+    assert.equal(crypto.createHash('sha256').update(r.body).digest('hex'), offer.sha256);
+  } finally { await s.stop(); }
+});
+
+test('1.22 Beam for Linux: the agent says how the computer is, sends its log (never a message’s text), and updates itself only to a newer build signed with its key', async () => {
+  const s = await startServer('agent122', 8798);
+  const runs = [];
+  try {
+    const K = s.key;
+    const admin = app(K, 'admin000123', 'Admin');
+    const home = homeDir('agent122');
+    // A stand-in for a Raspberry Pi 5's / (Raspberry Pi OS says it's Debian; /etc/rpi-issue tells)
+    const root = path.join(TMP, 'pi-root');
+    for (const [f, text] of Object.entries({
+      'etc/os-release': 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nNAME="Debian GNU/Linux"\nVERSION_ID="12"\nVERSION_CODENAME=bookworm\nID=debian\n',
+      'etc/rpi-issue': 'Raspberry Pi reference 2024-11-19\n',
+      'etc/machine-id': '0123456789abcdef0123456789abcdef\n',
+      'proc/device-tree/model': 'Raspberry Pi 5 Model B Rev 1.0\0',
+      'proc/stat': 'cpu  1 2 3 4\nbtime 1760000000\nprocesses 1\n',
+      'sys/class/thermal/thermal_zone0/type': 'cpu-thermal\n',
+      'sys/class/thermal/thermal_zone0/temp': '52350\n',
+    })) {
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+    // Put where linux/install.sh puts it, signed in as the installer does it (BEAM_APP=linux).
+    buildLinux(s.dist);
+    const source = fs.readFileSync(path.join(s.dist, 'beam-linux.js'), 'utf8');
+    const version = /^const VERSION = '(.+)';$/m.exec(source)[1];
+    const installed = path.join(home, '.local', 'share', 'beam', 'beam.js');
+    fs.mkdirSync(path.dirname(installed), { recursive: true });
+    fs.writeFileSync(path.join(path.dirname(installed), 'package.json'), '{ "type": "commonjs" }\n');
+    fs.writeFileSync(installed, source);
+    let r = await cli(['setup', `http://127.0.0.1:${s.port}/?key=${K}`, '--name', 'Garage Pi'], { home, env: { BEAM_APP: 'linux' } });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(cliConfig(home).app, 'linux');
+    const id = cliConfig(home).deviceId;
+    const agentEnv = cleanEnv({ HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), BEAM_TEST_LINUX_ROOT: root, BEAM_TEST_THROTTLED: 'throttled=0x50000', BEAM_TEST_AGENT_PAUSE: '100' });
+    const startAgent = () => {
+      const child = spawn(process.execPath, [installed, 'agent', '--no-copy', '--no-notify'], { env: agentEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      children.add(child);
+      const run = { child, out: '', exited: new Promise(resolve => child.on('exit', code => { children.delete(child); resolve(code); })) };
+      child.stdout.on('data', d => { run.out += d; });
+      child.stderr.on('data', d => { run.out += d; });
+      runs.push(run);
+      return run;
+    };
+    let agent = startAgent();
+    const device = () => s.req('GET', '/api/devices', { headers: admin }).then(x => x.json.devices.find(d => d.id === id));
+    const dev = await waitFor(async () => { const d = await device(); return d?.status?.temperature !== undefined && d; }, 15000);
+    assert.deepEqual(pick(dev, ['name', 'platform', 'appVersion']), { name: 'Garage Pi', platform: 'linux', appVersion: version });
+    assert.deepEqual(pick(dev.status, ['os', 'model', 'bootedAt', 'temperature', 'throttled']), {
+      os: 'Raspberry Pi OS 12 (bookworm)', model: 'Raspberry Pi 5 Model B Rev 1.0', bootedAt: 1760000000000, temperature: 52.4,
+      throttled: { now: [], sinceBoot: ['undervoltage', 'throttled'] },
+    });
+    assert.ok(dev.status.storage.total > 0, 'its disk');
+    assert.match((await s.req('GET', '/api/alerts', { headers: admin })).json.alerts[0].text, /^Garage Pi's power supply is too weak/);
+    // its log, from anywhere; a message's text is never in it
+    r = await post(s, `/api/devices/${id}/log`, {}, admin);
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.json.name, 'beam.log');
+    assert.match(r.json.text, /Beam for Linux \S+ on Raspberry Pi OS 12 \(bookworm\), Raspberry Pi 5 Model B Rev 1\.0/);
+    const t = await sendText(s, admin, 'the garage door code is 4321', [id]);
+    await waitFor(async () => (await s.req('GET', `/api/items/${t.id}`, { headers: admin })).json.delivered?.[id], 10000);
+    const logged = fs.readFileSync(path.join(home, '.local', 'state', 'beam', 'beam.log'), 'utf8');
+    assert.match(logged, /Text from Admin \(28 characters\)/);
+    assert.ok(!logged.includes('4321'), 'never a message’s text in its log');
+    // a `beam` command in a terminal there is the same device
+    r = await cli(['devices'], { home });
+    assert.match(r.out, /Garage Pi +linux +online +\(this computer\)/);
+
+    // A newer build signed with another key: not installed (it looks when it connects).
+    const bump = n => version.replace(/\d+$/, x => String(Number(x) + n));
+    const as = v => source.replace(`\nconst VERSION = '${version}';\n`, `\nconst VERSION = '${v}';\n`);
+    publishLinux(s.dist, as(bump(1)), bump(1), path.join(TMP, 'another-update-key.pem'));
+    agent.child.kill();
+    await agent.exited;
+    agent = startAgent();
+    await waitFor(() => agent.out.includes(`Didn't update to Beam for Linux ${bump(1)}: it isn't signed by whoever built this one`), 15000);
+    assert.equal(fs.readFileSync(installed, 'utf8'), source, 'still the one it had');
+    // One signed with its key: Beam tells it (app-update), it replaces itself and stops (its service starts it again).
+    publishLinux(s.dist, as(bump(2)), bump(2));
+    const code = await Promise.race([agent.exited, sleep(20000).then(() => 'still running')]);
+    assert.equal(code, 0, agent.out.split('\n').slice(-4).join('\n'));
+    assert.match(agent.out, new RegExp(`Updated to Beam for Linux ${bump(2).replace(/\./g, '\\.')}: starting again`));
+    assert.equal(fs.readFileSync(installed, 'utf8'), as(bump(2)));
+    agent = startAgent();
+    await waitFor(async () => (await device()).appVersion === bump(2), 15000);
+    assert.match(s.out, new RegExp(`Garage Pi now runs Beam ${bump(2).replace(/\./g, '\\.')}`));
+  } finally {
+    for (const run of runs) try { run.child.kill(); } catch {}
+    await s.stop();
   }
 });
 

@@ -242,7 +242,8 @@ Apps update themselves from the Beam server.
 - Each build writes a sidecar next to the app in `dist/`:
   - `beam.apk.json`: `{ "version": "<versionName>", "versionCode": 7 }`
   - `Beam.exe.json`: `{ "version": "1.7.3", "sha256", "size", "sig" }` (1.7.3: signed by the build; below)
-- `GET /api/updates` answers `{ "android": { "version", "versionCode", "url", "size", "sha256" }, "windows": { … } }`.
+  - `beam-linux.js.json` **(1.22)**: the same for Beam for Linux (`linux/build.mjs`; see Beam for Linux)
+- `GET /api/updates` answers `{ "android": { "version", "versionCode", "url", "size", "sha256" }, "windows": { … }, "linux": { … } }`.
   An app only appears there when both the file and a readable sidecar exist. The sidecar's fields are passed on;
   `size` and `sha256` are always the server's own, from the file.
 - **Signed Windows updates (1.7.3):** `windows\build.cmd` signs every build with its builder's key (ECDSA P-256 with
@@ -252,7 +253,8 @@ Apps update themselves from the Beam server.
   download's SHA-256 and size after) and installs nothing else: a Beam.exe in `dist/` that its builder didn't sign,
   an older signed one offered as new, or one changed on the way is refused (and not downloaded again until offered
   anew). A build made without a key checks only `sha256`, as before. The Android app has this from Android itself:
-  an update must be signed with the same key as the installed app.
+  an update must be signed with the same key as the installed app. **(1.22)** Beam for Linux's builds are signed with
+  the same key over `beam-linux-update\n<version>\n<sha256>\n<size>` (so neither app's build passes for the other's).
 - When `dist/` changes, the server broadcasts the SSE event `app-update` with the same object.
   - It is sent once per real change.
   - The server re-watches `dist/` if it is deleted and recreated, and also checks every minute (network shares).
@@ -505,8 +507,16 @@ their last value, and `null` clears one. Unknown fields or bad values are `400`.
   the app, and whether its user wants it there (the setup check flags a PC where it's wanted and missing). Shown in the
   device list's `status`. Older servers answer `400`: send them only when the server lists `setup-check`.
 - Both show in `status` in the device list.
+- **(1.22, Beam for Linux, feature `linux`)** Older servers answer `400`: send these only when the server lists `linux`.
+  - `model`: the hardware, 1–60 characters ("Raspberry Pi 5 Model B Rev 1.0"; a PC's maker and model).
+  - `bootedAt`: when the computer last started, in ms (its "Up since").
+  - `temperature`: the processor's, in °C (-50 to 150; kept to one decimal).
+  - `throttled`: what a Raspberry Pi's firmware says (`vcgencmd get_throttled`): `{ "now": [...], "sinceBoot": [...] }`,
+    each a list of `undervoltage` (its power supply is too weak), `capped` (its speed is capped), `throttled` (it's
+    slowing itself down), `softLimit` (it's near its temperature limit).
 - Others see `status` (without the MACs), `tailscale` and `can` in the device list; the `devices` event goes out at
-  most every 5 s for status changes. Low battery or storage can raise alerts (see Alerts).
+  most every 5 s for status changes. Low battery or storage, and (1.22) a hot or under-powered Pi can raise alerts
+  (see Alerts).
 
 **Ring.**
 - `POST /api/devices/{id}/ring` sends the event `ring { "device", "by", "from", "stop", "at" }` to every client:
@@ -554,10 +564,13 @@ The server watches for trouble and tells every client:
 - **(1.17)** An offline alert says why when tailscaled knows ("…: the PC is still on Tailscale, so Beam itself isn't
   running there", "…: Tailscale can't reach it either (off, asleep or without internet)", "…: its Tailscale sign-in has
   run out").
+- **hardware (1.22):** from a device's status (Beam for Linux): its processor at 80 °C or more (once; again only after
+  it was below 70 °C), and a power supply too weak for it (`throttled` has `undervoltage`, now or since it started: once
+  per start, by `bootedAt`).
 
 Each alert is the event `alert { "id", "kind", "device", "level": "warn" | "info", "text", "at" }`:
 - `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`, `tailscaleKey` (1.17), `powerLoss` (1.18), `update` (1.19: a Windows build that didn't work on the PC that tried it first; `device` null), `setup` (1.20: a setup
-  check that went wrong; `device` null);
+  check that went wrong; `device` null), `hardware` (1.22);
 - `device` is the device it is about (`null` for `serverDisk` and the server's own `tailscaleKey`);
 - `text` is ready to show.
 
@@ -566,7 +579,7 @@ log and pushed through ntfy when that is configured. **Clients ignore alerts abo
 except `serverDisk`, `tailscaleKey` (the apps don't watch their own Tailscale key) and `powerLoss` (1.18: why this PC
 restarted).
 
-The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "setup": true (1.20), "offline": ["<device id>", …] }`,
+The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "setup": true (1.20), "hardware": true (1.22), "offline": ["<device id>", …] }`,
 changed with `PATCH /api/settings`; see Settings. Crossings are logged even when that kind of alert is turned off.
 
 ### Each PC's history (1.18)
@@ -631,14 +644,41 @@ The checks (each only where it applies):
 A check that turns `false` raises a `setup` alert once; it alerts again only after it was right in between.
 
 ### A PC's log (1.20)
-Feature `device-logs`. A device asks a PC's Beam app (Windows 1.14 or later, online: its `can.log`) for the end of
-its beam.log; the server passes the request on (the event `log-request { id }`, to that PC's streams only) and the
-answer back, and keeps nothing.
+Feature `device-logs`. A device asks a PC's Beam app (Windows 1.14 or later, or (1.22) Beam for Linux; online: its
+`can.log`) for the end of its beam.log; the server passes the request on (the event `log-request { id }`, to that PC's
+streams only) and the answer back, and keeps nothing.
 
 | Method & path | Result |
 |---|---|
 | `POST /api/devices/{id}/log` | `{ "name", "text", "size", "at" }` (`Cache-Control: no-store`), within 30 s. `409` when it can't (too old, offline, no answer in time); `403` for a session-only sign-in |
 | `POST /api/devices/me/log` | the PC's answer: `{ "id", "name", "text" }` (1 MB at most is passed on, the end of it) → `204`; `404` for a request that isn't for this device or timed out |
+
+### Beam for Linux (1.22)
+Feature `linux`. A Raspberry Pi (or another Linux computer that stays on) as a device of its own: the command-line client
+(`cli/beam.js`) run as a service, `beam agent`. `linux/build.mjs` makes it into `dist/beam-linux.js` (the client with
+the public update key filled in) + `beam-linux.js.json`, signed (see App updates).
+
+| Method & path | Result |
+|---|---|
+| `GET /install/linux` | **No sign-in.** The install script (`linux/install.sh`, `text/plain`) with this Beam's address in it: the one the request came to (through `tailscale serve`, the name it was asked for); only a plain host name, else the known public address, else `400`. On the computer: `curl -fsSL <Beam>/install/linux \| bash [-s -- --name "…" \| --uninstall]` |
+| `GET /install/linux/beam.js` | **No sign-in.** The app the script installs (dist's `beam-linux.js`); `404` until it's built |
+| `GET /download/linux` | Its updates (signed in), like `/download/windows` |
+
+The script: Linux only, never as root; Node.js 20 or later from the system, else the newest 24 (22 on 32-bit ARM) from
+nodejs.org, checked against its SHASUMS256.txt, in `~/.local/share/beam/node`; the app in `~/.local/share/beam/beam.js`;
+the `beam` command in `~/.local/bin`; `beam login` (Tailscale sign-in, else a code to approve on another device) with
+the device's platform `linux`; a systemd user service `beam.service` (`Restart=always`) and `loginctl enable-linger`
+so it starts with the computer. Run again, it updates; `--uninstall` takes away the app and the service.
+
+The app (`beam agent`; the config `~/.beam.json` says `"app": "linux"`, and then every `beam` command there is that
+device): every request has `X-Beam-Platform: linux`, `X-Beam-App-Version` and `X-Beam-Profile` (a hash of
+`/etc/machine-id` and the user id, so a reinstall merges); it listens like `beam listen` (files to `~/Downloads/Beam`;
+text to the clipboard and a notification only with a desktop: it finds the user's Wayland or X session itself); it
+sends its status (os, model, storage, bootedAt, temperature, throttled) on each connect (after `hello`), every 15
+minutes and when it changes (a start, the firmware's flags, 5 °C either way or across 70 or 80 °C); it answers
+`log-request` with its own log (`~/.local/state/beam/beam.log`, never a message's text); and on each connect, each
+`app-update` and every 6 hours it takes a newer `linux` update signed with its key, checks it with `node --check`,
+replaces its own file and exits (the service starts it again). Only the installed copy updates itself.
 
 ### Apps on every PC (1.21)
 Feature `apps`. The user's own apps, which Beam installs on their PCs (the Windows app 1.16 or later: `can.apps`). An

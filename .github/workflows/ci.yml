@@ -26,3 +26,10 @@ jobs:
         run: node test/server.test.js
       - name: Beam Family tests
         run: node test/family.test.js
+      # (1.22) linux/install.sh as a person runs it, on a computer with systemd: the runner is one. New, so for now its
+      # failure is a warning on the run (and an annotation), not a failed run.
+      - name: Beam for Linux's installer, end to end
+        continue-on-error: true
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          node test/linux-install.mjs
