@@ -50,6 +50,8 @@ namespace Beam
         public string TestBridge;    // tests: a host bridge message as if the chat page sent it (the reply goes to beam.log)
         public string TestOpenRemote; // tests: the viewer window for that device, as the page's "Control" opens it
         public string TestFamily;    // tests (1.10): the Family window "minimize", "restore" or "close", as the user would
+        public string TestApps;      // tests (1.16): apps ("answer:<id>:install|always|notnow", "allow:on|off", "state")
+        public string RemoveApp;     // (1.16) Windows' Installed apps → Uninstall of an app Beam installed: its id
         public bool AddDevice;
         public bool Settings;
         public bool Approve;
@@ -100,6 +102,8 @@ namespace Beam
                 else if (lower == "--test-bridge" && more) o.TestBridge = args[++i];
                 else if (lower == "--test-open-remote" && more) o.TestOpenRemote = args[++i];
                 else if (lower == "--test-family" && more) o.TestFamily = args[++i];
+                else if (lower == "--test-apps" && more) o.TestApps = args[++i];
+                else if (lower == "--remove-app" && more) { o.RemoveApp = args[++i]; o.Background = true; }
                 else if (lower == "--add-device") o.AddDevice = true;
                 else if (lower == "--settings") o.Settings = true;
                 else if (lower == "--approve") o.Approve = true;
@@ -160,6 +164,8 @@ namespace Beam
             if (TestBridge != null) { list.Add("--test-bridge"); list.Add(TestBridge); }
             if (TestOpenRemote != null) { list.Add("--test-open-remote"); list.Add(TestOpenRemote); }
             if (TestFamily != null) { list.Add("--test-family"); list.Add(TestFamily); }
+            if (TestApps != null) { list.Add("--test-apps"); list.Add(TestApps); }
+            if (RemoveApp != null) { list.Add("--remove-app"); list.Add(RemoveApp); }
             if (AddDevice) list.Add("--add-device");
             if (Settings) list.Add("--settings");
             if (Approve) list.Add("--approve");
@@ -267,7 +273,8 @@ namespace Beam
             if (!opts.Send && !opts.Quit && !opts.Background && !opts.Settings && !opts.Approve && !opts.AddDevice
                 && !opts.PickClipboard && !opts.Screenshot && !opts.CopyLatest && !opts.Hide && !opts.TestPoke && opts.TestMode == null && opts.Updated == null
                 && opts.TestTransfer == null && opts.TestPhone == null && !opts.TestClickBalloon && opts.TestEventName == null
-                && opts.TestRc == null && opts.TestBackups == null && opts.TestHistory == null && opts.TestKvm == null && opts.TestBridge == null && opts.TestOpenRemote == null) opts.Show = true;
+                && opts.TestRc == null && opts.TestBackups == null && opts.TestHistory == null && opts.TestKvm == null && opts.TestBridge == null && opts.TestOpenRemote == null
+                && opts.TestApps == null && opts.RemoveApp == null) opts.Show = true;
             for (int i = 0; i < 6; i++)
             {
                 if (IpcServer.Send(PipeName(), opts.ToArgs(), 1000)) return 0;

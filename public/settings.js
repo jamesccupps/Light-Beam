@@ -7,6 +7,7 @@ const SECTIONS = [
   ['device', 'This device', 'user'],
   ['pc', 'This PC', 'monitor'],
   ['devices', 'Devices', 'phone'],
+  ['apps', 'Apps', 'download'], // (1.21: apps.js)
   ['connections', 'Connections', 'globe'], // (1.17)
   ['alerts', 'Alerts', 'alert'],
   ['security', 'Security', 'shield'],
@@ -20,6 +21,7 @@ async function openSettings(section = 'device') {
   backupState = null; // (1.8.1: the Server section asks again)
   connState = null; // (1.17: so does Connections)
   setupView = null; // (1.20: and the setup check)
+  appsState = null; // (1.21: and the apps)
   const dlg = $('#settingsDlg');
   renderSettings();
   if (!dlg.open) dlg.showModal();
@@ -47,7 +49,7 @@ function jumpToSection(id) {
   for (const b of $$('#settingsNav button')) b.setAttribute('aria-current', String(b.dataset.section === id));
 }
 
-const visibleSections = () => SECTIONS.filter(([id]) => (id === 'pc' ? Boolean(HOST) : id === 'notifications' ? !HOST : id === 'alerts' ? alertsSupported() : id === 'connections' ? serverHas('connections') : true));
+const visibleSections = () => SECTIONS.filter(([id]) => (id === 'pc' ? Boolean(HOST) : id === 'notifications' ? !HOST : id === 'alerts' ? alertsSupported() : id === 'connections' ? serverHas('connections') : id === 'apps' ? serverHas('apps') : true));
 
 function renderSettings() {
   const body = $('#settingsBody');
@@ -64,7 +66,7 @@ function renderSettings() {
   const top = body.scrollTop;
   $('#settingsNav').replaceChildren(...visibleSections().map(([id, label, ic]) =>
     el('button', { type: 'button', 'data-section': id, 'aria-current': String(id === settingsSection), onclick: () => jumpToSection(id) }, icon(ic), el('span', {}, label))));
-  const builders = { device: sectionDevice, pc: sectionPc, devices: sectionDevices, connections: sectionConnections, alerts: sectionAlerts, security: sectionSecurity, server: sectionServer, notifications: sectionNotifications, help: sectionHelp };
+  const builders = { device: sectionDevice, pc: sectionPc, devices: sectionDevices, apps: sectionApps, connections: sectionConnections, alerts: sectionAlerts, security: sectionSecurity, server: sectionServer, notifications: sectionNotifications, help: sectionHelp };
   body.replaceChildren(...visibleSections().map(([id, label]) => el('section', { class: 'set-section', id: `set-${id}`, 'aria-labelledby': `set-h-${id}` },
     el('h3', { id: `set-h-${id}` }, label), ...[].concat(builders[id]()).filter(Boolean))));
   body.scrollTop = top;
@@ -166,6 +168,7 @@ function sectionPc() {
     toggle('Clicking a notification about a link opens the link', s.openLinks, v => set({ openLinks: v })),
     hotkeys.length > 0 && field('Hotkeys', el('ul', { class: 'plain' }, ...hotkeys)),
     ...rcPcRows(s), // (1.6: shown when the app reports allowRemoteControl)
+    ...appsPcRows(s), // (1.21: shown when the app reports appsAllowed)
     el('h4', {}, 'Updates'),
     note(`Beam app ${u.current || s.app?.version || hostState.version || ''}${s.app && s.app.installed === false ? ' (running from outside its install folder)' : ''}. ${updateText}`),
     toggle('Install updates automatically', s.autoUpdate, v => set({ autoUpdate: v })),

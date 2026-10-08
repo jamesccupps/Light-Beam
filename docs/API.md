@@ -363,7 +363,7 @@ can't pass for it.
   "status": { "battery": { "level": 64, "charging": false }, "storage": { "free": 51200000000, "total": 256000000000 },
               "os": "Android 16", "at": 1790723000000 },
   "tailscale": { "name": "pixel-9", "dns": "pixel-9.tail1234.ts.net", "ip": "100.70.248.8", "online": true, "keyExpiry": 1806278692000 },
-  "can": { "ring": true, "wake": false, "remoteDesktop": false, "remoteControl": false, "log": false },
+  "can": { "ring": true, "wake": false, "remoteDesktop": false, "remoteControl": false, "log": false, "apps": false },
   "settings": { "phoneNotifications": false } }
 ```
 - `online` is true while the device holds an open `/api/events` connection.
@@ -639,6 +639,42 @@ answer back, and keeps nothing.
 |---|---|
 | `POST /api/devices/{id}/log` | `{ "name", "text", "size", "at" }` (`Cache-Control: no-store`), within 30 s. `409` when it can't (too old, offline, no answer in time); `403` for a session-only sign-in |
 | `POST /api/devices/me/log` | the PC's answer: `{ "id", "name", "text" }` (1 MB at most is passed on, the end of it) → `204`; `404` for a request that isn't for this device or timed out |
+
+### Apps on every PC (1.21)
+Feature `apps`. The user's own apps, which Beam installs on their PCs (the Windows app 1.16 or later: `can.apps`). An
+app comes from a GitHub repository's latest published release, from a file sent here, or from winget. Each PC installs
+it for its signed-in user, never raising itself to administrator (an installer that needs that gets Windows' own prompt
+there), and only once someone at that PC has allowed it: until then a request makes the PC ask (Install / Always allow /
+Not now; the app's `appsAllowed`, turned on only at the PC, see HOST-BRIDGE). Adding, changing, installing and
+removing need a device signed in for good (`403 { reason: "temporary" }` for a session-only one). `data/apps.json`, the
+files in `data/app-files/<id>/` (both in exports and backups).
+
+App: `{ id (8 hex), kind: "github" | "file" | "winget", name, source ("owner/repo", the winget id, or null), version,
+file: { name, size, sha256, type: "exe" | "msi" | "zip" } | null, state: "ready" | "fetching" | "failed", error?,
+checkError? (a GitHub check that failed while an earlier version stays), checksum? (GitHub: the release's checksum file,
+or null when it publishes none), asset? (the release file chosen), choices? (the release's Windows files when there are
+several), run? (a .zip's program), args? (an installer's switches), addedAt, addedBy, checkedAt, updatedAt,
+on: { <device id>: { state, version?, error?, at } } }`. A PC's state: `pending` (asked; an offline PC is asked when it
+connects), `asked` (waiting for someone at the PC), `installing`, `installed`, `failed`, `declined` (Not now at the PC),
+`removing`.
+
+| Method & path | Result |
+|---|---|
+| `GET /api/apps` | `{ "apps": [App...] }` |
+| `POST /api/apps` | `{ "github": "owner/repo" or a github.com address, "asset"?, "name"? }` → `201 { app }` in state `fetching` (the server gets the release in the background: the Windows .exe/.msi/.zip named like the repository first, never other systems' builds; when the release has `<file>.sha256` or a sums file, the file must match it); or `{ "winget": "Publisher.App", "name"? }` → `201`. `409` for one that's there already, or 50 apps |
+| `PUT /api/apps/file?name=&label=&version=` | the body is the file (.exe, .msi or .zip, 2 GB at most; no 30 s limit, 60 s without data ends it) → `201 { app }`; `&app=<id>`: a new version of that file app (`200`) |
+| `PATCH /api/apps/{id}` | `{ "name"?, "run"? (an .exe path inside the .zip), "args"? (one line), "asset"? (GitHub: another file of the release, fetched again) }` → `{ app }` |
+| `DELETE /api/apps/{id}` | `204`; its file goes from the server (the PCs keep what they installed) |
+| `POST /api/apps/{id}/check` | GitHub: the latest release now → `{ app }`. A new version goes to the PCs that have it |
+| `GET /api/apps/{id}/file` | the file (ranges, `no-cache`) |
+| `POST /api/apps/{id}/install` | `{ "devices": [ids] or "all" }` → `{ app, asked: [names], cannot: [names] }` and `app-install { id }` to each (`409` when none can) |
+| `POST /api/apps/{id}/uninstall` | `{ "devices": [ids] or "all" }` → `{ app, asked }` and `app-uninstall { id }` (`409` when it isn't installed there through Beam) |
+| `POST /api/devices/me/apps` | the PC: `{ "id", "state": "asked" \| "installing" \| "installed" \| "failed" \| "declined" \| "removed", "version"?, "error"? }` → `204` |
+| `PUT /api/devices/me/apps` | the PC, after each connect: `{ "apps": [{ "id", "version" }] }`, what Beam installed and is still there (its own version now: Slate updates itself); one not listed any more is forgotten there → `204` |
+
+Events: `apps { at }` (to every stream: read the list again), `app-install { id, update? }` and `app-uninstall { id }`
+(only to that PC's streams). GitHub releases are looked for 3 minutes after a start and every 6 hours (`BEAM_GITHUB_API`
+points the server at a stand-in for tests); downloads only from github.com and its download hosts, at every redirect.
 
 ### Items
 | Method & path | Result |

@@ -81,6 +81,8 @@ namespace Beam
         public KvmController Kvm;         // Beam 1.12: this PC's keyboard and mouse working the PCs beside it
         public SettingsBackups Backups;   // Beam 1.8.1: this PC's settings kept on the server too, and put back
         public PcHistory History;         // Beam 1.18 (app 1.13): Windows' record of restarts, power losses and crashes, sent
+        public AppInstaller Apps;         // Beam 1.21 (app 1.16): the user's apps, installed here when asked (once allowed here)
+        bool appsReported;                // ...what's installed told to the server on this stream
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
         FamilyWindow family;                     // (1.10) Beam Family in a window of its own
         bool familyPending, familyPendingQuiet;  // asked for (--family, an update) before the server said where Family is
@@ -162,6 +164,7 @@ namespace Beam
             Kvm = new KvmController(this);
             Backups = new SettingsBackups(this);
             History = new PcHistory(this);
+            Apps = new AppInstaller(this);
 
             up = new Uploader(() => Api, j => { var s = j.State; Post(() => OnUploadChanged(j, s)); }, j => { });
             down = new Downloader(() => Api, j => { var s = j.State; Post(() => OnDownloadChanged(j, s)); }, OnDownloadProgress);
@@ -581,6 +584,7 @@ namespace Beam
                 RenewSignIn(); // once, for a sign-in that was ever kept in clear
                 Backups.Check(); // (1.8.1) an earlier install's settings offered once; then this one's go up
                 History.Report(false); // (1.13) what Windows recorded since the server's copy (at most hourly)
+                if (!appsReported && ServerHas("apps")) { appsReported = true; var ignored = Apps.ReportInstalled(); } // (1.16) once a stream
             }
             catch (Exception ex) { Log.Error("Catch-up", ex); }
             finally
@@ -671,6 +675,7 @@ namespace Beam
                     FetchServerInfo();
                     break;
                 case "hello": // v3: the first event on every stream
+                    appsReported = false; // (1.16: what's installed goes to the server again on this stream)
                     ServerVersion = Json.Str(d, "version") ?? ServerVersion;
                     ServerApi = (int)Json.Long(d, "api", ServerApi);
                     serverFeatures.Clear();
@@ -714,6 +719,12 @@ namespace Beam
                     break;
                 case "log-request": // Beam 1.20: another device asked for this PC's Beam log (Device info → Beam log)
                     DeviceLog.Send(this, Json.Str(d, "id"));
+                    break;
+                case "app-install": // Beam 1.21: install one of the user's apps here (asked once here until allowed)
+                    Apps.OnInstall(d);
+                    break;
+                case "app-uninstall":
+                    Apps.OnUninstall(d);
                     break;
                 case "upload": // a file still arriving (Beam 1.4 servers can already serve what has arrived)
                     OnUploadProgress(d);
@@ -1413,6 +1424,12 @@ namespace Beam
         public void Notify(string title, string text)
         {
             notifier.Show(title, text, null, title);
+        }
+
+        // (1.16) One that does something when clicked (an app waiting for an answer here).
+        public void Notify(string title, string text, Action onClick)
+        {
+            notifier.Show(title, text, onClick, title);
         }
 
         // ------------------------------------------------------------------ updates
@@ -2385,6 +2402,8 @@ namespace Beam
             s["phonePopupText"] = Cfg.PhonePopupText;       // this PC only: balloons show the message, else app and count
             // Beam 1.6 (null: the server has no remote control). The page can turn it off, never on; the list is read-only.
             s["allowRemoteControl"] = ServerHas("remote-control") ? (object)Cfg.AllowRemoteControl : null;
+            // Beam 1.21 (null: the server has no apps). As for remote control: the page can turn it off, never on.
+            s["appsAllowed"] = ServerHas("apps") ? (object)Cfg.AppsAllowed : null;
             s["remoteControlDevices"] = Cfg.RemoteControlDevices.Select(a =>
             {
                 var o = new Dictionary<string, object>();
@@ -2443,6 +2462,14 @@ namespace Beam
                 rcOff = true;
             }
             if (s.ContainsKey("remoteControlDevices")) return RemoteControl.OnlyHere;
+            bool appsOff = false;
+            if (s.ContainsKey("appsAllowed"))
+            {
+                // (1.16) Only off from here: on at this PC (the tray menu's confirmation, the question's Always allow).
+                var v = Json.Get(s, "appsAllowed");
+                if (!(v is bool) || (bool)v) return AppInstaller.OnlyHere;
+                appsOff = true;
+            }
             if (s.ContainsKey("deviceName"))
             {
                 string n = (Json.Str(s, "deviceName") ?? "").Trim();
@@ -2496,6 +2523,7 @@ namespace Beam
             if (integrations) SyncIntegrations();
             if (phoneOn.HasValue) SetPhoneNotifications(phoneOn.Value, "settings");
             if (rcOff && Cfg.AllowRemoteControl) Rc.SetOff("settings");
+            if (appsOff) Apps.SetAllowed(false, "settings");
             if (SettingsChanged != null) SettingsChanged();
             if (Backups != null) Backups.Changed();
             MarkChanged();
@@ -2728,6 +2756,8 @@ namespace Beam
             if (o.TestOpenRemote != null && Cfg.CustomPath) { string err = OpenRemote(o.TestOpenRemote); if (err != null) Log.Write("Remote control: (test) " + err); }
             if (o.Family) OpenFamilyWhenKnown(o.Updated != null || o.UpdateFailed != null); // (after an update: without the focus)
             if (o.TestFamily != null && Cfg.CustomPath) FamilyTest(o.TestFamily);
+            if (o.TestApps != null && Cfg.CustomPath) Apps.TestCommand(o.TestApps);
+            if (o.RemoveApp != null) Apps.RemoveFromWindows(o.RemoveApp); // (1.16: Windows' Installed apps → Uninstall)
         }
 
         // Tests: a message as if the chat page sent it; the reply goes to beam.log.
@@ -3132,6 +3162,19 @@ namespace Beam
                 kvm.DropDownItems.Add(new ToolStripSeparator());
                 kvm.DropDownItems.Add(new ToolStripMenuItem("Arrange the PCs…", null, (s, e) => Kvm.ShowSettings()));
                 menu.Items.Add(kvm);
+            }
+            if (ServerHas("apps"))
+            {
+                // (1.16) Apps waiting for an answer here, and the switch (on through a confirmation, off at once).
+                foreach (var ask in Apps.Asks.ToList())
+                {
+                    string askId = ask.Id;
+                    menu.Items.Add("Install " + ask.Name + "?" + (ask.By != null ? " (asked by " + ask.By + ")" : "") + "…", null, (s, e) => Apps.ShowAsk(askId));
+                }
+                var allowApps = new ToolStripMenuItem(Cfg.AppsAllowed ? "Let Beam install apps" : "Let Beam install apps…", null, (s, e) => Apps.Toggle("tray menu"));
+                allowApps.Checked = Cfg.AppsAllowed;
+                allowApps.Tag = "apps";
+                menu.Items.Add(allowApps);
             }
             var phoneOn = PhoneNotificationsOn;
             if (phoneOn.HasValue)

@@ -294,6 +294,21 @@ address, so the browser becomes part of that device instead of a separate entry.
 - Nothing is seen or recorded: it's a remote control session with no picture, directly between the PCs over
   Tailscale. **Limits:** not onto a locked PC; no dragging files between PCs yet.
 
+**Apps on every PC** (Beam 1.21, Windows app 1.16; Settings → Apps)
+
+- **Add an app** from a GitHub repository (`owner/repo` or its link: its latest published release, the Windows .exe,
+  .msi or .zip, checked against the SHA-256 the release publishes when it publishes one), from a file you send (an
+  .exe, .msi or .zip, up to 2 GB), or from winget (a package id like `7zip.7zip`; each PC runs winget itself). Beam looks
+  for a new GitHub release every 6 hours, and the PCs that have the app get it too.
+- **Install on all PCs** (or one): each PC's Beam app installs it for its signed-in user: a single .exe goes to
+  `%LOCALAPPDATA%\Programs\<app>` with a Start menu shortcut and an entry in Windows' Installed apps; a .zip is unpacked
+  there; an .msi or a setup program runs (with the switches you give it for a quiet install). Beam never installs as
+  administrator: an installer that needs that shows Windows' own prompt on that PC.
+- **Each PC asks once:** until someone at the PC allows it, a request there asks **Install** (this once), **Always
+  allow** or **Not now**. Turn it on or off later with the tray menu's **Let Beam install apps** (or Settings → This PC).
+- **Where it is:** the Apps page shows each PC's state (installed and its version, waiting for someone at the PC,
+  couldn't install and why), with **Uninstall** per PC, **Check for a new version** and **Remove**.
+
 **Windows app** (`Beam.exe`, one self-updating file)
 
 - It lives in the system tray; click the icon to show or hide the chat window. Run a downloaded `Beam.exe` once and it
