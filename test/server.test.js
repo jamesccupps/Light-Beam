@@ -2813,6 +2813,8 @@ test('1.21 apps on every PC: from GitHub (checked against its release’s checks
     assert.deepEqual(['laptop00121', 'shoppc00121', 'oldpc000121', 'phone000121'].map(id => devs.find(d => d.id === id).can.apps), [true, true, false, false], 'can.apps: the Windows app 1.16 or later');
     const list = async () => (await s.req('GET', '/api/apps', { headers: phone })).json.apps;
     const ready = id => waitFor(async () => { const a = (await list()).find(x => x.id === id); return a && a.state !== 'fetching' ? a : null; }, 8000);
+    // (the server's log comes through a pipe of its own: a line can arrive after the answer it was written before)
+    const logged = re => waitFor(() => re.test(s.out), 5000).then(() => true, () => false);
     const add = async (body, status = 201) => { const r = await post(s, '/api/apps', body, laptop); assert.equal(r.status, status, r.body); return r.json; };
 
     // From GitHub: the release's Slate.exe through a redirect, matching its Slate.exe.sha256.
@@ -2824,8 +2826,8 @@ test('1.21 apps on every PC: from GitHub (checked against its release’s checks
     assert.deepEqual(slate.file, { name: 'Slate.exe', size: exe.length, sha256: sha(exe), type: 'exe' });
     let r = await s.req('GET', `/api/apps/${slateId}/file`, { headers: shop, raw: true });
     assert.ok(r.status === 200 && r.body.equals(exe), 'the PCs download it from here');
-    assert.match(s.out, /Robin Laptop added the app Slate \(GitHub robin\/Slate\)/);
-    assert.match(s.out, /Slate 0\.3\.0: Slate\.exe \([^)]+\) fetched from GitHub robin\/Slate, matching the SHA-256 in Slate\.exe\.sha256/);
+    assert.ok(await logged(/Robin Laptop added the app Slate \(GitHub robin\/Slate\)/), "logged: /Robin Laptop added the app Slate \\(GitHub robin\\/Slate\\)/");
+    assert.ok(await logged(/Slate 0\.3\.0: Slate\.exe \([^)]+\) fetched from GitHub robin\/Slate, matching the SHA-256 in Slate\.exe\.sha256/), "logged: /Slate 0\\.3\\.0: Slate\\.exe \\([^)]+\\) fetched from GitHub robin\\/Slate, matching the SHA-256 in Slate\\.exe\\.sha256/");
     assert.match((await add({ github: 'robin/slate' }, 409)).error, /one of Beam's apps already/);
     assert.match((await add({ github: 'not a repo' }, 400)).error, /owner\/repo/);
     // Refused: a checksum that doesn't match, no release, no Windows file, a file somewhere other than GitHub.
@@ -2866,7 +2868,7 @@ test('1.21 apps on every PC: from GitHub (checked against its release’s checks
     assert.deepEqual([r.json.asked.sort(), r.json.cannot], [['Robin Laptop', 'Shop Desktop'], []]);
     assert.equal((await lst.wait('app-install')).data.id, slateId);
     assert.match((await post(s, `/api/apps/${slateId}/install`, { devices: ['oldpc000121', 'phone000121'] }, laptop)).json.error, /Old PC, Robin Phone can’t install apps \(that needs Beam for Windows 1\.16\.0 or later\)/);
-    assert.match(s.out, /Robin Phone asked (Robin Laptop, Shop Desktop|Shop Desktop, Robin Laptop) to install Slate 0\.3\.0/);
+    assert.ok(await logged(/Robin Phone asked (Robin Laptop, Shop Desktop|Shop Desktop, Robin Laptop) to install Slate 0\.3\.0/), "logged: /Robin Phone asked (Robin Laptop, Shop Desktop|Shop Desktop, Robin Laptop) to install Slate 0\\.3\\.0/");
     const report = (h, body) => post(s, '/api/devices/me/apps', { id: slateId, ...body }, h);
     assert.equal((await report(laptop, { state: 'asked' })).status, 204);
     assert.equal((await list()).find(a => a.id === slateId).on.laptop00121.state, 'asked');
@@ -2875,11 +2877,11 @@ test('1.21 apps on every PC: from GitHub (checked against its release’s checks
     slate = (await list()).find(a => a.id === slateId);
     assert.deepEqual(pick(slate.on.laptop00121, ['state', 'version']), { state: 'installed', version: '0.3.0' });
     assert.equal(slate.on.shoppc00121.state, 'pending', 'the shop: asked when it connects');
-    assert.match(s.out, /Robin Laptop installed Slate 0\.3\.0/);
+    assert.ok(await logged(/Robin Laptop installed Slate 0\.3\.0/), "logged: /Robin Laptop installed Slate 0\\.3\\.0/");
     const sst = await openEvents(s.port, shop);
     assert.equal((await sst.wait('app-install')).data.id, slateId, 'asked as it connected');
     assert.equal((await report(shop, { state: 'failed', error: 'no room on C:' })).status, 204);
-    assert.match(s.out, /Shop Desktop couldn't install Slate: no room on C:/);
+    assert.ok(await logged(/Shop Desktop couldn't install Slate: no room on C:/), "logged: /Shop Desktop couldn't install Slate: no room on C:/");
     // What the laptop has at its start: Slate updated itself (its own version now).
     assert.equal((await s.req('PUT', '/api/devices/me/apps', { headers: json(laptop), body: JSON.stringify({ apps: [{ id: slateId, version: '0.3.1' }] }) })).status, 204);
     assert.equal((await list()).find(a => a.id === slateId).on.laptop00121.version, '0.3.1');
@@ -2887,10 +2889,10 @@ test('1.21 apps on every PC: from GitHub (checked against its release’s checks
     // A new release: fetched on Check, and offered to the PCs that have it.
     const exe2 = Buffer.concat([Buffer.from('MZ'), crypto.randomBytes(5000)]);
     gh.repos['robin/Slate'] = { tag: 'v0.4.0', files: { 'Slate.exe': exe2, 'Slate.exe.sha256': `${sha(exe2)}  Slate.exe\n` } };
-    const before = lst.events.length;
     r = await post(s, `/api/apps/${slateId}/check`, {}, laptop);
     assert.deepEqual([r.status, r.json.app.version, r.json.app.file.sha256], [200, '0.4.0', sha(exe2)]);
-    assert.ok(lst.events.slice(before).some(e => e.event === 'app-install' && e.data.id === slateId && e.data.update === true), 'the laptop is offered the new one');
+    // (the event goes out before the answer, but can arrive after it: Linux CI, 2026-10-08)
+    assert.ok(await lst.wait('app-install', d => d.id === slateId && d.update === true), 'the laptop is offered the new one');
     assert.deepEqual(pick((await list()).find(a => a.id === slateId).on.laptop00121, ['state', 'version']), { state: 'pending', version: '0.3.1' });
     r = await s.req('GET', `/api/apps/${slateId}/file`, { headers: shop, raw: true });
     assert.ok(r.body.equals(exe2), 'the new file in place of the old');
@@ -2904,7 +2906,7 @@ test('1.21 apps on every PC: from GitHub (checked against its release’s checks
     assert.equal((await list()).find(a => a.id === slateId).on.laptop00121.state, 'removing');
     assert.equal((await report(laptop, { state: 'removed' })).status, 204);
     assert.equal((await list()).find(a => a.id === slateId).on.laptop00121, undefined);
-    assert.match(s.out, /Robin Laptop uninstalled Slate/);
+    assert.ok(await logged(/Robin Laptop uninstalled Slate/), "logged: /Robin Laptop uninstalled Slate/");
     assert.equal((await post(s, `/api/apps/${slateId}/uninstall`, { devices: ['laptop00121'] }, phone)).status, 409, 'not there');
     await report(laptop, { state: 'installed', version: '0.4.0' });
     await s.req('PUT', '/api/devices/me/apps', { headers: json(laptop), body: JSON.stringify({ apps: [] }) });
