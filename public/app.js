@@ -87,6 +87,7 @@ function bindUI() {
   $('#copyAddressBtn').addEventListener('click', () => copyText($('#pairAddress').textContent, 'Address copied'));
   $('#pairLinkBox').addEventListener('toggle', () => { if ($('#pairLinkBox').open) showPairingLink(); });
   $('#copyLinkBtn').addEventListener('click', () => copyText($('#pairLink').value, 'Link copied'));
+  $('#copyLinuxBtn').addEventListener('click', () => copyText($('#linuxCmd').value, 'Command copied')); // (1.22)
   $('#newLinkBtn').addEventListener('click', showPairingLink);
   $('#pairDlg').addEventListener('close', () => clearInterval(pairExpiryTimer));
   $('#approveForm').addEventListener('submit', e => {

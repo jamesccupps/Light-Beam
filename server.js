@@ -142,7 +142,8 @@ const ENV_NAMES = { movedTo: 'BEAM_MOVED_TO', publicUrl: 'BEAM_PUBLIC_URL', tail
 const SETTING_DEFAULTS = { movedTo: '', publicUrl: '', tailscaleSignIn: true, retentionDays: 14, maxItems: 500 };
 const ENV_OWNERS = (env.BEAM_TAILSCALE_OWNERS || '').split(',').map(normalizeLogin).filter(Boolean);
 
-const APPS = { windows: 'Beam.exe', android: 'beam.apk' };
+// (1.22) beam-linux.js: Beam for Linux (the command-line client made by linux/build.mjs, signed like Beam.exe)
+const APPS = { windows: 'Beam.exe', android: 'beam.apk', linux: 'beam-linux.js' };
 
 const MIME = {
   html: 'text/html', css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', json: 'application/json',
@@ -1874,7 +1875,12 @@ async function logStatus() {
 // MAC addresses stay on the server: they are used to wake a PC and never sent to any client.
 
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
-const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted']);
+// (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
+const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted',
+  'model', 'bootedAt', 'temperature', 'throttled']);
+// (1.22) What a Raspberry Pi's firmware says about its power and speed (vcgencmd get_throttled), now and since it started.
+const THROTTLE_FLAGS = new Set(['undervoltage', 'capped', 'throttled', 'softLimit']);
+const HOT_C = 80; // a Pi 4 or 5 slows itself down from 80 °C
 // One line of text from a device: no control or direction characters, trimmed.
 const statusText = v => typeof v === 'string' ? v.toWellFormed().replace(/[\u0000-\u001f\u007f]/g, ' ').replace(BIDI, '').replace(/\s+/g, ' ').trim() : '';
 const MAC = /^([0-9a-f]{2})([:-]?)([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})$/i;
@@ -1911,10 +1917,24 @@ function parseStatus(body) {
         throw bad('storage must be {"free": bytes, "total": bytes}');
       }
       out.storage = { free: value.free, total: value.total };
-    } else if (key === 'os') {
+    } else if (key === 'os' || key === 'model') {
       const name = typeof value === 'string' ? value.toWellFormed().replace(/[\u0000-\u001f\u007f]/g, '').replace(BIDI, '').trim() : '';
-      if (!name || [...name].length > 60) throw bad('os must be a name of 1 to 60 characters');
-      out.os = name;
+      if (!name || [...name].length > 60) throw bad(`${key} must be a name of 1 to 60 characters`);
+      out[key] = name;
+    } else if (key === 'bootedAt') {
+      // (1.22) when the device last started, in ms: its "Up since"
+      if (!Number.isSafeInteger(value) || value < Date.UTC(2000, 0, 1) || value > now() + 86400e3) throw bad('bootedAt must be a time in milliseconds');
+      out.bootedAt = value;
+    } else if (key === 'temperature') {
+      // (1.22) the CPU's, in °C
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < -50 || value > 150) throw bad('temperature must be °C, from -50 to 150');
+      out.temperature = Math.round(value * 10) / 10;
+    } else if (key === 'throttled') {
+      const flags = v => Array.isArray(v) && v.length <= THROTTLE_FLAGS.size && v.every(f => THROTTLE_FLAGS.has(f));
+      if (!isPlainObject(value) || Object.keys(value).some(k => k !== 'now' && k !== 'sinceBoot') || !flags(value.now) || !flags(value.sinceBoot)) {
+        throw bad(`throttled must be {"now": [...], "sinceBoot": [...]} with ${[...THROTTLE_FLAGS].join(', ')}`);
+      }
+      out.throttled = { now: [...new Set(value.now)], sinceBoot: [...new Set(value.sinceBoot)] };
     } else if (key === 'macs') {
       const macs = Array.isArray(value) && value.length <= 8 ? value.map(normalizeMac) : [null];
       if (macs.some(m => !m)) throw bad('macs must be a list of up to 8 addresses like aa:bb:cc:dd:ee:ff');
@@ -1937,11 +1957,12 @@ function parseStatus(body) {
 
 // What other devices see of a status report (no MAC addresses).
 function publicStatus(status) {
-  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, at } = status;
+  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, at } = status;
   return {
     ...(battery && { battery }), ...(storage && { storage }), ...(os && { os }),
     ...(remoteControl !== undefined && { remoteControl }), ...(locked !== undefined && { locked }), ...(update && { update }),
     ...(startsWithWindows !== undefined && { startsWithWindows }), ...(startWanted !== undefined && { startWanted }), // (1.20)
+    ...(model && { model }), ...(bootedAt && { bootedAt }), ...(temperature !== undefined && { temperature }), ...(throttled && { throttled }), // (1.22)
     at: at || 0,
   };
 }
@@ -1949,6 +1970,9 @@ function publicStatus(status) {
 function describeStatus(status) {
   const parts = [];
   if (status.os) parts.push(status.os);
+  if (status.model) parts.push(status.model);
+  if (status.temperature !== undefined) parts.push(`${status.temperature} °C`);
+  if (status.throttled?.sinceBoot?.length) parts.push(`since it started: ${status.throttled.sinceBoot.join(', ')}`);
   if (status.battery) parts.push(`battery ${status.battery.level}%${status.battery.charging ? ' (charging)' : ''}`);
   if (status.storage) parts.push(`${formatSize(status.storage.free)} free of ${formatSize(status.storage.total)}`);
   if (status.remoteDesktop !== undefined) parts.push(`Remote Desktop ${status.remoteDesktop ? 'on' : 'off'}`);
@@ -2172,6 +2196,7 @@ function alertSettings() {
     tailscaleKey: a.tailscaleKey !== false, // (1.17)
     powerLoss: a.powerLoss !== false, // (1.18) a PC came back from a power loss, a blue screen or a forced power-off
     setup: a.setup !== false, // (1.20) the setup check found something wrong
+    hardware: a.hardware !== false, // (1.22) a Raspberry Pi or another Linux computer too hot, or short of power
     offline: Array.isArray(a.offline) ? a.offline.filter(id => typeof id === 'string') : [],
   };
 }
@@ -2214,6 +2239,31 @@ function checkStatusAlerts(device) {
       else log.warn(text);
     } else if (storage.free > limit * 1.2 && flags.storage) {
       flags.storage = false;
+    }
+  }
+  // (1.22) a Raspberry Pi (or another Linux computer) running hot, or its power supply too weak
+  const hardware = text => (enabled.hardware ? raiseAlert('hardware', device.id, 'warn', text) : log.warn(text));
+  const temp = status.temperature;
+  if (Number.isFinite(temp)) {
+    if (temp >= HOT_C && !flags.hot) {
+      flags.hot = true;
+      const slowing = status.throttled?.now?.some(f => f === 'throttled' || f === 'softLimit');
+      hardware(`${device.name} is too hot: ${Math.round(temp)} °C${slowing ? ', and it is slowing itself down' : ''}`);
+    } else if (temp < HOT_C - 10 && flags.hot) {
+      flags.hot = false;
+    }
+  }
+  const power = status.throttled;
+  if (power) {
+    // Once per start of the device: the firmware remembers it until then.
+    const underNow = power.now.includes('undervoltage');
+    const under = underNow || power.sinceBoot.includes('undervoltage');
+    const boot = status.bootedAt || 1;
+    if (under && flags.undervoltage !== boot) {
+      flags.undervoltage = boot;
+      hardware(`${device.name}'s power supply is too weak: under-voltage ${underNow ? 'right now' : 'since it started'} (it can slow down or restart)`);
+    } else if (!under && flags.undervoltage) {
+      flags.undervoltage = false;
     }
   }
 }
@@ -2677,14 +2727,15 @@ const LOG_MAX_BYTES = 1024 * 1024;
 const LOG_ANSWER_MS = FAST_TIMEOUTS ? 4000 : 30_000;
 const logAsks = new Map(); // request id -> { target, done(log) }
 
-const canSendLog = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, LOG_APP_MIN);
+const canSendLog = d => (d?.platform === 'windows' && versionAtLeast(d.appVersion, LOG_APP_MIN))
+  || (d?.platform === 'linux' && Boolean(d.appVersion)); // (1.22) Beam for Linux, from its first version
 
 // POST /api/devices/{id}/log: { name, text, size, at }, or 409 when it can't (too old, offline, didn't answer in time).
 async function askDeviceLog(req, res, [id], url) {
   const target = targetDevice(id);
   await readJson(req, { optional: true });
   if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read a PC’s log');
-  if (!canSendLog(target)) throw httpError(409, `${target.name} can’t send its log (that needs Beam for Windows ${LOG_APP_MIN} or later)`);
+  if (!canSendLog(target)) throw httpError(409, `${target.name} can’t send its log (that needs Beam for Windows ${LOG_APP_MIN} or later, or Beam for Linux)`);
   if (!isOnline(target.id)) throw httpError(409, `${target.name} is offline`);
   const askId = crypto.randomBytes(8).toString('hex');
   const got = await new Promise(resolve => {
@@ -5578,17 +5629,53 @@ async function getThumb(req, res, [id]) {
   await serveFile(req, res, thumbPath(id), `${item.id}.${item.thumb === 'webp' ? 'webp' : 'jpg'}`, `image/${item.thumb}`, true, { cache: 'private, max-age=86400' });
 }
 
+const APP_LABEL = { windows: 'Windows', android: 'Android', linux: 'Linux' };
+
 async function downloadApp(req, res, [platform]) {
   const file = path.join(DIST_DIR, APPS[platform]);
-  const mime = platform === 'android' ? MIME.apk : MIME.exe;
+  const mime = platform === 'android' ? MIME.apk : platform === 'linux' ? MIME.js : MIME.exe;
   if (!fs.existsSync(file)) return send(res, 404, { error: `The ${platform} app hasn't been built yet` });
   if (req.method !== 'HEAD' && !/^bytes=[1-9]/.test(req.headers.range || '')) {
     const url = new URL(req.url, 'http://beam');
     const version = readJsonQuiet(`${file}.json`)?.version || '?';
-    log.info(`${whoName(deviceIdOf(req, url), `A device at ${describeWhereSync(req)}`)} is downloading the ${platform === 'android' ? 'Android' : 'Windows'} app ${version}`);
+    log.info(`${whoName(deviceIdOf(req, url), `A device at ${describeWhereSync(req)}`)} is downloading the ${APP_LABEL[platform]} app ${version}`);
   }
   // The file changes whenever the app is rebuilt, so it must not be cached for long.
   await serveFile(req, res, file, APPS[platform], mime, false, { cache: 'no-cache' });
+}
+
+// ---------------------------------------------------------------- Beam for Linux's installer (1.22)
+// `curl -fsSL <Beam>/install/linux | bash` on a Linux computer that's on the tailnet: GET /install/linux is the script
+// (linux/install.sh) with this Beam's address in it, GET /install/linux/beam.js the app it installs (dist's
+// beam-linux.js). Both without a sign-in: that's how a new computer gets the app, which then signs in as it installs
+// (Tailscale, else a code to approve). Neither holds anything that isn't in the app's source.
+
+const LINUX_INSTALLER = path.join(__dirname, 'linux', 'install.sh');
+const HOST_HEADER = /^([a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})*|\[[0-9a-f:.]{2,45}\])(:\d{1,5})?$/;
+
+// The address the request came to (through tailscale serve: the name it was asked for): the computer reached Beam
+// there, so its app will too. Only a plain host name or address, as it goes into a shell script.
+function requestBase(req) {
+  const host = requestHost(req).trim().toLowerCase();
+  if (HOST_HEADER.test(host)) return `${isHttps(req) ? 'https' : 'http'}://${host}`;
+  const known = publicBaseSync();
+  return known && /^https?:\/\/[a-z0-9.:[\]-]+$/i.test(known) ? known : null;
+}
+
+async function linuxInstall(req, res, pathname) {
+  req.routeName = 'linuxInstall';
+  if (pathname === '/install/linux/beam.js') {
+    const file = path.join(DIST_DIR, APPS.linux);
+    if (!fs.existsSync(file)) return send(res, 404, 'Beam for Linux hasn\'t been built on this Beam yet (node linux/build.mjs).\n', { 'Content-Type': 'text/plain; charset=utf-8' });
+    if (req.method !== 'HEAD') log.info(`A computer at ${describeWhereSync(req)} is installing Beam for Linux ${readJsonQuiet(`${file}.json`)?.version || '?'}`);
+    return serveFile(req, res, file, 'beam.js', MIME.js, true, { cache: 'no-cache' });
+  }
+  const base = requestBase(req);
+  let script;
+  try { script = await fsp.readFile(LINUX_INSTALLER, 'utf8'); } catch { return send(res, 404, 'No installer here.\n', { 'Content-Type': 'text/plain; charset=utf-8' }); }
+  if (!base) return send(res, 400, 'Open this through Beam\'s own address.\n', { 'Content-Type': 'text/plain; charset=utf-8' });
+  // (text/plain: a browser shows it, to read before running it)
+  send(res, 200, script.replace(/\r\n/g, '\n').replace('__BEAM_URL__', base), { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache' });
 }
 
 // ---------------------------------------------------------------- app updates
@@ -5699,7 +5786,7 @@ async function checkDist() {
     if (lastUpdatesSent !== null && json !== lastUpdatesSent) {
       const before = JSON.parse(lastUpdatesSent);
       const changed = Object.entries(updates).filter(([p, u]) => before[p]?.sha256 !== u.sha256)
-        .map(([p, u]) => `${p === 'android' ? 'Android' : 'Windows'} ${u.version}`);
+        .map(([p, u]) => `${APP_LABEL[p] || p} ${u.version}`);
       if (changed.length) log.info(`New app build${changed.length > 1 ? 's' : ''} published: ${changed.join(', ')}; telling connected apps to update`);
       noticeWindowsBuild(updates);
       broadcast('app-update', updates, null, c => offersFor(c.deviceId, updates) === updates); // (1.19: not the held-back PCs)
@@ -5969,6 +6056,7 @@ const FEATURES = [
   'setup-check', // (1.20.0: GET /api/setup, `setup` alerts, status startsWithWindows/startWanted)
   'device-logs', // (1.20.0: POST /api/devices/{id}/log, the `log-request` event, POST /api/devices/me/log)
   'apps', // (1.21.0: /api/apps (GitHub, files, winget), `app-install`/`app-uninstall`, /api/devices/me/apps, `can.apps`)
+  'linux', // (1.22.0: Beam for Linux: /install/linux, updates `linux`, status model/bootedAt/temperature/throttled, `hardware` alerts)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -6043,7 +6131,7 @@ const SETTING_RULES = {
     if (!isPlainObject(v)) throw httpError(400, 'alerts must be an object like {"battery": true, "offline": ["<device id>"]}');
     const next = alertSettings();
     for (const [key, value] of Object.entries(v)) {
-      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss', 'setup'].includes(key)) {
+      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss', 'setup', 'hardware'].includes(key)) {
         if (typeof value !== 'boolean') throw httpError(400, `alerts.${key} must be true or false`);
         next[key] = value;
       } else if (key === 'offline') {
@@ -6862,7 +6950,7 @@ function helloProof(url) {
 
 // ---------------------------------------------------------------- export / import
 
-const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|apps\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|app-files\/[a-f0-9]{8}\/[A-Za-z0-9_()+-][A-Za-z0-9._ ()+-]{0,99}|apps\/(Beam\.exe|beam\.apk)(\.json)?)$/;
+const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|apps\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|app-files\/[a-f0-9]{8}\/[A-Za-z0-9_()+-][A-Za-z0-9._ ()+-]{0,99}|apps\/(Beam\.exe|beam\.apk|beam-linux\.js)(\.json)?)$/;
 
 // Everything a Beam is, as a .tar.gz: the key, server id, settings, sign-ins, devices, items and their files.
 // Leaves out unfinished uploads, logs and temporary files. items.json comes last and lists only the items whose
@@ -7349,7 +7437,7 @@ const routes = [
   ['DELETE', '/api/move', deleteMove],
   ['GET', '/api/admin/export', exportApi],
   ['POST', '/api/admin/shutdown', adminShutdown],
-  ['GET', '/download/(windows|android)', downloadApp],
+  ['GET', '/download/(windows|android|linux)', downloadApp],
 ].map(([method, pattern, handler]) => ({ method, re: new RegExp(`^${pattern}$`), handler, name: handler.name }));
 
 // A token from an approved move may only export and move.
@@ -7524,6 +7612,7 @@ async function handle(req, res) {
     // Share-target posts are normally caught by the service worker; if it isn't running yet, just open the app.
     if (pathname === '/share' && req.method === 'POST') return send(res, 303, '', { Location: './' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed', { 'Content-Type': 'text/plain' });
+    if (pathname === '/install/linux' || pathname === '/install/linux/beam.js') return linuxInstall(req, res, pathname); // (1.22)
     return serveStatic(req, res, pathname, url.searchParams.get('v'));
   }
 

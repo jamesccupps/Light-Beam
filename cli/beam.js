@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 // Beam command-line client: send files, text and clipboard contents to your
 // Beam server, and receive what your other devices send. Speaks docs/API.md (v3, and v2 servers).
+// (1.22) Also Beam for Linux: `beam agent`, what linux/install.sh sets up as a service (see "Beam for Linux" below).
 'use strict';
+
+// Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
+const VERSION = '1.0.0';
+// The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
+const UPDATE_KEY = '';
 
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -16,6 +22,9 @@ const { parseArgs } = require('node:util');
 const CONFIG_FILE = path.join(os.homedir(), '.beam.json');
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
+// (1.22) Beam for Linux's own parts run on Linux, and in tests anywhere with a stand-in for its / (etc, proc, sys).
+const SYSROOT = process.env.BEAM_TEST_LINUX_ROOT || '/';
+const AS_LINUX = process.platform === 'linux' || Boolean(process.env.BEAM_TEST_LINUX_ROOT);
 const DEFAULT_DIR = path.join(os.homedir(), 'Downloads', 'Beam');
 
 const HELP = `Beam: send text, clipboard contents and files between your devices
@@ -52,6 +61,13 @@ Everything else:
   beam approve <code> [--yes]                      let a new device in (the code it shows)
   beam open [--pair]                               open Beam in your browser (--pair: show "Add device")
   beam pair                                        show a one-time pairing link and QR code
+
+Beam for Linux (a Raspberry Pi or another Linux computer, kept connected all day):
+  curl -fsSL https://<your beam address>/install/linux | bash
+                                                   installs it as a service: signs in, starts with the computer,
+                                                   reports its status (disk, temperature…) and updates itself
+  beam agent                                       what that service runs: listen (same options), plus the status
+  beam version                                     Beam for Linux's version
 
 Add --toast to any command to report the result as a desktop notification.`;
 
@@ -95,8 +111,13 @@ function loadConfig() {
   cfg.key = process.env.BEAM_KEY || file.key;
   cfg.device = process.env.BEAM_DEVICE || file.device || os.hostname();
   cfg.deviceId = process.env.BEAM_DEVICE_ID || file.deviceId || stableDeviceId();
+  // (1.22) "linux": this computer's Beam for Linux (BEAM_APP=linux while the installer signs it in): every command here
+  // is that device, not a separate command-line one.
+  cfg.app = process.env.BEAM_APP === 'linux' || file.app === 'linux' ? 'linux' : undefined;
   return cfg;
 }
+
+const linuxApp = cfg => cfg.app === 'linux';
 
 function requireConfig(cfg) {
   if (!cfg.url || !cfg.key) {
@@ -116,7 +137,8 @@ async function api(cfg, route, options = {}) {
         Authorization: `Bearer ${cfg.key}`,
         'X-Beam-Device-Id': cfg.deviceId,
         'X-Beam-Device': encodeURIComponent(cfg.device),
-        'X-Beam-Platform': 'cli',
+        'X-Beam-Platform': linuxApp(cfg) ? 'linux' : 'cli',
+        ...(linuxApp(cfg) && { 'X-Beam-App-Version': VERSION, 'X-Beam-Profile': linuxProfile() }),
         ...options.headers,
       },
     });
@@ -308,9 +330,9 @@ async function download(cfg, item, dir) {
 
 // ---------------------------------------------------------------- OS integration
 
-function run(cmd, args, { input, env } = {}) {
+function run(cmd, args, { input, env, timeout } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { env: { ...process.env, ...env }, windowsHide: true });
+    const child = spawn(cmd, args, { env: { ...process.env, ...env }, windowsHide: true, timeout });
     const out = [];
     const err = [];
     child.stdout.on('data', d => out.push(d));
@@ -359,10 +381,27 @@ async function readClipboard() {
     if (result.kind === 'files') result.files = [].concat(result.files);
     return result;
   }
+  const env = IS_MAC ? {} : desktopEnv();
+  if (!env) throw new Error('there\'s no desktop here, so no clipboard');
   const text = IS_MAC
     ? await run('pbpaste', [])
-    : await firstWorking([['wl-paste', ['--no-newline']], ['xclip', ['-selection', 'clipboard', '-o']], ['xsel', ['--clipboard', '--output']]]);
+    : await firstWorking([['wl-paste', ['--no-newline'], { env }], ['xclip', ['-selection', 'clipboard', '-o'], { env }], ['xsel', ['--clipboard', '--output'], { env }]]);
   return text ? { kind: 'text', text } : { kind: 'empty' };
+}
+
+// (1.22) Beam for Linux runs as a service, outside the desktop session: it uses the desktop of its user that's on
+// (Wayland first, then X), found the way a session sets it up. {} when this process has a desktop of its own already,
+// null when there isn't one (a computer without a screen).
+function desktopEnv() {
+  if (process.env.WAYLAND_DISPLAY || process.env.DISPLAY) return {};
+  const runtime = process.env.XDG_RUNTIME_DIR || (process.getuid ? `/run/user/${process.getuid()}` : '');
+  const env = {};
+  if (runtime && !process.env.DBUS_SESSION_BUS_ADDRESS && fs.existsSync(path.join(runtime, 'bus'))) env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${path.join(runtime, 'bus')}`;
+  let wayland = null;
+  try { wayland = fs.readdirSync(runtime).filter(n => /^wayland-\d+$/.test(n)).sort()[0] || null; } catch {}
+  if (wayland) return { ...env, XDG_RUNTIME_DIR: runtime, WAYLAND_DISPLAY: wayland };
+  if (fs.existsSync('/tmp/.X11-unix/X0')) return { ...env, DISPLAY: ':0' };
+  return null;
 }
 
 async function writeClipboard(text) {
@@ -380,7 +419,9 @@ async function writeClipboard(text) {
     return;
   }
   if (IS_MAC) return void (await run('pbcopy', [], { input: text }));
-  await firstWorking([['wl-copy', [], { input: text }], ['xclip', ['-selection', 'clipboard'], { input: text }], ['xsel', ['--clipboard', '--input'], { input: text }]]);
+  const env = desktopEnv();
+  if (!env) throw new Error('there\'s no desktop here, so no clipboard');
+  await firstWorking([['wl-copy', [], { input: text, env }], ['xclip', ['-selection', 'clipboard'], { input: text, env }], ['xsel', ['--clipboard', '--input'], { input: text, env }]]);
 }
 
 // Clicking a notification opens Beam in the browser. (Windows refuses custom beam: links
@@ -407,7 +448,8 @@ async function desktopNotify(title, body = '', launch = webUrl) {
     } else if (IS_MAC) {
       await run('osascript', ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run', title, body]);
     } else {
-      await run('notify-send', ['-a', 'Beam', title, body]);
+      const env = desktopEnv();
+      if (env) await run('notify-send', ['-a', 'Beam', title, body], { env, timeout: 10_000 });
     }
   } catch {}
 }
@@ -527,7 +569,7 @@ async function discover() {
 }
 
 async function saveSignIn(cfg, base, key, serverUrl, name) {
-  const next = { ...(readConfigFile() || {}), url: (serverUrl || base).replace(/\/+$/, ''), key, device: name || cfg.device, deviceId: cfg.deviceId };
+  const next = { ...(readConfigFile() || {}), url: (serverUrl || base).replace(/\/+$/, ''), key, device: name || cfg.device, deviceId: cfg.deviceId, ...(cfg.app && { app: cfg.app }) };
   const probe = { ...cfg, ...next };
   const me = await (await api(probe, '/api/me')).json();
   if (me.you) next.deviceId = me.you;
@@ -548,7 +590,8 @@ async function login(cfg, address, opt) {
     console.error(`Found Beam at ${base}`);
   }
   const name = opt.name || cfg.device;
-  const who = { deviceId: cfg.deviceId, name, platform: 'cli' };
+  const platform = linuxApp(cfg) ? 'linux' : 'cli';
+  const who = { deviceId: cfg.deviceId, name, platform };
   const post = (route, body, headers = {}) => fetch(`${base}${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Beam-Device-Id': cfg.deviceId, ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
 
   if (opt.password) {
@@ -570,7 +613,7 @@ async function login(cfg, address, opt) {
 
   // 2. Approve a code on a device that's already signed in.
   for (;;) {
-    const res = await post('/api/login-requests', { name, platform: 'cli', deviceId: cfg.deviceId });
+    const res = await post('/api/login-requests', { name, platform, deviceId: cfg.deviceId });
     const request = await res.json().catch(() => ({}));
     if (res.status === 410 && request.movedTo) return login(cfg, request.movedTo, opt);
     if (!res.ok) throw new Error(request.error || `HTTP ${res.status}`);
@@ -796,14 +839,16 @@ async function* sseEvents(body, onActivity) {
   }
 }
 
-async function listen(cfg, opt) {
+// (1.22) hooks (Beam for Linux's agent): onHello(hello) after each connect, onEvent(name, data) for other events.
+async function listen(cfg, opt, hooks = {}) {
   const copy = !opt['no-copy'];
   const save = !opt['no-save'];
   const notify = !opt['no-notify'];
   const dir = path.resolve(opt.dir || DEFAULT_DIR);
   const maxSave = (Number(opt['max-save']) || 1024) * 1024 * 1024;
   const seen = new Set();
-  const log = msg => console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+  const log = logLine;
+  let clipProblem = '';
 
   async function receive(item, { clipboard = true } = {}) {
     if (seen.has(item.id)) return;
@@ -813,8 +858,14 @@ async function listen(cfg, opt) {
     if (!isFor(cfg, item)) return;
     if (item.kind === 'text') {
       const text = await fullText(cfg, item);
-      log(`Text from ${item.device}: ${preview(text)}`);
-      if (copy && clipboard) await writeClipboard(text);
+      // (Beam for Linux's log can be read from another device: never the text itself there)
+      log(opt.agent ? `Text from ${item.device} (${text.length} characters)` : `Text from ${item.device}: ${preview(text)}`);
+      if (copy && clipboard) {
+        // (1.22) Not a reason to leave the text unread: a computer without a desktop has no clipboard (said once a run)
+        try { await writeClipboard(text); clipProblem = ''; } catch (err) {
+          if (clipProblem !== err.message) log(`Not put on the clipboard: ${(clipProblem = err.message)}`);
+        }
+      }
       if (notify && clipboard) desktopNotify(copy ? `Copied from ${item.device}` : `Text from ${item.device}`, preview(text, 120));
     } else if (save && item.size <= maxSave) {
       const dest = await download(cfg, item, dir);
@@ -857,6 +908,8 @@ async function listen(cfg, opt) {
         if (ev.event === 'item') await receive(JSON.parse(ev.data)).catch(err => log(`Error: ${err.message}`));
         else if (ev.event === 'refresh') await whoAmI(cfg).then(catchUp).catch(() => {});
         else if (ev.event === 'moved') throw Object.assign(new Error('Beam moved'), { moved: JSON.parse(ev.data).movedTo });
+        else if (ev.event === 'hello') hooks.onHello?.(jsonOr(ev.data));
+        else hooks.onEvent?.(ev.event, jsonOr(ev.data));
       }
       throw new Error('connection closed');
     } catch (err) {
@@ -871,9 +924,262 @@ async function listen(cfg, opt) {
   }
 }
 
+// ---------------------------------------------------------------- Beam for Linux (1.22)
+// `beam agent` is Beam for Linux: what its service runs (linux/install.sh: a systemd user service that starts with the
+// computer and again whenever it stops). It is `beam listen` that also
+// - tells Beam how the computer is, like the PCs' apps do: its system and model, disk, when it started, its CPU's
+//   temperature and (a Raspberry Pi) what its firmware says about power and throttling. On each connect, every 15
+//   minutes, and when that changes (a minute's look);
+// - sends its own log when another device asks for it (Device info → Beam log): ~/.local/state/beam/beam.log;
+// - updates itself: a newer build that Beam offers (GET /api/updates `linux`), signed with the key this one carries,
+//   replaces this file, and it stops; the service starts it again.
+
+const LINUX_HOME = path.join(os.homedir(), '.local', 'share', 'beam'); // where the installer puts it
+const LOG_FILE = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'beam', 'beam.log');
+const LOG_MAX = 512 * 1024;
+const STATUS_EVERY = 15 * 60e3;
+const UPDATE_EVERY = 6 * 3600e3;
+let logToFile = false;
+
+const jsonOr = (text, fallback = {}) => { try { return JSON.parse(text); } catch { return fallback; } };
+
+function logLine(msg) {
+  console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+  if (!logToFile) return;
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    if ((fs.statSync(LOG_FILE, { throwIfNoEntry: false })?.size || 0) > LOG_MAX) fs.renameSync(LOG_FILE, `${LOG_FILE}.old`);
+    fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`);
+  } catch {}
+}
+
+const readSys = file => { try { return fs.readFileSync(path.join(SYSROOT, file), 'utf8'); } catch { return null; } };
+const oneLine = (text, max = 60) => String(text || '').replace(/\0/g, '').replace(/\s+/g, ' ').trim().slice(0, max).trim();
+
+// Which user account on which computer this is (X-Beam-Profile): a reinstall here is the same device again.
+let profile = '';
+function linuxProfile() {
+  profile ||= sha256(`beam-linux:${oneLine(readSys('etc/machine-id') || readSys('var/lib/dbus/machine-id') || os.hostname(), 64)}:${process.getuid?.() ?? os.userInfo().username}`).toString('hex').slice(0, 32);
+  return profile;
+}
+
+// "Raspberry Pi OS 12 (bookworm)": Raspberry Pi OS calls itself Debian; its /etc/rpi-issue says it's the Pi's.
+function osName() {
+  const f = {};
+  for (const line of (readSys('etc/os-release') || readSys('usr/lib/os-release') || '').split('\n')) {
+    const m = /^([A-Z_]+)=(.*)$/.exec(line.trim());
+    if (m) f[m[1]] = m[2].replace(/^(["'])(.*)\1$/, '$2');
+  }
+  if (readSys('etc/rpi-issue') !== null && !/raspberry|raspbian/i.test(f.PRETTY_NAME || '') && f.VERSION_ID) {
+    return oneLine(`Raspberry Pi OS ${f.VERSION_ID}${f.VERSION_CODENAME ? ` (${f.VERSION_CODENAME})` : ''}`);
+  }
+  return oneLine(f.PRETTY_NAME || f.NAME || `Linux ${os.release()}`) || 'Linux';
+}
+
+// "Raspberry Pi 5 Model B Rev 1.0" (the device tree), else the PC's maker and model as its firmware says.
+function hardwareModel() {
+  const tree = oneLine(readSys('proc/device-tree/model'));
+  if (tree) return tree;
+  const dmi = ['sys_vendor', 'product_name'].map(f => oneLine(readSys(`sys/devices/virtual/dmi/id/${f}`)))
+    .filter(v => v && !/o\.?e\.?m|default string|not specified|not applicable|system product name|to be filled/i.test(v));
+  return oneLine(dmi.join(' ')) || null;
+}
+
+function bootTime() {
+  const btime = /^btime (\d+)$/m.exec(readSys('proc/stat') || '');
+  return btime ? Number(btime[1]) * 1000 : Math.round((Date.now() - os.uptime() * 1000) / 60e3) * 60e3;
+}
+
+// The CPU's thermal zone (a Pi's "cpu-thermal"), else the first one that reads, in °C.
+function cpuTemperature() {
+  let zones = [];
+  try { zones = fs.readdirSync(path.join(SYSROOT, 'sys/class/thermal')).filter(n => /^thermal_zone\d+$/.test(n)).sort(); } catch {}
+  const read = zones.map(z => ({ type: oneLine(readSys(`sys/class/thermal/${z}/type`)), raw: (readSys(`sys/class/thermal/${z}/temp`) || '').trim() }))
+    .filter(z => /^-?\d+$/.test(z.raw) && Math.abs(Number(z.raw)) < 150_000);
+  const cpu = read.find(z => /cpu|x86_pkg|soc|k10temp|coretemp|package/i.test(z.type)) || read[0];
+  return cpu ? Math.round(Number(cpu.raw) / 100) / 10 : null;
+}
+
+// A Raspberry Pi's firmware (vcgencmd get_throttled): bits 0–3 now, 16–19 since it started. null elsewhere.
+const THROTTLE_BITS = [['undervoltage', 0], ['capped', 1], ['throttled', 2], ['softLimit', 3]];
+let noVcgencmd = false;
+async function throttling() {
+  let text = process.env.BEAM_TEST_THROTTLED;
+  if (text === undefined) {
+    if (noVcgencmd) return null;
+    try { text = await run('vcgencmd', ['get_throttled'], { timeout: 5000 }); } catch (err) {
+      if (err.code === 'ENOENT') noVcgencmd = true; // not a Raspberry Pi
+      return null;
+    }
+  }
+  const m = /0x([0-9a-f]{1,8})\b/i.exec(text);
+  if (!m) return null;
+  const bits = parseInt(m[1], 16);
+  return {
+    now: THROTTLE_BITS.filter(([, b]) => bits & (1 << b)).map(([f]) => f),
+    sinceBoot: THROTTLE_BITS.filter(([, b]) => bits & (1 << (b + 16))).map(([f]) => f),
+  };
+}
+
+function rootStorage() {
+  try {
+    const s = fs.statfsSync(SYSROOT);
+    const total = s.blocks * s.bsize;
+    const free = s.bavail * s.bsize;
+    return Number.isSafeInteger(total) && total > 0 && free >= 0 && free <= total ? { free, total } : null;
+  } catch { return null; }
+}
+
+// What PUT /api/devices/me/status gets. A Beam from before 1.22 knows only os and storage (it refuses other fields).
+async function linuxStatus(full) {
+  const status = { os: osName() };
+  const storage = rootStorage();
+  if (storage) status.storage = storage;
+  if (!full) return status;
+  const model = hardwareModel();
+  if (model) status.model = model;
+  status.bootedAt = bootTime();
+  const temperature = cpuTemperature();
+  if (temperature !== null) status.temperature = temperature;
+  const throttled = await throttling();
+  if (throttled) status.throttled = throttled;
+  return status;
+}
+
+// Worth telling Beam between the 15-minute reports: a restart, the firmware's flags, 5 °C either way or across 70 or 80.
+function statusChanged(was, now) {
+  if (!was) return true;
+  if (was.bootedAt !== now.bootedAt || JSON.stringify(was.throttled) !== JSON.stringify(now.throttled)) return true;
+  const [a, b] = [was.temperature, now.temperature];
+  if ((a === undefined) !== (b === undefined)) return true;
+  return a !== undefined && (Math.abs(b - a) >= 5 || [70, 80].some(t => (a >= t) !== (b >= t)));
+}
+
+const newerThan = (a, b) => {
+  const parts = v => String(v).split('.').map(n => Number(n) || 0);
+  const [x, y] = [parts(a), parts(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+};
+
+// An update is this build's own: signed with the key it carries (linux/build.mjs). A copy built without a key (a
+// plain checkout) checks only the SHA-256, like a Beam.exe built without one.
+function signedByOurBuilder(offer, sha, size) {
+  if (!UPDATE_KEY) return true;
+  try {
+    const xy = Buffer.from(UPDATE_KEY, 'base64');
+    const key = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: xy.subarray(0, 32).toString('base64url'), y: xy.subarray(32, 64).toString('base64url') }, format: 'jwk' });
+    const message = Buffer.from(`beam-linux-update\n${offer.version}\n${sha}\n${size}`, 'utf8');
+    return typeof offer.sig === 'string' && crypto.verify('sha256', message, { key, dsaEncoding: 'ieee-p1363' }, Buffer.from(offer.sig, 'base64'));
+  } catch {
+    return false;
+  }
+}
+
+const SELF = path.resolve(__filename);
+const refusedUpdates = new Set(); // "version sha256" of builds that weren't right (not tried again until offered anew)
+let updating = null;
+let updated = false;
+
+// Only the installed app replaces itself (never a copy run from a checkout of Beam).
+function checkForUpdate(cfg) {
+  if (SELF !== path.join(LINUX_HOME, 'beam.js') || updating || updated) return updating;
+  updating = (async () => {
+    const offer = (await (await api(cfg, '/api/updates')).json()).linux;
+    if (!offer?.version || !newerThan(offer.version, VERSION) || refusedUpdates.has(`${offer.version} ${offer.sha256}`)) return;
+    logLine(`Beam offers Beam for Linux ${offer.version}: updating`);
+    const data = Buffer.from(await (await api(cfg, '/download/linux')).arrayBuffer());
+    const sha = crypto.createHash('sha256').update(data).digest('hex');
+    const problem = sha !== offer.sha256 || data.length !== offer.size ? 'it changed on the way'
+      : !signedByOurBuilder(offer, sha, data.length) ? 'it isn\'t signed by whoever built this one'
+        : !data.toString('utf8').includes(`\nconst VERSION = '${offer.version}';\n`) ? 'it says it\'s another version' : null;
+    const next = path.join(path.dirname(SELF), 'beam.new.js'); // (.js: Node.js won't check a file it can't tell is a script)
+    if (!problem) {
+      fs.writeFileSync(next, data, { mode: 0o644 });
+      try { await run(process.execPath, ['--check', next], { timeout: 60_000 }); } catch (err) {
+        fs.rmSync(next, { force: true });
+        return refuse(offer, `Node.js can't read it (${oneLine(err.message, 200)})`);
+      }
+      fs.renameSync(next, SELF);
+      updated = true;
+      logLine(`Updated to Beam for Linux ${offer.version}: starting again`);
+      setTimeout(() => process.exit(0), 200); // (the service starts it again; let the log line out first)
+      return;
+    }
+    refuse(offer, problem);
+  })().catch(err => logLine(`Couldn't check for an update: ${err.message}`)).finally(() => { updating = null; });
+  return updating;
+}
+
+function refuse(offer, why) {
+  refusedUpdates.add(`${offer.version} ${offer.sha256}`);
+  logLine(`Didn't update to Beam for Linux ${offer.version}: ${why}`);
+}
+
+// Device info → Beam log on another device: the end of this log (Beam keeps none of it).
+async function sendLog(cfg, id) {
+  logLine('Sending this log (asked from another device)');
+  let text = '';
+  for (const f of [`${LOG_FILE}.old`, LOG_FILE]) { try { text += fs.readFileSync(f, 'utf8'); } catch {} }
+  await api(cfg, '/api/devices/me/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, name: 'beam.log', text: text.slice(-2 * LOG_MAX) }) });
+}
+
+async function agent(cfg, opt) {
+  if (!AS_LINUX) throw new Error('beam agent is Beam for Linux; on Windows and Android use their Beam apps (or beam listen)');
+  if (!linuxApp(cfg)) {
+    cfg.app = 'linux';
+    saveConfig({ app: 'linux' });
+  }
+  logToFile = true;
+  logLine(`Beam for Linux ${VERSION} on ${osName()}${hardwareModel() ? `, ${hardwareModel()}` : ''} (Node.js ${process.versions.node})`);
+  // At boot the service can start before the network (or Tailscale) is up: wait for Beam, rather than stopping.
+  for (let wait = 2000; ; wait = Math.min(wait * 2, 60e3)) {
+    try {
+      await whoAmI(cfg);
+      break;
+    } catch (err) {
+      if (!err.network) throw err;
+      if (wait === 2000) logLine(`Waiting for Beam (${err.message})`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+  }
+  let full = false; // the server knows the 1.22 fields
+  let sent = null;
+  let reporting = null;
+  let quiet = '';
+  const report = force => {
+    reporting ??= (async () => {
+      const status = await linuxStatus(full);
+      if (!force && !statusChanged(sent, status)) return;
+      await api(cfg, '/api/devices/me/status', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(status) });
+      if (!sent) logLine(`Told Beam how this computer is: ${[status.os, status.model, status.temperature !== undefined && `${status.temperature} °C`, status.storage && `${formatSize(status.storage.free)} free`].filter(Boolean).join(', ')}`);
+      sent = status;
+      quiet = '';
+    })().catch(err => {
+      if (!err.network && quiet !== err.message) logLine(`Couldn't report this computer's status: ${(quiet = err.message)}`);
+    }).finally(() => { reporting = null; });
+    return reporting;
+  };
+  setInterval(() => report(false), 60e3).unref();
+  setInterval(() => report(true), STATUS_EVERY).unref();
+  setInterval(() => checkForUpdate(cfg), UPDATE_EVERY).unref();
+  await listen(cfg, { ...opt, agent: true }, {
+    onHello: hello => {
+      full = Array.isArray(hello.features) && hello.features.includes('linux');
+      sent = null; // a new connection: tell it all again
+      report(true);
+      checkForUpdate(cfg);
+    },
+    onEvent: (name, data) => {
+      if (name === 'log-request' && typeof data.id === 'string') sendLog(cfg, data.id).catch(err => logLine(`Couldn't send the log: ${err.message}`));
+      else if (name === 'app-update' && data.linux) checkForUpdate(cfg);
+    },
+  });
+}
+
 // ---------------------------------------------------------------- main
 
-const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help']);
+const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version']);
 
 async function main() {
   let parsed;
@@ -906,6 +1212,7 @@ async function main() {
   webUrl = cfg.url ? `${cfg.url}/` : '';
   let [cmd, ...args] = positionals;
   if (opt.help || cmd === 'help') return console.log(HELP);
+  if (cmd === 'version') return console.log(VERSION);
   if (cmd && !COMMANDS.has(cmd)) { args = positionals; cmd = 'send'; }
 
   let result;
@@ -940,6 +1247,7 @@ async function main() {
         case 'rm': result = await remove(cfg, args); break;
         case 'approve': result = await approve(cfg, args[0], opt); break;
         case 'listen': await listen(cfg, opt); break;
+        case 'agent': await agent(cfg, opt); break;
         case 'open': await openWebApp(cfg, opt); break;
         case 'pair': await pair(cfg); break;
       }
@@ -948,6 +1256,12 @@ async function main() {
     if (opt.toast) await desktopNotify('Beam: something went wrong', err.message);
     console.error(`beam: ${err.message}`);
     process.exitCode = 1;
+    if (cmd === 'agent' && AS_LINUX) {
+      // (1.22) Its service starts it again: in its log why, and once a minute rather than every few seconds.
+      logToFile = true;
+      logLine(`Stopped: ${err.message}`);
+      await new Promise(r => setTimeout(r, Number(process.env.BEAM_TEST_AGENT_PAUSE) || 60e3));
+    }
     return;
   }
   if (!result) return;

@@ -6,6 +6,8 @@
 //
 //   node windows/update-key.mjs public-cs <out.cs>                     the public key as C# (made first if needed)
 //   node windows/update-key.mjs sign <Beam.exe> <version> <out.json>   the sidecar: version, sha256, size, sig
+//   node windows/update-key.mjs public                                 (1.22) the public key, X‖Y in base64
+//   node windows/update-key.mjs sign <file> <version> <out.json> linux (1.22) Beam for Linux's (linux/build.mjs)
 //
 // The key: BEAM_UPDATE_KEY, else ~/.beam/windows-update-key.pem: one per person who builds, shared by every copy of
 // the project on that computer (a staging copy signs with the same key). BACK IT UP, like the Android keystore:
@@ -13,14 +15,15 @@
 //
 // What is signed (ECDSA P-256 with SHA-256, the signature as r‖s in base64): the UTF-8 text
 //   "beam-windows-update\n<version>\n<sha256 in lowercase hex>\n<size in bytes>"
-// The version is in it so an older signed build can't be offered as new.
+// The version is in it so an older signed build can't be offered as new. Beam for Linux's begins "beam-linux-update"
+// instead: one app's signed build can't pass for the other's.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const KEY_FILE = process.env.BEAM_UPDATE_KEY || path.join(os.homedir(), '.beam', 'windows-update-key.pem');
-const message = (version, sha256, size) => `beam-windows-update\n${version}\n${sha256.toLowerCase()}\n${size}`;
+const message = (version, sha256, size, app = 'windows') => `beam-${app}-update\n${version}\n${sha256.toLowerCase()}\n${size}`;
 
 function privateKey() {
   if (!fs.existsSync(KEY_FILE)) {
@@ -49,15 +52,17 @@ try {
       `namespace Beam { static class UpdateKey { public const string PublicKey = "${publicXY(privateKey())}"; } }\n`;
     fs.mkdirSync(path.dirname(args[0]), { recursive: true });
     fs.writeFileSync(args[0], cs);
-  } else if (cmd === 'sign' && args.length === 3) {
-    const [exe, version, out] = args;
+  } else if (cmd === 'public' && !args.length) {
+    process.stdout.write(`${publicXY(privateKey())}\n`);
+  } else if (cmd === 'sign' && (args.length === 3 || (args.length === 4 && args[3] === 'linux'))) {
+    const [exe, version, out, app = 'windows'] = args;
     if (!/^\d+\.\d+\.\d+(\.\d+)?$/.test(version)) throw new Error(`not a version: ${version}`);
     const data = fs.readFileSync(exe);
     const sha256 = crypto.createHash('sha256').update(data).digest('hex');
-    const sig = crypto.sign('sha256', Buffer.from(message(version, sha256, data.length), 'utf8'), { key: privateKey(), dsaEncoding: 'ieee-p1363' });
+    const sig = crypto.sign('sha256', Buffer.from(message(version, sha256, data.length, app), 'utf8'), { key: privateKey(), dsaEncoding: 'ieee-p1363' });
     fs.writeFileSync(out, JSON.stringify({ version, sha256, size: data.length, sig: sig.toString('base64') }));
   } else {
-    console.error('Usage: node windows/update-key.mjs public-cs <out.cs> | sign <Beam.exe> <version> <out.json>');
+    console.error('Usage: node windows/update-key.mjs public-cs <out.cs> | public | sign <file> <version> <out.json> [linux]');
     process.exit(2);
   }
 } catch (err) {

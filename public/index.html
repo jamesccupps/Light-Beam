@@ -245,6 +245,15 @@
       <a id="androidLink" class="btn" href="download/android" hidden><svg class="i" aria-hidden="true"><use href="#i-phone"/></svg><span>Android</span></a>
       <a id="windowsLink" class="btn" href="download/windows" hidden><svg class="i" aria-hidden="true"><use href="#i-monitor"/></svg><span>Windows</span></a>
     </div>
+    <details id="linuxBox" class="pair-link" hidden>
+      <summary>A Raspberry Pi or another Linux computer</summary>
+      <p class="muted small">Put Tailscale on it first, signed in to your tailnet. Then run this in its terminal (as yourself, not as root):</p>
+      <div class="linkrow">
+        <input id="linuxCmd" type="text" readonly aria-label="The command that installs Beam for Linux" spellcheck="false">
+        <button id="copyLinuxBtn" class="btn" type="button">Copy</button>
+      </div>
+      <p class="muted small">It signs in through Tailscale (or shows a code to approve here), starts with the computer and updates itself. Its page in Beam shows its disk, temperature and power.</p>
+    </details>
     <details id="pairLinkBox" class="pair-link">
       <summary>Show a pairing link</summary>
       <p class="muted small">A one-time link that signs a device in when it's opened there. It works like a password until it's used.</p>

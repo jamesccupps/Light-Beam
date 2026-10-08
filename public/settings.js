@@ -704,6 +704,9 @@ async function openPairDialog() {
   $('#androidLink').hidden = !info.apps?.android;
   $('#windowsLink').hidden = HOST || !info.apps?.windows;
   $('#appsBox').hidden = $('#androidLink').hidden && $('#windowsLink').hidden;
+  // (1.22) Beam for Linux: one command in the computer's terminal (GET /install/linux)
+  $('#linuxBox').hidden = !(serverHas('linux') && info.apps?.linux);
+  $('#linuxCmd').value = `curl -fsSL ${address}/install/linux | bash`;
   $('#pairLinkBox').open = false;
   $('#pairLink').value = '';
   $('#qrImg').removeAttribute('src');
