@@ -37,6 +37,7 @@ function setDevices(list) {
     if (d.name && knownNames[d.id] !== d.name) { knownNames[d.id] = d.name; cache.saveNames(); }
   }
   dataVersion++;
+  showDeviceLabel(); // (1.23.2: a page that's part of an app shows the app's name)
 }
 
 function setItems(list) {
