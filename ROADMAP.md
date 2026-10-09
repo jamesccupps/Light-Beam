@@ -51,7 +51,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Beam for Linux** (Beam 1.22, a Raspberry Pi first): one command in its terminal (`curl … /install/linux | bash`)
   installs it as a service that starts with the computer and updates itself (signed like the Windows app); its page
   shows its system, hardware, disk, how long it's been up, its processor's temperature and, on a Pi, its power supply
-  and throttling, with alerts when it's too hot or short of power; its log from any device.
+  and throttling, with alerts when it's too hot or short of power; its log from any device. With a desktop (Beam for
+  Linux 1.1), Beam is in its menu: a window of its own to drop files on, paste text into and see what came.
 
 ## Next
 - **Remote control, further:** what's left of the delay is the network and the PC's capture inside Edge (a capture of
@@ -60,7 +61,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Linux, further:** an always-on Pi waking the PCs on its own network, the Apps page for Linux (.deb files, apt), a
-  script you allowed there run on request; later a desktop app with a tray icon and remote control of a Linux desktop.
+  script you allowed there run on request; remote control of a Pi's desktop (next: its screen through its own VNC
+  server, relayed by Beam); later a desktop app with a tray icon.
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.
 - **Builds and releases** with GitHub Actions.
 - **Beam Family:** voice and video calls; each person's own devices; the Beam apps signing in to a family server;

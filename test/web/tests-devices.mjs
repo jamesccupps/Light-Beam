@@ -527,6 +527,22 @@ export default function register(test) {
     eq(page.errors, [], 'no page errors');
   });
 
+  test('Beam for Linux 1.1: a page Beam took for a Linux computer’s app (Beam’s window from its menu) leaves notifications to that app', async ctx => {
+    const page = await ctx.signedIn();
+    await page.waitFor(`Boolean(deviceById(me.id))`, 8000, 'its own device listed');
+    // (the harness marks every page as offered already)
+    await page.evaluate(`deviceById(me.id).platform = 'linux'; store.remove('beam.notifyOffered'); offerNotifications()`);
+    eq(await page.evaluate(`[/notification/i.test($('#toast').textContent) && $('#toast').classList.contains('show'), store.get('beam.notifyOffered')]`), [false, null], 'not offered');
+    await page.evaluate(`openSettings('notifications')`);
+    await page.waitFor(`/Beam for Linux on this computer shows a notification/.test($('#settingsDlg').textContent)`, 5000, 'Settings says why');
+    await page.evaluate(`$('#settingsDlg').close(); deviceById(me.id).platform = 'web'`);
+    if (await page.evaluate(`Notification.permission === 'default' && window.isSecureContext`)) {
+      await page.evaluate(`offerNotifications()`);
+      eq(await page.evaluate(`store.get('beam.notifyOffered')`), '1', 'a plain browser page is still offered them');
+    }
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {
     const { page } = await hostPage(ctx, { state: {} });
     await page.waitFor(`paired && hostState.ready`);

@@ -680,6 +680,15 @@ minutes and when it changes (a start, the firmware's flags, 5 °C either way or 
 `app-update` and every 6 hours it takes a newer `linux` update signed with its key, checks it with `node --check`,
 replaces its own file and exits (the service starts it again). Only the installed copy updates itself.
 
+**(Beam for Linux 1.1)** On a computer with a desktop (a session in `/usr/share/wayland-sessions` or `xsessions`), the
+installed app puts Beam in the menu: `~/.local/share/applications/beam.desktop` (Internet → Beam; Beam's icon in
+`~/.local/share/beam/beam.svg`), which runs `beam window`: Beam's pages in a Chromium-family browser's app window with
+a profile of its own (`~/.local/share/beam/window`; no such browser: the default browser). The first time (or with
+`--sign-in`) the window opens a pairing link (`GET /api/pair`, as `beam open` does), and Beam takes the window for this
+computer's device, like any browser on the same machine as a Beam app. Such a page leaves notifications to the app,
+which shows them itself (`notify-send`, else the desktop's notification service through `gdbus`). An entry taken out of
+the menu by hand isn't put back; `--uninstall` removes it.
+
 ### Apps on every PC (1.21)
 Feature `apps`. The user's own apps, which Beam installs on their PCs (the Windows app 1.16 or later: `can.apps`). An
 app comes from a GitHub repository's latest published release, from a file sent here, or from winget. Each PC installs
