@@ -546,6 +546,31 @@ export default function register(test) {
     eq(page.errors, [], 'no page errors');
   });
 
+  test('1.23.2: a page that’s part of a Beam app shows the app’s name; Beam for Linux’s window renames the computer through Beam, a browser next to another app can’t', async ctx => {
+    const page = await ctx.signedIn();
+    await page.waitFor(`Boolean(deviceById(me.id))`, 8000, 'its own device listed');
+    // (as in the test above: the page's own device stands in for the app's, each check in the step that changes it)
+    await page.evaluate(`window.__realFetch = window.fetch; window.__renamed = null;
+      window.fetch = (u, o) => String(u).includes('api/devices/me/name')
+        ? (window.__renamed = { method: o.method, body: JSON.parse(o.body) }, Promise.resolve(new Response('{"name":"OCC Pi"}', { status: 200, headers: { 'Content-Type': 'application/json' } })))
+        : window.__realFetch(u, o)`);
+    const own = await page.evaluate(`me.name`);
+    eq(await page.evaluate(`(() => { const d = deviceById(me.id); d.platform = 'linux'; d.name = 'Pi'; showDeviceLabel(); openSettings('device');
+      const input = $('#set-device input[type=text]');
+      const shown = [$('#deviceLabel').textContent, input.value, input.disabled, /How this computer appears on your other devices/.test($('#set-device').textContent)];
+      input.value = '  OCC Pi '; input.dispatchEvent(new Event('change'));
+      return shown; })()`), ['Pi', 'Pi', false, true], 'the computer’s name, in the footer and Settings');
+    await page.waitFor(`window.__renamed !== null`, 5000, 'sent to Beam');
+    eq(await page.evaluate(`window.__renamed`), { method: 'PUT', body: { name: 'OCC Pi' } });
+    eq(await page.evaluate(`me.name`), own, 'the page’s own name is left alone');
+    eq(await page.evaluate(`(() => { const d = deviceById(me.id); d.platform = 'windows'; d.name = 'Desktop'; openSettings('device');
+      const input = $('#set-device input[type=text]');
+      return [input.value, input.disabled, /This browser is part of Desktop: its Beam app sets the name/.test($('#set-device').textContent)]; })()`),
+      ['Desktop', true, true], 'next to Beam for Windows: its name, not changed here');
+    await page.evaluate(`$('#settingsDlg').close(); deviceById(me.id).platform = 'web'; deviceById(me.id).name = me.name; showDeviceLabel(); window.fetch = window.__realFetch`);
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {
     const { page } = await hostPage(ctx, { state: {} });
     await page.waitFor(`paired && hostState.ready`);

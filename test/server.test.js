@@ -3281,6 +3281,71 @@ test('Beam for Linux 1.1: Beam in the menu (once, kept up to date, not again onc
   }
 });
 
+test('1.23.2 Beam for Linux renamed from its window: the name sticks over the app’s old one, the app keeps it (1.2.1, when it next connects or at once), then names itself again', async () => {
+  const s = await startServer('rename1232', 8799);
+  const runs = [];
+  try {
+    const admin = app(s.key, 'admin000111', 'Admin');
+    const home = homeDir('rename1232');
+    const root = path.join(TMP, 'rename-root');
+    fs.rmSync(root, { recursive: true, force: true });
+    for (const [f, text] of Object.entries({ 'etc/os-release': 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\n', 'etc/machine-id': '0123456789abcdef0123456789abcdef\n' })) {
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+    const installed = path.join(home, '.local', 'share', 'beam', 'beam.js');
+    fs.mkdirSync(path.dirname(installed), { recursive: true });
+    fs.writeFileSync(path.join(path.dirname(installed), 'package.json'), '{ "type": "commonjs" }\n');
+    fs.copyFileSync(path.join(ROOT, 'cli', 'beam.js'), installed);
+    let r = await cli(['setup', `http://127.0.0.1:${s.port}/?key=${s.key}`, '--name', 'Pi'], { home, env: { BEAM_APP: 'linux' } });
+    assert.equal(r.code, 0, r.out);
+    const { deviceId: id, key } = cliConfig(home);
+    const nameNow = async () => (await s.req('GET', '/api/devices', { headers: admin })).json.devices.find(d => d.id === id)?.name;
+    // The window: a page Beam took for the Pi (its requests are the Pi's, as a browser's).
+    const windowPage = { Authorization: `Bearer ${key}`, 'X-Beam-Device-Id': id, 'X-Beam-Device': 'Chrome on raspberrypi', 'X-Beam-Platform': 'web' };
+    const rename = (name, headers = windowPage) => s.req('PUT', '/api/devices/me/name', { headers: json(headers), body: JSON.stringify({ name }) });
+    await s.req('GET', '/api/me', { headers: windowPage });
+    assert.equal(await nameNow(), 'Pi', 'a page that’s part of the app never renames it by its requests');
+
+    // Renamed while its app is away: the new name at once, over what the app (an older one) still says.
+    r = await rename('  OCC Pi  ');
+    assert.deepEqual([r.status, r.json], [200, { name: 'OCC Pi' }]);
+    assert.equal(await nameNow(), 'OCC Pi');
+    r = await cli(['status'], { home });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(await nameNow(), 'OCC Pi', 'the app’s old name doesn’t win');
+
+    // Its app (1.2.1) hears it when it connects, keeps it, and says it from then on.
+    const agentEnv = cleanEnv({ HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), BEAM_TEST_LINUX_ROOT: root, BEAM_TEST_THROTTLED: 'throttled=0x0', BEAM_TEST_AGENT_PAUSE: '100' });
+    const child = spawn(process.execPath, [installed, 'agent', '--no-copy', '--no-notify'], { env: agentEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    children.add(child);
+    const agent = { child, out: '', exited: new Promise(resolve => child.on('exit', code => { children.delete(child); resolve(code); })) };
+    child.stdout.on('data', d => { agent.out += d; });
+    child.stderr.on('data', d => { agent.out += d; });
+    runs.push(agent);
+    await waitFor(() => cliConfig(home).device === 'OCC Pi', 15000);
+    assert.match(agent.out, /This computer is called OCC Pi in Beam now/);
+    // And at once while it's connected.
+    r = await rename('Pi at the office');
+    assert.equal(r.status, 200);
+    await waitFor(() => cliConfig(home).device === 'Pi at the office', 10000);
+    assert.equal(await nameNow(), 'Pi at the office');
+    // The app having said it, its own name counts again (here: the command line's, for this one run).
+    await waitFor(async () => (await cli(['status'], { home, env: { BEAM_DEVICE: 'Pi Three' } })).code === 0 && await nameNow() === 'Pi Three', 10000, 300);
+
+    // Only a Beam for Linux computer is renamed here.
+    r = await rename('Not me', admin);
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /Only a computer with Beam for Linux/);
+    r = await rename('   ');
+    assert.equal(r.status, 400);
+    assert.ok(!(await s.req('GET', '/api/devices', { headers: admin })).json.devices.some(d => d.name === 'Not me'));
+  } finally {
+    for (const run of runs) try { run.child.kill(); } catch {}
+    await s.stop();
+  }
+});
+
 // ---------------------------------------------------------------- 1.23 control of a Linux computer
 // Sessions of kind vnc: the computer's own VNC server (wayvnc) relayed by the server between two WebSockets, the
 // viewer's and the computer's Beam for Linux's (rcSetup's fake tailnet; the relay's frames from lib/websocket.js).

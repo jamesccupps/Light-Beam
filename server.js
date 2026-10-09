@@ -1360,7 +1360,7 @@ function rawDeviceIdOf(req, url) {
 // The calling device's id: the one its token is bound to, else the id it sends; merges are followed. (1.23.1) Including
 // one this very request made: a browser joining the Linux or Windows app on its machine got its old id back in that
 // answer's body (/api/me `you`) while X-Beam-You said the app's, and the page took the old one again ("This device:
-// Chrome on occ-bkp-02" in the Pi's menu window).
+// Chrome on raspberrypi" in the Pi's menu window).
 function deviceIdOf(req, url) {
   const auth = authOf(req);
   if (auth?.deviceId) return resolveAlias(auth.deviceId);
@@ -1417,9 +1417,13 @@ function touchDevice(req, url) {
   if (authOf(req)?.session && !APP_PLATFORMS.has(device.platform)) device.temporary = true;
   // A browser linked to the app on its machine shares the app's identity but must never rename or re-platform it.
   if (platform === 'web' && APP_PLATFORMS.has(device.platform)) return device;
-  const name = sentName || device.name;
+  let name = sentName || device.name;
+  // (1.23.2) Renamed in Beam for Linux's window (putDeviceName): that name, until the app says it too.
+  const named = Boolean(device.renaming) && name === device.renaming;
+  if (named) delete device.renaming;
+  else if (device.renaming) name = device.renaming;
   const nextPlatform = explicitPlatform(req, url) || (isNew ? platform : device.platform);
-  const changed = isNew || device.name !== name || device.platform !== nextPlatform;
+  const changed = isNew || named || device.name !== name || device.platform !== nextPlatform;
   const profile = APP_PLATFORMS.has(nextPlatform) ? profileOf(req, url) : '';
   const newProfile = Boolean(profile) && device.profile !== profile;
   if (profile) device.profile = profile;
@@ -2077,6 +2081,36 @@ async function putStatus(req, res, _m, url) {
   persistDevices();
   broadcastDevicesThrottled();
   send(res, 204);
+}
+
+// PUT /api/devices/me/name { name } (1.23.2): a Linux computer renamed in Beam's window there (a browser linked to its
+// Beam for Linux, whose requests never rename it: touchDevice). The name is the computer's at once; its app hears it
+// (`rename`, now or when it next connects) and keeps it in its own settings. The user's report: the Pi renamed in its
+// window still showed as "Pi" everywhere else.
+async function putDeviceName(req, res, _m, url) {
+  const id = deviceIdOf(req, url);
+  const device = id && devices[id];
+  if (!device) throw httpError(400, 'X-Beam-Device-Id is required');
+  if (device.platform !== 'linux') throw httpError(400, 'Only a computer with Beam for Linux is renamed here (a browser renames itself with each request; Beam for Windows and Android in their settings)');
+  const name = cleanName((await readJson(req)).name);
+  if (!name) throw httpError(400, 'Expected {"name": "<the new name>"}');
+  if (name !== device.name) log.info(`${device.name} is now called ${name}`);
+  device.name = name;
+  device.renaming = name;
+  persistDevices();
+  broadcastDevices();
+  renameApp(device);
+  send(res, 200, { name });
+}
+
+function renameApp(device, only = null) {
+  if (!device.renaming) return;
+  const msg = `event: rename\ndata: ${JSON.stringify({ name: device.renaming })}\n\n`;
+  for (const c of only ? [only] : clients) {
+    if (c.kind !== 'app' || c.deviceId !== device.id || !streamOpen(c)) continue;
+    c.events++;
+    writeTo(c, msg);
+  }
 }
 
 function targetDevice(id) {
@@ -6177,6 +6211,7 @@ function events(req, res, _m, url) {
     if (kind === 'app') rcOnConnect(client);
     if (kind === 'app') offerUpdateOnConnect(client, req, url);
     if (kind === 'app') appsOnConnect(client); // (1.21) installs or removals asked while it was away
+    if (kind === 'app' && devices[deviceId]) renameApp(devices[deviceId], client); // (1.23.2) renamed while it was away
   }
   res.on('close', () => {
     clearTimeout(client.beat);
@@ -7527,6 +7562,7 @@ const routes = [
   ['GET', '/api/info', info],
   ['GET', '/api/devices', getDevices],
   ['PUT', '/api/devices/me/status', putStatus],
+  ['PUT', '/api/devices/me/name', putDeviceName], // (1.23.2) Beam for Linux's window
   ['PUT', '/api/devices/me/settings', putDeviceSettings],
   ['PUT', '/api/devices/me/backup', putDeviceBackup],
   ['GET', '/api/devices/me/backups', getDeviceBackups],

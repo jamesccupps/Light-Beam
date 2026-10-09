@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -94,9 +94,24 @@ function readConfigFile() {
 function saveConfig(changes) {
   const saved = readConfigFile();
   if (!saved) return false; // configured through the environment: nothing to update
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ ...saved, ...changes }, null, 2) + '\n', { mode: 0o600 });
-  keepPrivate();
+  writeConfigFile({ ...saved, ...changes });
   return true;
+}
+
+// (Beam for Linux 1.2.1) Written beside it, then put in its place: a command reading it meanwhile (the agent saves it
+// as it runs) never finds it half written.
+function writeConfigFile(config) {
+  let file = CONFIG_FILE;
+  try { file = fs.realpathSync(CONFIG_FILE); } catch {} // (a link to it stays a link)
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+    throw err;
+  }
+  keepPrivate();
 }
 
 // (audit C-5) The mode above applies only when the file is created: an older file, a hand edit or a restored
@@ -608,8 +623,7 @@ async function saveSignIn(cfg, base, key, serverUrl, name) {
   const me = await (await api(probe, '/api/me')).json();
   if (me.you) next.deviceId = me.you;
   next.serverId = (await (await fetch(`${next.url}/api/hello`)).json().catch(() => ({}))).serverId;
-  await fsp.writeFile(CONFIG_FILE, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
-  keepPrivate();
+  writeConfigFile(next);
   return next;
 }
 
@@ -1585,6 +1599,13 @@ async function agent(cfg, opt) {
       else if (name === 'app-update' && data.linux) checkForUpdate(cfg);
       else if (name === 'rc-request' && data.kind === 'vnc') startControl(cfg, data); // (Beam for Linux 1.2)
       else if (name === 'rc-end' && typeof data.id === 'string') stopControl(data.id);
+      else if (name === 'rename' && typeof data.name === 'string' && data.name.trim() && data.name !== cfg.device) {
+        // (Beam for Linux 1.2.1) renamed in Beam's window here: kept, and said from now on (which tells Beam it's done)
+        cfg.device = data.name;
+        try { saveConfig({ device: data.name }); } catch (err) { logLine(`Couldn't keep the new name in ${CONFIG_FILE}: ${err.message}`); }
+        logLine(`This computer is called ${oneLine(data.name, 60)} in Beam now`);
+        report(true);
+      }
       else if (name === 'rc-disable' && controlAllowed()) {
         // turned off from another device: off here too (only someone at this computer turns it on again)
         saveConfig({ remoteControl: false });

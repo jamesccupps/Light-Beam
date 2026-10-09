@@ -85,10 +85,17 @@ function toggle(label, checked, onchange, { hint, disabled } = {}) {
 // ---------------------------------------------------------------- This device
 
 function sectionDevice() {
-  const input = el('input', { type: 'text', maxlength: '40', autocomplete: 'off', value: me.name, 'aria-label': 'This device’s name' });
+  // (1.23.2) A page that's part of a Beam app (Beam for Linux's window, a browser next to the app) has the app's name:
+  // Beam for Linux takes it from here, the others in their own settings.
+  const app = linkedApp();
+  const input = el('input', { type: 'text', maxlength: '40', autocomplete: 'off', value: app ? app.name : me.name, 'aria-label': 'This device’s name', disabled: Boolean(app) && app.platform !== 'linux' });
   input.addEventListener('change', () => renameThisDevice(input.value));
   input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
-  const parts = [field('Name', input, note(HOST ? 'How this PC appears on your other devices.' : 'How this browser appears on your other devices.'))];
+  const about = HOST ? 'How this PC appears on your other devices.'
+    : app?.platform === 'linux' ? 'How this computer appears on your other devices.'
+    : app ? `This browser is part of ${app.name}: its Beam app sets the name.`
+    : 'How this browser appears on your other devices.';
+  const parts = [field('Name', input, note(about))];
   if (phoneFeature() && !HOST) { // (in the Windows app it's the app's: Settings → This PC)
     parts.push(toggle('Show phone notifications here', phoneShownFor(deviceById(me.id)), (v, box) => setPhoneShown(me.id, v, box),
       { hint: 'From the apps picked on your phone (in Beam there: Settings → Notifications on your PCs). Reply, act on or dismiss them from here. Kept in memory only.' }));
@@ -114,6 +121,20 @@ async function renameThisDevice(value) {
     if (r?.settings) { hostState.settings = r.settings; setDeviceName(r.settings.deviceName || name, { chosen: true }); toast('Saved'); }
     return;
   }
+  const app = linkedApp();
+  if (app?.platform === 'linux') { // (1.23.2) to Beam for Linux, through Beam
+    try {
+      const r = await (await api('api/devices/me/name', jsonBody({ name }, 'PUT'))).json();
+      app.name = r.name || name;
+      showDeviceLabel();
+      toast('Saved');
+    } catch (err) {
+      toast(friendlyError(err));
+      renderSettings();
+    }
+    return;
+  }
+  if (app) return renderSettings();
   setDeviceName(name, { chosen: true });
   api('api/me').catch(() => {}); // any request with the new name renames the device
   connect();

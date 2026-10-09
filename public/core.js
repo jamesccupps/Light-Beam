@@ -264,8 +264,20 @@ function setDeviceName(name, { chosen = false } = {}) {
     store.set('beam.named', me.named ? '1' : '0');
     setCookie('beam_device', me.name);
   }
+  showDeviceLabel();
+}
+
+// (1.23.2) The Beam app's device this page is part of, if any: Beam for Linux's window, or a browser the server linked
+// to the app on its machine. Its name is the app's (the page's own never reaches the server).
+const LINKED_APPS = new Set(['windows', 'android', 'ios', 'mac', 'linux', 'cli']);
+function linkedApp() {
+  const d = !HOST && typeof deviceById === 'function' ? deviceById(me.id) : null;
+  return d && LINKED_APPS.has(d.platform) ? d : null;
+}
+
+function showDeviceLabel() {
   const label = $('#deviceLabel');
-  if (label) label.textContent = me.name;
+  if (label) label.textContent = linkedApp()?.name || me.name;
 }
 
 // The server told us the Tailscale machine name (API v3 /api/me → machine.name): better default names.
