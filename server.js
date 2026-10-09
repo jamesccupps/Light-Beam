@@ -1357,10 +1357,13 @@ function rawDeviceIdOf(req, url) {
   return DEVICE_ID.test(id) ? id : null;
 }
 
-// The calling device's id: the one its token is bound to, else the id it sends; merges are followed.
+// The calling device's id: the one its token is bound to, else the id it sends; merges are followed. (1.23.1) Including
+// one this very request made: a browser joining the Linux or Windows app on its machine got its old id back in that
+// answer's body (/api/me `you`) while X-Beam-You said the app's, and the page took the old one again ("This device:
+// Chrome on occ-bkp-02" in the Pi's menu window).
 function deviceIdOf(req, url) {
   const auth = authOf(req);
-  if (auth?.deviceId) return auth.deviceId;
+  if (auth?.deviceId) return resolveAlias(auth.deviceId);
   const raw = rawDeviceIdOf(req, url);
   return raw && resolveAlias(raw);
 }
