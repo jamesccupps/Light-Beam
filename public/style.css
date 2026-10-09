@@ -651,6 +651,8 @@ html.remote-mode .rc {
 .rc-tool.attn { box-shadow: inset 0 0 0 1px #d4ceff; }
 .rc-tool .i { width: 18px; height: 18px; }
 .rc-body { position: relative; flex: 1; min-height: 0; }
+/* (1.23) A Linux computer's screen (vnc.js): noVNC fills the body and lays out and scales its own canvas. */
+.rc-vnc { position: absolute; inset: 0; }
 /* The picture: laid out at "fit" and moved/zoomed with a transform (remote.js rcV); 1:1 centres it and scrolls. */
 .rc-stage {
   position: absolute; inset: 0; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;

@@ -307,6 +307,8 @@ async function rcConnect({ retry = false } = {}) {
     const d = (list.devices || []).find(x => x && x.id === rc.id);
     if (!d) return rcEnded('unknown');
     rc.myName = cleanName((list.devices || []).find(x => x && x.id === me.id)?.name) || me.name; // (as the PC lists it)
+    // (1.23) A Linux computer: its own viewer (vnc.js). The Windows app's viewer window always opens this one.
+    if (d.platform === 'linux') { location.replace(`${BASE.pathname}#vnc=${encodeURIComponent(rc.id)}`); return; }
     rcSetDevice(d);
     if (d.id === me.id) return rcEnded('self');
     if (d.status?.locked === true) return rcEnded('locked');

@@ -402,13 +402,14 @@ function rcActions(d) {
   return [];
 }
 
-// The viewer: the Windows app's own window, else a new tab.
+// The viewer: the Windows app's own window, else a new tab. (1.23) A Linux computer's is the VNC one (vnc.js); the
+// Windows app's window opens the PCs' viewer, which moves over to it by itself.
 function openRemote(d) {
   if (HOST) {
     hostCall('openRemote', { device: d.id }).catch(err => toast(err.message || 'The Beam app couldn’t open the remote screen.', { error: true }));
     return;
   }
-  window.open(`${BASE.href}#remote=${encodeURIComponent(d.id)}`, '_blank', 'noopener');
+  window.open(`${BASE.href}#${d.platform === 'linux' ? 'vnc' : 'remote'}=${encodeURIComponent(d.id)}`, '_blank', 'noopener');
 }
 
 function onRcSessions(d) {

@@ -18,7 +18,8 @@ is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keybo
 `connections` (how the server reaches each device over Tailscale, the devices' Tailscale state and `tailscaleKey`
 alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
 device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
-`device-logs` (shipped with 1.19's in Beam 1.20.0). Use each one only when its flag is there; everything older keeps working.
+`device-logs` (shipped with 1.19's in Beam 1.20.0), 1.21 `apps`, 1.22 `linux` (Beam for Linux) and 1.23 `vnc` (control
+of a Linux computer, relayed). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -689,6 +690,9 @@ computer's device, like any browser on the same machine as a Beam app. Such a pa
 which shows them itself (`notify-send`, else the desktop's notification service through `gdbus`). An entry taken out of
 the menu by hand isn't put back; `--uninstall` removes it.
 
+**(Beam for Linux 1.2)** Remote control of its screen, turned on only at the computer (`beam control on|off`; status
+`remoteControl` when the server lists `vnc`): see "Control for a Linux computer (1.23)".
+
 ### Apps on every PC (1.21)
 Feature `apps`. The user's own apps, which Beam installs on their PCs (the Windows app 1.16 or later: `can.apps`). An
 app comes from a GitHub repository's latest published release, from a file sent here, or from winget. Each PC installs
@@ -1195,6 +1199,43 @@ The activity log records only:
 - "Pixel turned off remote control on Desktop" and "Desktop allows remote control now".
 
 `GET /api/metrics` gains `rc`: `{ "sessions", "live", "started", "refused", "ended": { "<reason>": count } }`.
+
+### Control for a Linux computer (1.23)
+Feature `vnc`. A computer with Beam for Linux 1.2 or later (a Raspberry Pi first) shares its own screen through its
+desktop's VNC server, [wayvnc](https://github.com/any1/wayvnc), and the server relays the bytes between it and the
+viewer. Unlike a PC's, nothing goes directly between the two devices. Everything above holds, with these differences:
+- **The session's kind is `vnc`** (`POST /api/rc/sessions { "device", "kind": "vnc" }`), only for a `linux` device. A
+  `view` request for one gets `409 { "reason": "vnc" }` (the PCs' viewer then opens the VNC one), and `vnc` for
+  anything else `400`. `rc-request` carries `"kind": "vnc"`.
+- **The computer** is its Beam for Linux: `can.remoteControl` needs 1.2 or later (else `not-allowed`, "needs Beam for
+  Linux 1.2.0 or later"), `remoteControl: true` in its status (turned on only there: `beam control on`, kept in its
+  `~/.beam.json`), and the tie to its machine and account (`X-Beam-Profile`). Its own sign-in counts like the Android
+  app's (made for `linux`, not automatically); it leases as a PC does and may end with a PC's reasons.
+- **The relay:** `GET /api/rc/sessions/{id}/vnc` with `Upgrade: websocket` (RFC 6455; a `binary` subprotocol is echoed),
+  from each party:
+  - the viewer, with the sign-in that started the session (`404` for any other); with a cookie, only from Beam's own
+    pages (the `Origin` must be this Beam's: `403 { "reason": "csrf" }`);
+  - the computer's own Beam for Linux (as for a lease: `403 { "reason": "machine" }` from elsewhere).
+  
+  `401` without a sign-in, `404`/`410` as for the session, `400` for any other path or a request that isn't a WebSocket
+  upgrade. The server pings each side every 30 s; one that doesn't answer is let go. Data frames (binary or text) are a
+  byte stream either way: what one side sends, the other gets, in order, each side waiting for the other when it's
+  behind. Up to 1 MB that one side sends before the other has joined is kept for it; the other side has 30 s to join.
+- **Either side closing its WebSocket ends the session** (`stopped`, by that side), and the session ending closes both
+  (close code 1000 for `stopped`, 4000 otherwise, with the reason as its text). The other side not joining in time ends it
+  `failed` ("the computer didn't join"; "the viewer didn't join").
+- **`rc-end` for a vnc session carries `detail`**: the computer's own words when it ended it with one ("wayvnc isn't
+  installed (sudo apt install wayvnc)"), or the server's.
+- **Beam for Linux's side:** on `rc-request` (kind `vnc`) it checks its switch, starts wayvnc on a socket only its user
+  can open (`$XDG_RUNTIME_DIR/beam/vnc.sock`, the folder 0700; `-u <path>`, or `unix:<path>` for newer wayvnc;
+  `--render-cursor`; the keyboard layout from `/etc/default/keyboard`), leases, opens the relay and joins the two;
+  wayvnc stops a minute after the last session. A notification on the computer says who is controlling it. `rc-disable`
+  turns its switch off there too. It needs a Wayland desktop that's on (Raspberry Pi OS's labwc or Wayfire); otherwise
+  it ends the session `failed` with why.
+- **The viewer** is `index.html#vnc=<device id>` (`public/vnc.js`, with noVNC 1.7 in `public/novnc/`, unchanged,
+  MPL-2.0): scaled to fit or 1:1, mouse, keyboard and touch through noVNC, "Paste there" (this device's clipboard to the
+  computer's) and Copy (what was copied on the computer), full screen, Disconnect. `#remote=<id>` for a Linux computer
+  moves to it.
 
 ### Settings (v3)
 | Method & path | Result |

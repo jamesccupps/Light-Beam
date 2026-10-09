@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -15,6 +15,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const net = require('node:net');
 const { spawn, execFile } = require('node:child_process');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
@@ -70,6 +71,8 @@ Beam for Linux (a Raspberry Pi or another Linux computer, kept connected all day
   beam window [--sign-in]                          Beam in a window of its own (Beam in the menu, with a desktop):
                                                    drop files on it to send them, paste text; --sign-in: sign
                                                    that window in again
+  beam control on|off                              let your other devices see and control this computer's screen
+                                                   (Control on its page in Beam; needs wayvnc and a desktop)
   beam agent                                       what that service runs: listen (same options), plus the status
   beam version                                     Beam for Linux's version
 
@@ -132,20 +135,19 @@ function requireConfig(cfg) {
 
 // ---------------------------------------------------------------- server calls
 
+// Who's asking, on every request (and, Beam for Linux 1.2, the VNC relay's WebSocket).
+const beamHeaders = cfg => ({
+  Authorization: `Bearer ${cfg.key}`,
+  'X-Beam-Device-Id': cfg.deviceId,
+  'X-Beam-Device': encodeURIComponent(cfg.device),
+  'X-Beam-Platform': linuxApp(cfg) ? 'linux' : 'cli',
+  ...(linuxApp(cfg) && { 'X-Beam-App-Version': VERSION, 'X-Beam-Profile': linuxProfile() }),
+});
+
 async function api(cfg, route, options = {}) {
   let res;
   try {
-    res = await fetch(cfg.url + route, {
-      ...options,
-      headers: {
-        Authorization: `Bearer ${cfg.key}`,
-        'X-Beam-Device-Id': cfg.deviceId,
-        'X-Beam-Device': encodeURIComponent(cfg.device),
-        'X-Beam-Platform': linuxApp(cfg) ? 'linux' : 'cli',
-        ...(linuxApp(cfg) && { 'X-Beam-App-Version': VERSION, 'X-Beam-Profile': linuxProfile() }),
-        ...options.headers,
-      },
-    });
+    res = await fetch(cfg.url + route, { ...options, headers: { ...beamHeaders(cfg), ...options.headers } });
   } catch (err) {
     if (err.name === 'AbortError') throw err;
     throw Object.assign(new Error(`Can't reach Beam at ${cfg.url} (${err.cause?.code || err.message})`), { network: true });
@@ -1062,11 +1064,13 @@ function rootStorage() {
   } catch { return null; }
 }
 
-// What PUT /api/devices/me/status gets. A Beam from before 1.22 knows only os and storage (it refuses other fields).
-async function linuxStatus(full) {
+// What PUT /api/devices/me/status gets. A Beam from before 1.22 knows only os and storage (it refuses other fields);
+// (Beam for Linux 1.2) one that takes vnc sessions hears whether remote control is on here.
+async function linuxStatus(full, vnc = false) {
   const status = { os: osName() };
   const storage = rootStorage();
   if (storage) status.storage = storage;
+  if (vnc) status.remoteControl = controlAllowed();
   if (!full) return status;
   const model = hardwareModel();
   if (model) status.model = model;
@@ -1082,6 +1086,7 @@ async function linuxStatus(full) {
 function statusChanged(was, now) {
   if (!was) return true;
   if (was.bootedAt !== now.bootedAt || JSON.stringify(was.throttled) !== JSON.stringify(now.throttled)) return true;
+  if (was.remoteControl !== now.remoteControl) return true; // (Beam for Linux 1.2: beam control on/off)
   const [a, b] = [was.temperature, now.temperature];
   if ((a === undefined) !== (b === undefined)) return true;
   return a !== undefined && (Math.abs(b - a) >= 5 || [70, 80].some(t => (a >= t) !== (b >= t)));
@@ -1224,15 +1229,17 @@ function ensureMenuEntry() {
   }
 }
 
-function findBrowser() {
+// The first of these programs on the PATH (in the order given).
+function findOnPath(names) {
   const dirs = (process.env.PATH || '/usr/local/bin:/usr/bin:/bin').split(path.delimiter).filter(Boolean);
-  for (const name of BROWSERS) {
+  for (const name of [].concat(names)) {
     for (const dir of dirs) {
       try { fs.accessSync(path.join(dir, name), fs.constants.X_OK); return path.join(dir, name); } catch {}
     }
   }
   return null;
 }
+const findBrowser = () => findOnPath(BROWSERS);
 
 // `beam window`: what Beam in the menu runs.
 async function openWindow(cfg, opt) {
@@ -1256,6 +1263,273 @@ async function openWindow(cfg, opt) {
   });
 }
 
+// ---------------------------------------------------------------- remote control (Beam for Linux 1.2)
+// Like the PCs' "Allow remote control": off until someone at this computer turns it on (`beam control on`, kept in
+// ~/.beam.json; another device can only turn it off). A session (kind vnc, asked for from another device's Beam) is
+// this computer's own screen sharing: wayvnc, the VNC server of Raspberry Pi OS's desktop, on a socket only this user
+// can open ($XDG_RUNTIME_DIR/beam/vnc.sock), its bytes relayed by Beam to the viewer's page (noVNC) through a
+// WebSocket of the agent's own. wayvnc stops a minute after the last session. A notification here says who controls it.
+
+const controlAllowed = () => readConfigFile()?.remoteControl === true;
+const RUN_DIR = path.join(process.env.XDG_RUNTIME_DIR || (process.getuid ? `/run/user/${process.getuid()}` : os.tmpdir()), 'beam');
+// (tests: BEAM_TEST_VNC_SOCKET, a named pipe on Windows)
+const VNC_SOCKET = process.env.BEAM_TEST_VNC_SOCKET || path.join(RUN_DIR, 'vnc.sock');
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const controls = new Map(); // session id -> { id, by, link, vnc, lease, started }
+let wayvnc = null; // { child, exited, err, stopTimer }
+let controlNotices = true; // (the agent's --no-notify turns these off too)
+
+// Why this computer's screen can't be shared at all (null: it can).
+function controlUnavailable() {
+  if (!process.env.BEAM_TEST_WAYVNC && !findOnPath('wayvnc')) return 'wayvnc isn\'t installed (sudo apt install wayvnc)';
+  if (!hasDesktop()) return 'this computer has no desktop';
+  return null;
+}
+
+// `beam control [on|off]`
+async function control(cfg, args) {
+  const [want = 'status'] = args;
+  if (!AS_LINUX || !linuxApp(cfg)) throw new Error('beam control is Beam for Linux\'s: it lets your other devices control this computer\'s screen');
+  if (want === 'status') return `Remote control of this computer is ${controlAllowed() ? 'on (beam control off turns it off)' : 'off (beam control on turns it on)'}`;
+  if (want !== 'on' && want !== 'off') throw new Error('Usage: beam control on|off');
+  if (want === 'on') {
+    const why = controlUnavailable();
+    if (why) throw new Error(`not turned on: ${why}`);
+  }
+  saveConfig({ remoteControl: want === 'on' });
+  // (Beam hears it at once; the service says so too, within a minute)
+  await api(cfg, '/api/devices/me/status', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remoteControl: want === 'on' }) }).catch(() => {});
+  return want === 'on'
+    ? 'Remote control of this computer is on: your other devices can see and control its screen (Control, on its page in Beam). beam control off turns it off.'
+    : 'Remote control of this computer is off.';
+}
+
+// The keyboard layout the computer is set to (Raspberry Pi OS: /etc/default/keyboard), for wayvnc's keyboard.
+function keyboardLayout() {
+  const text = readSys('etc/default/keyboard') || '';
+  const layout = /^XKBLAYOUT="?([a-z]{2,8})/m.exec(text)?.[1];
+  const variant = /^XKBVARIANT="?([a-z0-9_]{1,24})/m.exec(text)?.[1];
+  return layout ? (variant ? `${layout}-${variant}` : layout) : null;
+}
+
+// wayvnc on the private socket, started if it isn't on. Throws, in words for the viewer, when it can't be.
+async function startWayvnc() {
+  if (wayvnc && !wayvnc.exited) { clearTimeout(wayvnc.stopTimer); return; }
+  const env = desktopEnv();
+  if (!env) throw new Error('its desktop isn\'t on (nobody is signed in on its screen)');
+  if (!(env.WAYLAND_DISPLAY || process.env.WAYLAND_DISPLAY)) throw new Error('its desktop runs on X11, and Beam\'s remote control needs a Wayland one (Raspberry Pi OS: Raspberry Pi Configuration → Advanced)');
+  // (tests: BEAM_TEST_WAYVNC, a Node.js script standing in for it)
+  const [cmd, ...before] = process.env.BEAM_TEST_WAYVNC ? [process.execPath, process.env.BEAM_TEST_WAYVNC] : [findOnPath('wayvnc')];
+  if (!cmd) throw new Error('wayvnc isn\'t installed (sudo apt install wayvnc)');
+  fs.mkdirSync(RUN_DIR, { recursive: true, mode: 0o700 });
+  fs.chmodSync(RUN_DIR, 0o700);
+  const layout = keyboardLayout();
+  const said = [];
+  // (wayvnc up to 0.9 listens on a socket with -u <path>; later ones take unix:<path>)
+  for (const listen of [['-u', VNC_SOCKET], [`unix:${VNC_SOCKET}`]]) {
+    try { fs.rmSync(VNC_SOCKET, { force: true }); } catch {} // (an old one's socket; wayvnc says so if it's still in the way)
+    const args = [...before, '--render-cursor', `--socket=${path.join(RUN_DIR, 'wayvncctl')}`, ...(layout ? [`--keyboard=${layout}`] : []), ...listen];
+    const state = { child: spawn(cmd, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] }), exited: false, err: '', stopTimer: null };
+    state.child.stderr.on('data', d => { state.err = (state.err + d).slice(-2000); });
+    state.child.on('error', err => { state.exited = true; state.err ||= err.message; });
+    state.child.on('exit', code => {
+      state.exited = true;
+      if (wayvnc !== state) return;
+      wayvnc = null;
+      logLine(`wayvnc stopped${code ? ` (${oneLine(state.err, 200) || `code ${code}`})` : ''}`);
+      for (const id of [...controls.keys()]) stopControl(id); // (its sessions end with it)
+    });
+    // (looked at once each time: on Windows, where tests put it on a named pipe, each look takes up one of its connections)
+    let up = false;
+    for (let i = 0; i < 50 && !state.exited && !(up = fs.existsSync(VNC_SOCKET)); i++) await new Promise(r => setTimeout(r, 100));
+    if (!state.exited && up) {
+      wayvnc = state;
+      logLine(`Started wayvnc for remote control${layout ? ` (keyboard ${layout})` : ''}`);
+      return;
+    }
+    state.child.kill();
+    said.push(oneLine(state.err.replace(/^.*\bat .*$/gm, ''), 200));
+  }
+  // (what the first way said, unless it didn't know -u: then the second's)
+  const why = /unrecognized|invalid option|unknown option/i.test(said[0]) ? said[1] : said[0] || said[1];
+  throw new Error(`wayvnc didn't start${why ? ` (${why})` : ''}`);
+}
+
+// A WebSocket to Beam of our own (no npm packages here): https.request's upgrade, then frames, masked as a client's must
+// be (lib/websocket.js is the server's half).
+function wsFrame(opcode, payload = Buffer.alloc(0)) {
+  const len = payload.length;
+  const extra = len < 126 ? 0 : len < 65536 ? 2 : 8;
+  const head = Buffer.alloc(6 + extra);
+  head[0] = 0x80 | opcode;
+  head[1] = 0x80 | (len < 126 ? len : len < 65536 ? 126 : 127);
+  if (extra === 2) head.writeUInt16BE(len, 2);
+  else if (extra === 8) head.writeBigUInt64BE(BigInt(len), 2);
+  const mask = crypto.randomBytes(4);
+  mask.copy(head, 2 + extra);
+  const body = Buffer.from(payload);
+  for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
+  return Buffer.concat([head, body]);
+}
+
+function wsConnect(cfg, route) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(cfg.url + route);
+    const key = crypto.randomBytes(16).toString('base64');
+    const req = require(url.protocol === 'https:' ? 'node:https' : 'node:http').request(url, {
+      headers: { ...beamHeaders(cfg), Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': key },
+    });
+    const timer = setTimeout(() => req.destroy(new Error('Beam didn\'t answer')), 15_000);
+    req.on('upgrade', (res, socket, head) => {
+      clearTimeout(timer);
+      if (res.headers['sec-websocket-accept'] !== crypto.createHash('sha1').update(key + WS_GUID).digest('base64')) {
+        socket.destroy();
+        return reject(new Error('Beam\'s answer wasn\'t a WebSocket'));
+      }
+      resolve(wsLink(socket, head));
+    });
+    req.on('response', res => {
+      clearTimeout(timer);
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', d => { body += d; });
+      res.on('end', () => reject(Object.assign(new Error(jsonOr(body).error || `HTTP ${res.statusCode}`), { status: res.statusCode })));
+    });
+    req.on('error', err => { clearTimeout(timer); reject(err); });
+    req.end();
+  });
+}
+
+// The open WebSocket: send(bytes), close(), and what comes in through receive(fn) and closed(fn).
+function wsLink(socket, head) {
+  socket.setNoDelay(true);
+  socket.on('error', () => {});
+  let buf = Buffer.alloc(0);
+  let onData = null;
+  let onClose = null;
+  const queued = [];
+  const link = {
+    socket, gone: false,
+    send: payload => socket.write(wsFrame(2, payload)),
+    receive: fn => { onData = fn; for (const p of queued.splice(0)) fn(p); },
+    closed: fn => { onClose = fn; if (link.gone) fn(); },
+    close: (code = 1000) => {
+      if (socket.destroyed || link.closing) return;
+      link.closing = true;
+      const p = Buffer.alloc(2);
+      p.writeUInt16BE(code);
+      try { socket.end(wsFrame(8, p)); } catch {}
+      setTimeout(() => socket.destroy(), 1000).unref();
+    },
+  };
+  const read = chunk => {
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+    while (buf.length >= 2) {
+      const opcode = buf[0] & 0x0f;
+      if (buf[1] & 0x80) return socket.destroy(); // (a server's frames are never masked)
+      let len = buf[1] & 0x7f;
+      let at = 2;
+      if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); at = 4; } else if (len === 127) {
+        if (buf.length < 10) return;
+        len = Number(buf.readBigUInt64BE(2));
+        at = 10;
+      }
+      if (len > 16 << 20) return socket.destroy();
+      if (buf.length < at + len) return;
+      const payload = Buffer.from(buf.subarray(at, at + len));
+      buf = buf.subarray(at + len);
+      if (opcode === 9) socket.write(wsFrame(10, payload));
+      else if (opcode === 8) link.close();
+      else if (opcode <= 2 && payload.length) { if (onData) onData(payload); else queued.push(payload); }
+    }
+  };
+  socket.on('data', read);
+  socket.on('close', () => { link.gone = true; onClose?.(); });
+  if (head?.length) read(head);
+  return link;
+}
+
+// rc-request (kind vnc): wayvnc, the session's lease, the relay and the socket, joined.
+async function startControl(cfg, request) {
+  const { id } = request;
+  if (typeof id !== 'string' || !/^[a-f0-9]{16}$/.test(id) || controls.has(id)) return;
+  const by = oneLine(request.by, 60) || 'Another device';
+  const session = { id, by, link: null, vnc: null, lease: null, started: false };
+  controls.set(id, session);
+  logLine(`${by} asked to control this computer`);
+  try {
+    if (!controlAllowed()) throw Object.assign(new Error('remote control is off here (beam control on)'), { reason: 'declined' });
+    await startWayvnc();
+    await api(cfg, `/api/rc/sessions/${id}/lease`, { method: 'POST' });
+    session.lease = setInterval(() => {
+      api(cfg, `/api/rc/sessions/${id}/lease`, { method: 'POST' }).catch(err => { if (err.status === 404 || err.status === 410) stopControl(id); });
+    }, 30e3);
+    session.lease.unref();
+    if (!controls.has(id)) return;
+    const link = await wsConnect(cfg, `/api/rc/sessions/${id}/vnc`);
+    session.link = link;
+    if (!controls.has(id)) return link.close();
+    const vnc = await new Promise((resolve, reject) => {
+      const s = net.connect(VNC_SOCKET);
+      s.once('connect', () => resolve(s));
+      s.once('error', reject);
+    });
+    session.vnc = vnc;
+    if (!controls.has(id)) return vnc.destroy();
+    vnc.on('error', () => {});
+    // Both ways, each waiting for the other when it's behind.
+    vnc.on('data', d => {
+      if (!link.send(d) && !session.heldVnc) {
+        session.heldVnc = true;
+        vnc.pause();
+        link.socket.once('drain', () => { session.heldVnc = false; vnc.resume(); });
+      }
+    });
+    link.receive(d => {
+      if (!vnc.write(d) && !session.heldLink) {
+        session.heldLink = true;
+        link.socket.pause();
+        vnc.once('drain', () => { session.heldLink = false; link.socket.resume(); });
+      }
+    });
+    vnc.on('close', () => { if (controls.get(id) === session) endControl(cfg, id, 'stopped', 'wayvnc closed the connection'); });
+    link.closed(() => stopControl(id));
+    session.started = true;
+    logLine(`${by} is controlling this computer`);
+    if (controlNotices) desktopNotify(`${by} is controlling this computer`, 'Through Beam. To turn remote control off: beam control off');
+  } catch (err) {
+    logLine(`Didn't share this computer's screen with ${by}: ${err.message}`);
+    endControl(cfg, id, err.reason || 'failed', err.message);
+  }
+}
+
+// This end gives up the session: Beam hears why (the viewer sees its words), then it's let go here.
+function endControl(cfg, id, reason, detail = '') {
+  if (!controls.has(id)) return;
+  stopControl(id);
+  api(cfg, `/api/rc/sessions/${id}/end`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason, ...(detail && { detail: oneLine(detail, 160) }) }) }).catch(() => {});
+}
+
+// The session is over (rc-end, the relay closed, or this end gave up): everything of it here goes.
+function stopControl(id) {
+  const session = controls.get(id);
+  if (!session) return;
+  controls.delete(id);
+  clearInterval(session.lease);
+  session.link?.close();
+  session.vnc?.destroy();
+  if (session.started) {
+    logLine(`${session.by} stopped controlling this computer`);
+    if (controlNotices) desktopNotify(`${session.by} stopped controlling this computer`, 'Beam');
+  }
+  if (!controls.size && wayvnc && !wayvnc.exited) {
+    clearTimeout(wayvnc.stopTimer);
+    const was = wayvnc;
+    was.stopTimer = setTimeout(() => { if (wayvnc === was && !controls.size) { wayvnc = null; was.child.kill(); logLine('Stopped wayvnc (no one is controlling this computer)'); } }, Number(process.env.BEAM_TEST_WAYVNC_IDLE) || 60e3);
+    was.stopTimer.unref();
+  }
+}
+
 async function agent(cfg, opt) {
   if (!AS_LINUX) throw new Error('beam agent is Beam for Linux; on Windows and Android use their Beam apps (or beam listen)');
   if (!linuxApp(cfg)) {
@@ -1263,6 +1537,7 @@ async function agent(cfg, opt) {
     saveConfig({ app: 'linux' });
   }
   logToFile = true;
+  controlNotices = !opt['no-notify'];
   logLine(`Beam for Linux ${VERSION} on ${osName()}${hardwareModel() ? `, ${hardwareModel()}` : ''} (Node.js ${process.versions.node})`);
   ensureMenuEntry();
   // At boot the service can start before the network (or Tailscale) is up: wait for Beam, rather than stopping.
@@ -1277,12 +1552,13 @@ async function agent(cfg, opt) {
     }
   }
   let full = false; // the server knows the 1.22 fields
+  let vnc = false; // (Beam for Linux 1.2) and takes vnc sessions
   let sent = null;
   let reporting = null;
   let quiet = '';
   const report = force => {
     reporting ??= (async () => {
-      const status = await linuxStatus(full);
+      const status = await linuxStatus(full, vnc);
       if (!force && !statusChanged(sent, status)) return;
       await api(cfg, '/api/devices/me/status', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(status) });
       if (!sent) logLine(`Told Beam how this computer is: ${[status.os, status.model, status.temperature !== undefined && `${status.temperature} °C`, status.storage && `${formatSize(status.storage.free)} free`].filter(Boolean).join(', ')}`);
@@ -1299,6 +1575,7 @@ async function agent(cfg, opt) {
   await listen(cfg, { ...opt, agent: true }, {
     onHello: hello => {
       full = Array.isArray(hello.features) && hello.features.includes('linux');
+      vnc = Array.isArray(hello.features) && hello.features.includes('vnc');
       sent = null; // a new connection: tell it all again
       report(true);
       checkForUpdate(cfg);
@@ -1306,13 +1583,22 @@ async function agent(cfg, opt) {
     onEvent: (name, data) => {
       if (name === 'log-request' && typeof data.id === 'string') sendLog(cfg, data.id).catch(err => logLine(`Couldn't send the log: ${err.message}`));
       else if (name === 'app-update' && data.linux) checkForUpdate(cfg);
+      else if (name === 'rc-request' && data.kind === 'vnc') startControl(cfg, data); // (Beam for Linux 1.2)
+      else if (name === 'rc-end' && typeof data.id === 'string') stopControl(data.id);
+      else if (name === 'rc-disable' && controlAllowed()) {
+        // turned off from another device: off here too (only someone at this computer turns it on again)
+        saveConfig({ remoteControl: false });
+        logLine(`${oneLine(data.by, 60) || 'Another device'} turned remote control of this computer off`);
+        for (const id of [...controls.keys()]) stopControl(id);
+        report(true);
+      }
     },
   });
 }
 
 // ---------------------------------------------------------------- main
 
-const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version', 'window']);
+const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version', 'window', 'control']);
 
 async function main() {
   let parsed;
@@ -1384,6 +1670,7 @@ async function main() {
         case 'agent': await agent(cfg, opt); break;
         case 'open': await openWebApp(cfg, opt); break;
         case 'window': await openWindow(cfg, opt); break;
+        case 'control': result = await control(cfg, args); break;
         case 'pair': await pair(cfg); break;
       }
     }

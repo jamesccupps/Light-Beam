@@ -447,6 +447,30 @@ beam listen                            # stay connected: text → clipboard, fil
 Leave out `--to` to send to all devices. When Beam moves, the `beam` command follows it by itself, once the new
 server has proved it holds your key.
 
+## Beam for Linux (a Raspberry Pi first)
+
+A Raspberry Pi, or another Linux computer that stays on, as a device of its own. Put Tailscale on it, signed in to your
+tailnet, then in its terminal (as yourself, not root):
+
+```bash
+curl -fsSL https://beam.your-tailnet.ts.net/install/linux | bash                       # install, or update
+curl -fsSL https://beam.your-tailnet.ts.net/install/linux | bash -s -- --name "Garage Pi"   # with a name
+curl -fsSL https://beam.your-tailnet.ts.net/install/linux | bash -s -- --uninstall         # take it away
+```
+
+It needs no root: Node.js 20 or later from the computer, else its own from nodejs.org (checked against its checksums),
+the app and the `beam` command in your home folder, a systemd user service that starts with the computer. Then:
+- files sent to it land in `~/Downloads/Beam`; text goes to its clipboard, with a notification, when it has a desktop;
+- with a desktop, **Beam is in its menu** (Internet → Beam): Beam in a window of its own, to drop files on and paste text
+  into (`beam window` from a terminal);
+- its page in Beam shows its system, disk, uptime, processor temperature and, on a Pi, its power supply and throttling,
+  with alerts; **Beam log** on that page shows the end of its log;
+- **Control** it from your other devices: run `beam control on` there once (only there; `beam control off` turns it off
+  again). Its page then has **Control**: its screen in a window of Beam's, with its mouse and keyboard, through its
+  desktop's own VNC server (wayvnc; `sudo apt install wayvnc` if it isn't there) relayed by your Beam;
+- it updates itself when a newer build lands in the server's `dist` (`node linux/build.mjs`, signed like the Windows
+  app's updates).
+
 ## iPhone Shortcuts
 
 Until there's an iPhone app, Shortcuts can send to Beam from the share sheet. Replace `BEAM` with
@@ -731,4 +755,5 @@ Where it's going: [ROADMAP.md](ROADMAP.md). How to help, and how the code is lai
 ## Licence
 
 [MIT](LICENSE). The Windows app embeds Microsoft's WebView2 SDK, under its own BSD-style licence
-([windows/lib/webview2/LICENSE.txt](windows/lib/webview2/LICENSE.txt)).
+([windows/lib/webview2/LICENSE.txt](windows/lib/webview2/LICENSE.txt)). The viewer for Linux computers uses noVNC,
+unchanged, under the MPL 2.0 (with pako under MIT): [public/novnc/](public/novnc/README.md).

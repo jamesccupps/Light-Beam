@@ -8,9 +8,9 @@ issue first, so we can agree on the shape before you spend time on it.
 | Path | What |
 |---|---|
 | `server.js`, `lib/` | The Beam server (Node.js 20.12+; its only dependency is `qrcode`). All state lives in `data/` (or `BEAM_DATA`). Also a CLI: `node server.js help` |
-| `public/` | The web app: plain scripts sharing one scope, loaded in order (no build step). Also the Windows app's chat window (WebView2 "host mode", see [docs/HOST-BRIDGE.md](docs/HOST-BRIDGE.md)) |
+| `public/` | The web app: plain scripts sharing one scope, loaded in order (no build step). Also the Windows app's chat window (WebView2 "host mode", see [docs/HOST-BRIDGE.md](docs/HOST-BRIDGE.md)). The viewer for Linux computers (`vnc.js`) is an ES module using noVNC, vendored unchanged in `public/novnc/` (MPL-2.0) |
 | `family/` | Beam Family: its own server (`family/server.js`, Node 22.13+ for `node:sqlite`), modules in `family/lib/`, and its web app in `family/public/` (ES modules, no build step) |
-| `cli/beam.js` | The `beam` command-line tool |
+| `cli/beam.js` | The `beam` command-line tool; also **Beam for Linux** (`beam agent`, installed by `linux/install.sh`, built by `linux/build.mjs`) |
 | `windows/` | The Windows tray app (C# 5 / .NET Framework 4.8, built by `windows\build.cmd` with the compiler built into Windows; WebView2 SDK vendored in `windows/lib/webview2/`) |
 | `android/` | The Android app (Kotlin, Views, OkHttp) |
 | `test/` | Server, Beam Family and web tests; speed budgets and Windows checks in `test/perf/` |
