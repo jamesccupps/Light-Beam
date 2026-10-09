@@ -125,7 +125,7 @@ function bindUI() {
   window.addEventListener('online', () => { if (paired) reconnectNow(); else if (!$('#lock').hidden) startLoginLoop(); });
   window.addEventListener('offline', () => net.fail());
   window.addEventListener('pageshow', () => { leaving = false; });
-  window.addEventListener('hashchange', () => { if (/^#remote=/.test(location.hash)) location.reload(); }); // (the viewer: remote.js)
+  window.addEventListener('hashchange', () => { if (/^#(remote|vnc)=/.test(location.hash)) location.reload(); }); // (the viewers: remote.js, vnc.js)
   window.addEventListener('pagehide', () => {
     leaving = true;
     if (pendingLogin) withdrawLogin(true);
@@ -239,6 +239,21 @@ function offerNotifications() {
 
 // index.html#remote=<PC id>: this page is the remote control viewer (remote.js).
 const RC_ID = (/^#remote=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
+// (1.23) index.html#vnc=<device id>: the viewer for a Linux computer's screen (vnc.js, a module that brings noVNC).
+const VNC_ID = (/^#vnc=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
+
+function loadVnc() {
+  document.documentElement.classList.add('remote-mode');
+  const script = document.createElement('script');
+  script.type = 'module';
+  script.src = $('#vncScript')?.content.querySelector('script')?.getAttribute('src') || 'vnc.js';
+  script.onerror = () => document.body.append(el('div', { id: 'remote', class: 'rc', 'data-state': 'ended' },
+    el('div', { class: 'rc-body' }, el('div', { class: 'rc-overlay' }, el('div', { class: 'rc-card', role: 'alert' },
+      el('strong', {}, 'The remote screen didn’t open'),
+      el('p', {}, 'Beam couldn’t load it. Check the connection, then try again.'),
+      el('button', { class: 'btn primary', type: 'button', onclick: () => location.reload() }, 'Try again'))))));
+  document.head.append(script);
+}
 
 // The viewer's script, only on its own page (1.12.2: the chat app never needs its ~130 KB, a quarter of what it
 // loaded). index.html names it inside a <template> (inert: nothing loads), so the server gives it its version.
@@ -258,6 +273,7 @@ function loadViewer() {
 async function init() {
   // index.html#remote=<PC id>: the remote control viewer, and nothing of the chat app (remote.js).
   if (RC_ID) return loadViewer();
+  if (VNC_ID) return loadVnc(); // (1.23: a Linux computer's screen)
   document.documentElement.classList.toggle('host', Boolean(HOST));
   const params = new URLSearchParams(location.search);
   const handoff = takeHandoff();

@@ -29,6 +29,7 @@ const pcHistory = require('./lib/history');
 const winevents = require('./lib/winevents');
 const winsetup = require('./lib/winsetup');
 const appsLib = require('./lib/apps');
+const ws = require('./lib/websocket');
 const { version: VERSION } = require('./package.json');
 
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch {}
@@ -3678,8 +3679,11 @@ const RC_MIN_VERSION = '1.6.0';
 // (1.16) A session's kind: `view` (the screen, with the mouse and keyboard on it) or `kvm` (another PC's own keyboard
 // and mouse, no picture: the viewer's pointer crosses over the edge of its own screen). A kvm session never takes the
 // place of someone viewing the PC (busy); someone viewing it ends a kvm session (busy), whose app asks again later.
-const RC_KINDS = new Set(['view', 'kvm']);
+// (1.23) `vnc`: a Linux computer's own screen sharing (its VNC server, run by its Beam for Linux), relayed by this server
+// (see "control of a Linux computer").
+const RC_KINDS = new Set(['view', 'kvm', 'vnc']);
 const RC_KVM_MIN_VERSION = '1.12.0'; // the Beam app for Windows that takes a kvm session
+const RC_LINUX_MIN_VERSION = '1.2.0'; // (1.23) the Beam for Linux that takes a vnc session
 // The PC leases every 30 s; a session whose lease is this late ends.
 const RC_LEASE_MS = FAST_TIMEOUTS && env.BEAM_TEST_RC_LEASE_MS ? Number(env.BEAM_TEST_RC_LEASE_MS) : 90_000;
 const RC_SDP_MAX = 64 * 1024;
@@ -3698,10 +3702,10 @@ const rcStarts = new Limiter(10, 60_000); // per asking device
 const rcDisables = new Limiter(10, 60_000);
 const rcStats = { started: 0, refused: 0, ended: {} };
 
-// What the PC allows: the Beam app for Windows 1.6+ with "Allow remote control" on, tied to its machine, and not
-// turned off from another device since (a disable that hasn't reached it yet).
-const rcAllowed = d => d.platform === 'windows' && versionAtLeast(d.appVersion, RC_MIN_VERSION) && d.status?.remoteControl === true
-  && !d.rcDisable && Boolean(d.rcMachine);
+// What the PC allows: the Beam app for Windows 1.6+ (or, 1.23, Beam for Linux 1.2+) with "Allow remote control" on, tied
+// to its machine, and not turned off from another device since (a disable that hasn't reached it yet).
+const rcAllowed = d => (d.platform === 'windows' ? versionAtLeast(d.appVersion, RC_MIN_VERSION) : d.platform === 'linux' && versionAtLeast(d.appVersion, RC_LINUX_MIN_VERSION))
+  && d.status?.remoteControl === true && !d.rcDisable && Boolean(d.rcMachine);
 
 // Every /api/rc route: a device signed in for good (a session-only sign-in on a borrowed computer can't).
 function rcCaller(req, url) {
@@ -3722,8 +3726,8 @@ function rcCaller(req, url) {
 // the user has: the password, a pairing link or code, a sign-in approved on another device, or the master key. Never
 // a browser signed in by Tailscale identity or because a Beam app runs on the same machine (any Windows account on
 // that machine gets those), nor the CLI. And a Beam app's own requests (bearer) say which Windows account they come
-// from (X-Beam-Profile).
-const RC_APP_PLATFORMS = new Set(['windows', 'android']);
+// from (X-Beam-Profile). (1.23) Beam for Linux's sign-in counts like the Android app's.
+const RC_APP_PLATFORMS = new Set(['windows', 'android', 'linux']);
 const RC_EXPLICIT = new Set(['password', 'pairing', 'login-request', 'key', 'migration']);
 
 function rcSignInOk(auth) {
@@ -3742,8 +3746,10 @@ function rcIneligible(req, url) {
   return null;
 }
 
-// The PC is its Beam app for Windows: the master key, or a sign-in made for Windows.
-const rcPcSignIn = auth => auth?.via === 'master' || (auth?.via === 'token' && tokenPlatform(auth.token) === 'windows' && keyBound(auth.token));
+// The PC is its Beam app for Windows: the master key, or a sign-in made for Windows. (1.23) A Linux computer is its Beam
+// for Linux: a sign-in made for it (not an automatic one, as for Android).
+const rcPcSignIn = auth => auth?.via === 'master' || (auth?.via === 'token' && ((tokenPlatform(auth.token) === 'windows' && keyBound(auth.token))
+  || (tokenPlatform(auth.token) === 'linux' && tokenOrigin(auth.token) !== 'autopair')));
 
 const RC_INELIGIBLE = {
   'sign-in': 'To control PCs from here, sign in to Beam on this device with a pairing link, an approval from another device or the password',
@@ -3895,9 +3901,12 @@ function endRcSession(session, reason, by = null, detail = '') {
     rcEnded.delete(id);
   }
   rcStats.ended[reason] = (rcStats.ended[reason] || 0) + 1;
-  const data = { id: session.id, reason, from: by, by: by ? nameOf(by) : null };
+  // (1.23) A Linux computer's own words on why it stopped ("wayvnc isn't installed") go to the viewer too: it has no
+  // other way to say.
+  const data = { id: session.id, reason, from: by, by: by ? nameOf(by) : null, ...(session.kind === 'vnc' && detail && { detail }) };
   sendToPc(session.host, 'rc-end', data);
   sendToViewer(session, 'rc-end', data);
+  if (session.relay) vncShut(session, reason);
   const how = (by ? `${reason}, by ${whoName(by)}` : reason) + (detail ? `: ${detail}` : '');
   if (session.kind === 'kvm') {
     log.info(session.state === 'live'
@@ -3999,7 +4008,12 @@ function rcRefused(me, pc, reason, message, status = 409) {
 }
 
 function rcNotAllowed(pc) {
-  if (pc.platform !== 'windows') return `${pc.name} can't be controlled (only PCs with the Beam app for Windows can)`;
+  if (pc.platform === 'linux') { // (1.23)
+    if (!versionAtLeast(pc.appVersion, RC_LINUX_MIN_VERSION)) return `${pc.name} needs Beam for Linux ${RC_LINUX_MIN_VERSION} or later to be controlled`;
+    if (pc.status?.remoteControl === true && !pc.rcDisable && !pc.rcMachine) return `${pc.name}'s remote control isn't tied to its Beam for Linux on a Tailscale machine yet`;
+    return `Remote control is off on ${pc.name} (turn it on there: beam control on)`;
+  }
+  if (pc.platform !== 'windows') return `${pc.name} can't be controlled (only PCs with the Beam app for Windows and computers with Beam for Linux can)`;
   if (!versionAtLeast(pc.appVersion, RC_MIN_VERSION)) return `${pc.name} needs the Beam app ${RC_MIN_VERSION} or later to be controlled`;
   if (pc.status?.remoteControl === true && !pc.rcDisable && !pc.rcMachine) return `${pc.name}'s remote control isn't tied to its Beam app on a Tailscale machine yet`;
   return `Remote control is off on ${pc.name} ("Allow remote control" is turned on at that PC)`;
@@ -4017,8 +4031,8 @@ async function startRemoteControl(req, res, _m, url) {
   rcStarts.hit(me);
   const body = await readJson(req);
   if (typeof body.device !== 'string' || !body.device) throw httpError(400, 'Expected {"device": "<the PC\'s device id>"}');
-  if (body.kind !== undefined && !RC_KINDS.has(body.kind)) throw httpError(400, 'kind must be view or kvm');
-  const kind = body.kind === 'kvm' ? 'kvm' : 'view';
+  if (body.kind !== undefined && !RC_KINDS.has(body.kind)) throw httpError(400, 'kind must be view, kvm or vnc');
+  const kind = RC_KINDS.has(body.kind) ? body.kind : 'view';
   const pc = devices[resolveAlias(body.device)];
   if (!pc) throw httpError(404, 'No such device');
   const viewer = devices[me];
@@ -4026,6 +4040,10 @@ async function startRemoteControl(req, res, _m, url) {
   const key = KEY;
   const check = () => {
     if (pc.id === me) throw rcRefused(me, pc, 'self', "A device can't control itself");
+    // (1.23) A Linux computer shares its screen through VNC: the PCs' viewer (the Windows app's viewer window always
+    // opens it) moves over to the VNC one when it hears this.
+    if (pc.platform === 'linux' && kind !== 'vnc') throw httpError(409, `${pc.name} shares its screen through VNC`, { reason: 'vnc' });
+    if (kind === 'vnc' && pc.platform !== 'linux') throw httpError(400, 'kind vnc is for computers with Beam for Linux');
     if (!rcAllowed(pc)) throw rcRefused(me, pc, 'not-allowed', rcNotAllowed(pc));
     if (kind === 'kvm' && !versionAtLeast(pc.appVersion, RC_KVM_MIN_VERSION)) {
       throw rcRefused(me, pc, 'old-app', `${pc.name} needs the Beam app ${RC_KVM_MIN_VERSION} or later to take another device's keyboard and mouse`);
@@ -4068,7 +4086,7 @@ async function startRemoteControl(req, res, _m, url) {
   session.request = {
     id, from: me, by: nameOf(me), at: session.since,
     viewer: { ip: tailscale.isTailscaleIp(ip) ? ip : you.ip4 || you.ip6, ip4: you.ip4, ip6: you.ip6, node: you.node, user: you.user, platform: viewer.platform || null },
-    ...(kind === 'kvm' && { kind }),
+    ...(kind !== 'view' && { kind }),
   };
   rcSessions.set(id, session);
   armRcLease(session);
@@ -4203,6 +4221,171 @@ async function disableRemoteControl(req, res, _m, url) {
   sendTo(new Set([pc.id]), 'rc-disable', { from: me, by: nameOf(me) });
   log.info(`${whoName(me)} turned off remote control on ${pc.name}`);
   send(res, 202, {});
+}
+
+// ---------------------------------------------------------------- control of a Linux computer (1.23)
+// A session of kind vnc: the computer's own VNC server (wayvnc, which its Beam for Linux runs on a private socket)
+// relayed here between the viewer's page (noVNC) and that computer's Beam for Linux. Both open a WebSocket to
+// GET /api/rc/sessions/{id}/vnc: the viewer with the sign-in that started the session (its page's cookie, from Beam's
+// own pages only), the computer as itself (rcFromPc, as for leases). Bytes only, nothing kept or logged. Either side
+// leaving ends the session, and the session ending closes both.
+
+const VNC_WAIT_MS = FAST_TIMEOUTS ? 4000 : 30_000; // for the other side to join
+const VNC_PING_MS = FAST_TIMEOUTS ? 1000 : 30_000; // each side is pinged; no pong in time: gone
+const VNC_PENDING_MAX = 1 << 20; // what one side may send before the other is there
+const VNC_FRAME_MAX = 4 << 20;
+const vncStats = { relayed: 0 };
+
+function onUpgrade(req, socket, head) {
+  socket.on('error', () => {});
+  vncUpgrade(req, socket, head).catch(err => {
+    if (!err.status) log.error('VNC relay:', err);
+    refuseUpgrade(socket, err.status || 500, err.status ? err.message : 'Server error', err.extra);
+  });
+}
+
+function refuseUpgrade(socket, status, message, extra = {}) {
+  if (socket.destroyed) return;
+  const body = JSON.stringify({ error: message, ...extra });
+  socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status] || 'Error'}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+}
+
+async function vncUpgrade(req, socket, head) {
+  const url = new URL(req.url, 'http://beam');
+  const m = /^\/api\/rc\/sessions\/([a-f0-9]{16})\/vnc$/.exec(url.pathname);
+  if (!m || req.method !== 'GET' || String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || !req.headers['sec-websocket-key']) {
+    throw httpError(400, 'Only a VNC relay (GET /api/rc/sessions/{id}/vnc) takes a WebSocket');
+  }
+  if (setting('movedTo')) throw httpError(410, 'Beam moved', { movedTo: setting('movedTo') });
+  const ip = clientIp(req);
+  const host = machineOf(req) === 'host' && !viaTrustedProxy(req);
+  if (!host && badSecrets.blocked(ip)) throw httpError(429, 'Too many failed sign-ins from this address. Try again in a few minutes.');
+  const auth = authOf(req);
+  if (!auth) {
+    if (req._authPresented && !host) badSecrets.hit(ip);
+    throw httpError(401, 'Not signed in', { serverId: SERVER_ID });
+  }
+  // (a page of another machine of the tailnet is the same site, and WebSockets aren't held to the same origin)
+  if (auth.source === 'cookie' && !originMatches(req)) throw httpError(403, 'Blocked a cross-site request', { reason: 'csrf' });
+  if (auth.scope) throw httpError(403, 'This sign-in can only be used to move Beam');
+  touchToken(auth);
+  const me = deviceIdOf(req, url);
+  const session = rcSessionOf(m[1], me);
+  if (session.kind !== 'vnc') throw httpError(404, 'No such VNC session');
+  let side;
+  if (me === session.host) {
+    if (!(await rcFromPc(devices[session.host], req, url))) throw rcNotFromPc(devices[session.host], req);
+    side = 'host';
+  } else if (rcCredKey(auth, machineOf(req), profileOf(req, url)) === session.viewerKey) {
+    side = 'viewer';
+  } else {
+    throw httpError(404, 'No such remote control session'); // the device, but not the sign-in that started it
+  }
+  rcStillOn(session);
+  if (socket.destroyed) return;
+  // noVNC asks for the "binary" subprotocol (a browser that asked for one fails a handshake that names none); nothing
+  // else is spoken here, so nothing else is named
+  const asked = String(req.headers['sec-websocket-protocol'] || '').split(',').map(s => s.trim());
+  const protocol = asked.includes('binary') ? 'binary' : null;
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${ws.acceptKey(req.headers['sec-websocket-key'])}\r\n${protocol ? `Sec-WebSocket-Protocol: ${protocol}\r\n` : ''}\r\n`);
+  vncJoin(session, side, socket, head);
+}
+
+function vncJoin(session, side, socket, head) {
+  socket.setTimeout(0);
+  socket.setNoDelay(true);
+  const relay = (session.relay ||= { viewer: null, host: null, waiting: null, ping: null });
+  const other = side === 'host' ? 'viewer' : 'host';
+  const old = relay[side];
+  const end = { side, socket, reader: new ws.FrameReader({ masked: true, max: VNC_FRAME_MAX }), alive: true, pending: [], pendingBytes: 0 };
+  relay[side] = end;
+  if (old) { old.replaced = true; vncCloseEnd(old, 4001, 'replaced'); } // (the same party again: the newest wins)
+  const forward = payload => {
+    const to = relay[other];
+    if (!to) {
+      end.pendingBytes += payload.length;
+      if (end.pendingBytes > VNC_PENDING_MAX) return endRcSession(session, 'failed', null, `the ${other === 'host' ? 'computer' : 'viewer'} didn't join`);
+      return end.pending.push(payload);
+    }
+    vncStats.relayed += payload.length;
+    if (!to.socket.write(ws.frame(ws.OP.binary, payload)) && !end.held) {
+      end.held = true; // (the other side's connection is behind: this side waits for it)
+      socket.pause();
+      to.socket.once('drain', () => { end.held = false; socket.resume(); });
+    }
+  };
+  const onData = chunk => {
+    let frames;
+    try { frames = end.reader.push(chunk); } catch (err) {
+      vncCloseEnd(end, 1002, 'protocol error');
+      return endRcSession(session, 'failed', null, `the ${side === 'host' ? 'computer' : 'viewer'}'s connection broke the protocol (${err.message})`);
+    }
+    for (const f of frames) {
+      if (rcSessions.get(session.id) !== session) return;
+      if (f.opcode === ws.OP.ping) socket.write(ws.frame(ws.OP.pong, f.payload));
+      else if (f.opcode === ws.OP.pong) end.alive = true;
+      else if (f.opcode === ws.OP.close) {
+        vncCloseEnd(end, 1000, '');
+        return endRcSession(session, 'stopped', side === 'host' ? session.host : session.viewer);
+      } else if (f.payload.length) forward(f.payload);
+    }
+  };
+  socket.on('data', onData);
+  socket.on('close', () => {
+    if (relay[side] !== end || end.replaced) return;
+    relay[side] = null;
+    endRcSession(session, 'stopped', side === 'host' ? session.host : session.viewer);
+  });
+  if (head?.length) onData(head);
+  // The other side's bytes that came first
+  const there = relay[other];
+  if (there?.pending.length) {
+    const queued = there.pending;
+    there.pending = [];
+    there.pendingBytes = 0;
+    for (const p of queued) socket.write(ws.frame(ws.OP.binary, p));
+  }
+  if (relay.viewer && relay.host) {
+    clearTimeout(relay.waiting);
+    relay.waiting = null;
+    rcLive(session);
+  } else {
+    clearTimeout(relay.waiting);
+    relay.waiting = setTimeout(() => endRcSession(session, 'failed', null, `the ${other === 'host' ? 'computer' : 'viewer'} didn't join`), VNC_WAIT_MS);
+    relay.waiting.unref();
+  }
+  relay.ping ||= setInterval(() => {
+    for (const e of [relay.viewer, relay.host]) {
+      if (!e) continue;
+      if (!e.alive) {
+        vncCloseEnd(e, 1001, 'no answer');
+        endRcSession(session, 'failed', null, `the ${e.side === 'host' ? 'computer' : 'viewer'} stopped answering`);
+        return;
+      }
+      e.alive = false;
+      e.socket.write(ws.frame(ws.OP.ping));
+    }
+  }, VNC_PING_MS);
+  relay.ping.unref();
+}
+
+function vncCloseEnd(end, code, reason) {
+  if (end.closing || end.socket.destroyed) return;
+  end.closing = true;
+  try { end.socket.end(ws.closeFrame(code, reason)); } catch {}
+  setTimeout(() => end.socket.destroy(), 1000).unref();
+}
+
+// The session is over: both sides hear why (a close frame) and are let go.
+function vncShut(session, reason) {
+  const relay = session.relay;
+  clearTimeout(relay.waiting);
+  clearInterval(relay.ping);
+  for (const side of ['viewer', 'host']) {
+    const end = relay[side];
+    relay[side] = null;
+    if (end) vncCloseEnd(end, reason === 'stopped' ? 1000 : 4000, reason);
+  }
 }
 
 // ---------------------------------------------------------------- live updates
@@ -6057,6 +6240,7 @@ const FEATURES = [
   'device-logs', // (1.20.0: POST /api/devices/{id}/log, the `log-request` event, POST /api/devices/me/log)
   'apps', // (1.21.0: /api/apps (GitHub, files, winget), `app-install`/`app-uninstall`, /api/devices/me/apps, `can.apps`)
   'linux', // (1.22.0: Beam for Linux: /install/linux, updates `linux`, status model/bootedAt/temperature/throttled, `hardware` alerts)
+  'vnc', // (1.23.0: remote control of a Linux computer: rc sessions of kind vnc, relayed at GET /api/rc/sessions/{id}/vnc)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
@@ -7786,6 +7970,7 @@ function serve() {
       send(res, err.status || 500, { error: err.status ? err.message : 'Server error', ...err.extra }, { ...(err.status === 413 && { Connection: 'close' }), ...err.headers });
     });
   });
+  server.on('upgrade', onUpgrade); // (1.23) only the VNC relay takes a WebSocket
   server.requestTimeout = 0; // per-request limits are applied above (uploads can take hours on slow links)
   // Idle connections stay open 100 s (Node's default is 5 s): a client that asks again soon skips a new connection
   // (and its round trip), and tailscaled's proxy, which drops idle connections after 90 s, always closes first;

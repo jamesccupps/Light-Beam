@@ -16,7 +16,7 @@ const shared = {
 };
 
 export default [
-  { ignores: ['**/node_modules/**', 'android/**', 'windows/bin/**', 'windows/obj/**', 'windows/lib/**', 'dist/**', 'data/**', '**/build/**'] },
+  { ignores: ['**/node_modules/**', 'android/**', 'windows/bin/**', 'windows/obj/**', 'windows/lib/**', 'dist/**', 'data/**', '**/build/**', 'public/novnc/**'] },
   js.configs.recommended,
   {
     // Node, CommonJS: both servers and their modules, the CLI, the server tests
@@ -46,6 +46,13 @@ export default [
     // Beam Family's web app: ES modules
     files: ['family/public/**/*.js'],
     languageOptions: { sourceType: 'module', globals: { ...globals.browser } },
+  },
+  {
+    // (1.23) the Linux computers' viewer: an ES module (it imports noVNC, public/novnc, which lint leaves alone) that uses
+    // the web app's shared scope like the plain scripts do
+    files: ['public/vnc.js'],
+    languageOptions: { sourceType: 'module', globals: { ...globals.browser } },
+    rules: { 'no-undef': 'off', 'no-unused-vars': 'off' },
   },
   {
     // the service workers

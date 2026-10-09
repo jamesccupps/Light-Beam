@@ -3276,6 +3276,250 @@ test('Beam for Linux 1.1: Beam in the menu (once, kept up to date, not again onc
   }
 });
 
+// ---------------------------------------------------------------- 1.23 control of a Linux computer
+// Sessions of kind vnc: the computer's own VNC server (wayvnc) relayed by the server between two WebSockets, the
+// viewer's and the computer's Beam for Linux's (rcSetup's fake tailnet; the relay's frames from lib/websocket.js).
+
+const wsLib = require(path.join(ROOT, 'lib', 'websocket.js'));
+
+// A WebSocket of the test's own (a client's masked frames), answering pings: what comes in collects in `data`.
+function wsOpen(port, route, headers = {}) {
+  return new Promise(resolve => {
+    const key = crypto.randomBytes(16).toString('base64');
+    const req = http.request({ host: '127.0.0.1', port, path: route, headers: { ...headers, Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': key } });
+    req.on('response', res => {
+      let body = '';
+      res.on('data', d => { body += d; });
+      res.on('end', () => { let json = {}; try { json = JSON.parse(body); } catch {} resolve({ status: res.statusCode, body, json }); });
+    });
+    req.on('upgrade', (res, socket, head) => {
+      const reader = new wsLib.FrameReader({ masked: false, max: 64 << 20 });
+      const mask = () => crypto.randomBytes(4);
+      const c = {
+        status: 101, accept: res.headers['sec-websocket-accept'] === wsLib.acceptKey(key), protocol: res.headers['sec-websocket-protocol'],
+        socket, data: Buffer.alloc(0), closed: null, ended: false,
+        send: buf => socket.write(wsLib.frame(wsLib.OP.binary, Buffer.from(buf), mask())),
+        close: (code = 1000) => socket.write(wsLib.closeFrame(code, '', mask())),
+      };
+      const onData = chunk => {
+        for (const f of reader.push(chunk)) {
+          if (f.opcode === wsLib.OP.ping) socket.write(wsLib.frame(wsLib.OP.pong, f.payload, mask()));
+          else if (f.opcode === wsLib.OP.close) c.closed = { code: f.payload.length >= 2 ? f.payload.readUInt16BE(0) : 1005, reason: f.payload.subarray(2).toString() };
+          else if (f.opcode <= 2) c.data = Buffer.concat([c.data, f.payload]);
+        }
+      };
+      socket.on('data', onData);
+      socket.on('error', () => {});
+      socket.on('close', () => { c.ended = true; });
+      if (head.length) onData(head);
+      resolve(c);
+    });
+    req.on('error', err => resolve({ status: 0, error: err.message }));
+    req.end();
+  });
+}
+
+test('1.23 Control for a Linux computer: a vnc session relayed between the viewer and the computer’s Beam for Linux; who may join; either side ending; the computer’s own words reach the viewer', async () => {
+  const t = await rcSetup('vnc123');
+  try {
+    const { s, laptop, pc, phone, status, rc } = t;
+    const pi = app(t.K, 'rcpi0000123', 'Desk Pi', 'linux', { ...from('100.64.91.30'), 'X-Beam-App-Version': '1.2.0', 'X-Beam-Profile': 'e5e5e5e5e5e5e5e5' });
+    const oldPi = app(t.K, 'rcpiold0123', 'Old Pi', 'linux', { ...from('100.64.91.31'), 'X-Beam-App-Version': '1.1.0', 'X-Beam-Profile': 'f7f7f7f7f7f7f7f7' });
+    for (const h of [pi, oldPi]) await s.req('GET', '/api/me', { headers: h });
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('vnc'));
+    assert.equal((await status(pi, { remoteControl: true })).status, 204);
+    await status(oldPi, { remoteControl: true });
+    await status(pc, { remoteControl: true, locked: false });
+    const dev = async id => (await s.req('GET', '/api/devices', { headers: laptop })).json.devices.find(d => d.id === id);
+    assert.equal((await dev('rcpi0000123')).can.remoteControl, true, 'Beam for Linux 1.2 with remote control on');
+    assert.equal((await dev('rcpiold0123')).can.remoteControl, false, 'not before Beam for Linux 1.2');
+    const start = (h, device, kind) => rc('POST', 'sessions', h, { device, ...(kind && { kind }) });
+    let r = await start(laptop, 'rcpi0000123');
+    assert.deepEqual([r.status, r.json.reason], [409, 'vnc'], 'the PCs’ viewer hears to move over');
+    assert.equal((await start(laptop, 'rcdesk00001', 'vnc')).status, 400, 'vnc is for Linux computers');
+    r = await start(laptop, 'rcpiold0123', 'vnc');
+    assert.deepEqual([r.status, r.json.reason], [409, 'not-allowed']);
+    assert.match(r.json.error, /needs Beam for Linux 1\.2\.0 or later/);
+
+    // A session: the computer hears it (kind vnc) on its own stream.
+    const piEv = await openEvents(s.port, pi, '/api/events?mode=background');
+    const lapEv = await openEvents(s.port, laptop, '/api/events?mode=background');
+    for (const e of [piEv, lapEv]) await e.wait('hello');
+    r = await start(laptop, 'rcpi0000123', 'vnc');
+    assert.equal(r.status, 201, r.body);
+    const id = r.json.id;
+    assert.equal((await piEv.wait('rc-request', d => d.id === id, 1000)).data.kind, 'vnc');
+    // The relay: a sign-in, one of the two parties, Beam's own pages for a cookie, a WebSocket to that path only.
+    const route = `/api/rc/sessions/${id}/vnc`;
+    assert.equal((await wsOpen(s.port, route, from('100.64.91.2'))).status, 401);
+    assert.equal((await wsOpen(s.port, route, phone)).status, 404, 'not a party');
+    assert.equal((await wsOpen(s.port, route, { ...cookie(t.K), Origin: 'https://evil.example' })).status, 403, 'a cookie from another site');
+    assert.equal((await wsOpen(s.port, `/api/rc/sessions/${id}/other`, laptop)).status, 400);
+    assert.equal((await s.req('GET', route, { headers: laptop })).status, 404, 'a plain GET isn’t one');
+    // The viewer first (noVNC asks for "binary"), then the computer: each gets what the other sends, in order.
+    const viewer = await wsOpen(s.port, route, { ...laptop, 'Sec-WebSocket-Protocol': 'binary' });
+    assert.deepEqual([viewer.status, viewer.accept, viewer.protocol], [101, true, 'binary']);
+    assert.equal((await rc('POST', `sessions/${id}/lease`, pi)).status, 200);
+    const host = await wsOpen(s.port, route, pi);
+    assert.equal(host.status, 101);
+    host.send('RFB 003.008\n');
+    await waitFor(() => viewer.data.toString() === 'RFB 003.008\n', 3000);
+    viewer.send('RFB 003.008\n');
+    await waitFor(() => host.data.toString() === 'RFB 003.008\n', 3000);
+    const screenful = crypto.randomBytes(300_000);
+    for (let i = 0; i < screenful.length; i += 65536) host.send(screenful.subarray(i, i + 65536));
+    await waitFor(() => viewer.data.length === 12 + screenful.length, 5000);
+    assert.ok(viewer.data.subarray(12).equals(screenful), 'a screenful, whole and in order');
+    assert.equal((await rc('GET', 'sessions', laptop)).json.sessions.find(x => x.id === id).state, 'live');
+    await sleep(2500); // (the server pings both every second here; they answer)
+    assert.ok(!viewer.ended && !host.ended, 'still on after the pings');
+    // The viewer leaves: the session ends (stopped, by it) and the computer's side is closed.
+    viewer.close();
+    assert.deepEqual((await piEv.wait('rc-end', d => d.id === id, 2000)).data, { id, reason: 'stopped', from: 'rclaptop001', by: 'Robin Laptop' });
+    await waitFor(() => host.ended, 3000);
+    assert.equal(host.closed?.code, 1000);
+
+    // The computer can't share its screen: why, in its words, reaches the viewer.
+    r = await start(laptop, 'rcpi0000123', 'vnc');
+    const id2 = r.json.id;
+    await piEv.wait('rc-request', d => d.id === id2, 1000);
+    const viewer2 = await wsOpen(s.port, `/api/rc/sessions/${id2}/vnc`, laptop);
+    assert.equal((await rc('POST', `sessions/${id2}/end`, pi, { reason: 'failed', detail: 'wayvnc isn\'t installed (sudo apt install wayvnc)' })).status, 204);
+    const end2 = (await lapEv.wait('rc-end', d => d.id === id2, 2000)).data;
+    assert.deepEqual([end2.reason, end2.detail], ['failed', 'wayvnc isn\'t installed (sudo apt install wayvnc)']);
+    await waitFor(() => viewer2.ended, 3000);
+    assert.equal(viewer2.closed?.code, 4000);
+
+    // The computer never joins: over after the wait (4 s here).
+    r = await start(laptop, 'rcpi0000123', 'vnc');
+    const id3 = r.json.id;
+    const viewer3 = await wsOpen(s.port, `/api/rc/sessions/${id3}/vnc`, laptop);
+    const end3 = (await lapEv.wait('rc-end', d => d.id === id3, 8000)).data;
+    assert.deepEqual([end3.reason, end3.detail], ['failed', 'the computer didn\'t join']);
+    await waitFor(() => viewer3.ended, 3000);
+
+    // Remote control turned off at the computer: its session ends (revoked), both sides closed.
+    r = await start(laptop, 'rcpi0000123', 'vnc');
+    const id4 = r.json.id;
+    const viewer4 = await wsOpen(s.port, `/api/rc/sessions/${id4}/vnc`, laptop);
+    await rc('POST', `sessions/${id4}/lease`, pi);
+    const host4 = await wsOpen(s.port, `/api/rc/sessions/${id4}/vnc`, pi);
+    assert.equal(host4.status, 101);
+    await status(pi, { remoteControl: false });
+    assert.equal((await lapEv.wait('rc-end', d => d.id === id4, 2000)).data.reason, 'revoked');
+    await waitFor(() => viewer4.ended && host4.ended, 3000);
+    assert.equal((await dev('rcpi0000123')).can.remoteControl, false);
+
+    assert.match(s.out, /Desk Pi's remote control is tied to its Beam app on/);
+    assert.match(s.out, /Robin Laptop asked to control Desk Pi/);
+    assert.match(s.out, /Robin Laptop stopped controlling Desk Pi after \d+ s \(stopped, by Robin Laptop\)/);
+    assert.match(s.out, /request to control Desk Pi ended \(failed, by Desk Pi: wayvnc isn't installed/);
+    for (const e of [piEv, lapEv]) e.close();
+  } finally { await t.stop(); }
+});
+
+// The agent end to end: `beam control on`, then a session through the real agent, with a Node.js script standing in for
+// wayvnc (on Windows its socket is a named pipe). Never a real VNC server, clipboard or notification here.
+test('1.23 Control for a Linux computer: Beam for Linux 1.2’s agent (beam control on, wayvnc on its private socket, its end of the relay, turned off from another device)', async () => {
+  const t = await rcSetup('vncagent');
+  const runs = [];
+  try {
+    const { s, laptop, rc } = t;
+    const home = homeDir('vncagent');
+    const root = path.join(TMP, 'vnc-root');
+    fs.rmSync(root, { recursive: true, force: true });
+    for (const [f, text] of Object.entries({
+      'etc/os-release': 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\n',
+      'etc/machine-id': '00112233445566778899aabbccddeeff\n',
+      'etc/default/keyboard': 'XKBMODEL="pc105"\nXKBLAYOUT="gb"\nXKBVARIANT=""\nXKBOPTIONS=""\n',
+      'usr/share/wayland-sessions/labwc.desktop': '[Desktop Entry]\nName=labwc\n',
+    })) {
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+    const installed = path.join(home, '.local', 'share', 'beam', 'beam.js');
+    fs.mkdirSync(path.dirname(installed), { recursive: true });
+    fs.writeFileSync(path.join(path.dirname(installed), 'package.json'), '{ "type": "commonjs" }\n');
+    fs.copyFileSync(path.join(ROOT, 'cli', 'beam.js'), installed);
+    let r = await cli(['setup', `http://127.0.0.1:${s.port}/?key=${t.K}`, '--name', 'Desk Pi'], { home, env: { BEAM_APP: 'linux' } });
+    assert.equal(r.code, 0, r.out);
+    const id = cliConfig(home).deviceId;
+    // wayvnc's stand-in: says what it was started with, then speaks first on each connection and echoes the rest.
+    const stub = path.join(TMP, 'vnc-wayvnc.js');
+    const stubArgs = path.join(TMP, 'vnc-wayvnc-args.txt');
+    fs.rmSync(stubArgs, { force: true });
+    fs.writeFileSync(stub, `const fs = require('fs'); const net = require('net');
+const args = process.argv.slice(2);
+process.on('uncaughtException', e => { fs.appendFileSync(${JSON.stringify(stubArgs)}, 'ERROR ' + e.message + '\\n'); process.exit(1); });
+fs.appendFileSync(${JSON.stringify(stubArgs)}, JSON.stringify(args) + '\\n');
+const at = args[args.indexOf('-u') + 1];
+net.createServer(c => { c.on('error', () => {}); c.write('RFB 003.008\\n'); c.on('data', d => c.write(d)); }).listen(at);
+`);
+    const runDir = path.join(TMP, 'vnc-run');
+    fs.rmSync(runDir, { recursive: true, force: true });
+    fs.mkdirSync(runDir);
+    const pipe = IS_WIN ? `\\\\.\\pipe\\beam-test-vnc-${process.pid}` : null;
+    const env = {
+      BEAM_TEST_LINUX_ROOT: root, BEAM_TEST_THROTTLED: 'throttled=0x0', WAYLAND_DISPLAY: 'wayland-test', XDG_RUNTIME_DIR: runDir,
+      BEAM_TEST_WAYVNC_IDLE: '300', BEAM_TEST_AGENT_PAUSE: '100', ...(pipe && { BEAM_TEST_VNC_SOCKET: pipe }),
+    };
+    // Not without wayvnc; with it, on.
+    r = await cli(['control', 'on'], { home, env });
+    assert.equal(r.code, 1);
+    assert.match(r.out, /not turned on: wayvnc isn't installed \(sudo apt install wayvnc\)/);
+    r = await cli(['control', 'on'], { home, env: { ...env, BEAM_TEST_WAYVNC: stub } });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /Remote control of this computer is on/);
+    assert.equal(cliConfig(home).remoteControl, true);
+    const dev = async () => (await s.req('GET', '/api/devices', { headers: laptop })).json.devices.find(d => d.id === id);
+    const agentEnv = cleanEnv({ HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), BEAM_TEST_WAYVNC: stub, ...env });
+    const child = spawn(process.execPath, [installed, 'agent', '--no-copy', '--no-notify'], { env: agentEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    children.add(child);
+    const agent = { child, out: '', exited: new Promise(resolve => child.on('exit', code => { children.delete(child); resolve(code); })) };
+    child.stdout.on('data', d => { agent.out += d; });
+    child.stderr.on('data', d => { agent.out += d; });
+    runs.push(agent);
+    await waitFor(() => /\bConnected\b/.test(agent.out), 15000);
+    await waitFor(async () => (await dev())?.can?.remoteControl === true, 15000);
+    assert.equal((await dev()).status.remoteControl, true, 'the agent says so too');
+
+    // A session through the agent: wayvnc starts, and the viewer talks to it through Beam.
+    r = await rc('POST', 'sessions', laptop, { device: id, kind: 'vnc' });
+    assert.equal(r.status, 201, r.body);
+    const session = r.json.id;
+    const viewer = await wsOpen(s.port, `/api/rc/sessions/${session}/vnc`, laptop);
+    assert.equal(viewer.status, 101);
+    await waitFor(() => viewer.data.toString() === 'RFB 003.008\n', 10000).catch(() => {
+      throw new Error(`no greeting; wayvnc's stand-in: ${(fs.existsSync(stubArgs) ? fs.readFileSync(stubArgs, 'utf8') : 'not started').replace(/\n/g, ' | ')} || the agent: ${agent.out.replace(/\n/g, ' | ')}`);
+    });
+    viewer.send('hello Pi');
+    await waitFor(() => viewer.data.toString() === 'RFB 003.008\nhello Pi', 5000);
+    const started = JSON.parse(fs.readFileSync(stubArgs, 'utf8').trim().split('\n')[0]);
+    assert.deepEqual(started.slice(0, 3), ['--render-cursor', `--socket=${path.join(runDir, 'beam', 'wayvncctl')}`, '--keyboard=gb']);
+    assert.deepEqual(started.slice(3), ['-u', pipe || path.join(runDir, 'beam', 'vnc.sock')]);
+    if (!IS_WIN) assert.equal(fs.statSync(path.join(runDir, 'beam')).mode & 0o777, 0o700, 'its socket in a folder only this user opens');
+    assert.equal((await rc('GET', 'sessions', laptop)).json.sessions.find(x => x.id === session).state, 'live');
+    assert.match(agent.out, /Robin Laptop asked to control this computer/);
+    assert.match(agent.out, /Started wayvnc for remote control \(keyboard gb\)/);
+    assert.match(agent.out, /Robin Laptop is controlling this computer/);
+    // The viewer leaves: the agent lets go, and wayvnc stops when no one is left (300 ms here, a minute for real).
+    viewer.close();
+    await waitFor(() => /Robin Laptop stopped controlling this computer/.test(agent.out), 5000);
+    await waitFor(() => /Stopped wayvnc \(no one is controlling this computer\)/.test(agent.out), 5000);
+
+    // Turned off from another device: off at the computer too (only someone there turns it on again).
+    assert.equal((await rc('POST', 'disable', laptop, { device: id })).status, 202);
+    await waitFor(() => cliConfig(home).remoteControl === false, 5000);
+    await waitFor(async () => (await dev()).can.remoteControl === false && (await dev()).status.remoteControl === false, 5000);
+    assert.match(agent.out, /Robin Laptop turned remote control of this computer off/);
+    r = await cli(['control'], { home, env });
+    assert.match(r.out, /Remote control of this computer is off/);
+  } finally {
+    for (const run of runs) try { run.child.kill(); } catch {}
+    await t.stop();
+  }
+});
+
 // ---------------------------------------------------------------- 1.4 protocol additions (plan/speed.md P1–P6)
 
 // A GET that keeps what arrived even when the server cuts the response off.
