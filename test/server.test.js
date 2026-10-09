@@ -3130,6 +3130,152 @@ test('1.22 Beam for Linux: the agent says how the computer is, sends its log (ne
   }
 });
 
+// Beam for Linux 1.1: Beam in the menu of a Linux desktop. The agent writes the menu entry; `beam window` opens Beam's
+// pages in a Chromium app window of its own (a Node.js script stands in for the browser here). On Linux (CI) the agent's
+// clipboard and notifications run too, with stand-ins for wl-copy, notify-send and gdbus: never this PC's own.
+test('Beam for Linux 1.1: Beam in the menu (once, kept up to date, not again once taken out), `beam window` (its own profile, a pairing link only the first time), and a text on the clipboard never holds the agent up', async () => {
+  const s = await startServer('window11', 8799);
+  const runs = [];
+  try {
+    const K = s.key;
+    const admin = app(K, 'admin000111', 'Admin');
+    const home = homeDir('window11');
+    // A / with a desktop to sign in to (Raspberry Pi OS with a desktop has labwc's)
+    const root = path.join(TMP, 'desktop-root');
+    fs.rmSync(root, { recursive: true, force: true });
+    for (const [f, text] of Object.entries({
+      'etc/os-release': 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\n',
+      'etc/machine-id': 'fedcba9876543210fedcba9876543210\n',
+      'usr/share/wayland-sessions/labwc.desktop': '[Desktop Entry]\nName=labwc\n',
+    })) {
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+    const share = path.join(home, '.local', 'share');
+    const installed = path.join(share, 'beam', 'beam.js');
+    fs.mkdirSync(path.dirname(installed), { recursive: true });
+    fs.writeFileSync(path.join(path.dirname(installed), 'package.json'), '{ "type": "commonjs" }\n');
+    fs.copyFileSync(path.join(ROOT, 'cli', 'beam.js'), installed);
+    let r = await cli(['setup', `http://127.0.0.1:${s.port}/?key=${K}`, '--name', 'Desk Pi'], { home, env: { BEAM_APP: 'linux' } });
+    assert.equal(r.code, 0, r.out);
+    const id = cliConfig(home).deviceId;
+
+    const onLinux = process.platform === 'linux';
+    const bin = path.join(TMP, 'window11-bin'); // wl-copy, notify-send
+    const bin2 = path.join(TMP, 'window11-bin2'); // wl-copy, gdbus: a desktop without notify-send
+    const clip = path.join(TMP, 'window11-clipboard.txt');
+    const shown = path.join(TMP, 'window11-notifications.txt');
+    for (const dir of [bin, bin2]) { fs.rmSync(dir, { recursive: true, force: true }); fs.mkdirSync(dir); }
+    fs.rmSync(shown, { force: true });
+    if (onLinux) {
+      // wl-copy goes on in the background holding the error output it was given, as the real one does
+      const wlCopy = `#!/bin/sh\nPATH=/usr/bin:/bin\ncat > '${clip}'\n( sleep 30 ) &\nexit 0\n`;
+      for (const dir of [bin, bin2]) fs.writeFileSync(path.join(dir, 'wl-copy'), wlCopy, { mode: 0o755 });
+      fs.writeFileSync(path.join(bin, 'notify-send'), `#!/bin/sh\nprintf 'notify-send %s\\n' "$*" >> '${shown}'\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(bin2, 'gdbus'), `#!/bin/sh\nprintf 'gdbus %s\\n' "$*" >> '${shown}'\n`, { mode: 0o755 });
+    }
+    const agentEnv = (extra = {}) => cleanEnv({
+      HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), XDG_DATA_HOME: share,
+      BEAM_TEST_LINUX_ROOT: root, BEAM_TEST_THROTTLED: 'throttled=0x0', BEAM_TEST_AGENT_PAUSE: '100',
+      ...(onLinux && { PATH: `${bin}:${process.env.PATH}`, WAYLAND_DISPLAY: 'wayland-test' }), ...extra,
+    });
+    const startAgent = (env = agentEnv()) => {
+      // (here on Windows: no clipboard or notifications, which would be this PC's own)
+      const child = spawn(process.execPath, [installed, 'agent', ...(onLinux ? [] : ['--no-copy', '--no-notify'])], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      children.add(child);
+      const run = { child, out: '', exited: new Promise(resolve => child.on('exit', code => { children.delete(child); resolve(code); })) };
+      child.stdout.on('data', d => { run.out += d; });
+      child.stderr.on('data', d => { run.out += d; });
+      runs.push(run);
+      return run;
+    };
+    const stop = async run => { run.child.kill(); await run.exited; };
+    const entryFile = path.join(share, 'applications', 'beam.desktop');
+    const icon = path.join(share, 'beam', 'beam.svg');
+    const read = f => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
+
+    // Its first start puts Beam in the menu, with Beam's icon.
+    let agent = startAgent();
+    await waitFor(() => agent.out.includes('Connected'), 15000);
+    const entry = read(entryFile);
+    assert.ok(entry?.startsWith('# Beam for Linux'), entry);
+    assert.match(entry, /^\[Desktop Entry\]$/m);
+    assert.match(entry, /^Name=Beam$/m);
+    assert.match(entry, /^Exec=.*\bbeam"? window --toast$/m);
+    assert.ok(entry.includes(`\nIcon=${icon}\n`), entry);
+    assert.match(entry, /^Categories=Network;FileTransfer;$/m);
+    assert.match(read(icon), /^<svg /);
+    assert.match(agent.out, /Put Beam in the menu \(Internet → Beam/);
+
+    if (onLinux) {
+      // A text goes on the clipboard (wl-copy stays on holding it), and what comes next is received at once all the same.
+      const t = await sendText(s, admin, 'paste me on the Pi', [id]);
+      const f = await upload(s, admin, 'after.txt', Buffer.from('right after the text'), { to: [id] });
+      await waitFor(async () => (await s.req('GET', `/api/items/${f.id}`, { headers: admin })).json.delivered?.[id], 10000);
+      assert.ok((await s.req('GET', `/api/items/${t.id}`, { headers: admin })).json.delivered?.[id], 'the text too');
+      assert.equal(read(clip), 'paste me on the Pi');
+      assert.equal(read(path.join(home, 'Downloads', 'Beam', 'after.txt')), 'right after the text');
+      await waitFor(() => (read(shown) || '').includes(`notify-send -a Beam -i ${icon} Copied from Admin paste me on the Pi`), 5000);
+    }
+
+    // An older entry of its own is brought up to date (on Linux: on a desktop without notify-send, which gdbus stands in
+    // for); someone else's beam.desktop is left alone.
+    await stop(agent);
+    fs.writeFileSync(entryFile, '# Beam for Linux: an older one\n[Desktop Entry]\nName=Beam\nExec=beam\n');
+    agent = startAgent(agentEnv(onLinux ? { PATH: bin2 } : {}));
+    await waitFor(() => read(entryFile) === entry, 15000);
+    if (onLinux) {
+      await waitFor(() => agent.out.includes('Connected'), 15000);
+      await sendText(s, admin, 'shown through gdbus', [id]);
+      await waitFor(() => (read(shown) || '').includes('gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications'
+        + ` --method org.freedesktop.Notifications.Notify 'Beam' 0 '${icon}' 'Copied from Admin' 'shown through gdbus' [] {} -1`), 10000);
+    }
+    await stop(agent);
+    fs.writeFileSync(entryFile, '[Desktop Entry]\nName=Beam (another one)\n');
+    agent = startAgent();
+    await waitFor(() => agent.out.includes('Connected'), 15000);
+    assert.equal(read(entryFile), '[Desktop Entry]\nName=Beam (another one)\n');
+    // Taken out of the menu by hand: it stays out.
+    await stop(agent);
+    fs.rmSync(entryFile);
+    agent = startAgent();
+    await waitFor(() => agent.out.includes('Connected'), 15000);
+    assert.equal(read(entryFile), null);
+    await stop(agent);
+
+    // `beam window`: the browser in app mode with a profile of Beam's own; the first time a pairing link, which signs it in.
+    const browserLog = path.join(TMP, 'window11-browser.txt');
+    const stub = path.join(TMP, 'window11-browser.js');
+    fs.writeFileSync(stub, `require('fs').appendFileSync(${JSON.stringify(browserLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');\n`);
+    fs.rmSync(browserLog, { force: true });
+    const opened = async (args = []) => {
+      const before = (read(browserLog) || '').split('\n').filter(Boolean).length;
+      const res = await cli(['window', ...args], { home, env: { BEAM_TEST_LINUX_ROOT: root, BEAM_TEST_BROWSER: stub, WAYLAND_DISPLAY: 'wayland-test' } });
+      assert.equal(res.code, 0, res.out);
+      assert.equal(res.out, '', 'nothing to say when it worked');
+      await waitFor(() => (read(browserLog) || '').split('\n').filter(Boolean).length > before, 10000);
+      return JSON.parse(read(browserLog).split('\n').filter(Boolean).at(-1));
+    };
+    const profile = path.join(share, 'beam', 'window');
+    let args = await opened();
+    const key = /^--app=http:\/\/127\.0\.0\.1:\d+\/\?key=(bp_[A-Za-z0-9_-]+)$/.exec(args[0])?.[1];
+    assert.ok(key, args[0]);
+    assert.deepEqual(args.slice(1), [`--user-data-dir=${profile}`, '--class=Beam', '--no-first-run', '--no-default-browser-check', '--password-store=basic', '--window-size=1000,720']);
+    assert.ok(fs.statSync(profile).isDirectory());
+    r = await s.req('GET', `/?key=${key}`);
+    assert.equal(r.status, 302, 'the link signs the window in');
+    assert.match(cookieValue(r) || '', /^bt_/);
+    args = await opened();
+    assert.equal(args[0], `--app=http://127.0.0.1:${s.port}/`, 'signed in already: no link');
+    assert.ok(!args.includes('--window-size=1000,720'), 'the window keeps the size it was given');
+    args = await opened(['--sign-in']);
+    assert.match(args[0], /\/\?key=bp_/, '--sign-in: a new link');
+  } finally {
+    for (const run of runs) try { run.child.kill(); } catch {}
+    await s.stop();
+  }
+});
+
 // ---------------------------------------------------------------- 1.4 protocol additions (plan/speed.md P1–P6)
 
 // A GET that keeps what arrived even when the server cuts the response off.

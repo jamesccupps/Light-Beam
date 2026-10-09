@@ -10,8 +10,8 @@
 # Run it again any time: it updates what's there. It needs Tailscale on this computer, signed in to your tailnet.
 # Everything goes into your home folder, as you (never as root): the app in ~/.local/share/beam (with its own Node.js
 # when this computer has none from 20 on), the `beam` command in ~/.local/bin, the service in
-# ~/.config/systemd/user/beam.service. Only one thing may ask for your password (sudo): letting the service start when
-# the computer does, before anyone signs in (loginctl enable-linger).
+# ~/.config/systemd/user/beam.service and, with a desktop, Beam in the menu. Only one thing may ask for your password
+# (sudo): letting the service start when the computer does, before anyone signs in (loginctl enable-linger).
 
 set -euo pipefail
 
@@ -22,6 +22,7 @@ main() {
   local app_dir="$HOME/.local/share/beam"
   local bin_dir="$HOME/.local/bin"
   local unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  local menu_entry="${XDG_DATA_HOME:-$HOME/.local/share}/applications/beam.desktop" # (the service writes it, with a desktop)
   local name='' uninstall=0 service=1 own_node=0 node='' node_arch=''
 
   while [ $# -gt 0 ]; do
@@ -47,6 +48,7 @@ main() {
       systemctl --user daemon-reload >/dev/null 2>&1 || true
     fi
     if [ -f "$bin_dir/beam" ] && grep -q 'Beam for Linux' "$bin_dir/beam"; then rm -f "$bin_dir/beam"; fi
+    if [ -f "$menu_entry" ]; then case "$(head -n 1 "$menu_entry")" in '# Beam for Linux'*) rm -f "$menu_entry" ;; esac; fi
     rm -rf "$app_dir"
     say "Beam for Linux is off this computer. Still here: its sign-in (~/.beam.json), what it received (~/Downloads/Beam)"
     say "and its log (~/.local/state/beam). To sign it out of Beam too, remove the device there (its Device info)."
@@ -140,6 +142,10 @@ EOF
     say "Beam for Linux $("$beam" version) is on, and starts by itself with this computer."
     say "  Files sent to it are saved in ~/Downloads/Beam. Send from here:  beam <file>   or   some-command | beam"
     say "  Its page in Beam shows how it's doing (Device info). Its log: ~/.local/state/beam/beam.log"
+    if [ -f "$menu_entry" ]; then
+      say "  In the menu: Internet → Beam, a window to drop files on and paste text into (or run: beam window)"
+      has wl-copy || has xclip || has xsel || say "  For text sent here to go on the clipboard:  sudo apt install wl-clipboard"
+    fi
     say "  Stop it: systemctl --user stop beam   ·   Take it away: curl -fsSL $beam_url/install/linux | bash -s -- --uninstall"
     case ":$PATH:" in *":$bin_dir:"*) ;; *) say "  (Open a new terminal for the beam command, or run it as $beam.)" ;; esac
   else

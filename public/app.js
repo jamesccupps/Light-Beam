@@ -225,7 +225,7 @@ async function pickUpShares() {
 
 // A one-time offer to turn on notifications, after something has arrived (a click is needed to ask).
 function offerNotifications() {
-  if (HOST || store.get('beam.notifyOffered') || !('Notification' in window) || !window.isSecureContext || Notification.permission !== 'default') return;
+  if (HOST || appNotifiesHere() || store.get('beam.notifyOffered') || !('Notification' in window) || !window.isSecureContext || Notification.permission !== 'default') return;
   if ($('#toast').classList.contains('show') || document.querySelector('dialog[open]')) return; // never over another message; next time
 
   store.set('beam.notifyOffered', '1');

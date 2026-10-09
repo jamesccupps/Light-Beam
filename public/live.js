@@ -626,8 +626,12 @@ let pendingUpdateReload = '';
 
 // ---------------------------------------------------------------- notifications (browser mode only; the Windows app notifies natively)
 
+// (Beam for Linux 1.1) A browser Beam took for a computer's Beam for Linux (Beam's window from its menu, say): the app
+// there shows what arrives itself, so the page doesn't as well.
+const appNotifiesHere = () => deviceById(me.id)?.platform === 'linux';
+
 async function notify(item) {
-  if (HOST || !document.hidden || !('Notification' in window) || Notification.permission !== 'granted') return;
+  if (HOST || appNotifiesHere() || !document.hidden || !('Notification' in window) || Notification.permission !== 'granted') return;
   const title = `${item.kind === 'text' ? 'Message' : 'File'} from ${senderName(item)}`;
   const conv = convsOf(item)[0] || 'all';
   const options = {

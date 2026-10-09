@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Beam command-line client: send files, text and clipboard contents to your
 // Beam server, and receive what your other devices send. Speaks docs/API.md (v3, and v2 servers).
-// (1.22) Also Beam for Linux: `beam agent`, what linux/install.sh sets up as a service (see "Beam for Linux" below).
+// (1.22) Also Beam for Linux: `beam agent`, what linux/install.sh sets up as a service (see "Beam for Linux" below), and
+// (Beam for Linux 1.1) `beam window`, the menu's Beam on a Linux desktop.
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -66,6 +67,9 @@ Beam for Linux (a Raspberry Pi or another Linux computer, kept connected all day
   curl -fsSL https://<your beam address>/install/linux | bash
                                                    installs it as a service: signs in, starts with the computer,
                                                    reports its status (disk, temperature…) and updates itself
+  beam window [--sign-in]                          Beam in a window of its own (Beam in the menu, with a desktop):
+                                                   drop files on it to send them, paste text; --sign-in: sign
+                                                   that window in again
   beam agent                                       what that service runs: listen (same options), plus the status
   beam version                                     Beam for Linux's version
 
@@ -351,14 +355,6 @@ function powershell(script, env) {
   return run('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', encoded], { env });
 }
 
-async function firstWorking(attempts) {
-  let lastError;
-  for (const [cmd, args, opts] of attempts) {
-    try { return await run(cmd, args, opts); } catch (err) { lastError = err; }
-  }
-  throw lastError;
-}
-
 const b64 = s => Buffer.from(String(s), 'utf8').toString('base64');
 
 // Returns { kind: 'files', files } | { kind: 'image', path } | { kind: 'text', text } | { kind: 'empty' }
@@ -385,8 +381,30 @@ async function readClipboard() {
   if (!env) throw new Error('there\'s no desktop here, so no clipboard');
   const text = IS_MAC
     ? await run('pbpaste', [])
-    : await firstWorking([['wl-paste', ['--no-newline'], { env }], ['xclip', ['-selection', 'clipboard', '-o'], { env }], ['xsel', ['--clipboard', '--output'], { env }]]);
+    : await firstTool([['wl-paste', ['--no-newline']], ['xclip', ['-selection', 'clipboard', '-o']], ['xsel', ['--clipboard', '--output']]], (cmd, args) => run(cmd, args, { env }));
   return text ? { kind: 'text', text } : { kind: 'empty' };
+}
+
+// (Beam for Linux 1.1) The first clipboard program here that works; none: why the first one there didn't, or which to get.
+async function firstTool(tools, use) {
+  let failed = null;
+  for (const [cmd, args] of tools) {
+    try { return await use(cmd, args); } catch (err) { if (err.code !== 'ENOENT') failed ??= err; }
+  }
+  throw failed || new Error('this computer has no clipboard program (sudo apt install wl-clipboard)');
+}
+
+// (Beam for Linux 1.1) wl-copy, xclip and xsel go on in the background to hold what they copied (that's how a Linux
+// clipboard works), still holding the error output they were started with: waiting for that to close waited until
+// something else was copied, and Beam for Linux received nothing more meanwhile. Each is done when it exits.
+function copyWith(cmd, args, text, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { env: { ...process.env, ...env }, stdio: ['pipe', 'ignore', 'ignore'], timeout: 10_000 });
+    child.on('error', reject);
+    child.on('exit', (code, signal) => (code === 0 ? resolve() : reject(new Error(`${cmd} ${signal ? `was stopped (${signal})` : `exited with code ${code}`}`))));
+    child.stdin.on('error', () => {}); // (one that fails may exit before it has read it all)
+    child.stdin.end(text);
+  });
 }
 
 // (1.22) Beam for Linux runs as a service, outside the desktop session: it uses the desktop of its user that's on
@@ -421,7 +439,7 @@ async function writeClipboard(text) {
   if (IS_MAC) return void (await run('pbcopy', [], { input: text }));
   const env = desktopEnv();
   if (!env) throw new Error('there\'s no desktop here, so no clipboard');
-  await firstWorking([['wl-copy', [], { input: text, env }], ['xclip', ['-selection', 'clipboard'], { input: text, env }], ['xsel', ['--clipboard', '--input'], { input: text, env }]]);
+  await firstTool([['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['--clipboard', '--input']]], (cmd, args) => copyWith(cmd, args, text, env));
 }
 
 // Clicking a notification opens Beam in the browser. (Windows refuses custom beam: links
@@ -449,18 +467,32 @@ async function desktopNotify(title, body = '', launch = webUrl) {
       await run('osascript', ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run', title, body]);
     } else {
       const env = desktopEnv();
-      if (env) await run('notify-send', ['-a', 'Beam', title, body], { env, timeout: 10_000 });
+      if (!env) return;
+      // (Beam for Linux 1.1) with Beam's icon; without notify-send (not every desktop has it), straight to the desktop's
+      // notifications through gdbus (GLib's, there wherever a GTK desktop is)
+      const icon = AS_LINUX && fs.existsSync(ICON_FILE) ? ICON_FILE : '';
+      await run('notify-send', ['-a', 'Beam', ...(icon ? ['-i', icon] : []), title, body], { env, timeout: 10_000 }).catch(err => {
+        if (err.code !== 'ENOENT') throw err;
+        return run('gdbus', ['call', '--session', '--dest', 'org.freedesktop.Notifications', '--object-path', '/org/freedesktop/Notifications',
+          '--method', 'org.freedesktop.Notifications.Notify', gvText('Beam'), '0', gvText(icon), gvText(title), gvText(body), '[]', '{}', '-1'], { env, timeout: 10_000 });
+      });
     }
   } catch {}
 }
 
+// A string as GVariant text (gdbus call reads its arguments that way).
+const gvText = s => `'${String(s).replace(/[\\']/g, c => `\\${c}`).replace(/\n/g, '\\n')}'`;
+
 // Opens the web app signed in, with a pairing key that works once: never the CLI's own key, which would stay in the
 // browser's history (and on a command line).
 async function openWebApp(cfg, opt) {
-  let key = null;
-  try { key = (await (await api(cfg, '/api/pair')).json()).key || null; } catch {}
+  const key = await pairingKey(cfg);
   // (Without a pairing key, the sign-in page: since 1.7.3 a link signs in only with one.)
   openInBrowser(`${cfg.url}/${key ? `?key=${encodeURIComponent(key)}` : ''}${opt.pair ? '#pair' : ''}`);
+}
+
+async function pairingKey(cfg) {
+  try { return (await (await api(cfg, '/api/pair')).json()).key || null; } catch { return null; }
 }
 
 function openInBrowser(url) {
@@ -1124,6 +1156,106 @@ async function sendLog(cfg, id) {
   await api(cfg, '/api/devices/me/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, name: 'beam.log', text: text.slice(-2 * LOG_MAX) }) });
 }
 
+// ---------------------------------------------------------------- Beam in the menu (Beam for Linux 1.1)
+// On a computer with a desktop, Beam for Linux puts Beam in the menu (Internet → Beam): Beam's own pages in a window of
+// their own, to drop files on, paste text into and see what came. The window is a Chromium-family browser's app mode
+// with a profile of its own (~/.local/share/beam/window: it stays signed in apart from the browser). The first time (or
+// `beam window --sign-in`) it signs in with a pairing link that works once, and Beam takes it for this computer's device,
+// as it does any browser on the same computer as a Beam app. Without such a browser: Beam in the default browser.
+
+const ICON_FILE = path.join(LINUX_HOME, 'beam.svg');
+const ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">'
+  + '<stop offset="0" stop-color="#6c5cff"/><stop offset="1" stop-color="#1fb3d6"/></linearGradient></defs>'
+  + '<rect width="512" height="512" rx="116" fill="url(#bg)"/><g transform="translate(256 262) scale(14.5) translate(-12 -12)">'
+  + '<path d="M3 11 21 3 11 13Z" fill="#fff"/><path d="M11 13 21 3 13 21Z" fill="#fff" fill-opacity=".78"/></g></svg>\n'; // (public/icon.svg)
+const MENU_ENTRY = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'applications', 'beam.desktop');
+const MENU_ADDED = path.join(LINUX_HOME, 'menu-added'); // (taken out of the menu by hand: it stays out)
+const WINDOW_PROFILE = path.join(LINUX_HOME, 'window');
+const BROWSERS = ['chromium-browser', 'chromium', 'google-chrome-stable', 'google-chrome', 'microsoft-edge-stable', 'microsoft-edge', 'brave-browser'];
+
+const readText = file => { try { return fs.readFileSync(file, 'utf8'); } catch { return null; } };
+
+// A desktop to sign in to is installed here (Raspberry Pi OS with desktop, Ubuntu…; not Raspberry Pi OS Lite).
+function hasDesktop() {
+  return ['usr/share/wayland-sessions', 'usr/share/xsessions'].some(dir => {
+    try { return fs.readdirSync(path.join(SYSROOT, dir)).some(n => n.endsWith('.desktop')); } catch { return false; }
+  });
+}
+
+// An Exec= argument, quoted the way the desktop entry spec wants when it needs to be.
+const execArg = s => (/^[\w/.+-]+$/.test(s) ? s : `"${s.replace(/[`"$\\]/g, c => `\\${c}`)}"`.replace(/\\/g, '\\\\').replace(/%/g, '%%'));
+
+function menuEntry() {
+  return [
+    '# Beam for Linux: Beam in the menu (its service keeps this up to date; its installer\'s --uninstall takes it away)',
+    '[Desktop Entry]',
+    'Type=Application',
+    'Name=Beam',
+    'GenericName=Send to your devices',
+    'Comment=Send files and text to your other devices, and see what they sent',
+    `Exec=${execArg(path.join(os.homedir(), '.local', 'bin', 'beam'))} window --toast`,
+    `Icon=${ICON_FILE}`,
+    'Terminal=false',
+    'Categories=Network;FileTransfer;',
+    'Keywords=send;share;files;clipboard;',
+    'StartupWMClass=Beam',
+    '',
+  ].join('\n');
+}
+
+// Puts Beam in the menu, or brings its entry up to date: only the installed app (never a copy run from a checkout), only
+// with a desktop, never over another program's beam.desktop, and not again once someone took it out of the menu.
+function ensureMenuEntry() {
+  if (SELF !== path.join(LINUX_HOME, 'beam.js') || !hasDesktop()) return;
+  try {
+    if (readText(ICON_FILE) !== ICON_SVG) fs.writeFileSync(ICON_FILE, ICON_SVG);
+    const entry = menuEntry();
+    const had = readText(MENU_ENTRY);
+    if (had === entry || (had === null ? fs.existsSync(MENU_ADDED) : !had.startsWith('# Beam for Linux'))) return;
+    fs.mkdirSync(path.dirname(MENU_ENTRY), { recursive: true });
+    fs.writeFileSync(`${MENU_ENTRY}.tmp`, entry);
+    fs.renameSync(`${MENU_ENTRY}.tmp`, MENU_ENTRY);
+    if (had === null) {
+      fs.writeFileSync(MENU_ADDED, `${new Date().toISOString()}\n`);
+      logLine('Put Beam in the menu (Internet → Beam: a window to send files and text from here)');
+    }
+  } catch (err) {
+    logLine(`Couldn't put Beam in the menu: ${err.message}`);
+  }
+}
+
+function findBrowser() {
+  const dirs = (process.env.PATH || '/usr/local/bin:/usr/bin:/bin').split(path.delimiter).filter(Boolean);
+  for (const name of BROWSERS) {
+    for (const dir of dirs) {
+      try { fs.accessSync(path.join(dir, name), fs.constants.X_OK); return path.join(dir, name); } catch {}
+    }
+  }
+  return null;
+}
+
+// `beam window`: what Beam in the menu runs.
+async function openWindow(cfg, opt) {
+  if (!AS_LINUX) return openWebApp(cfg, opt); // (elsewhere: Beam's own apps, or the browser)
+  const env = desktopEnv();
+  if (!env) throw new Error('there\'s no desktop on this computer to open Beam\'s window on');
+  // (tests: BEAM_TEST_BROWSER, a Node.js script that stands in for the browser)
+  const browser = process.env.BEAM_TEST_BROWSER ? [process.execPath, process.env.BEAM_TEST_BROWSER] : [findBrowser()].filter(Boolean);
+  if (!browser.length) return openWebApp(cfg, opt);
+  const first = !fs.existsSync(WINDOW_PROFILE);
+  const key = first || opt['sign-in'] ? await pairingKey(cfg) : null;
+  fs.mkdirSync(WINDOW_PROFILE, { recursive: true, mode: 0o700 });
+  const [cmd, ...before] = browser;
+  // (--password-store=basic: no keyring to unlock first, which a desktop that signs in by itself would ask for)
+  const args = [...before, `--app=${cfg.url}/${key ? `?key=${encodeURIComponent(key)}` : ''}`, `--user-data-dir=${WINDOW_PROFILE}`, '--class=Beam',
+    '--no-first-run', '--no-default-browser-check', '--password-store=basic', ...(first ? ['--window-size=1000,720'] : [])];
+  await new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env: { ...process.env, ...env } });
+    child.once('error', reject);
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
+}
+
 async function agent(cfg, opt) {
   if (!AS_LINUX) throw new Error('beam agent is Beam for Linux; on Windows and Android use their Beam apps (or beam listen)');
   if (!linuxApp(cfg)) {
@@ -1132,6 +1264,7 @@ async function agent(cfg, opt) {
   }
   logToFile = true;
   logLine(`Beam for Linux ${VERSION} on ${osName()}${hardwareModel() ? `, ${hardwareModel()}` : ''} (Node.js ${process.versions.node})`);
+  ensureMenuEntry();
   // At boot the service can start before the network (or Tailscale) is up: wait for Beam, rather than stopping.
   for (let wait = 2000; ; wait = Math.min(wait * 2, 60e3)) {
     try {
@@ -1179,7 +1312,7 @@ async function agent(cfg, opt) {
 
 // ---------------------------------------------------------------- main
 
-const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version']);
+const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version', 'window']);
 
 async function main() {
   let parsed;
@@ -1197,6 +1330,7 @@ async function main() {
         'no-notify': { type: 'boolean' },
         toast: { type: 'boolean' },
         pair: { type: 'boolean' },
+        'sign-in': { type: 'boolean' },
         password: { type: 'boolean' },
         yes: { type: 'boolean', short: 'y' },
         help: { type: 'boolean', short: 'h' },
@@ -1249,6 +1383,7 @@ async function main() {
         case 'listen': await listen(cfg, opt); break;
         case 'agent': await agent(cfg, opt); break;
         case 'open': await openWebApp(cfg, opt); break;
+        case 'window': await openWindow(cfg, opt); break;
         case 'pair': await pair(cfg); break;
       }
     }

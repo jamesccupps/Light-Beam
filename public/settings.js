@@ -678,6 +678,7 @@ async function deleteEverything() {
 // ---------------------------------------------------------------- Notifications (browser)
 
 function sectionNotifications() {
+  if (appNotifiesHere()) return note('Beam for Linux on this computer shows a notification when something arrives (this window doesn’t as well).');
   const supported = 'Notification' in window && window.isSecureContext;
   if (!supported) return note('This browser can’t show notifications for Beam here (it needs https).');
   const state = Notification.permission;
