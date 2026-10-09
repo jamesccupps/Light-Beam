@@ -3509,7 +3509,8 @@ net.createServer(c => { c.on('error', () => {}); c.write('RFB 003.008\\n'); c.on
 
     // Turned off from another device: off at the computer too (only someone there turns it on again).
     assert.equal((await rc('POST', 'disable', laptop, { device: id })).status, 202);
-    await waitFor(() => cliConfig(home).remoteControl === false, 5000);
+    // (read while the agent may be writing it: a half-written file is "not yet")
+    await waitFor(() => { try { return cliConfig(home).remoteControl === false; } catch { return false; } }, 5000);
     await waitFor(async () => (await dev()).can.remoteControl === false && (await dev()).status.remoteControl === false, 5000);
     assert.match(agent.out, /Robin Laptop turned remote control of this computer off/);
     r = await cli(['control'], { home, env });
