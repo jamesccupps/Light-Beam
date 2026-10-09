@@ -530,11 +530,14 @@ export default function register(test) {
   test('Beam for Linux 1.1: a page Beam took for a Linux computer’s app (Beam’s window from its menu) leaves notifications to that app', async ctx => {
     const page = await ctx.signedIn();
     await page.waitFor(`Boolean(deviceById(me.id))`, 8000, 'its own device listed');
-    // (the harness marks every page as offered already)
-    await page.evaluate(`deviceById(me.id).platform = 'linux'; store.remove('beam.notifyOffered'); offerNotifications()`);
-    eq(await page.evaluate(`[/notification/i.test($('#toast').textContent) && $('#toast').classList.contains('show'), store.get('beam.notifyOffered')]`), [false, null], 'not offered');
-    await page.evaluate(`openSettings('notifications')`);
-    await page.waitFor(`/Beam for Linux on this computer shows a notification/.test($('#settingsDlg').textContent)`, 5000, 'Settings says why');
+    // (The page's own device stands in for one Beam took for a Linux computer's app. A device list from the server can
+    // replace it at any time, so each check runs in the same step as the change. The harness marks every page as
+    // offered already.)
+    eq(await page.evaluate(`deviceById(me.id).platform = 'linux'; store.remove('beam.notifyOffered'); offerNotifications();
+      [/notification/i.test($('#toast').textContent) && $('#toast').classList.contains('show'), store.get('beam.notifyOffered')]`), [false, null], 'not offered');
+    // (openSettings draws the dialog at once, then again once it has heard from the server)
+    eq(await page.evaluate(`deviceById(me.id).platform = 'linux'; openSettings('notifications');
+      /Beam for Linux on this computer shows a notification/.test($('#settingsDlg').textContent)`), true, 'Settings says why');
     await page.evaluate(`$('#settingsDlg').close(); deviceById(me.id).platform = 'web'`);
     if (await page.evaluate(`Notification.permission === 'default' && window.isSecureContext`)) {
       await page.evaluate(`offerNotifications()`);
