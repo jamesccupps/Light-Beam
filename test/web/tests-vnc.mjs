@@ -21,7 +21,8 @@ function wsClient(port, route, headers) {
       const reader = new ws.FrameReader({ masked: false, max: 64 << 20 });
       const link = {
         onData: null, closed: false,
-        send: buf => socket.write(ws.frame(ws.OP.binary, buf, crypto.randomBytes(4))),
+        // (in pieces of 64 KB, as Beam for Linux sends what its socket gives it: the relay takes frames up to 4 MB)
+        send: buf => { for (let i = 0; i < buf.length; i += 65536) socket.write(ws.frame(ws.OP.binary, buf.subarray(i, i + 65536), crypto.randomBytes(4))); },
         end: () => socket.destroy(),
       };
       const read = chunk => {
@@ -143,6 +144,8 @@ export default function register(test) {
     await page.waitFor(`(() => { const c = document.querySelector('.rc-vnc canvas'); if (!c || !c.width) return false; const d = c.getContext('2d').getImageData(5, 5, 1, 1).data; return d[0] === 0 && d[1] === 128 && d[2] === 255; })()`, 8000, 'its picture');
     eq(await pixel(page), [0, 128, 255], 'the colour of its screen');
     eq(await page.evaluate(`document.title`), `${pi.name} · Beam`, 'the window says which computer');
+    // (1.23.1) Fit never enlarges a screen smaller than the window (its text would go soft): pixel for pixel, centred
+    eq(await page.evaluate(`(r => [Math.round(r.width), Math.round(r.height)])(document.querySelector('.rc-vnc canvas').getBoundingClientRect())`), [64, 48], 'shown at its own size');
     // A click in the middle of the screen, and a key, reach the computer
     const mid = await page.evaluate(`(r => ({ x: r.left + r.width / 2, y: r.top + r.height / 2 }))(document.querySelector('.rc-vnc canvas').getBoundingClientRect())`);
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: mid.x, y: mid.y });
@@ -177,6 +180,21 @@ export default function register(test) {
     await page.waitFor(`location.hash === '#vnc=${pi.id}' && document.querySelector('#remote')?.dataset.state === 'live'`, 15000, 'moved over, and on');
     await page.evaluate(`document.querySelector('.rc-tool.danger').click()`);
     await page.waitFor(`document.querySelector('#remote')?.dataset.state === 'ended'`, 5000, 'ended again');
+
+    // A screen bigger than the window: Fit shrinks it to the window; 1:1 shows it pixel for pixel (scrolling)
+    const big = await fakePi(ctx, { width: 1600, height: 1200, color: [200, 40, 40] });
+    await page.goto('about:blank');
+    await page.goto(`${ctx.srv.base}/#vnc=${big.id}`);
+    await page.waitFor(`document.querySelector('#remote')?.dataset.state === 'live' && document.querySelector('.rc-vnc canvas')?.width === 1600`, 15000, 'the big screen is on');
+    const size = () => page.evaluate(`(r => [Math.round(r.width), Math.round(r.height)])(document.querySelector('.rc-vnc canvas').getBoundingClientRect())`);
+    const room = await page.evaluate(`[document.querySelector('.rc-vnc').clientWidth, document.querySelector('.rc-vnc').clientHeight]`);
+    await page.waitFor(`(r => r.width < 1600)(document.querySelector('.rc-vnc canvas').getBoundingClientRect())`, 5000, 'shrunk to fit');
+    const fitted = await size();
+    assert(fitted[0] <= room[0] + 1 && fitted[1] <= room[1] + 1, `inside the window: ${fitted} in ${room}`);
+    await page.evaluate(`document.querySelector('.rc-tool[data-tool="zoom-out"]').click()`);
+    await page.waitFor(`(r => Math.round(r.width) === 1600)(document.querySelector('.rc-vnc canvas').getBoundingClientRect())`, 5000, '1:1');
+    await page.evaluate(`document.querySelector('.rc-tool.danger').click()`);
+    await page.waitFor(`document.querySelector('#remote')?.dataset.state === 'ended'`, 5000, 'ended');
 
     // A computer that doesn't allow it: why, and what to do there
     const off = await fakePi(ctx, { allow: false });

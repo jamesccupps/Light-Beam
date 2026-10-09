@@ -147,7 +147,9 @@ EOF
       has wl-copy || has xclip || has xsel || say "  For text sent here to go on the clipboard:  sudo apt install wl-clipboard"
     fi
     say "  Stop it: systemctl --user stop beam   ·   Take it away: curl -fsSL $beam_url/install/linux | bash -s -- --uninstall"
-    case ":$PATH:" in *":$bin_dir:"*) ;; *) say "  (Open a new terminal for the beam command, or run it as $beam.)" ;; esac
+    # (Raspberry Pi OS and Debian add ~/.local/bin to the PATH at sign-in, and only when it's there already: a new
+    # terminal now still doesn't have it. 2026-10-09: the user's `beam control on` wasn't found.)
+    case ":$PATH:" in *":$bin_dir:"*) ;; *) say "  Until you next sign in to this computer (or restart it), the beam command is  ~/.local/bin/beam" ;; esac
   else
     say "The service didn't stay on. What it said:"
     tail -n 20 "${XDG_STATE_HOME:-$HOME/.local/state}/beam/beam.log" 2>/dev/null \

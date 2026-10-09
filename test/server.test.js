@@ -3265,6 +3265,11 @@ test('Beam for Linux 1.1: Beam in the menu (once, kept up to date, not again onc
     r = await s.req('GET', `/?key=${key}`);
     assert.equal(r.status, 302, 'the link signs the window in');
     assert.match(cookieValue(r) || '', /^bt_/);
+    // (1.23.1) The window's page, on the same machine as the Linux app: its first answer makes it that device, in the
+    // body as in X-Beam-You (the body used to say the page's own id, and the page took that one back).
+    const page = await s.req('GET', '/api/me', { headers: { ...cookie(cookieValue(r), 'pagewindow01'), 'X-Beam-Device-Id': 'pagewindow01', 'X-Beam-Platform': 'web' } });
+    assert.deepEqual([page.status, page.json.you, page.headers['x-beam-you']], [200, id, id], 'the window is this computer’s device');
+    assert.ok(!(await s.req('GET', '/api/devices', { headers: admin })).json.devices.some(d => d.id === 'pagewindow01'), 'not a device of its own');
     args = await opened();
     assert.equal(args[0], `--app=http://127.0.0.1:${s.port}/`, 'signed in already: no link');
     assert.ok(!args.includes('--window-size=1000,720'), 'the window keeps the size it was given');

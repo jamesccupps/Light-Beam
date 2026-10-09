@@ -40,6 +40,8 @@ function start() {
   window.addEventListener('hashchange', () => location.reload());
   window.addEventListener('pagehide', leave);
   document.addEventListener('fullscreenchange', renderTools);
+  window.addEventListener('resize', applyFit);
+  setInterval(() => { if (vnc.live) applyFit(); }, 1000); // (the computer's own screen may change size: noVNC says nothing)
   connect();
 }
 
@@ -85,16 +87,17 @@ async function connect() {
     vnc.session = String(s.id);
     setState('connecting', `Starting ${vnc.name}’s screen…`);
     const rfb = new RFB(ui.screen, relayUrl(vnc.session), { wsProtocols: ['binary'] });
-    rfb.scaleViewport = vnc.fit;
-    rfb.clipViewport = !vnc.fit;
+    rfb.scaleViewport = false; // (fit: see applyFit)
+    rfb.clipViewport = false; // (1:1 scrolls when the screen is bigger than the window)
     rfb.dragViewport = false;
     rfb.resizeSession = false;
     rfb.showDotCursor = true;
     rfb.focusOnClick = true;
-    rfb.qualityLevel = 6;
+    // (1.23.1, the user: "the resolution isnt that high": the best JPEG quality, for sharp text; the link is the tailnet)
+    rfb.qualityLevel = 9;
     rfb.compressionLevel = 2;
     rfb.background = '#0b0c0f';
-    rfb.addEventListener('connect', () => { vnc.live = true; setState('live'); rfb.focus(); });
+    rfb.addEventListener('connect', () => { vnc.live = true; setState('live'); applyFit(); rfb.focus(); });
     rfb.addEventListener('disconnect', e => {
       if (vnc.rfb !== rfb) return;
       vnc.rfb = null;
@@ -182,13 +185,20 @@ async function copyFromPi() {
 
 function toggleFit() {
   vnc.fit = !vnc.fit;
-  if (vnc.rfb) {
-    vnc.rfb.scaleViewport = vnc.fit;
-    vnc.rfb.clipViewport = !vnc.fit;
-    vnc.rfb.dragViewport = false;
-  }
+  applyFit();
   renderTools();
   vnc.rfb?.focus();
+}
+
+// Fit only ever shrinks: a screen bigger than the window is scaled down to it, one that fits is shown pixel for pixel
+// (centred), as enlarging it softens its text (1.23.1). 1:1: always pixel for pixel, scrolling when it's bigger. Looked at
+// again when the window or the computer's screen changes size.
+function applyFit() {
+  const rfb = vnc.rfb;
+  const canvas = ui.screen.querySelector('canvas');
+  if (!rfb || !canvas || !canvas.width) return;
+  const shrink = vnc.fit && (canvas.width > ui.screen.clientWidth || canvas.height > ui.screen.clientHeight);
+  if (rfb.scaleViewport !== shrink) rfb.scaleViewport = shrink;
 }
 
 function toggleFullscreen() {

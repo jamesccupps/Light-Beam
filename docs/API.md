@@ -294,7 +294,9 @@ Apps update themselves from the Beam server.
   `windows`).
 
 **Response header `X-Beam-You` (v3)**: sent when the effective device id differs from the one you sent (after a
-merge). Adopt it. `GET /api/me` and `GET /api/devices` also return `you`.
+merge). Adopt it. `GET /api/me` and `GET /api/devices` also return `you`. **(1.23.1)** Both say the same id, even in
+the answer to the very request that merged the device (a browser joining the app on its machine); before, that
+answer's body still named the old id.
 
 **Same-machine linking.**
 - The server works out which machine each device talks from, but only where an address pins down one machine:
@@ -1233,7 +1235,8 @@ viewer. Unlike a PC's, nothing goes directly between the two devices. Everything
   turns its switch off there too. It needs a Wayland desktop that's on (Raspberry Pi OS's labwc or Wayfire); otherwise
   it ends the session `failed` with why.
 - **The viewer** is `index.html#vnc=<device id>` (`public/vnc.js`, with noVNC 1.7 in `public/novnc/`, unchanged,
-  MPL-2.0): scaled to fit or 1:1, mouse, keyboard and touch through noVNC, "Paste there" (this device's clipboard to the
+  MPL-2.0): Fit (shrinks a screen bigger than the window, never enlarges one; 1.23.1) or 1:1 (scrolls), JPEG quality 9
+  (sharp text; 1.23.1), mouse, keyboard and touch through noVNC, "Paste there" (this device's clipboard to the
   computer's) and Copy (what was copied on the computer), full screen, Disconnect. `#remote=<id>` for a Linux computer
   moves to it.
 
