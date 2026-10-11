@@ -402,9 +402,12 @@ class BehaviourTest {
         pair.pause().stop().destroy()
     }
 
-    /** "Share → Laptop" (a Direct Share shortcut) and the tile's default device send without the chooser. */
+    /**
+     * "Share → Laptop" (a Direct Share shortcut) opens the sheet with Laptop ready to send (audit 2026-10-11 S-7: any app
+     * can name a shortcut on a share of its own); the tile's default device sends without it.
+     */
     @Test
-    fun directShareAndTheTileSendWithoutAsking() {
+    fun directShareAsksOnceAndTheTileSendsWithoutAsking() {
         needServer()
         val main = signIn()
         val me = app.prefs.deviceId
@@ -413,11 +416,18 @@ class BehaviourTest {
 
         val share = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "direct share text")
             .putExtra(ShortcutManagerCompat.EXTRA_SHORTCUT_ID, Shortcuts.idFor(laptop.deviceId))
-        val before = ShadowDialog.getLatestDialog()
+        val earlier = ShadowDialog.getLatestDialog()
         val send = Robolectric.buildActivity(SendActivity::class.java, share).setup()
+        val sheet = ShadowDialog.getLatestDialog()
+        assertTrue("the sheet", sheet != null && sheet !== earlier && sheet.isShowing)
+        Thread.sleep(500)
+        assertTrue("nothing sent before Send", laptop.items().none { it.text == "direct share text" })
+        val sendButton = sheet.findViewById<View>(R.id.send)
+        assertEquals("Send, ready", View.VISIBLE, sendButton.visibility)
+        sendButton.performClick()
         idleUntil("sent by direct share") { laptop.items().any { it.text == "direct share text" && it.from == me && it.to == listOf(laptop.deviceId) } }
-        assertTrue("no chooser sheet", ShadowDialog.getLatestDialog() === before)
         idleUntil("finished") { send.get().isFinishing }
+        val before = ShadowDialog.getLatestDialog()
 
         app.prefs.tileTarget = laptop.deviceId
         app.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("x", "tile clipboard text"))

@@ -96,11 +96,12 @@ function bindUI() {
     if (!code) return;
     $('#approveInput').value = '';
     $('#pairDlg').close();
-    lookUpApproval(code);
+    lookUpApproval(code, { typed: true });
   });
 
   $('#approveBtn').addEventListener('click', () => answerApproval('approve'));
   $('#denyBtn').addEventListener('click', () => answerApproval('deny'));
+  $('#approveType').addEventListener('input', syncApproveButton); // (a move: its code typed in)
   $('#approveDlg').addEventListener('cancel', e => {
     // Esc = decide later: the request stays open (it can still be approved by its code).
     e.preventDefault();

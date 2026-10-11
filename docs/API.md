@@ -150,7 +150,12 @@ Apps should try this first when they reach Beam over its `https://…ts.net` add
    - Answer with `POST /api/login-requests/approve` or `/deny`, body `{ "code" }`. Always show the requester's name,
      `where` and code before approving.
    - A request with `purpose: "move"` asks for a **full copy of this Beam** (`node server.js import-from`, see
-     Moving). Warn clearly before approving it.
+     Moving). Warn clearly before approving it. **(1.23.3, audit 2026-10-11 S-3)** Such a request is announced to no
+     one (no `login-request` event) and isn't in `GET /api/login-requests`: only its code finds it
+     (`GET /api/login-requests?code=…`, the QR code's link). The web app asks for the code to be typed in from the new
+     server's screen, never showing it.
+   - **(1.23.3, S-2)** Approving needs a device signed in for good: a session-only sign-in gets `403` reason
+     `temporary` (denying is fine).
 
    The QR code encodes `https://<server>/?approve=<CODE>`. Scanning it with a signed-in phone should open the approval
    prompt.
@@ -190,7 +195,9 @@ Apps should try this first when they reach Beam over its `https://…ts.net` add
 Every `*.ts.net` machine of a tailnet counts as the same *site* for browsers. So cookie-authenticated requests that
 change something (any method except GET/HEAD) are accepted only when one of these is true:
 - `Sec-Fetch-Site` is `same-origin` or `none` (every current browser sends this for same-origin `fetch`/XHR);
-- or `Origin` matches the Host;
+- or `Origin` matches the request's own origin: scheme, host and port, a port the Host leaves out (behind
+  `tailscale serve`) being the request's own scheme's (1.23.3, audit 2026-10-11 S-1: another port of the same name,
+  such as Beam Family's `:8443`, used to pass);
 - or, when neither header is there, the request carries `X-Beam-Device-Id`.
 
 Anything else gets `403 { "reason": "csrf" }`.
@@ -664,7 +671,7 @@ the public update key filled in) + `beam-linux.js.json`, signed (see App updates
 
 | Method & path | Result |
 |---|---|
-| `GET /install/linux` | **No sign-in.** The install script (`linux/install.sh`, `text/plain`) with this Beam's address in it: the one the request came to (through `tailscale serve`, the name it was asked for); only a plain host name, else the known public address, else `400`. On the computer: `curl -fsSL <Beam>/install/linux \| bash [-s -- --name "…" \| --uninstall]` |
+| `GET /install/linux` | **No sign-in.** The install script (`linux/install.sh`, `text/plain`) with this Beam's address in it: the one the request came to (through `tailscale serve`, the name it was asked for); only a plain host name, else the known public address, else `400`. **(1.23.3, audit 2026-10-11 S-9)** Both this and `beam.js` only over https or to a Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48) or loopback address: plain http on a local network gets `403` (the script refuses such an address too, and Add a device shows no command then). On the computer: `curl -fsSL <Beam>/install/linux \| bash [-s -- --name "…" \| --uninstall]` |
 | `GET /install/linux/beam.js` | **No sign-in.** The app the script installs (dist's `beam-linux.js`); `404` until it's built |
 | `GET /download/linux` | Its updates (signed in), like `/download/windows` |
 
@@ -1256,7 +1263,7 @@ viewer. Unlike a PC's, nothing goes directly between the two devices. Everything
 |---|---|
 | `GET /api/settings` | `{ "movedTo", "publicUrl", "publicUrlLearned", "tailscaleSignIn", "tailscaleOwners": [...], "tailscaleOwnersFixed": [...] (1.7.3: from BEAM_TAILSCALE_OWNERS), "tailscaleSeen": [{ "login", "since", "last", "devices": [names] }] (1.7.3: accounts that signed in on purpose but aren't owners), "retentionDays", "maxItems", "blockedNodes": [{ "node", "name", "since", "device" }], "alerts": { "battery", "storage", "serverDisk", "offline": [...] }, "locked": [...] }` |
 | `DELETE /api/settings/blocked-nodes/{node}` | unblock one Tailscale machine (URI-encode `node`) → the new settings |
-| `PATCH /api/settings` | any of `publicUrl` (`""`/`null` = learn again), `tailscaleSignIn`, `tailscaleOwners`, `retentionDays` (0 = forever … 3650), `maxItems` (0 = no limit … 100000), and `unblockNode: "<node>"` (or a list) to let a blocked Tailscale machine sign in automatically again. (1.7.3) `allowOwner: "<login>"` / `removeOwner: "<login>"` add or remove one owner (not one from BEAM_TAILSCALE_OWNERS: `409`). Owners are never learned by just seeing an account: a login becomes one on a brand-new Beam's first sign-in, from these settings or BEAM_TAILSCALE_OWNERS, or, on a Beam with no owner at all, from a sign-in made on purpose; other accounts that sign in on purpose are listed in `tailscaleSeen`. Letting more in (`allowOwner`, `tailscaleOwners`, `tailscaleSignIn: true`) needs a sign-in made on purpose (the password, a pairing link or code, an approval, the master key, a Beam app's own): else `403` reason `sign-in`. Everything is checked before anything changes. Also `alerts` (1.3): any of `battery`, `storage`, `serverDisk` (true/false) and `offline` (the full list of watched device ids); kinds you leave out keep their value. → the new settings; event `settings`. `400` for unknown or invalid values, `409` for ones fixed by an environment variable (listed in `locked`) |
+| `PATCH /api/settings` | any of `publicUrl` (`""`/`null` = learn again), `tailscaleSignIn`, `tailscaleOwners`, `retentionDays` (0 = forever … 3650), `maxItems` (0 = no limit … 100000), and `unblockNode: "<node>"` (or a list) to let a blocked Tailscale machine sign in automatically again. (1.7.3) `allowOwner: "<login>"` / `removeOwner: "<login>"` add or remove one owner (not one from BEAM_TAILSCALE_OWNERS: `409`). Owners are never learned by just seeing an account: a login becomes one on a brand-new Beam's first sign-in, from these settings or BEAM_TAILSCALE_OWNERS, or, on a Beam with no owner at all, from a sign-in made on purpose; other accounts that sign in on purpose are listed in `tailscaleSeen`. Letting more in (`allowOwner`, `tailscaleOwners`, `tailscaleSignIn: true`) needs a sign-in made on purpose (the password, a pairing link or code, an approval, the master key, a Beam app's own): else `403` reason `sign-in`; that and `unblockNode` (as `DELETE /api/settings/blocked-nodes/{node}`) also need one signed in for good (1.23.3, S-2): else `403` reason `temporary`. Everything is checked before anything changes. Also `alerts` (1.3): any of `battery`, `storage`, `serverDisk` (true/false) and `offline` (the full list of watched device ids); kinds you leave out keep their value. → the new settings; event `settings`. `400` for unknown or invalid values, `409` for ones fixed by an environment variable (listed in `locked`) |
 
 `publicUrl` is learned from the first https address seen through `tailscale serve` (or another trusted proxy) on a
 signed-in request, unless configured.
@@ -1266,7 +1273,7 @@ signed-in request, unless configured.
 |---|---|
 | `GET /api/me` | `{ "ok": true, "you", "api": 3, "read": {...}, "auth": { "via": "master"|"token", "user", "role", "session"? }, "machine": { "name" } | null }`. `machine.name` is this device's Tailscale machine name when known (v3) |
 | `GET /api/info` | `{ "version", "api", "serverId", "features": [...], "uptime", "retentionDays", "maxItems", "maxUpload", "chunkSize", "maxChunkSize" (1.4), "maxStorage", "storage": { "used", "items", "files", "free", "total" }, "publicUrl", "urls", "tailscaleSignIn", "tailscaleOwners", "moving", "apps": { "windows", "android" }, "passwordSet", "ntfy", "settings", "family" (1.7: Beam Family's address from `BEAM_FAMILY_URL`, or null; see docs/FAMILY.md) }` |
-| `GET /api/pair` | `{ "key": "bp_…", "lanUrl", "publicUrl", "expiresAt", "link" }`. `key` is a single-use pairing token valid 15 minutes (v3; it was the master key) |
+| `GET /api/pair` | `{ "key": "bp_…", "lanUrl", "publicUrl", "expiresAt", "link" }`. `key` is a single-use pairing token valid 15 minutes (v3; it was the master key). (1.23.3, S-2) `403` reason `temporary` for a session-only sign-in: a pairing link is a lasting sign-in |
 | `POST /api/password` | `{ "password", "current"? }` sets it (≥ 8 characters); `""` removes it. Changing or removing a set password takes `current` (1.7.2; `403 reason: "current-password"` without it or when wrong), except from a sign-in made deliberately (the password, a pairing link, an approval, the master key, a Beam app's own) |
 | `POST /api/security/sign-out-others` | **(v3)** optional body `{ "disableTailscaleSignIn": true }`. New master key, every sign-in revoked, every other device's Tailscale machine blocked, learned Tailscale owners dropped; the caller gets `{ "key": "bt_…", "revoked": n, "tailscaleSignIn" }` (and `X-Beam-Token` / a cookie). `409` when the key comes from `BEAM_KEY` |
 | `POST /api/logout` | Signs this browser out: revokes its token, clears the cookie, and sends `Clear-Site-Data: "cache", "storage"` (v3) |
@@ -1283,7 +1290,7 @@ signed-in request, unless configured.
 | `GET /api/metrics` | **(1.4)** how the server is doing (see Metrics). **(1.14.3)** `403` for a session-only sign-in, as backups |
 | `POST /api/move`, `DELETE /api/move` | **(v3)** see When the server moves |
 | `GET /api/admin/export` | **(v3)** the whole Beam as a `.tar.gz` (master key, or a token from an approved `purpose: "move"` request). `?freeze` pauses changes until a move completes |
-| `GET /api/backups` | **(1.8.1, feature `backups`)** this server's own backups: `{ "dir", "hours", "keep", "filesMB", "running", "last": { "at", "name", "bytes", "files", "filesLeftOut", "why" } \| { "at", "error" } \| null, "backups": [{ "name", "at", "bytes" }] }` (newest first). A backup is an export (`beam-backup-<UTC time>.tar.gz`), made every `BEAM_BACKUP_HOURS` into `BEAM_BACKUP_DIR`; the newest `BEAM_BACKUP_KEEP` are kept. Item files go in while they add up to `BEAM_BACKUP_FILES_MB`, the smallest first (1.14.3; before, all or none): `files` is true when every one went in, `filesLeftOut` counts the rest (also in the archive's `beam-export.json`); a file left out isn't in the backup's item list. Restore: stop Beam, then `node server.js import <backup> --force`. `403` for a session-only sign-in |
+| `GET /api/backups` | **(1.8.1, feature `backups`)** this server's own backups: `{ "dir", "hours", "keep", "filesMB", "running", "last": { "at", "name", "bytes", "files", "filesLeftOut", "why" } \| { "at", "error" } \| null, "backups": [{ "name", "at", "bytes" }] }` (newest first). A backup is an export (`beam-backup-<UTC time>.tar.gz`), made every `BEAM_BACKUP_HOURS` into `BEAM_BACKUP_DIR`; the newest `BEAM_BACKUP_KEEP` are kept. Item files go in while they add up to `BEAM_BACKUP_FILES_MB`, the smallest first (1.14.3; before, all or none): `files` is true when every one went in, `filesLeftOut` counts the rest (also in the archive's `beam-export.json`); a file left out isn't in the backup's item list. Restore: stop Beam, then `node server.js import <backup> --force`. `403` for a session-only sign-in. **(1.23.3, S-11)** Without `BEAM_BACKUP_DIR`: `beam-backups` next to the data folder (a plain `backups` there that already holds Beam's backups stays in use), or `backups` inside it when the data folder is at a drive's root |
 | `POST /api/backups` | **(1.8.1)** a backup now (Settings → Server, `node server.js backup`) → `201` with the same as `GET`; one at a time (a second gets the one being written). `500` if writing it failed |
 | `POST /api/admin/shutdown` | **(v3)** stops the server cleanly; master key, from the server machine only (`node server.js stop`) |
 | `GET /api/qr.svg?data=…`, `GET /api/qr.png?data=…` | a QR code (signed-in only) |

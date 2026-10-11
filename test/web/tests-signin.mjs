@@ -450,6 +450,35 @@ export default function register(test) {
     await page.waitFor(`!$('#approveDlg').open`, 5000, 'dialog closed');
   });
 
+  test('audit 2026-10-11 S-3: a move pops up nowhere; found by its code, it is approved only with the code typed in', async ctx => {
+    const srv = await ctx.startServer(8822);
+    ctx.defer(() => srv.stop());
+    const page = await ctx.signedIn({ server: srv });
+    const r = await (await fetch(`${srv.base}/api/login-requests`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ctx.nextIp() }, body: JSON.stringify({ name: 'Your bank', platform: 'server', purpose: 'move' }) })).json();
+    await ctx.sleep(1500);
+    assert(await page.evaluate(`!$('#approveDlg').open`), 'no pop-up for a move');
+    // An approve link (its code in it): the prompt asks for the code, shows none, and Approve waits for it.
+    await page.evaluate(`lookUpApproval(${JSON.stringify(r.code)})`);
+    await page.waitFor(`$('#approveDlg').open && !$('#approveTypeRow').hidden`, 5000, 'asked to type the code');
+    eq(await page.evaluate(`[$('#approveCode').hidden, $('#approveTitle').textContent]`), [true, 'Copy all of Beam to a new server?']);
+    await ctx.sleep(1100);
+    assert(await page.evaluate(`$('#approveBtn').disabled`), 'not without the code');
+    await page.evaluate(`$('#approveType').value = 'WRONG-CODE'; $('#approveType').dispatchEvent(new Event('input'))`);
+    assert(await page.evaluate(`$('#approveBtn').disabled`), 'not with another code');
+    await page.evaluate(`$('#approveType').value = ${JSON.stringify(r.code.toLowerCase().replace('-', ' '))}; $('#approveType').dispatchEvent(new Event('input'))`);
+    assert(await page.evaluate(`!$('#approveBtn').disabled`), 'the code, however it is typed');
+    await page.evaluate(`$('#denyBtn').click()`);
+    await page.waitFor(`!$('#approveDlg').open`, 5000);
+    // Typed into Add a device → Approve: not asked twice.
+    const r2 = await (await fetch(`${srv.base}/api/login-requests`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ctx.nextIp() }, body: JSON.stringify({ name: 'New server', platform: 'server', purpose: 'move' }) })).json();
+    await page.evaluate(`lookUpApproval(${JSON.stringify(r2.code)}, { typed: true })`);
+    await page.waitFor(`$('#approveDlg').open && $('#approveType').value !== ''`, 5000);
+    await ctx.sleep(1100);
+    assert(await page.evaluate(`!$('#approveBtn').disabled`), 'typed once is enough');
+    await page.evaluate(`$('#denyBtn').click()`);
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('a signed-out phone opening an approve link is asked to sign in first, then gets the prompt', async ctx => {
     const r = await (await fetch(`${ctx.srv.base}/api/login-requests`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ctx.nextIp() }, body: JSON.stringify({ name: 'New laptop', platform: 'web' }) })).json();
     const admin = dev(ctx, 'Admin', 'windows');

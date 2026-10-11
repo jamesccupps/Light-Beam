@@ -50,6 +50,7 @@ class SendActivity : BaseActivity() {
 
     /** Where to send without asking: a Direct Share shortcut, or the tile's default device. */
     private var directTarget: String? = null
+    private var shareShortcut: String? = null // (audit 2026-10-11 S-7) a Direct Share target: chosen in the sheet
 
     /** Loading the device list failed (no saved copy either): offer what's possible anyway. */
     private var refreshFailed = false
@@ -79,7 +80,7 @@ class SendActivity : BaseActivity() {
             finish()
             return
         }
-        directTarget = Shortcuts.conversationFor(intent.getStringExtra(ShortcutManagerCompat.EXTRA_SHORTCUT_ID))
+        shareShortcut = Shortcuts.conversationFor(intent.getStringExtra(ShortcutManagerCompat.EXTRA_SHORTCUT_ID))
         when (intent.action) {
             Intent.ACTION_SEND -> {
                 intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.takeIf { it.isNotBlank() }?.let(texts::add)
@@ -190,6 +191,10 @@ class SendActivity : BaseActivity() {
         binding.targets.layoutManager = LinearLayoutManager(this)
         binding.targets.adapter = targets
         binding.send.setOnClickListener { sendNow(targets.selected.toList(), withSheet = true) }
+        shareShortcut?.takeIf { known(it) }?.let { key ->
+            targets.multi = true
+            targets.toggle(key) // (Send shows, for that conversation)
+        }
         dialog.show()
 
         lifecycleScope.launch {

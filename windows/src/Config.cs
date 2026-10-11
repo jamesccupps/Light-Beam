@@ -507,6 +507,7 @@ namespace Beam
         readonly string handledFile;
         readonly string stateFile;
         readonly List<string> handledOrder = new List<string>();
+        readonly List<string> pathOrder = new List<string>(); // (audit 2026-10-11) LocalPaths' keys, oldest first
         readonly HashSet<string> handled = new HashSet<string>();
         public bool Initialized;
         public long BaselineTs;
@@ -545,7 +546,7 @@ namespace Beam
                     {
                         LastRead = Json.LongMap(d, "lastRead");
                         var paths = Json.Obj(Json.Get(d, "files"));
-                        if (paths != null) foreach (var kv in paths) if (kv.Value is string) LocalPaths[kv.Key] = (string)kv.Value;
+                        if (paths != null) foreach (var kv in paths) if (kv.Value is string && !LocalPaths.ContainsKey(kv.Key)) { LocalPaths[kv.Key] = (string)kv.Value; pathOrder.Add(kv.Key); }
                         var sc = Json.Obj(Json.Get(d, "sendTo"));
                         if (sc != null) foreach (var kv in sc) if (kv.Value is string) Shortcuts[kv.Key] = (string)kv.Value;
                         var ups = Json.Get(d, "uploads") as object[];
@@ -593,6 +594,7 @@ namespace Beam
             ServerId = serverId;
             LastRead.Clear();
             LocalPaths.Clear();
+            pathOrder.Clear();
             Uploads.Clear();
             Downloads.Clear();
             SaveHandled();
@@ -621,11 +623,13 @@ namespace Beam
 
         public void SetLocalPath(string itemId, string path)
         {
+            pathOrder.Remove(itemId);
             if (path == null) LocalPaths.Remove(itemId);
-            else LocalPaths[itemId] = path;
-            if (LocalPaths.Count > MaxPaths)
+            else { LocalPaths[itemId] = path; pathOrder.Add(itemId); }
+            while (pathOrder.Count > MaxPaths)
             {
-                foreach (var k in LocalPaths.Keys.Take(LocalPaths.Count - MaxPaths).ToList()) LocalPaths.Remove(k);
+                LocalPaths.Remove(pathOrder[0]);
+                pathOrder.RemoveAt(0);
             }
             Save();
         }
@@ -652,7 +656,7 @@ namespace Beam
                 var lr = new Dictionary<string, object>();
                 foreach (var kv in LastRead) lr[kv.Key] = kv.Value;
                 var files = new Dictionary<string, object>();
-                foreach (var kv in LocalPaths) files[kv.Key] = kv.Value;
+                foreach (var k in pathOrder) files[k] = LocalPaths[k]; // (oldest first, as they're read back)
                 var sc = new Dictionary<string, object>();
                 foreach (var kv in Shortcuts) sc[kv.Key] = kv.Value;
                 d["lastRead"] = lr;

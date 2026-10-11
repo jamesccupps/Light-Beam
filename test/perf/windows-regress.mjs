@@ -674,6 +674,12 @@ async function backups(r) {
   r.check(first.restoreChecked === true && !!(await r.waitLog(/Settings: this PC's are kept on the server too/, 0, 5000)), '...after looking for an earlier install\'s (there was none)');
   r.forward(['--test-bridge', JSON.stringify({ type: 'setSettings', id: 'test-set', settings: { openLinks: false } })]);
   r.check(await r.waitFor(async () => ((await get())[0] || {}).settings?.openLinks === false, 25000), 'a change goes up (10 s later)');
+  // (audit 2026-10-11 S-4) Where received files go is picked at this PC only (Windows' folder picker), never by the page.
+  const asked = r.logLines().length;
+  r.forward(['--test-bridge', JSON.stringify({ type: 'setSettings', id: 'test-folder', settings: { saveFolder: path.join(r.dir, 'startup') } })]);
+  const line = await r.waitLog(/Bridge test reply: .*"id":"test-folder"/, asked, 10000);
+  const rep = line ? JSON.parse(line.slice(line.indexOf('{'))) : null;
+  r.check(rep && rep.ok === false && rep.code === 'native-only' && r.readConfig().saveFolder !== path.join(r.dir, 'startup'), `the page can't choose the save folder (${rep ? rep.code || 'ok' : 'no reply'})`);
   await r.quitApp();
   // The reinstall: a fresh config in the same place (a test instance's "Windows account" goes by its config path), so a
   // new device id, install id and device key, and the default settings.

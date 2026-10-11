@@ -198,7 +198,15 @@ namespace Beam
                     break;
                 case "setSettings":
                 {
-                    string err = app.ApplySettings(Json.Obj(Json.Get(m, "settings")));
+                    var asked = Json.Obj(Json.Get(m, "settings"));
+                    // (audit 2026-10-11 S-4) The folders received files are saved in are picked at this PC (browseFolder):
+                    // a page could otherwise send them into any folder, Startup or a program's own.
+                    if (asked != null && (asked.ContainsKey("saveFolder") || asked.ContainsKey("outboxFolder")))
+                    {
+                        Fail(id, "native-only", "Choose the folder with Change… (Windows' folder picker) at this PC");
+                        break;
+                    }
+                    string err = app.ApplySettings(asked);
                     // Remote control is turned on (and its devices chosen) only at this PC: never from the page. (1.16) So
                     // is letting Beam install apps here.
                     if (err == RemoteControl.OnlyHere || err == AppInstaller.OnlyHere) Fail(id, "native-only", err);

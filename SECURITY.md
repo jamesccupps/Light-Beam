@@ -24,6 +24,8 @@ for the owner's family, which may face the internet.
 - **Files.** Received files are never opened or run automatically. Files are served with `nosniff` and a sandboxing
   content policy, and only pictures, video and sound are shown inline, so an uploaded page can't run as Beam.
 - **A server move.** Devices follow Beam to a new address only when the new server proves it holds this Beam's key.
+  Asking for a move (a full copy of Beam) pops up on no device: it's approved only by typing the code the new server
+  shows.
 - **Updates.** The apps install only what your own server offers, and only when it's signed with the key they were
   built with: Windows checks the build's signature (`windows/update-key.mjs`, since 1.7.3), Android that the update is
   signed with the same key as the installed app. A changed `dist` folder or a server that isn't yours can't push
@@ -40,6 +42,10 @@ for the owner's family, which may face the internet.
   apps update from `dist` but install only builds signed with your keys (the Windows update key, the Android keystore):
   whoever has those keys can change every app.
 - **The server itself.** Messages and files are not end-to-end encrypted: the server stores and relays them.
+- **Apps on every PC** (off until allowed at each PC): installers are checked against the SHA-256 and size in your
+  server's own list, which any device signed in for good can add to. That makes sure a PC installs what the list says,
+  not that the list is trustworthy: whoever controls your server's list can install programs on every PC that allows
+  it. Unlike the Beam apps' own updates, the list isn't signed with a key the server never holds.
 
 ## Trade-offs, on purpose
 

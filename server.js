@@ -91,9 +91,15 @@ const MAX_STORAGE = num(env.BEAM_MAX_STORAGE_GB, 0) * 1024 * MB; // 0 = no limit
 // (1.8.1) Backups of this server: an export every BEAM_BACKUP_HOURS (0: none) into BEAM_BACKUP_DIR (default: a
 // "backups" folder next to the data folder, or in it when the data folder is at a drive's root), the newest
 // BEAM_BACKUP_KEEP kept; item files go in while they add up to at most BEAM_BACKUP_FILES_MB.
+// (audit 2026-10-11 S-11) Next to the data folder it's "beam-backups": a plain "backups" there (C:\ProgramData\backups
+// with BEAM_DATA=C:\ProgramData\Beam) is a name any account may have made first. One that already holds Beam's backups
+// stays in use.
 const BACKUP_DIR = path.resolve(env.BEAM_BACKUP_DIR || (() => {
   const parent = path.dirname(DATA_DIR);
-  return parent === path.parse(parent).root ? path.join(DATA_DIR, 'backups') : path.join(parent, 'backups');
+  if (parent === path.parse(parent).root) return path.join(DATA_DIR, 'backups');
+  const old = path.join(parent, 'backups');
+  try { if (fs.readdirSync(old).some(f => /^beam-backup-\d{8}-\d{6}\.tar\.gz$/.test(f))) return old; } catch {}
+  return path.join(parent, 'beam-backups');
 })());
 const BACKUP_HOURS = Math.max(0, num(env.BEAM_BACKUP_HOURS, 24));
 const BACKUP_KEEP = Math.max(1, Math.floor(num(env.BEAM_BACKUP_KEEP, 14)));
@@ -1285,14 +1291,18 @@ function crossSiteBrowser(req) {
   return Boolean(req.headers.origin) && !originMatches(req);
 }
 
+// (audit 2026-10-11 S-1) The whole origin: scheme, host and port, a port the Host leaves out (behind tailscale serve)
+// being the request's own scheme's, never the Origin's (another port of the same name, Beam Family's :8443 say, is
+// another site's page).
 function originMatches(req) {
   try {
     const o = new URL(req.headers.origin);
-    const port = o.port || (o.protocol === 'https:' ? '443' : '80');
-    const want = `${o.hostname}:${port}`.toLowerCase();
+    const want = `${o.protocol}//${o.hostname}:${o.port || (o.protocol === 'https:' ? '443' : '80')}`.toLowerCase();
+    const scheme = isHttps(req) ? 'https:' : 'http:';
+    const port = scheme === 'https:' ? '443' : '80';
     return [requestHost(req), String(req.headers.host || '')].some(h => {
       const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(h.trim());
-      return m && `${m[1]}:${m[2] || port}`.toLowerCase() === want;
+      return m && `${scheme}//${m[1]}:${m[2] || port}`.toLowerCase() === want;
     });
   } catch {
     return false;
@@ -5882,8 +5892,22 @@ function requestBase(req) {
   return known && /^https?:\/\/[a-z0-9.:[\]-]+$/i.test(known) ? known : null;
 }
 
+// (audit 2026-10-11 S-9) What it installs runs on that computer: never over plain http on a LAN, where anyone on the
+// network could change it on the way. https (tailscale serve), or a Tailscale address (WireGuard underneath), or this
+// machine itself.
+function installAddressOk(base) {
+  let u;
+  try { u = new URL(base); } catch { return false; }
+  if (u.protocol === 'https:') return true;
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host) || /^fd7a:115c:a1e0:/.test(host)
+    || host === 'localhost' || /^127\./.test(host) || host === '::1';
+}
+const INSTALL_HTTPS_ONLY = 'Beam for Linux installs only through Beam\'s https address (tailscale serve) or its Tailscale address, never plain http on a local network.\n';
+
 async function linuxInstall(req, res, pathname) {
   req.routeName = 'linuxInstall';
+  if (!installAddressOk(originOf(req))) return send(res, 403, INSTALL_HTTPS_ONLY, { 'Content-Type': 'text/plain; charset=utf-8' });
   if (pathname === '/install/linux/beam.js') {
     const file = path.join(DIST_DIR, APPS.linux);
     if (!fs.existsSync(file)) return send(res, 404, 'Beam for Linux hasn\'t been built on this Beam yet (node linux/build.mjs).\n', { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -6289,7 +6313,18 @@ function createPairing(byDevice) {
   return token;
 }
 
+// (audit 2026-10-11 S-2) What outlasts a borrowed computer's session takes a device signed in for good: a pairing
+// link (a lasting sign-in), approving another sign-in, letting more sign in automatically. Remote control, logs, backups
+// and apps already ask the same (rcCaller and the like).
+function requireLasting(req, url, what) {
+  const me = deviceIdOf(req, url);
+  if (authOf(req)?.session || (me && devices[me]?.temporary)) {
+    throw httpError(403, `A sign-in for this browser session only can't ${what}: sign in on this device for good first`, { reason: 'temporary' });
+  }
+}
+
 async function pairInfo(req, res, _m, url) {
+  requireLasting(req, url, 'add a device');
   const key = createPairing(deviceIdOf(req, url));
   const lanUrl = lanBase();
   const publicUrl = (await publicBase()) || null;
@@ -6373,6 +6408,7 @@ async function patchSettings(req, res) {
   // (1.7.3) Letting more in (another owner, automatic sign-in back on) takes a sign-in made on purpose, not one that
   // Tailscale or this machine's Beam app made by itself. Taking away needs no more than any sign-in.
   const widens = body.allowOwner !== undefined || body.tailscaleOwners !== undefined || body.tailscaleSignIn === true;
+  if (widens || body.unblockNode !== undefined) requireLasting(req, url, 'change who signs in automatically'); // (audit 2026-10-11 S-2)
   if (widens && !rcSignInOk(authOf(req))) {
     throw httpError(403, 'To change who signs in automatically, sign in on this device with the password, a pairing link or an approval first', { reason: 'sign-in' });
   }
@@ -6440,7 +6476,8 @@ function unblockNodes(nodes) {
   }
 }
 
-function deleteBlockedNode(req, res, [node]) {
+function deleteBlockedNode(req, res, [node], url) {
+  requireLasting(req, url, 'let a blocked device sign itself in again');
   let id = node;
   try { id = decodeURIComponent(node); } catch {}
   if (!(settings.blockedNodes || []).some(b => b.node === id)) return send(res, 404, { error: 'Not found' });
@@ -6664,7 +6701,9 @@ async function createLoginRequest(req, res) {
   const local = /^https?:\/\/(localhost|127\.|\[::1\])/i.test(origin);
   const approveUrl = `${(await publicBase()) || (local && lanBase()) || origin}/?approve=${r.code}`;
   const qrSvg = await QRCode.toString(approveUrl, { type: 'svg', margin: 2, errorCorrectionLevel: 'M' });
-  broadcast('login-request', publicLoginRequest(r));
+  // (audit 2026-10-11 S-3) A move (a full copy of Beam, asked for by anyone who can reach this server) pops up
+  // nowhere and isn't listed: it's approved only with its code, which only the new server's screen shows.
+  if (purpose !== 'move') broadcast('login-request', publicLoginRequest(r));
   send(res, 201, { id: r.id, code: formatCode(r.code), secret, approveUrl, qrSvg, expiresAt: r.expires });
 }
 
@@ -6719,10 +6758,11 @@ function findLoginRequest(code) {
 function listLoginRequests(req, res, _m, url) {
   if (url.searchParams.get('code')) return send(res, 200, publicLoginRequest(findLoginRequest(url.searchParams.get('code'))));
   pruneLoginRequests();
-  send(res, 200, { requests: pendingRequests().map(publicLoginRequest) });
+  send(res, 200, { requests: pendingRequests().filter(r => r.purpose !== 'move').map(publicLoginRequest) });
 }
 
 async function answerLoginRequest(req, res, [action], url) {
+  if (action === 'approve') requireLasting(req, url, 'approve a sign-in');
   const { code } = await readJson(req);
   const r = findLoginRequest(code);
   const by = nameOf(deviceIdOf(req, url)) || deviceNameOf(req, url) || 'a signed-in device';

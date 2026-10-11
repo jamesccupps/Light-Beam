@@ -200,13 +200,14 @@ function fakeTailscale({ self = [], selfInfo = {}, peers = [], whois = {}, serve
 // Tailscale serve forwards requests from loopback with these headers.
 const viaServe = (ip, login, extra = {}) => ({ 'X-Forwarded-For': ip, 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'beam.tail1234.ts.net', Host: 'beam.tail1234.ts.net', ...(login && { 'Tailscale-User-Login': login }), ...extra });
 
-function runNode(args, env, { timeout = 60000 } = {}) {
+// live: an object whose `out` follows the output as it comes (for a command that waits on something it printed).
+function runNode(args, env, { timeout = 60000, live = null } = {}) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, [SERVER, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     children.add(child);
     let out = '';
-    child.stdout.on('data', d => { out += d; });
-    child.stderr.on('data', d => { out += d; });
+    child.stdout.on('data', d => { out += d; if (live) live.out = out; });
+    child.stderr.on('data', d => { out += d; if (live) live.out = out; });
     const timer = setTimeout(() => child.kill(), timeout);
     child.on('exit', code => { clearTimeout(timer); children.delete(child); resolve({ code, out }); });
   });
@@ -701,6 +702,17 @@ test('A8: cookie-authenticated changes need same-origin proof; JSON endpoints ne
     assert.equal(r.status, 403);
     r = await post(s, '/api/login', { secret: 'long enough pw' }, { ...evil });
     assert.equal(r.status, 403);
+    // (audit 2026-10-11 S-1) Behind tailscale serve (no port in the Host): another port of the same name (Beam Family's
+    // :8443), or the other scheme, is another site's page; the same name and scheme are Beam's own.
+    const served = { Cookie: `__Host-beam_key=${encodeURIComponent(token)}; beam_device_id=csrfbrow001`, Host: 'beam.tail9876.ts.net', 'X-Forwarded-Proto': 'https', 'Sec-Fetch-Site': 'same-site' };
+    for (const origin of ['https://beam.tail9876.ts.net:8443', 'http://beam.tail9876.ts.net']) {
+      r = await s.req('POST', '/api/file', { headers: { ...served, Origin: origin, 'Content-Type': 'text/plain', 'X-Beam-Filename': 'planted.txt' }, body: 'x' });
+      assert.equal(r.status, 403, origin);
+      r = await s.req('POST', '/api/security/sign-out-others', { headers: { ...served, Origin: origin } });
+      assert.equal(r.status, 403, origin);
+    }
+    r = await post(s, '/api/text', { text: 'from the served page' }, { ...served, Origin: 'https://beam.tail9876.ts.net' });
+    assert.equal(r.status, 201, 'the served page itself');
     // bearer requests are not affected
     r = await s.req('POST', '/api/text', { headers: { ...app(K, 'csrfapp0001'), ...evil, 'Content-Type': 'text/plain' }, body: 'from curl' });
     assert.equal(r.status, 201);
@@ -1271,6 +1283,18 @@ test('C6: session sign-ins end with the browser and after 12 h idle; their devic
     await s.req('GET', '/api/me', { headers: cookie(cookieValue(r), 'borrowed001', { 'X-Beam-Platform': 'web', 'X-Beam-Device': 'Library PC' }) });
     const devs = (await s.req('GET', '/api/devices', { headers: app(K, 'sessadmin01') })).json.devices;
     assert.equal(devs.find(d => d.id === 'borrowed001').temporary, true);
+    // (audit 2026-10-11 S-2) Nothing that outlasts the session: no pairing link, no approving, no letting more in.
+    const borrowed = cookie(cookieValue(r), 'borrowed001', { ...sameOrigin, 'X-Beam-Platform': 'web' });
+    let x = await s.req('GET', '/api/pair', { headers: borrowed });
+    assert.deepEqual([x.status, x.json.reason], [403, 'temporary'], 'no pairing link');
+    const asked = (await post(s, '/api/login-requests', { name: 'Someone' }, from('100.64.70.70'))).json;
+    x = await post(s, '/api/login-requests/approve', { code: asked.code }, borrowed);
+    assert.deepEqual([x.status, x.json.reason], [403, 'temporary'], 'no approving');
+    x = await s.req('PATCH', '/api/settings', { headers: json(borrowed), body: JSON.stringify({ tailscaleSignIn: true }) });
+    assert.deepEqual([x.status, x.json.reason], [403, 'temporary'], 'no letting more in');
+    x = await post(s, '/api/login-requests/deny', { code: asked.code }, borrowed);
+    assert.equal(x.status, 200, 'denying is fine');
+    assert.equal((await s.req('GET', '/api/pair', { headers: app(K, 'sessadmin01') })).status, 200, 'a device signed in for good still can');
     await sleep(500); // let devices.json be written (the test kills the server hard)
   } finally { await s.stop(); }
   const file = path.join(s.data, 'tokens.json');
@@ -1502,10 +1526,14 @@ test('B5: import-from copies a running Beam after approval and moves everyone ov
     await upload(old, h, 'doc.pdf', crypto.randomBytes(20_000));
     const target = path.join(TMP, 'if-new');
     fs.rmSync(target, { recursive: true, force: true });
-    const running = runNode(['import-from', `http://127.0.0.1:${old.port}`, '--public-url', 'http://127.0.0.1:8795'], serverEnv(8795, target));
-    const request = await waitFor(async () => (await old.req('GET', '/api/login-requests', { headers: h })).json.requests.find(r => r.purpose === 'move'), 15000);
+    const live = { out: '' };
+    const running = runNode(['import-from', `http://127.0.0.1:${old.port}`, '--public-url', 'http://127.0.0.1:8795'], serverEnv(8795, target), { live });
+    // (1.23.3, audit 2026-10-11 S-3) A move is announced to no one: it's approved with the code the new server shows.
+    const code = await waitFor(() => /Code: (\S+)/.exec(live.out)?.[1], 15000);
+    assert.ok(!(await old.req('GET', '/api/login-requests', { headers: h })).json.requests.some(r => r.purpose === 'move'), 'not listed');
+    const request = (await old.req('GET', `/api/login-requests?code=${encodeURIComponent(code)}`, { headers: h })).json;
     assert.match(request.name, /Move Beam to/);
-    await post(old, '/api/login-requests/approve', { code: request.code }, h);
+    await post(old, '/api/login-requests/approve', { code }, h);
     const result = await running;
     assert.equal(result.code, 0, result.out);
     const frozen = await post(old, '/api/text', { text: 'during the move' }, h);
@@ -1590,6 +1618,10 @@ test('1.7.3: a revoked migration sign-in never comes back; one answer for a move
     } finally { other.close(); }
     // S-14: a move sign-in (approved like import-from's) is revoked when the move is called off.
     const lr = (await post(s, '/api/login-requests', { name: 'Move Beam', platform: 'server', purpose: 'move' })).json;
+    // (audit 2026-10-11 S-3) Listed nowhere (and announced to no one): only its code finds it.
+    assert.ok(!(await s.req('GET', '/api/login-requests', { headers: admin })).json.requests.some(x => x.id === lr.id), 'not listed');
+    const found = (await s.req('GET', `/api/login-requests?code=${encodeURIComponent(lr.code)}`, { headers: admin })).json;
+    assert.deepEqual([found.id, found.purpose], [lr.id, 'move'], 'found by its code');
     await post(s, '/api/login-requests/approve', { code: lr.code }, admin);
     const moveKey = (await s.req('GET', `/api/login-requests/${lr.id}`, { headers: { 'X-Beam-Login-Secret': lr.secret } })).json.key;
     assert.ok(moveKey);
@@ -3009,7 +3041,15 @@ test('1.22 Beam for Linux on the server: its status (model, start, temperature, 
     assert.ok(!r.body.includes('__BEAM_URL__'));
     r = await s.req('GET', '/install/linux', { headers: { ...from('100.64.40.3'), 'X-Forwarded-Host': 'beam.example.ts.net', 'X-Forwarded-Proto': 'https' } });
     assert.ok(r.body.includes('local beam_url=\'https://beam.example.ts.net\''), 'the name tailscale serve was asked for');
-    assert.equal((await s.req('GET', '/install/linux', { headers: { Host: 'evil.example:80:80' } })).status, 400, 'only a plain host name goes into a script');
+    assert.equal((await s.req('GET', '/install/linux', { headers: { Host: 'evil.example:80:80' } })).status, 403, 'only a plain host name goes into a script');
+    // (audit 2026-10-11 S-9) Never over plain http on a local network (the script, nor the app it fetches); a Tailscale
+    // address is fine (WireGuard underneath).
+    for (const p of ['/install/linux', '/install/linux/beam.js']) {
+      r = await s.req('GET', p, { headers: { Host: '192.168.1.20:8765' } });
+      assert.deepEqual([r.status, /https address/.test(r.body)], [403, true], p);
+    }
+    r = await s.req('GET', '/install/linux', { headers: { Host: '100.101.102.103:8765' } });
+    assert.ok(r.body.includes('local beam_url=\'http://100.101.102.103:8765\''), 'a Tailscale address');
     if (process.platform === 'linux') {
       fs.writeFileSync(path.join(TMP, 'install-linux.sh'), (await s.req('GET', '/install/linux')).body);
       const check = spawnSync('bash', ['-n', path.join(TMP, 'install-linux.sh')], { encoding: 'utf8' });

@@ -15,6 +15,21 @@
 
 set -euo pipefail
 
+# (audit 2026-10-11) --help in its own words: under `curl … | bash` there is no file to read them from.
+usage() {
+  cat <<'EOF'
+Beam for Linux: puts the Beam app on this computer, signs it in and runs it as a service that starts with the
+computer and updates itself.
+
+  curl -fsSL <your Beam>/install/linux | bash
+  curl -fsSL <your Beam>/install/linux | bash -s -- --name "Garage Pi"   (the name Beam shows)
+  curl -fsSL <your Beam>/install/linux | bash -s -- --uninstall         (takes it away again)
+
+Run it again any time to update. It needs Tailscale on this computer, signed in to your tailnet, and runs as you
+(never as root).
+EOF
+}
+
 # (The whole script is one function, run on its last line: bash reads it all first, so a download cut short does
 # nothing, and nothing in it reads what's still coming down the pipe.)
 main() {
@@ -32,7 +47,7 @@ main() {
       --uninstall) uninstall=1; shift ;;
       --no-service) service=0; shift ;; # (tests, and computers without systemd: run `beam agent` yourself)
       --own-node) own_node=1; shift ;;  # (tests: Beam's own Node.js even when this computer has one)
-      -h|--help) sed -n '2,15p' "$0" 2>/dev/null || true; return 0 ;;
+      -h|--help) usage; return 0 ;;
       *) fail "I don't know the option $1 (there's --name \"…\" and --uninstall)" ;;
     esac
   done
@@ -40,6 +55,11 @@ main() {
   [ "$(uname -s)" = Linux ] || fail "this installer is for Linux. Windows and Android have Beam apps of their own (Settings → Add a device)."
   [ "$(id -u)" != 0 ] || fail "run it as yourself, not as root or with sudo: Beam for Linux lives in your home folder."
   case "$beam_url" in http://*|https://*) ;; *) fail "this copy of the installer doesn't know your Beam's address: get it from your Beam (Settings → Add a device)." ;; esac
+  # (audit 2026-10-11 S-9) never over plain http on a local network: https, or a Tailscale or loopback address
+  case "$beam_url" in
+    https://*|http://100.6[4-9].*|http://100.[7-9][0-9].*|http://100.1[01][0-9].*|http://100.12[0-7].*|http://\[fd7a:115c:a1e0:*|http://localhost:*|http://localhost|http://127.*) ;;
+    *) fail "Beam for Linux installs only through Beam's https address (tailscale serve) or its Tailscale address, not $beam_url" ;;
+  esac
 
   if [ "$uninstall" = 1 ]; then
     if has systemctl; then
