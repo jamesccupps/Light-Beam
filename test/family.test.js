@@ -1504,6 +1504,29 @@ test('F-X (1.15.1): a fast link’s direct download counts as it starts, as over
   }
 });
 
+test('F-Y (1.23.5, audit): a name with an accented capital ("Émile") signs in however it’s typed, and can’t be taken again in another case', async () => {
+  const s = await start('accents', 8842);
+  try {
+    const f = await family(s);
+    let r = await call(s, 'POST', '/api/invites', f.owner, { uses: 5 });
+    const code = r.json.url.split('/join/')[1];
+    r = await call(s, 'POST', `/api/invites/${code}`, {}, { name: 'Émile', password: 'a long family password' });
+    assert.equal(r.status, 201, r.body);
+    for (const name of ['Émile', 'émile', 'ÉMILE', ' émile ']) {
+      r = await call(s, 'POST', '/api/signin', {}, { name, password: 'a long family password' });
+      assert.equal(r.status, 200, `${JSON.stringify(name)}: ${r.body}`);
+      assert.equal((await call(s, 'GET', '/api/session', `fam_s=${sessionOf(r)}`)).json.me?.name, 'Émile');
+    }
+    assert.equal((await call(s, 'POST', '/api/signin', {}, { name: 'émile', password: 'not the password at all' })).status, 401);
+    for (const name of ['émile', 'ÉMILE']) {
+      assert.equal((await call(s, 'POST', `/api/invites/${code}`, {}, { name, password: 'another long family password' })).status, 409, name);
+    }
+    const zoe = await join(s, f.owner, 'Zoë');
+    r = await call(s, 'PATCH', '/api/me', zoe.who, { name: 'éMILE' });
+    assert.equal(r.status, 409, 'nor by a rename');
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

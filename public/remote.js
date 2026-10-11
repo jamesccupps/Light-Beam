@@ -2738,9 +2738,6 @@ function rcSetPic(key, value) {
   rcRenderDetails();
 }
 
-// (the old toggle's name, for a PC before 1.8: its two modes)
-function rcSetQuality(q) { rcSetPic('mode', q); }
-
 // The picture area here in physical pixels, zoom included (zoomed in, more of the PC's pixels are worth sending).
 function rcArea(zoomed) {
   const st = rcUi.stage;
