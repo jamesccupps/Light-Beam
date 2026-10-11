@@ -248,17 +248,22 @@ export function adminView() {
   const view = h('section', { class: 'main', 'aria-label': 'People and channels' },
     h('header', { class: 'conv-head' }, iconBtn('back', 'Back', () => nav.go('/'), { class: 'icon-btn back' }), h('div', { class: 'title' }, h('strong', {}, 'People & channels'))), body);
   let lastInvite = null;
+  // (1.23.5, audit) The page is built once; a person or channel event redraws only its own list. It was all rebuilt
+  // (and the open links fetched again) whenever someone posted or came online, which reset the invite form ("Who /
+  // How many / Works for") and a half-typed space name: an admin could make a different link than the one set up.
+  let built = false;
+  const inviteShown = h('div');
+  const openLinks = h('div');
+  const peopleBox = h('div', { class: 'box' });
+  const channelsBox = h('div', { class: 'box' });
 
-  async function render() {
-    if (!isAdmin()) { fill(body, h('p', {}, 'Only the family space’s admins can see this.')); return; }
-    let invites = [];
-    try { invites = (await api('/api/invites')).invites; } catch {}
+  function render() {
+    built = isAdmin();
+    if (!built) { fill(body, h('p', {}, 'Only the family space’s admins can see this.')); return; }
     const owner = state.me.role === 'owner';
     const role = h('select', { class: 'input', name: 'role' }, h('option', { value: 'member' }, 'Family member'), owner ? h('option', { value: 'admin' }, 'Admin (can invite and manage)') : null);
     const uses = h('select', { class: 'input', name: 'uses' }, [[1, 'One person'], [5, 'Up to 5 people'], [20, 'Up to 20 people']].map(([v, l]) => h('option', { value: v }, l)));
     const days = h('select', { class: 'input', name: 'days' }, [[7, '7 days'], [1, '1 day'], [30, '30 days']].map(([v, l]) => h('option', { value: v }, l)));
-    const people = [...state.people.values()].sort((a, b) => (a.disabled ? 1 : 0) - (b.disabled ? 1 : 0) || a.name.localeCompare(b.name));
-    const all = [...state.channels.values()].filter(c => c.kind === 'text').sort((a, b) => a.position - b.position);
     const space = state.spaces[0];
     fill(body, h('section', {}, h('h2', {}, 'Invite family'), h('div', { class: 'box' },
         h('p', { class: 'muted small', style: { marginTop: 0 } }, 'Make a link and send it (a text message, an e-mail) or let them scan the QR code. On Tailscale they’re signed in by Tailscale; otherwise they choose a password.'),
@@ -266,38 +271,64 @@ export function adminView() {
         h('button', { class: 'btn primary', type: 'button', onclick: async () => {
           try {
             lastInvite = await api('/api/invites', { method: 'POST', body: { role: role.value, uses: Number(uses.value), days: Number(days.value) } });
-            render();
+            showInvite();
+            loadLinks();
           } catch (err) { toast(err.message, { error: true }); }
         } }, icon('user-plus'), 'Make an invite link'),
-        lastInvite ? h('div', { style: { marginTop: '16px' } },
-          h('div', { class: 'invite-link' }, h('code', {}, lastInvite.url), iconBtn('copy', 'Copy the link', () => copyText(lastInvite.url, 'Link copied')),
-            navigator.share ? iconBtn('link', 'Share the link', () => navigator.share({ title: `Join ${space?.name || 'the family'} on Beam Family`, url: lastInvite.url }).catch(() => {})) : null),
-          lastInvite.qr ? h('img', { class: 'qr', alt: 'QR code of the invite link', src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(lastInvite.qr)}`, style: { marginTop: '12px' } }) : null,
-          h('p', { class: 'muted small' }, 'The link is shown only now. It’s like a key: send it only to who it’s for.')) : null,
-        invites.length ? h('div', { style: { marginTop: '16px' } }, h('strong', {}, 'Links still open'),
-          invites.map(i => h('div', { class: 'item' }, h('div', { class: 'grow' }, h('span', {}, `${i.role === 'admin' ? 'Admin' : 'Member'} · ${i.uses} of ${i.max} used`), h('div', { class: 'muted small' }, `Works until ${fullTime(i.expires)}`)),
-            h('button', { class: 'btn ghost danger', type: 'button', onclick: () => api(`/api/invites/${i.id}`, { method: 'DELETE' }).then(render).catch(err => toast(err.message, { error: true })) }, 'Withdraw')))) : null)),
-      h('section', {}, h('h2', {}, 'People'), h('div', { class: 'box' }, people.map(p => h('div', { class: 'item', style: { opacity: p.disabled ? 0.55 : 1 } },
-        avatar(p, { presence: true }),
-        h('div', { class: 'grow' }, h('strong', {}, p.name), h('div', { class: 'muted small' }, [p.tailscale ? `Tailscale ${p.tailscale}` : null, p.password ? 'password' : null, `joined ${whenShort(p.joined)}`].filter(Boolean).join(' · '))),
-        h('span', { class: `pill ${p.role !== 'member' ? 'accent' : ''}` }, p.disabled ? 'Turned off' : p.role === 'owner' ? 'Owner' : p.role === 'admin' ? 'Admin' : 'Member'),
-        p.role !== 'owner' && p.id !== state.me.id && (owner || p.role === 'member') ? iconBtn('more', `Manage ${p.name}`, e => personMenu(p, e.currentTarget)) : null)))),
-      h('section', {}, h('h2', {}, 'Channels'), h('div', { class: 'box' }, all.map((c, i) => h('div', { class: 'item', style: { opacity: c.archived ? 0.55 : 1 } },
-        icon('hash'), h('div', { class: 'grow' }, h('strong', {}, c.name), h('div', { class: 'muted small' }, c.archived ? 'Archived' : c.topic || '')),
-        c.archived ? h('button', { class: 'btn ghost', type: 'button', onclick: () => api(`/api/channels/${c.id}`, { method: 'PATCH', body: { archived: false } }).then(render) }, 'Bring back')
-          : [iconBtn('up', 'Move up', () => move(all, i, -1), { disabled: i === 0 }), iconBtn('down', 'Move down', () => move(all, i, 1), { disabled: i === all.length - 1 })])))),
+        inviteShown, openLinks)),
+      h('section', {}, h('h2', {}, 'People'), peopleBox),
+      h('section', {}, h('h2', {}, 'Channels'), channelsBox),
       space ? h('section', {}, h('h2', {}, 'The family space'), h('div', { class: 'box' }, (() => {
         const n = h('input', { class: 'input', value: space.name, maxlength: 40, 'aria-label': 'Name' });
         return h('div', { class: 'row' }, n, h('button', { class: 'btn', type: 'button', onclick: () => api(`/api/spaces/${space.id}`, { method: 'PATCH', body: { name: n.value } }).then(() => toast('Saved')).catch(err => toast(err.message, { error: true })) }, 'Rename'));
       })())) : null,
     );
+    showInvite();
+    loadLinks();
+    renderPeople();
+    renderChannels();
+  }
+
+  function showInvite() {
+    const space = state.spaces[0];
+    fill(inviteShown, lastInvite ? h('div', { style: { marginTop: '16px' } },
+      h('div', { class: 'invite-link' }, h('code', {}, lastInvite.url), iconBtn('copy', 'Copy the link', () => copyText(lastInvite.url, 'Link copied')),
+        navigator.share ? iconBtn('link', 'Share the link', () => navigator.share({ title: `Join ${space?.name || 'the family'} on Beam Family`, url: lastInvite.url }).catch(() => {})) : null),
+      lastInvite.qr ? h('img', { class: 'qr', alt: 'QR code of the invite link', src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(lastInvite.qr)}`, style: { marginTop: '12px' } }) : null,
+      h('p', { class: 'muted small' }, 'The link is shown only now. It’s like a key: send it only to who it’s for.')) : null);
+  }
+
+  async function loadLinks() {
+    let invites = [];
+    try { invites = (await api('/api/invites')).invites; } catch {}
+    fill(openLinks, invites.length ? h('div', { style: { marginTop: '16px' } }, h('strong', {}, 'Links still open'),
+      invites.map(i => h('div', { class: 'item' }, h('div', { class: 'grow' }, h('span', {}, `${i.role === 'admin' ? 'Admin' : 'Member'} · ${i.uses} of ${i.max} used`), h('div', { class: 'muted small' }, `Works until ${fullTime(i.expires)}`)),
+        h('button', { class: 'btn ghost danger', type: 'button', onclick: () => api(`/api/invites/${i.id}`, { method: 'DELETE' }).then(loadLinks).catch(err => toast(err.message, { error: true })) }, 'Withdraw')))) : null);
+  }
+
+  function renderPeople() {
+    const owner = state.me.role === 'owner';
+    const people = [...state.people.values()].sort((a, b) => (a.disabled ? 1 : 0) - (b.disabled ? 1 : 0) || a.name.localeCompare(b.name));
+    fill(peopleBox, people.map(p => h('div', { class: 'item', style: { opacity: p.disabled ? 0.55 : 1 } },
+      avatar(p, { presence: true }),
+      h('div', { class: 'grow' }, h('strong', {}, p.name), h('div', { class: 'muted small' }, [p.tailscale ? `Tailscale ${p.tailscale}` : null, p.password ? 'password' : null, `joined ${whenShort(p.joined)}`].filter(Boolean).join(' · '))),
+      h('span', { class: `pill ${p.role !== 'member' ? 'accent' : ''}` }, p.disabled ? 'Turned off' : p.role === 'owner' ? 'Owner' : p.role === 'admin' ? 'Admin' : 'Member'),
+      p.role !== 'owner' && p.id !== state.me.id && (owner || p.role === 'member') ? iconBtn('more', `Manage ${p.name}`, e => personMenu(p, e.currentTarget)) : null)));
+  }
+
+  function renderChannels() {
+    const all = [...state.channels.values()].filter(c => c.kind === 'text').sort((a, b) => a.position - b.position);
+    fill(channelsBox, all.map((c, i) => h('div', { class: 'item', style: { opacity: c.archived ? 0.55 : 1 } },
+      icon('hash'), h('div', { class: 'grow' }, h('strong', {}, c.name), h('div', { class: 'muted small' }, c.archived ? 'Archived' : c.topic || '')),
+      c.archived ? h('button', { class: 'btn ghost', type: 'button', onclick: () => api(`/api/channels/${c.id}`, { method: 'PATCH', body: { archived: false } }).then(renderChannels) }, 'Bring back')
+        : [iconBtn('up', 'Move up', () => move(all, i, -1), { disabled: i === 0 }), iconBtn('down', 'Move down', () => move(all, i, 1), { disabled: i === all.length - 1 })])));
   }
 
   async function move(all, i, d) {
     const order = [...all];
     [order[i], order[i + d]] = [order[i + d], order[i]];
     try { await Promise.all(order.map((c, p) => (c.position !== p ? api(`/api/channels/${c.id}`, { method: 'PATCH', body: { position: p } }) : null))); } catch (err) { toast(err.message, { error: true }); }
-    render();
+    renderChannels();
   }
 
   function personMenu(p, anchor) {
@@ -325,10 +356,11 @@ export function adminView() {
   }
 
   async function update(p, body) {
-    try { await api(`/api/people/${p.id}`, { method: 'PATCH', body }); render(); } catch (err) { toast(err.message, { error: true }); }
+    try { await api(`/api/people/${p.id}`, { method: 'PATCH', body }); renderPeople(); } catch (err) { toast(err.message, { error: true }); }
   }
 
-  offs.push(on('people', render), on('channels', render));
+  // Becoming or no longer being an admin rebuilds the page; otherwise only the list that changed.
+  offs.push(on('people', () => (built === isAdmin() ? built && renderPeople() : render())), on('channels', () => built && renderChannels()));
   render();
   return { el: view, destroy() { for (const off of offs) off(); } };
 }

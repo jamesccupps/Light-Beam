@@ -972,4 +972,27 @@ export function registerLink(test) {
     await plain.waitFor(`typeof server !== 'undefined' && Boolean(server.info)`, 10000, 'info loaded');
     eq(await plain.evaluate(`serverHas('fast-links')`), false, 'no fast links without Beam Family');
   }, { timeout: 60000 });
+
+  test('family: the admin page keeps the invite form and a half-typed space name while people join and post (1.23.5, audit)', async ctx => {
+    const srv = await familyServer(ctx);
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'the owner in #general');
+    await robin.evaluate(`history.pushState({}, '', '/admin'); dispatchEvent(new PopStateEvent('popstate')); true`);
+    await robin.waitFor(`document.querySelector('select[name=uses]') !== null`, 5000, 'the admin page');
+    await robin.evaluate(`(() => { const q = s => document.querySelector(s); q('select[name=uses]').value = '5'; q('select[name=days]').value = '30'; q('input[aria-label=Name]').value = 'Half typ'; window.__uses = q('select[name=uses]'); return true; })()`);
+    // Someone joins (a people event), then posts (a channels event).
+    const inv = await srv.call(owner, 'POST', '/api/invites', {});
+    const join = await srv.call({ cookie: '' }, 'POST', `/api/invites/${inv.json.url.split('/join/')[1]}`, { name: 'Bob', password: 'bob family password' });
+    eq(join.status, 201, 'Bob joined');
+    await robin.waitFor(`[...document.querySelectorAll('.item strong')].some(s => s.textContent === 'Bob')`, 5000, 'Bob in People, live');
+    const general = (await srv.call(owner, 'GET', '/api/bootstrap')).json.channels.find(c => c.name === 'general').id;
+    await srv.call(owner, 'POST', `/api/channels/${general}/messages`, { body: 'Dinner at 7' });
+    await sleep(800);
+    eq(await robin.evaluate(`[document.querySelector('select[name=uses]') === window.__uses, document.querySelector('select[name=uses]').value, document.querySelector('select[name=days]').value, document.querySelector('input[aria-label=Name]').value]`),
+      [true, '5', '30', 'Half typ'], 'the form as it was set');
+    await robin.evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Make an invite link')).click(); true`);
+    await robin.waitFor(`/0 of 5 used/.test(document.body.innerText)`, 5000, 'the link made as set up: up to 5 people');
+    eq(robin.errors, [], 'no page errors');
+  }, { timeout: 60000 });
 }

@@ -284,7 +284,8 @@ async function init() {
   const wantsPaste = params.get('action') === 'paste';
   const shareError = params.has('share-error');
   if ([...params.keys()].length) history.replaceState(history.state, '', BASE.pathname + location.hash);
-  if (convParam) current = convParam;
+  // (1.23.5, audit) only a conversation's shape: `?conv=__proto__` put "[object Object]" in the composer
+  if (convParam && (convParam === 'all' || (DEVICE_ID.test(convParam) && !Object.hasOwn(Object.prototype, convParam)))) current = convParam;
 
   initIdentity();
   bindUI();

@@ -207,4 +207,14 @@ export default function register(test) {
     eq((await page.evaluate('window.__acks')).length, 2);
     eq(page.errors, [], 'no page errors');
   });
+
+  test('a ?conv= link opens only a conversation: ?conv=__proto__ leaves the composer empty (1.23.5, audit)', async ctx => {
+    const page = await ctx.signedIn();
+    for (const conv of ['__proto__', 'constructor']) {
+      await page.goto(`${ctx.srv.base}/?conv=${conv}`);
+      await page.waitFor(`typeof paired !== 'undefined' && paired && net.state === 'online'`, 15000, 'signed in and online');
+      eq(await page.evaluate(`[current !== '${conv}', $('#text').value]`), [true, ''], conv);
+    }
+    eq(page.errors, [], 'no page errors');
+  });
 }

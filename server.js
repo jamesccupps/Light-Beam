@@ -5004,8 +5004,10 @@ async function receiveBody(req, dest, limit, { flags = 'w', onData, onWritten, d
     await sync(false);
   };
   let ok = false;
+  let writeFailed = null;
   try {
     for await (const chunk of req) {
+      if (writeFailed) throw writeFailed;
       size += chunk.length;
       if (size > limit) throw httpError(413, 'More data than expected');
       idle.refresh();
@@ -5015,6 +5017,9 @@ async function receiveBody(req, dest, limit, { flags = 'w', onData, onWritten, d
       if (batched >= WRITE_BATCH) {
         await writing;
         writing = write();
+        // (1.23.5, audit) a write that fails while the next batch fills stops the reading at the next piece, and is
+        // never an unhandled rejection meanwhile (it was, until the next batch awaited it)
+        writing.catch(err => { writeFailed = err; });
       }
     }
     ok = true;

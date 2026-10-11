@@ -27,8 +27,25 @@ function createPeople(ctx) {
   // everywhere slows a guess spread over many addresses; an address with a live session for that person passes it.
   const failByNameIp = auth.createLimiter({ limit: 10, windowMs: 60 * 60e3 });
   const failByName = auth.createLimiter({ limit: 200, windowMs: 60 * 60e3 });
-  const sessionFrom = (name, ip) => Boolean(db.get(`SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
-    WHERE u.name = ? COLLATE NOCASE AND s.ip = ? AND s.expires_at > ?`, name, ip, now()));
+  // (1.23.5, audit) A name in any case. SQLite's NOCASE folds only A–Z: "émile" never found "Émile" (who couldn't sign
+  // in with a password then), and "Émile" and "émile" could both join. So the exact name first, then the one name that
+  // matches as JavaScript folds case (several: none; only one can be made from now on, see nameTaken).
+  function userByName(name) {
+    if (!name) return null;
+    const exact = db.get('SELECT * FROM users WHERE name = ? COLLATE NOCASE', name);
+    if (exact || !/[^\x00-\x7f]/.test(name)) return exact || null;
+    const folded = name.toLowerCase();
+    const found = db.all('SELECT * FROM users').filter(u => u.name.toLowerCase() === folded);
+    return found.length === 1 ? found[0] : null;
+  }
+  const nameTaken = (name, exceptId = '') => {
+    const folded = name.toLowerCase();
+    return db.all('SELECT id, name FROM users').some(u => u.id !== exceptId && u.name.toLowerCase() === folded);
+  };
+  const sessionFrom = (name, ip) => {
+    const u = userByName(name);
+    return Boolean(u && db.get('SELECT 1 FROM sessions WHERE user_id = ? AND ip = ? AND expires_at > ?', u.id, ip, now()));
+  };
   // (every sign-in costs a deliberately slow password check: many addresses at once can't keep the server busy)
   const signinAll = auth.createLimiter({ limit: 120, windowMs: 60e3 });
   // (audit S-8) Addresses with a live session (the family's own) have a budget of their own: a flood from unknown
@@ -161,7 +178,7 @@ function createPeople(ctx) {
       const wait = Math.max(budget.wait(budgetKey), signinByIp.wait(ip), name ? Math.max(failByNameIp.wait(nameIp), failByName.wait(name)) : 0);
       throw httpError(429, `Too many tries: wait ${wait > 90 ? `${Math.ceil(wait / 60)} minutes` : `${wait} seconds`}`, { retryAfter: wait });
     }
-    const user = name ? db.get('SELECT * FROM users WHERE name = ? COLLATE NOCASE', name) : null;
+    const user = userByName(String(body.name ?? '').trim().slice(0, 64));
     const ok = await auth.checkPassword(String(body.password ?? ''), user?.pass_hash || null);
     if (!ok || !user || user.disabled_at) {
       if (name) { failByNameIp.hit(nameIp); failByName.hit(name); }
@@ -243,7 +260,7 @@ function createPeople(ctx) {
     const user = db.tx(() => {
       const invite = auth.findInvite(db, code);
       if (!invite) throw httpError(404, 'This invite link is used up, expired or was withdrawn. Ask for a new one.');
-      if (db.get('SELECT 1 FROM users WHERE name = ? COLLATE NOCASE', name)) throw httpError(409, 'Someone already has that name: choose another');
+      if (nameTaken(name)) throw httpError(409, 'Someone already has that name: choose another');
       db.run('UPDATE invites SET uses = uses + 1 WHERE id = ?', invite.id);
       if (invite.role === 'owner') return createOwner(who.identity, { name, password: passHash });
       const id = newId();
@@ -342,7 +359,7 @@ function createPeople(ctx) {
     const changes = {};
     if (body.name !== undefined) {
       const name = cleanName(body.name);
-      if (name.toLowerCase() !== user.name.toLowerCase() && db.get('SELECT 1 FROM users WHERE name = ? COLLATE NOCASE AND id != ?', name, user.id)) {
+      if (name.toLowerCase() !== user.name.toLowerCase() && nameTaken(name, user.id)) {
         throw httpError(409, 'Someone already has that name: choose another');
       }
       changes.name = name;

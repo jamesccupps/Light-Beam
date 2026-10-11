@@ -18,9 +18,10 @@ There are no accounts and no third-party cloud. Your devices reach your Beam pri
 The browser is all you need to start: the native apps add system integration, and you build them yourself (see
 [Building the apps](#building-the-apps)).
 
-> **Status:** a personal project, now open source. It is developed and used every day on Windows 11 PCs and an
-> Android phone. The server is plain Node.js; Linux and macOS should work but haven't been tested yet, and neither
-> have the Docker files. Reports and fixes are welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+> **Status:** a personal project, now open source. It is developed and used every day on Windows 11 PCs, an Android
+> phone and a Raspberry Pi (Beam for Linux). The server is plain Node.js and its tests run on Linux (Ubuntu) as well as
+> Windows; macOS should work but hasn't been tested yet, and neither have the systemd unit and the Docker files.
+> Reports and fixes are welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Quick start (browser only)
 
