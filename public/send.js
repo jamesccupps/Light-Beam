@@ -1061,6 +1061,7 @@ async function zipStore(entries, progress) {
 // ---------------------------------------------------------------- thumbnails (API v3): the sender makes a small preview
 
 let thumbsUnsupported = false;
+const THUMB_PX = 640;
 async function makeThumb(file) {
   if (thumbsUnsupported || typeof OffscreenCanvas === 'undefined') return null;
   let source;
@@ -1074,7 +1075,8 @@ async function makeThumb(file) {
     ({ source, w, h } = await videoFrame(file));
     if (!source) return null;
   } else return null;
-  const scale = Math.min(1, 320 / Math.max(w, h));
+  // (1.23.4, audit) 640 px: shown up to 320 CSS px, sharp on a 2× screen (320 was blurry on phones)
+  const scale = Math.min(1, THUMB_PX / Math.max(w, h));
   const canvas = new OffscreenCanvas(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)));
   canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
   source.close?.();

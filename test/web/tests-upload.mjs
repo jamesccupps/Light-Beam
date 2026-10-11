@@ -215,5 +215,7 @@ export default function register(test) {
     const img = await other.evaluate(`(() => { const i = document.querySelector('[data-id="${item.id}"] img'); return i && [i.src.includes('/thumb'), i.getAttribute('width'), i.getAttribute('height')]; })()`);
     eq([item.w, item.h], [1600, 1200], 'original size recorded');
     eq(img, [true, '320', '240'], 'receiver shows the thumbnail with its size reserved');
+    const px = await other.evaluate(`(async () => { const b = await createImageBitmap(await (await fetch('api/items/${item.id}/thumb')).blob()); return [b.width, b.height]; })()`);
+    eq(px, [640, 480], 'the thumbnail itself is 640 px, sharp at 320 CSS px on a 2× screen (1.23.4)');
   });
 }

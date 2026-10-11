@@ -227,11 +227,12 @@ object Thumbs {
     }
 
     /**
-     * The small JPEG the server keeps for a picture or video (API v3): about 320 px, at most 256 KB.
+     * The small JPEG the server keeps for a picture or video (API v3): about 640 px (1.13.2, audit: 320 was blurry on
+     * phones' 2×–3× screens), at most 256 KB.
      */
     fun serverThumb(bmp: Bitmap): ByteArray? {
         val longest = maxOf(bmp.width, bmp.height).coerceAtLeast(1)
-        val scale = minOf(1.0, 320.0 / longest)
+        val scale = minOf(1.0, 640.0 / longest)
         val small = if (scale < 1.0) bmp.scale((bmp.width * scale).toInt().coerceAtLeast(1), (bmp.height * scale).toInt().coerceAtLeast(1)) else bmp
         for (quality in intArrayOf(80, 60, 40)) {
             val out = java.io.ByteArrayOutputStream()

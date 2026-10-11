@@ -136,7 +136,12 @@ namespace Beam
 
         async Task StartHere()
         {
-            if (reused) { core.Navigate(PageUrl); return; } // a fresh page in the warm host
+            if (reused)
+            {
+                try { core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal; } catch { } // (1.17.2: Low while parked)
+                core.Navigate(PageUrl); // a fresh page in the warm host
+                return;
+            }
             foreach (var other in open.ToList()) await other.CloseHere(false); // one at a time (the options differ per screen)
             open.Add(this);
             await lastExit;
@@ -330,6 +335,9 @@ namespace Beam
             InputAllowed = false;
             gate = () => false;
             try { if (core != null) core.Navigate("about:blank"); } catch { }
+            // (1.17.2, audit) A parked host gives memory back (every PC that allows remote control keeps one, ~150 MB);
+            // Normal again when a session takes it (StartHere).
+            try { if (core != null) core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low; } catch { }
             var old = parked;
             parked = this;
             if (old != null && old != this) { var ignored = old.CloseHere(false); }

@@ -1410,6 +1410,9 @@ function profileOf(req, url) {
 }
 
 // Registers the calling device (or refreshes its name, platform and last-seen time).
+// (1.23.4, audit) lastSeen alone is saved at most every 10 minutes, as tokens' lastUsed (it was every minute while
+// any device was active); a stop saves it (shutdown).
+const DEVICE_SEEN_SAVE_MS = 10 * 60e3;
 let lastDeviceSave = 0;
 function touchDevice(req, url) {
   const id = deviceIdOf(req, url);
@@ -1424,7 +1427,8 @@ function touchDevice(req, url) {
   }
   device.lastSeen = now();
   // A browser signed in "for this session only" is forgotten when that session ends (apps never are).
-  if (authOf(req)?.session && !APP_PLATFORMS.has(device.platform)) device.temporary = true;
+  const becameTemporary = Boolean(authOf(req)?.session && !APP_PLATFORMS.has(device.platform) && !device.temporary);
+  if (becameTemporary) device.temporary = true;
   // A browser linked to the app on its machine shares the app's identity but must never rename or re-platform it.
   if (platform === 'web' && APP_PLATFORMS.has(device.platform)) return device;
   let name = sentName || device.name;
@@ -1450,7 +1454,7 @@ function touchDevice(req, url) {
   device.platform = nextPlatform;
   device.machine = machineOf(req);
   delete device.ip;
-  if (changed || newProfile || newVersion || now() - lastDeviceSave > 60_000) {
+  if (changed || newProfile || newVersion || becameTemporary || now() - lastDeviceSave > DEVICE_SEEN_SAVE_MS) {
     lastDeviceSave = now();
     persistDevices();
   }
@@ -5111,13 +5115,33 @@ function ackItem(req, res, [id], url) {
   if (!item) return send(res, 404, { error: 'Not found' });
   const deviceId = deviceIdOf(req, url);
   if (!deviceId) throw httpError(400, 'X-Beam-Device-Id is required');
-  if (deviceId !== item.from && !item.delivered?.[deviceId]) {
-    log.info(`Delivered [${shortId(id)}] to ${whoName(deviceId)} after ${durationText(now() - item.ts)}`);
-    item.delivered = { ...item.delivered, [deviceId]: now() };
-    itemChanged(item);
-    broadcastUpdate(item);
-  }
+  markDelivered(item, deviceId);
   send(res, 200, { id, delivered: item.delivered || {} });
+}
+
+// (1.23.4, audit) Many at once: what the web app has seen, in one request instead of one each. Items that are gone
+// are left out of the answer.
+async function ackSome(req, res, params, url) {
+  const { ids } = await readJson(req);
+  if (!Array.isArray(ids) || ids.length > 1000 || !ids.every(id => typeof id === 'string')) throw httpError(400, 'Expected {"ids": [...]} (up to 1000)');
+  const deviceId = deviceIdOf(req, url);
+  if (!deviceId) throw httpError(400, 'X-Beam-Device-Id is required');
+  const delivered = {};
+  for (const id of new Set(ids)) {
+    const item = findItem(id);
+    if (!item) continue;
+    markDelivered(item, deviceId);
+    delivered[id] = item.delivered || {};
+  }
+  send(res, 200, { delivered });
+}
+
+function markDelivered(item, deviceId) {
+  if (deviceId === item.from || item.delivered?.[deviceId]) return;
+  log.info(`Delivered [${shortId(item.id)}] to ${whoName(deviceId)} after ${durationText(now() - item.ts)}`);
+  item.delivered = { ...item.delivered, [deviceId]: now() };
+  itemChanged(item);
+  broadcastUpdate(item);
 }
 
 async function deleteItem(req, res, [id]) {
@@ -7659,6 +7683,7 @@ const routes = [
   ['GET', '/api/items', listItems],
   ['DELETE', '/api/items', clearItems],
   ['POST', '/api/items/delete', deleteSome],
+  ['POST', '/api/items/ack', ackSome],
   ['GET', `/api/items/${ID}`, getItem],
   ['PATCH', `/api/items/${ID}`, patchItem],
   ['GET', `/api/items/${ID}/text`, getItemText],
@@ -8019,6 +8044,7 @@ async function shutdown(code = 0) {
   for (const c of clients) c.res.end();
   server?.close();
   await Promise.race([checkpointUploads(), sleep(5000)]).catch(() => {});
+  persistDevices(); // (1.23.4) the last-seen times since the last save (DEVICE_SEEN_SAVE_MS)
   await flushAll();
   try { if (Number(fs.readFileSync(FILE.pid, 'utf8')) === process.pid) fs.rmSync(FILE.pid, { force: true }); } catch {}
   process.exit(code);

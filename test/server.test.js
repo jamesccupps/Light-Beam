@@ -3429,6 +3429,55 @@ function wsOpen(port, route, headers = {}) {
   });
 }
 
+test('1.23.4 speed round: many items acknowledged in one request; a device’s last-seen time alone is saved at most every 10 minutes, and on a stop', async () => {
+  const s = await startServer('speed1234', 8799);
+  let ev = null;
+  try {
+    const K = s.key;
+    const laptop = app(K, 'laptop12340', 'Laptop');
+    const phone = app(K, 'phone123400', 'Phone', 'android');
+    // Last seen: the new device is saved at once, a later request alone isn't, a stop saves it.
+    await s.req('GET', '/api/me', { headers: phone });
+    const onDisk = () => { try { return JSON.parse(fs.readFileSync(path.join(s.data, 'devices.json'), 'utf8')).phone123400?.lastSeen || 0; } catch { return 0; } };
+    await waitFor(() => onDisk() > 0);
+    const saved = onDisk();
+    await sleep(1100);
+    await s.req('GET', '/api/me', { headers: phone });
+    await sleep(1500);
+    assert.equal(onDisk(), saved, 'not saved for the last-seen time alone');
+    const live = (await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(d => d.id === 'phone123400').lastSeen;
+    assert.ok(live > saved, `${live} > ${saved}`);
+
+    // Acknowledged together: only the ones that exist, each once (one update event each), never to its sender.
+    const ids = [];
+    for (let i = 0; i < 5; i++) ids.push((await sendText(s, laptop, `seen ${i}`, ['phone123400'])).id);
+    ev = await openEvents(s.port, laptop);
+    await sleep(200);
+    const ack = body => s.req('POST', '/api/items/ack', { headers: json(phone), body: JSON.stringify(body) });
+    let r = await ack({ ids: [...ids, ids[0], '0123456789abcdef', 'nonsense'] });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(Object.keys(r.json.delivered).sort(), [...ids].sort(), 'the ones that exist');
+    assert.ok(ids.every(id => r.json.delivered[id].phone123400 > 0));
+    const updates = () => ev.events.filter(e => e.event === 'update' && e.data.delivered?.phone123400).length;
+    await waitFor(() => updates() === 5);
+    r = await ack({ ids });
+    assert.equal(r.status, 200);
+    await sleep(300);
+    assert.equal(updates(), 5, 'acknowledged again: nothing new to say');
+    r = await s.req('POST', '/api/items/ack', { headers: json(laptop), body: JSON.stringify({ ids: [ids[0]] }) });
+    assert.equal(r.json.delivered[ids[0]].laptop12340, undefined, 'not delivered to its own sender');
+    for (const body of ['{}', '{"ids":"x"}', '{"ids":[1]}', JSON.stringify({ ids: Array(1001).fill('a') })]) {
+      assert.equal((await s.req('POST', '/api/items/ack', { headers: json(phone), body })).status, 400, body);
+    }
+    ev.close();
+
+    const stop = await runNode(['stop'], serverEnv(8799, s.dir));
+    assert.equal(stop.code, 0, stop.out);
+    assert.equal(await Promise.race([s.exited, sleep(8000).then(() => 'still running')]), 0);
+    assert.ok(onDisk() >= live, 'saved on a stop');
+  } finally { ev?.close(); await s.stop(); }
+});
+
 test('1.23 Control for a Linux computer: a vnc session relayed between the viewer and the computer’s Beam for Linux; who may join; either side ending; the computer’s own words reach the viewer', async () => {
   const t = await rcSetup('vnc123');
   try {

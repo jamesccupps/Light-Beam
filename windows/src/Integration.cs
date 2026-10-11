@@ -387,7 +387,8 @@ namespace Beam
     }
 
     // Outbox folders: files or folders put into "<root>\To <device>\" are sent to that device, then moved to "Sent".
-    // Everything here runs on the UI thread.
+    // Everything here runs on the UI thread, except a check's look at the entries (Probe: sizes, a dropped folder's
+    // whole tree, possibly on a network drive).
     class Outbox : IDisposable
     {
         readonly App app;
@@ -400,12 +401,28 @@ namespace Beam
         readonly Dictionary<string, DateTime> failed = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         const string AllFolder = "To All devices";
         const string SentFolder = "Sent";
+        bool checking; // (1.17.2, audit) a check's probes are running on a pool thread
+        bool disposed;
 
         class Candidate
         {
             public long Size = -1;
             public DateTime Written;
             public int Stable;
+            public int Seen; // bumped whenever the watcher sees it change (a probe from before then doesn't count)
+        }
+
+        enum Outcome { Wait, Drop, Changed, Steady, Ready }
+
+        // One entry's look, taken off the UI thread from a copy of its candidate.
+        class Probe
+        {
+            public string Entry;
+            public long Size;
+            public DateTime Written;
+            public int Stable;
+            public int Seen;
+            public Outcome Outcome;
         }
 
         public Outbox(App app, string root)
@@ -529,7 +546,7 @@ namespace Beam
                 failed.Remove(entry);
             }
             Candidate c;
-            if (candidates.TryGetValue(entry, out c)) c.Stable = 0;
+            if (candidates.TryGetValue(entry, out c)) { c.Stable = 0; c.Seen++; }
             else candidates[entry] = new Candidate();
             if (!timer.Enabled) timer.Start();
         }
@@ -552,33 +569,66 @@ namespace Beam
             }
         }
 
-        // An entry is sent once its size and write time stop changing and nobody holds it open.
+        // An entry is sent once its size and write time stop changing and nobody holds it open. (1.17.2, audit) The
+        // looking runs on a pool thread (a big dropped folder or a network drive froze the tray, the windows and the
+        // notifications every second); its results come back here. One check at a time.
         void Check()
         {
+            if (checking) return;
             if (candidates.Count == 0) { timer.Stop(); return; } // nothing arriving: sleep until the watcher sees something
-            foreach (var entry in candidates.Keys.ToList())
+            var probes = candidates.Select(kv => new Probe { Entry = kv.Key, Size = kv.Value.Size, Written = kv.Value.Written, Stable = kv.Value.Stable, Seen = kv.Value.Seen }).ToList();
+            checking = true;
+            Task.Run(() => { foreach (var p in probes) Look(p); }).ContinueWith(t => app.Post(() =>
             {
-                var c = candidates[entry];
-                try
+                checking = false;
+                if (disposed) return;
+                if (t.Exception != null) Log.Error("Outbox check", t.Exception.GetBaseException());
+                else Apply(probes);
+            }));
+        }
+
+        // (pool thread) What the entry looks like now, next to what it looked like at the last check.
+        static void Look(Probe p)
+        {
+            string entry = p.Entry;
+            try
+            {
+                bool isFile = File.Exists(entry);
+                if (!isFile && !Directory.Exists(entry)) { p.Outcome = Outcome.Drop; return; }
+                var attr = File.GetAttributes(entry);
+                if ((attr & (FileAttributes.Hidden | FileAttributes.System)) != 0) { p.Outcome = Outcome.Drop; return; }
+                long size; DateTime written;
+                Measure(entry, out size, out written);
+                if (size != p.Size || written != p.Written)
                 {
-                    bool isFile = File.Exists(entry);
-                    if (!isFile && !Directory.Exists(entry)) { candidates.Remove(entry); continue; }
-                    var attr = File.GetAttributes(entry);
-                    if ((attr & (FileAttributes.Hidden | FileAttributes.System)) != 0) { candidates.Remove(entry); continue; }
-                    long size; DateTime written;
-                    Measure(entry, out size, out written);
-                    if (size != c.Size || written != c.Written)
-                    {
-                        c.Size = size;
-                        c.Written = written;
-                        c.Stable = 0;
-                        continue;
-                    }
-                    if (++c.Stable < (isFile ? 2 : 3)) continue;
-                    if (isFile) using (new FileStream(entry, FileMode.Open, FileAccess.Read, FileShare.None)) { }
+                    p.Size = size;
+                    p.Written = written;
+                    p.Outcome = Outcome.Changed;
+                    return;
                 }
-                catch (IOException) { continue; } // still being written
-                catch (UnauthorizedAccessException) { candidates.Remove(entry); continue; }
+                if (p.Stable + 1 < (isFile ? 2 : 3)) { p.Outcome = Outcome.Steady; return; }
+                if (isFile) using (new FileStream(entry, FileMode.Open, FileAccess.Read, FileShare.None)) { }
+                p.Outcome = Outcome.Ready;
+            }
+            catch (IOException) { p.Outcome = Outcome.Wait; } // still being written
+            catch (UnauthorizedAccessException) { p.Outcome = Outcome.Drop; }
+            catch (Exception ex) { Log.Error("Outbox: looking at an entry", ex); p.Outcome = Outcome.Drop; } // until it changes
+        }
+
+        void Apply(List<Probe> probes)
+        {
+            foreach (var p in probes)
+            {
+                Candidate c;
+                if (!candidates.TryGetValue(p.Entry, out c) || c.Seen != p.Seen) continue; // changed meanwhile: the next check
+                string entry = p.Entry;
+                switch (p.Outcome)
+                {
+                    case Outcome.Wait: continue;
+                    case Outcome.Drop: candidates.Remove(entry); continue;
+                    case Outcome.Changed: c.Size = p.Size; c.Written = p.Written; c.Stable = 0; continue;
+                    case Outcome.Steady: c.Stable++; continue;
+                }
                 candidates.Remove(entry);
                 string target = TargetOf(entry);
                 if (target == null || !app.Cfg.Paired) continue;
@@ -612,6 +662,7 @@ namespace Beam
 
         public void Dispose()
         {
+            disposed = true;
             timer.Stop();
             timer.Dispose();
             if (watcher != null) watcher.Dispose();
