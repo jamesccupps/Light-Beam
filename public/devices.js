@@ -148,7 +148,9 @@ async function ringDevice(d, stop = false) {
 async function wakeDevice(d) {
   try {
     const r = await apiJson(`api/devices/${encodeURIComponent(d.id)}/wake`, jsonBody({}));
-    toast(`Sent a wake-up signal to ${d.name}${r?.macs > 1 ? ` (${r.macs} network cards)` : ''}. It may take a minute to come online.`, { ms: 6000 });
+    // (1.24) also through each Beam for Linux on another network (a Pi at the office)
+    const through = r?.relays?.length ? ` from Beam’s server and through ${r.relays.join(', ')}` : '';
+    toast(`Sent a wake-up signal to ${d.name}${through}${r?.macs > 1 ? ` (${r.macs} network cards)` : ''}. It may take a minute to come online.`, { ms: 6000 });
   } catch (err) {
     toast(err.status === 409 ? `Beam doesn’t know ${d.name}’s network card yet. Open the Beam app on it once while it’s on.` : friendlyError(err), { error: true, ms: 6000 });
   }

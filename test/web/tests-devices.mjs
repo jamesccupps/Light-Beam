@@ -116,7 +116,8 @@ export default function register(test) {
     const page = await ctx.signedIn();
     await recordToasts(page);
     await page.waitFor(`deviceById('${pc.id}')?.can?.wake === true && !deviceById('${pc.id}').online`, 8000, 'wakeable and offline');
-    const calls = await fakeResponses(page, '*/wake', [{ status: 200, body: { sent: 12, macs: 1 } }, { status: 409, body: { error: 'Work PC hasn’t told Beam its network adapters yet' } }]);
+    const calls = await fakeResponses(page, '*/wake', [{ status: 200, body: { sent: 12, macs: 1 } }, { status: 409, body: { error: 'Work PC hasn’t told Beam its network adapters yet' } },
+      { status: 200, body: { sent: 12, macs: 1, relays: ['Office Pi'] } }]);
     await page.evaluate(`openConv('${pc.id}')`);
     await openThreadMenu(page);
     await clickMenu(page, 'Wake');
@@ -125,6 +126,10 @@ export default function register(test) {
     await openThreadMenu(page);
     await clickMenu(page, 'Wake');
     await page.waitFor(`__toasts.some(t => /network card/.test(t))`, 5000, 'a 409 explains itself');
+    // (1.24) sent through Beam for Linux too: says so
+    await openThreadMenu(page);
+    await clickMenu(page, 'Wake');
+    await page.waitFor(`__toasts.some(t => /wake-up signal to Work PC from Beam’s server and through Office Pi\\./.test(t))`, 5000, 'names the relay');
   });
 
   test('remote desktop: a browser downloads the .rdp file; the Windows app gets remoteDesktop { host }', async ctx => {
