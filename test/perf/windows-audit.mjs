@@ -137,6 +137,17 @@ try {
   fs.writeFileSync(path.join(dir('outbox'), want[0], 'for-laptop-one.txt'), 'from the outbox');
   const item = await waitFor(async () => (await phone('GET', '/api/items')).data?.items?.find(i => i.name === 'for-laptop-one.txt'), 20000);
   check(!!item && item.to.length === 1 && item.to[0] === laptops[0], `the file went to that Laptop only (${item ? JSON.stringify(item.to) : 'not sent'})`);
+  // 1.17.2 (audit): the checks look at the entries off the UI thread; a dropped folder (its whole tree) still goes once
+  // it's settled, and both move to Sent.
+  const drop = path.join(dir('outbox'), 'To All devices', 'Holiday folder');
+  fs.mkdirSync(path.join(drop, 'day 2'), { recursive: true });
+  fs.writeFileSync(path.join(drop, 'a.txt'), 'a');
+  fs.writeFileSync(path.join(drop, 'day 2', 'b.txt'), 'b');
+  const zipped = await waitFor(async () => (await phone('GET', '/api/items')).data?.items?.find(i => i.name?.startsWith('Holiday folder')), 25000);
+  check(!!zipped, `a dropped folder is sent (${zipped ? zipped.name : 'not sent'})`);
+  const moved = await waitFor(() => fs.existsSync(path.join(dir('outbox'), want[0], 'Sent', 'for-laptop-one.txt')) && fs.existsSync(path.join(dir('outbox'), 'To All devices', 'Sent', 'Holiday folder', 'day 2', 'b.txt')), 15000);
+  check(!!moved, '...and both are moved to Sent');
+  check(!logLines().some(l => /Outbox check|Outbox: looking at an entry/.test(l)), 'no errors from the checks');
 
   // B-12: another PC's backup: its folder isn't here, so this PC keeps its own
   from = logLines().length;

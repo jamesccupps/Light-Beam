@@ -189,4 +189,22 @@ export default function register(test) {
     const target = await page.evaluate(`Math.min(...[...document.querySelectorAll('.composer button:not([hidden])')].map(b => b.getBoundingClientRect().height))`);
     assert(target >= 40, `composer buttons are big enough to tap (${target}px)`);
   });
+
+  test('speed round 1.23.4: what the page has seen is acknowledged in one request, not one per item', async ctx => {
+    const page = await ctx.signedIn();
+    const phone = dev(ctx, 'Pixel');
+    await phone.me();
+    const meId = await page.evaluate('me.id');
+    for (let i = 0; i < 30; i++) await phone.text(`unread ${i}`, [meId]);
+    await page.evaluate(`(() => { window.__acks = []; const f = window.fetch; window.fetch = (u, o) => { if (/ack\\b/.test(String(u))) window.__acks.push(String(u)); return f(u, o); }; })()`);
+    await page.evaluate(`openConv('${phone.id}')`);
+    await page.waitFor(`${msgCount} === 30`);
+    await page.waitFor(`itemsIn('${phone.id}').every(i => i.delivered[me.id])`, 8000, 'all 30 marked delivered');
+    const acks = await page.evaluate('window.__acks');
+    eq(acks.map(u => u.replace(/^.*\/api\//, 'api/')), ['api/items/ack'], 'one request for all 30');
+    const late = await phone.text('one more', [meId]);
+    await page.waitFor(`itemsIn('${phone.id}').find(i => i.id === '${late.id}')?.delivered[me.id]`, 8000, 'a new one, seen, is acknowledged too');
+    eq((await page.evaluate('window.__acks')).length, 2);
+    eq(page.errors, [], 'no page errors');
+  });
 }

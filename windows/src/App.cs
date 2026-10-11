@@ -2206,7 +2206,7 @@ namespace Beam
             {
                 try
                 {
-                    var jpeg = Thumbnail.Jpeg(path, 320, 256 * 1024);
+                    var jpeg = Thumbnail.Jpeg(path, 640, 256 * 1024); // (1.17.2, audit: 320 was blurry on 2× screens)
                     if (jpeg != null) await api.PutThumb(itemId, jpeg);
                 }
                 catch (Exception ex) { Log.Error("Thumbnail", ex); }

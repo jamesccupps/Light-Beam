@@ -70,7 +70,22 @@ class Repository(private val app: BeamApp) {
 
     private val cacheFile get() = File(app.filesDir, "state.json")
     private val _state = MutableStateFlow(State(app.prefs.effectiveId ?: app.prefs.deviceId))
-    val state: StateFlow<State> = _state
+
+    /**
+     * (1.13.2, audit) The saved copy is read on a background thread (up to 32 MB of JSON; it was read in
+     * Application.onCreate, on the main thread, for every start: boot, the service, a share). Whoever looks at the
+     * state waits for it, so nothing ever sees an empty history that isn't: usually it's long read by then.
+     */
+    private val cacheRead = java.util.concurrent.CountDownLatch(1)
+    private fun awaitCache() {
+        if (cacheRead.count > 0L) cacheRead.await()
+    }
+
+    val state: StateFlow<State>
+        get() {
+            awaitCache()
+            return _state
+        }
     private var saveJob: Job? = null
 
     /** Guards the saved copy's file (the rename into place, and deleting it); a save never waits on a clear. */
@@ -95,7 +110,17 @@ class Repository(private val app: BeamApp) {
     val me: String get() = app.prefs.effectiveId ?: app.prefs.deviceId
 
     init {
-        loadCache()
+        if (app.prefs.paired && cacheFile.isFile) {
+            app.scope.launch(Dispatchers.IO) {
+                try {
+                    loadCache()
+                } finally {
+                    cacheRead.countDown()
+                }
+            }
+        } else {
+            cacheRead.countDown()
+        }
     }
 
     fun setConn(conn: Conn, offline: Offline? = null) = _state.update {
@@ -132,6 +157,7 @@ class Repository(private val app: BeamApp) {
      */
     fun refreshBlocking(full: Boolean = false) {
         val api = app.api ?: return
+        awaitCache() // its cursor: only what changed since
         val request = refreshes.incrementAndGet()
         val seen = devicesEvents
         val start = _state.value
@@ -466,8 +492,10 @@ class Repository(private val app: BeamApp) {
 
     // ---------------------------------------------------------------- the copy on disk
 
+    /** On a background thread (see [cacheRead]). */
     private fun loadCache() {
         if (!app.prefs.paired) return
+        val gen = generation
         try {
             val f = cacheFile
             if (!f.isFile || f.length() > 32L * 1024 * 1024) return
@@ -477,9 +505,19 @@ class Repository(private val app: BeamApp) {
             val devices = Device.parseList(o.optJSONArray("devices"))
             val items = Item.parseList(o.optJSONArray("items"))
             val info = o.optJSONObject("info")?.let(ServerInfo::parse)
-            _state.update { it.copy(devices = devices, items = items, loaded = true, info = info, cursor = o.str("cursor")) }
+            synchronized(saving) {
+                // Signed out meanwhile: not put back. Whatever is here already (an item sent in the first moments, the
+                // server's info) is newer than the copy.
+                if (gen != generation || !app.prefs.paired) return
+                _state.update {
+                    if (it.loaded) return@update it
+                    val held = it.items.mapTo(HashSet()) { i -> i.id }
+                    val merged = if (held.isEmpty()) items else (it.items + items.filter { i -> i.id !in held }).sortedByDescending { i -> i.ts }
+                    it.copy(devices = it.devices.ifEmpty { devices }, items = merged, loaded = true, info = it.info ?: info, cursor = o.str("cursor"))
+                }
+            }
         } catch (_: Exception) {
-            cacheFile.delete()
+            synchronized(saving) { if (gen == generation) cacheFile.delete() }
         }
     }
 

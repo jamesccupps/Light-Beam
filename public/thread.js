@@ -698,17 +698,28 @@ function checkRead() {
   if (!HOST) ackSeen(list, upto);
 }
 
-let acksInFlight = 0;
+// (1.23.4, audit) Everything seen goes in one request (it was one per item: 100 unread, 100 requests). One at a time;
+// what's seen meanwhile goes in the next.
+const ACK_BATCH = 500;
+let ackBusy = false;
+let ackAgain = false;
 function ackSeen(list, upto) {
+  if (ackBusy) { ackAgain = true; return; }
+  const ids = [];
   for (const item of list) {
-    if (acksInFlight >= 6) { setTimeout(scheduleCheckRead, 500); break; }
     if (item.ts > upto || !isForMe(item) || item.delivered[me.id] || acked.has(item.id)) continue;
     acked.add(item.id);
-    acksInFlight++;
-    api(`api/items/${item.id}/ack`, { method: 'POST' })
-      .catch(err => { if (!err.status) acked.delete(item.id); })
-      .finally(() => { acksInFlight--; });
+    ids.push(item.id);
+    if (ids.length === ACK_BATCH) { ackAgain = true; break; }
   }
+  if (!ids.length) return;
+  ackBusy = true;
+  api('api/items/ack', jsonBody({ ids }))
+    .catch(err => { if (!err.status) for (const id of ids) acked.delete(id); })
+    .finally(() => {
+      ackBusy = false;
+      if (ackAgain) { ackAgain = false; scheduleCheckRead(); }
+    });
 }
 
 // ---------------------------------------------------------------- pending rows (uploads, outbox, native transfers)
