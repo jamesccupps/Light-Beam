@@ -2099,7 +2099,7 @@ test('QW-C: Wake-on-LAN sends magic packets for every adapter (to a test listene
     await s.req('PUT', '/api/devices/me/status', { headers: json(pc), body: JSON.stringify({ macs: [MAC1, MAC2] }) });
     r = await s.req('POST', '/api/devices/officepc001/wake', { headers: phone });
     assert.equal(r.status, 200, r.body);
-    assert.deepEqual(r.json, { sent: 6, macs: 2 }, 'two adapters × one target × three rounds');
+    assert.deepEqual(r.json, { sent: 6, macs: 2, relays: [] }, 'two adapters × one target × three rounds');
     assert.doesNotMatch(r.body, /0a:1b/i);
     await waitFor(() => packets.length >= 6);
     const expect = mac => Buffer.concat([Buffer.alloc(6, 0xff), ...Array(16).fill(Buffer.from(mac.split(/[:-]/).map(h => parseInt(h, 16))))]);
@@ -2107,6 +2107,64 @@ test('QW-C: Wake-on-LAN sends magic packets for every adapter (to a test listene
     assert.match(s.out, /sent Wake-on-LAN to Office PC \(2 network adapters, 6 packets\)/);
     assert.equal((await s.req('POST', '/api/devices/nosuchdevice1/wake', { headers: phone })).status, 404);
   } finally { await s.stop(); await new Promise(r => listener.close(r)); }
+});
+
+test('1.24 Wake-on-LAN through Beam for Linux: a connected Beam for Linux 1.3 sends the magic packets on its own network too (no older one, no other app)', async () => {
+  const packets = [];
+  const listener = require('node:dgram').createSocket('udp4');
+  listener.on('message', msg => packets.push(msg));
+  await new Promise(r => listener.bind(8797, '127.0.0.1', r));
+  const s = await startServer('wakerelay', 8793);
+  const runs = [];
+  const streams = [];
+  try {
+    const K = s.key;
+    const pc = app(K, 'officepc001', 'Office PC', 'windows');
+    const phone = app(K, 'phone000001', 'Pixel', 'android', from('100.64.70.2'));
+    await s.req('GET', '/api/me', { headers: phone });
+    await s.req('PUT', '/api/devices/me/status', { headers: json(pc), body: JSON.stringify({ macs: [MAC1, MAC2] }) });
+    const oldPi = await openEvents(s.port, app(K, 'oldpi000001', 'Old Pi', 'linux', { 'X-Beam-App-Version': '1.2.1' }));
+    const otherPc = await openEvents(s.port, app(K, 'otherpc0001', 'Other PC', 'windows', { 'X-Beam-App-Version': '1.17.2' }));
+    streams.push(oldPi, otherPc);
+
+    // A real Beam for Linux 1.3 (cli/beam.js agent), its magic packets to the test's port.
+    const home = homeDir('wakerelay');
+    const root = path.join(TMP, 'wakerelay-root');
+    fs.rmSync(root, { recursive: true, force: true });
+    for (const [f, text] of Object.entries({ 'etc/os-release': 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\n', 'etc/machine-id': '0123456789abcdef0123456789abcdef\n' })) {
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+    let r = await cli(['setup', `http://127.0.0.1:${s.port}/?key=${s.key}`, '--name', 'Office Pi'], { home, env: { BEAM_APP: 'linux' } });
+    assert.equal(r.code, 0, r.out);
+    const { deviceId: piId } = cliConfig(home);
+    const agentEnv = cleanEnv({ HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), BEAM_TEST_LINUX_ROOT: root, BEAM_TEST_THROTTLED: 'throttled=0x0',
+      BEAM_TEST_AGENT_PAUSE: '100', BEAM_WOL_TARGETS: '127.0.0.1:8797' });
+    const child = spawn(process.execPath, [path.join(ROOT, 'cli', 'beam.js'), 'agent', '--no-copy', '--no-notify'], { env: agentEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    children.add(child);
+    const agent = { child, out: '' };
+    child.stdout.on('data', d => { agent.out += d; });
+    child.stderr.on('data', d => { agent.out += d; });
+    child.on('exit', () => children.delete(child));
+    runs.push(agent);
+    await waitFor(async () => (await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(d => d.id === piId)?.online, 15000, 200);
+
+    r = await s.req('POST', '/api/devices/officepc001/wake', { headers: phone });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json, { sent: 6, macs: 2, relays: ['Office Pi'] }, 'the server’s own packets, and through the Pi');
+    assert.match(s.out, /Pixel sent Wake-on-LAN to Office PC \(2 network adapters, 6 packets; also through Office Pi\)/);
+    await waitFor(() => packets.length >= 6, 8000);
+    const expect = mac => Buffer.concat([Buffer.alloc(6, 0xff), ...Array(16).fill(Buffer.from(mac.split(/[:-]/).map(h => parseInt(h, 16))))]);
+    assert.ok(packets.some(p => p.equals(expect(MAC1))) && packets.some(p => p.equals(expect(MAC2))), 'real magic packets from the Pi');
+    await waitFor(() => /Sent Wake-on-LAN for Office PC on this computer's network \(Pixel asked; 6 packets\)/.test(agent.out), 5000);
+    await sleep(300);
+    assert.ok(![oldPi, otherPc].some(e => e.events.some(ev => ev.event === 'wake-relay')), 'not to an older Beam for Linux, nor to another app');
+  } finally {
+    for (const e of streams) e.close();
+    for (const run of runs) try { run.child.kill(); } catch {}
+    await s.stop();
+    await new Promise(r => listener.close(r));
+  }
 });
 
 test('QW-D: a Remote Desktop file for a Windows PC with a Tailscale address', async () => {

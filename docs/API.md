@@ -19,7 +19,7 @@ is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keybo
 alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
 device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
 `device-logs` (shipped with 1.19's in Beam 1.20.0), 1.21 `apps`, 1.22 `linux` (Beam for Linux) and 1.23 `vnc` (control
-of a Linux computer, relayed). Use each one only when its flag is there; everything older keeps working.
+of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -483,7 +483,7 @@ an **All devices** conversation for broadcasts.
 | `PUT /api/devices/me/backup` | **(1.8.1, feature `backups`)** an app keeps a copy of its own settings here: `{ "install": "<its id, 8–64 of A–Z a–z 0–9 _ ->", "app": "windows"\|"android", "version", "settings": {…} }` → `204`; event `devices`. Never a sign-in or a key. One per install (the same install replaces its own), the newest three per device; when a reinstall's new device is linked to the old one, they go along. `settings` is an object of at most 32 KB (`413` above). `403` for a session-only sign-in. What the apps keep: Windows (1.8.1) its Settings, hotkeys and remote control's devices; Android (1.8.2) `deviceName`, `stayConnected`, `autoCopy`, `autoDownload`, `wifiOnlyDownloads`, `maxDownloadMb`, `tileTarget` (`""` = ask), `mutedDevices`, `autoCopyDevices`, `shareNotifications`, `sharedApps` (package names), sent only when they changed. A reinstalled phone comes back with the same device id (from ANDROID_ID), so it finds its earlier install's here |
 | `GET /api/devices/{id}/backups`, `GET /api/devices/me/backups` | **(1.8.1)** `{ "device", "name", "backups": [{ "install", "app", "version", "at", "settings" }] }`, newest first: for an app to offer them back after a reinstall, or to set up a new PC like another. Any of the owner's devices signed in for good (`403` for a session-only sign-in). The device list says only when: `backup: { "at", "app" }` |
 | `POST /api/devices/{id}/ring` | **(1.3)** body `{ "stop"?: true }` → `202 { "online" }`; event `ring`. `404` unknown device, `409` a device that can't ring (`can.ring` is false) |
-| `POST /api/devices/{id}/wake` | **(1.3)** Wake-on-LAN → `200 { "sent": <packets>, "macs": <number of adapters> }`. `409` when the device hasn't reported any adapters |
+| `POST /api/devices/{id}/wake` | **(1.3)** Wake-on-LAN → `200 { "sent": <packets>, "macs": <number of adapters>, "relays": [names] }` (**(1.24)** `relays`: the Beam for Linux computers also asked to send it, event `wake-relay`). `409` when the device hasn't reported any adapters |
 | `GET /api/devices/{id}/remote-desktop.rdp` | **(1.3)** a Remote Desktop connection file (`application/x-rdp`, attachment `<name>.rdp`). `404` when no Tailscale name or address is known |
 
 ### Device status, ring, Wake-on-LAN, Remote Desktop (1.3)
@@ -543,6 +543,11 @@ apart. It only works when:
 - the Beam server is on the same local network as the PC (in Docker it needs host networking, not the Tailscale
   sidecar);
 - Wake-on-LAN is enabled on that PC and its network card.
+
+**(1.24, feature `wake-relay`)** or when a Beam for Linux 1.3+ computer on the PC's network is connected: each
+connected one gets the event `wake-relay` `{ "device", "name", "macs", "by" }` on one of its streams (only these
+relays ever see a device's MAC addresses, for that wake) and sends the same packets on its own networks. The answer's
+`relays` names them.
 
 `BEAM_WOL_TARGETS` (`address[:port]`, comma-separated) on the server replaces the list of destinations.
 
@@ -891,6 +896,7 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk`, `tailscaleKey` (1.17) and `powerLoss` (1.18) |
 | `speed-test` | **(1.18)** `{ "id" }`, to the asked device's own streams only (at once): run a speed test (see Speed tests) and send the result with this `id` |
 | `log-request` | **(1.20)** `{ "id" }`, to the asked PC's own streams only (at once): send the end of its log with this `id` (see A PC's log) |
+| `wake-relay` | **(1.24)** `{ "device", "name", "macs", "by" }`, to one stream of each connected Beam for Linux 1.3+ (not the device itself): send Wake-on-LAN for those MAC addresses on this computer's networks |
 | `notification`, `notification-removed`, `notification-request`, `notification-request-done` | **(1.5)** see Phone notifications; only the devices concerned get them, urgent on background streams |
 | `rc-request`, `rc-signal`, `rc-end`, `rc-disable` | **(1.6)** see Remote control; only the devices named get them, urgent on background streams |
 | `rc-sessions` | **(1.6)** the remote control sessions going on, to everyone (not urgent) |

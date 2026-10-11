@@ -147,7 +147,9 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Ring a device** to find it. Your phone rings loudly for up to a minute, even on silent, until you tap Stop. A PC
   plays an alarm and shows a Stop window. Needs the Beam app on that device.
 - **Wake a sleeping PC** (Wake-on-LAN). The button appears when a PC is offline. It only works if:
-  - the Beam server is on the same home network as that PC;
+  - the Beam server, or a computer running Beam for Linux 1.3 or later (a Raspberry Pi), is on the same network as
+    that PC: the server asks every connected Beam for Linux to send the wake-up too, so a Pi at the office wakes the
+    office's PCs while Beam runs at home;
   - Wake-on-LAN is switched on for the PC's network adapter (and in its BIOS/UEFI; wired Ethernet is the most
     reliable).
 - **Remote Desktop** into another of your Windows PCs that allows it (Windows Pro, with Remote Desktop turned on in
@@ -469,6 +471,8 @@ the app and the `beam` command in your home folder, a systemd user service that 
 - **Control** it from your other devices: run `beam control on` there once (only there; `beam control off` turns it off
   again). Its page then has **Control**: its screen in a window of Beam's, with its mouse and keyboard, through its
   desktop's own VNC server (wayvnc; `sudo apt install wayvnc` if it isn't there) relayed by your Beam;
+- **Wake** works for the PCs on its network (1.3): a wake from any of your devices is sent from there too, so a Pi at
+  the office wakes the office's PCs while your Beam runs somewhere else;
 - it updates itself when a newer build lands in the server's `dist` (`node linux/build.mjs`, signed like the Windows
   app's updates).
 
@@ -534,8 +538,9 @@ node server.js help            # all commands
 - **Alerts** are kept in `data/alerts.json` (the last 100) and also go to ntfy if it's configured.
 - **Each device's history** is kept in `data/history.json` (120 days, part of exports and backups).
 - **Wake-on-LAN** packets go out from the server itself, so the server must be on the same network as the PCs it
-  wakes. In Docker that needs host networking. `BEAM_WOL_TARGETS` (a list of `address[:port]`) overrides where they're
-  sent.
+  wakes (in Docker that needs host networking), or from a Beam for Linux 1.3+ computer on their network (the server
+  passes each wake to them). `BEAM_WOL_TARGETS` (a list of `address[:port]`) overrides where they're sent, on the
+  server and in Beam for Linux.
 
 ## Moving Beam
 

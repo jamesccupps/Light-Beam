@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.2.1';
+const VERSION = '1.3.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -1544,6 +1544,55 @@ function stopControl(id) {
   }
 }
 
+// (Beam for Linux 1.3) Wake-on-LAN for another device, sent on this computer's own network(s): a PC on the same network
+// as this one (a Pi at the office) wakes though Beam's server is elsewhere. As the server does: 255.255.255.255 and each
+// LAN's directed broadcast (not Tailscale's), ports 9 and 7, three rounds 300 ms apart. BEAM_WOL_TARGETS
+// (address[:port], comma-separated) replaces that list.
+function wakeTargets() {
+  if (process.env.BEAM_WOL_TARGETS) {
+    return process.env.BEAM_WOL_TARGETS.split(',').map(s => s.trim()).filter(Boolean).map(entry => {
+      const [address, port] = entry.split(':');
+      return { address, port: Number(port) || 9 };
+    });
+  }
+  const addresses = new Set(['255.255.255.255']);
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const a of list || []) {
+      if (a.family !== 'IPv4' || a.internal || !a.netmask || a.address.startsWith('169.254.')) continue;
+      const ip = a.address.split('.').map(Number);
+      if (ip[0] === 100 && ip[1] >= 64 && ip[1] <= 127) continue; // Tailscale's own addresses
+      const mask = a.netmask.split('.').map(Number);
+      addresses.add(ip.map((b, i) => (b & mask[i]) | (~mask[i] & 255)).join('.'));
+    }
+  }
+  return [...addresses].flatMap(address => [9, 7].map(port => ({ address, port })));
+}
+
+async function relayWake(data) {
+  const macs = (Array.isArray(data.macs) ? data.macs : []).filter(m => typeof m === 'string' && /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(m)).slice(0, 8);
+  if (!macs.length) return;
+  const socket = require('node:dgram').createSocket('udp4');
+  await new Promise((resolve, reject) => {
+    socket.once('error', reject);
+    socket.bind(0, () => { socket.setBroadcast(true); resolve(); });
+  });
+  let sent = 0;
+  try {
+    const targets = wakeTargets();
+    for (let round = 0; round < 3; round++) {
+      if (round) await new Promise(r => setTimeout(r, 300));
+      for (const mac of macs) {
+        const bytes = Buffer.from(mac.split(':').map(h => parseInt(h, 16)));
+        const packet = Buffer.concat([Buffer.alloc(6, 0xff), ...Array(16).fill(bytes)]);
+        for (const t of targets) await new Promise(resolve => socket.send(packet, t.port, t.address, err => { if (!err) sent++; resolve(); }));
+      }
+    }
+  } finally {
+    socket.close();
+  }
+  logLine(`Sent Wake-on-LAN for ${oneLine(data.name, 60) || 'a device'} on this computer's network (${oneLine(data.by, 60) || 'another device'} asked; ${sent} packets)`);
+}
+
 async function agent(cfg, opt) {
   if (!AS_LINUX) throw new Error('beam agent is Beam for Linux; on Windows and Android use their Beam apps (or beam listen)');
   if (!linuxApp(cfg)) {
@@ -1599,6 +1648,7 @@ async function agent(cfg, opt) {
       else if (name === 'app-update' && data.linux) checkForUpdate(cfg);
       else if (name === 'rc-request' && data.kind === 'vnc') startControl(cfg, data); // (Beam for Linux 1.2)
       else if (name === 'rc-end' && typeof data.id === 'string') stopControl(data.id);
+      else if (name === 'wake-relay') relayWake(data).catch(err => logLine(`Couldn't send Wake-on-LAN: ${err.message}`)); // (Beam for Linux 1.3)
       else if (name === 'rename' && typeof data.name === 'string' && data.name.trim() && data.name !== cfg.device) {
         // (Beam for Linux 1.2.1) renamed in Beam's window here: kept, and said from now on (which tells Beam it's done)
         cfg.device = data.name;

@@ -1894,7 +1894,8 @@ async function logStatus() {
 
 // ---------------------------------------------------------------- device status, ring, Wake-on-LAN, Remote Desktop
 // Apps report their battery, free storage, OS, network adapters (for Wake-on-LAN) and whether Remote Desktop is on.
-// MAC addresses stay on the server: they are used to wake a PC and never sent to any client.
+// MAC addresses stay on the server: they are used to wake a PC and sent to no client but (1.24) the Beam for Linux
+// computers that relay that wake (wakeDevice).
 
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
 // (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
@@ -2207,16 +2208,40 @@ async function sendMagicPackets(macs) {
   return sent;
 }
 
-// POST /api/devices/{id}/wake: Wake-on-LAN. Works only when this server is on the same network as the PC (in
-// Docker: host networking) and the PC and its network card have Wake-on-LAN enabled.
+// (1.24) The Beam for Linux that sends a device's magic packets on its own network(s) too (wake-relay).
+const WAKE_RELAY_MIN_VERSION = '1.3.0';
+
+// The connected Beam for Linux computers that can relay a wake (one stream each), other than the target itself.
+function wakeRelays(target) {
+  const out = new Map();
+  for (const c of clients) {
+    if (c.kind !== 'app' || !streamOpen(c) || !c.deviceId || c.deviceId === target.id || out.has(c.deviceId)) continue;
+    const d = devices[c.deviceId];
+    if (d?.platform === 'linux' && versionAtLeast(d.appVersion, WAKE_RELAY_MIN_VERSION)) out.set(d.id, { device: d, stream: c });
+  }
+  return [...out.values()];
+}
+
+// POST /api/devices/{id}/wake: Wake-on-LAN. The server sends the magic packets on its own network(s) (in Docker: host
+// networking), and (1.24) every connected Beam for Linux 1.3+ sends them on its own: a Pi at the office wakes the
+// office's PCs though Beam runs at home. The PC and its network card need Wake-on-LAN enabled. Only those relays get
+// the MAC addresses, for that one wake (no other client ever sees them).
 async function wakeDevice(req, res, [id], url) {
   const target = targetDevice(id);
   await readJson(req, { optional: true });
   const macs = target.status?.macs || [];
   if (!macs.length) throw httpError(409, `${target.name} hasn't told Beam its network adapters yet (the Beam app on that PC does, once it has run there)`);
+  const by = whoName(deviceIdOf(req, url), 'A device');
+  const relays = wakeRelays(target);
+  const msg = `event: wake-relay\ndata: ${JSON.stringify({ device: target.id, name: target.name, macs, by })}\n\n`;
+  for (const { stream } of relays) {
+    stream.events++;
+    writeTo(stream, msg);
+  }
   const sent = await sendMagicPackets(macs);
-  log.info(`${whoName(deviceIdOf(req, url), 'A device')} sent Wake-on-LAN to ${target.name} (${macs.length} network adapter${macs.length > 1 ? 's' : ''}, ${sent} packets)`);
-  send(res, 200, { sent, macs: macs.length });
+  const through = relays.length ? `; also through ${relays.map(r => r.device.name).join(', ')}` : '';
+  log.info(`${by} sent Wake-on-LAN to ${target.name} (${macs.length} network adapter${macs.length > 1 ? 's' : ''}, ${sent} packets${through})`);
+  send(res, 200, { sent, macs: macs.length, relays: relays.map(r => r.device.name) });
 }
 
 // GET /api/devices/{id}/remote-desktop.rdp: a Remote Desktop connection file for the device's Tailscale address.
@@ -6332,6 +6357,7 @@ const FEATURES = [
   'apps', // (1.21.0: /api/apps (GitHub, files, winget), `app-install`/`app-uninstall`, /api/devices/me/apps, `can.apps`)
   'linux', // (1.22.0: Beam for Linux: /install/linux, updates `linux`, status model/bootedAt/temperature/throttled, `hardware` alerts)
   'vnc', // (1.23.0: remote control of a Linux computer: rc sessions of kind vnc, relayed at GET /api/rc/sessions/{id}/vnc)
+  'wake-relay', // (1.24.0: a wake also goes to Beam for Linux 1.3+, the `wake-relay` event; the answer's `relays`)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
