@@ -60,6 +60,8 @@ class ServerMoves(private val app: BeamApp) {
         candidates += app.prefs.alternates
         Pairing.tailnetBeam(current)?.let { candidates += it }
         candidates -= current
+        // (audit 2026-10-11 S-8) only to an address as safe as this one: https stays https
+        if (current.startsWith("https://", ignoreCase = true)) candidates.removeAll { !it.startsWith("https://", ignoreCase = true) }
         for (c in candidates) {
             val there = verify(c) ?: continue
             switchTo(c, there.serverId)

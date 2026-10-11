@@ -573,16 +573,28 @@ function showNextApproval() {
   $('#approveWho').textContent = who;
   $('#approveWho').hidden = !who;
   $('#approveWhoLabel').hidden = !who;
+  // (audit 2026-10-11 S-3) A move (a full copy of Beam) is never one tap: its code is typed in from the new server's
+  // screen, not shown here (the server never sends a move to anyone without its code, nor lists it).
   $('#approveCode').textContent = r.code;
+  $('#approveCode').hidden = $('#approveCodeLabel').hidden = move;
+  $('#approveTypeRow').hidden = !move;
+  $('#approveType').value = move && r.typed ? r.typed : '';
   $('#approveWarn').textContent = move
-    ? 'This asks for a full copy of your Beam (every message, file and sign-in) for a new server. Only approve it if you are moving Beam yourself right now and the code matches.'
+    ? 'This asks for a full copy of your Beam (every message, file and sign-in) for a new server. Only approve it if you are moving Beam yourself right now: type the code the new server shows.'
     : `Only approve if it's your device and the code matches what it shows. It will be able to see and send everything.${r.remember === false ? ' It will be signed in for one session only.' : ''}`;
-  const btn = $('#approveBtn');
-  btn.disabled = true;
-  approveGuard = setTimeout(() => { btn.disabled = false; }, 1000);
+  $('#approveBtn').disabled = true;
+  approveGuard = setTimeout(() => { approveGuard = 0; syncApproveButton(); }, 1000);
   updateApprovalQueueNote();
   if (!dlg.open) dlg.showModal();
-  $('#denyBtn').focus();
+  (move ? $('#approveType') : $('#denyBtn')).focus();
+}
+
+const loginCodeKey = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+// Approve: a moment after the request appeared, and for a move once its code is typed in.
+function syncApproveButton() {
+  const r = approving;
+  $('#approveBtn').disabled = !r || Boolean(approveGuard) || (r.purpose === 'move' && loginCodeKey($('#approveType').value) !== loginCodeKey(r.code));
 }
 
 function updateApprovalQueueNote() {
@@ -611,10 +623,11 @@ async function answerApproval(action) {
   showNextApproval();
 }
 
-async function lookUpApproval(code) {
+// typed: the code was typed in here (Add a device → Approve), so a move doesn't ask for it again.
+async function lookUpApproval(code, { typed = false } = {}) {
   try {
     const r = await apiJson(`api/login-requests?code=${encodeURIComponent(code)}`);
-    enqueueApproval(r);
+    enqueueApproval(typed ? { ...r, typed: code } : r);
   } catch (err) {
     toast(friendlyError(err), { error: true, ms: 5000 });
   }

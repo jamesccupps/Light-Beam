@@ -729,6 +729,10 @@ async function openPairDialog() {
   // (1.22) Beam for Linux: one command in the computer's terminal (GET /install/linux)
   $('#linuxBox').hidden = !(serverHas('linux') && info.apps?.linux);
   $('#linuxCmd').value = `curl -fsSL ${address}/install/linux | bash`;
+  // (audit 2026-10-11 S-9) never a plain http address on a local network (the server refuses those too)
+  const safe = /^https:/i.test(address) || /^http:\/\/(100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|\[fd7a:115c:a1e0:|localhost[:/]|127\.)/i.test(`${address}/`);
+  $('#linuxCmdRow').hidden = !safe;
+  $('#linuxHttpsOnly').hidden = safe;
   $('#pairLinkBox').open = false;
   $('#pairLink').value = '';
   $('#qrImg').removeAttribute('src');

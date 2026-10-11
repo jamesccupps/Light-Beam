@@ -71,6 +71,17 @@ function createLinks(ctx) {
     return { maxDownloads, clean: body.removeLocation === true };
   }
 
+  // (audit 2026-10-11 S-6) A new download is one served from byte 0, however the Range says it: none, one that's
+  // served whole anyway, a start that parses to 0 (leading zeros too), or the last N bytes when that's all of it.
+  function startsNew(req, size) {
+    const raw = req.headers.range;
+    if (!raw) return true;
+    const m = /^bytes=(\d*)-(\d*)$/.exec(String(raw).trim());
+    if (!m || (m[1] === '' && m[2] === '')) return true;
+    if (m[1] === '') return Number(m[2]) >= size;
+    return Number(m[1]) === 0;
+  }
+
   function counted(link) {
     if (link) db.run('UPDATE links SET downloads = downloads + 1 WHERE id = ?', link.id);
   }
@@ -167,10 +178,9 @@ function createLinks(ctx) {
   async function play(req, res, { token }, url) {
     const { l, a } = open(req, token);
     if (l.clean && a.play !== 'ready') throw httpError(404, 'Not found'); // (1.15.0: never the original)
-    if (url.searchParams.has('download') && (!req.headers.range || /^bytes=0-/.test(String(req.headers.range)))) {
-      if (usedUp(l)) throw httpError(410, USED_UP);
-      counted(l);
-    }
+    // (audit 2026-10-11 S-6) a used-up link plays no more either; keeping it (?download) takes one of its downloads
+    if (usedUp(l)) throw httpError(410, USED_UP);
+    if (url.searchParams.has('download') && startsNew(req, a.play_size || a.size)) counted(l);
     await ctx.media.sendPlay(req, res, a, url, { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
   }
 
@@ -187,7 +197,7 @@ function createLinks(ctx) {
     const type = a.mime === 'application/octet-stream' ? a.mime : a.mime + (a.mime.startsWith('text/') ? '; charset=utf-8' : '');
     const range = /^bytes=(\d+)-$/.exec(String(req.headers.range || ''));
     // (1.15.0) a new download (not one picked up again) takes one of the link's downloads, if it has a limit
-    const starting = !req.headers.range || /^bytes=0-/.test(String(req.headers.range));
+    const starting = startsNew(req, a.size); // (audit 2026-10-11 S-6: by where it starts, however it's written)
     if (starting && usedUp(l)) throw httpError(410, USED_UP);
     if (l.clean) {
       // (1.15.0) the copy without location data, never the original

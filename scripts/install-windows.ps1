@@ -225,6 +225,12 @@ if ($Server) {
     }
   }
 
+  # (audit 2026-10-11 S-10) Shared over Tailscale, the plain-http port on the local network is only needed by devices
+  # without Tailscale: say how to close it.
+  if ($sharedOverTailscale -and -not (Select-String -Path $envFile -Pattern '^\s*BEAM_HOST\s*=' -Quiet -ErrorAction SilentlyContinue)) {
+    "Beam also answers on port $port of your local network (plain http). Once every device uses Tailscale, add BEAM_HOST=127.0.0.1 to $envFile and restart Beam: then it's reachable only through Tailscale."
+  }
+
   # Sign the app in to this server. It keeps the identity the command-line tool had on this PC, so
   # conversations with this PC carry over. (audit I-1) With a pairing key (single use, 15 minutes), never the master
   # key: its first request makes the pairing key its own sign-in, which it swaps for a sealed device token of its own.

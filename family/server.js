@@ -235,7 +235,7 @@ function serve() {
   }
 
   // (a request has 15 minutes to arrive in full: enough for a 16 MB piece of a file over a slow link, not for ever)
-  server = http.createServer({ requestTimeout: 15 * 60e3, headersTimeout: 30_000, keepAliveTimeout: 65_000 }, handle);
+  server = http.createServer({ requestTimeout: 15 * 60e3, headersTimeout: 30_000, keepAliveTimeout: 100_000 }, handle); // (audit 2026-10-11: over tailscaled's 90 s, as Beam's)
   server.maxConnections = 1000; // (1.7.2) live streams included
   server.on('clientError', (err, socket) => { try { socket.destroy(); } catch {} });
   // Expired sign-ins and invites go once a day (1.7.2: they stayed for good); the audit trail is kept for a year.

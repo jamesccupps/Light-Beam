@@ -250,7 +250,8 @@
     <details id="linuxBox" class="pair-link" hidden>
       <summary>A Raspberry Pi or another Linux computer</summary>
       <p class="muted small">Put Tailscale on it first, signed in to your tailnet. Then run this in its terminal (as yourself, not as root):</p>
-      <div class="linkrow">
+      <p id="linuxHttpsOnly" class="warn small" hidden>Open Beam through its https address (tailscale serve) or its Tailscale address to get the command: Beam for Linux never installs over plain http on a local network.</p>
+      <div id="linuxCmdRow" class="linkrow">
         <input id="linuxCmd" type="text" readonly aria-label="The command that installs Beam for Linux" spellcheck="false">
         <button id="copyLinuxBtn" class="btn" type="button">Copy</button>
       </div>
@@ -274,8 +275,10 @@
     <dl class="approve-facts">
       <dt>From</dt><dd id="approveWhere"></dd>
       <dt id="approveWhoLabel" hidden>Tailscale</dt><dd id="approveWho" hidden></dd>
-      <dt>Code</dt><dd id="approveCode" class="login-code"></dd>
+      <dt id="approveCodeLabel">Code</dt><dd id="approveCode" class="login-code"></dd>
     </dl>
+    <label id="approveTypeRow" class="field" hidden><span>Type the code the new server shows</span>
+      <input id="approveType" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12"></label>
     <p id="approveWarn" class="warn small">Only approve if it's your device and the code matches what it shows. It will be able to see and send everything.</p>
     <p id="approveQueue" class="muted small" hidden></p>
     <div class="dlg-foot">

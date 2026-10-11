@@ -12,7 +12,7 @@
         android:shortcutShortLabel="@string/send_clipboard">
         <intent
             android:action="app.beam.android.action.SEND_CLIPBOARD"
-            android:targetClass="app.beam.android.ui.SendActivity"
+            android:targetClass="app.beam.android.ui.ClipboardSendActivity"
             android:targetPackage="app.beam.android" />
     </shortcut>
 

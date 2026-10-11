@@ -520,6 +520,7 @@ export default function register(test) {
     await page.evaluate(`openPairDialog()`);
     await page.waitFor(`$('#pairDlg').open && !$('#linuxBox').hidden`, 5000, 'offered once built');
     eq(await page.evaluate(`$('#linuxCmd').value`), `curl -fsSL ${ctx.srv.base}/install/linux | bash`);
+    eq(await page.evaluate(`[$('#linuxCmdRow').hidden, $('#linuxHttpsOnly').hidden]`), [false, true], 'this machine’s own address: the command (audit 2026-10-11 S-9)');
     await page.evaluate(`$('#pairDlg').close()`);
     await page.evaluate(`openSettings('alerts')`);
     await page.waitFor(`/A Raspberry Pi is too hot or short of power/.test($('#settingsDlg').textContent)`, 5000, 'the alert’s switch');

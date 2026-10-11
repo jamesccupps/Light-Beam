@@ -1408,6 +1408,8 @@ test('F-W (1.15.0): a fast link can stop after some downloads (one picked up aga
     const spent = (await call(s, 'GET', `/api/links/${tok}`)).json;
     assert.deepEqual([spent.usedUp, spent.downloadsLeft], [true, 0]);
     assert.equal((await get(tok)).status, 410, 'a third download: used up');
+    // (audit 2026-10-11 S-6) However the Range is written, one from byte 0 is a new download.
+    for (const range of ['bytes=00-', 'bytes=-5000', 'bytes=-9999', 'bytes=x', 'bytes=-']) assert.equal((await get(tok, { Range: range })).status, 410, range);
     r = await get(tok, { Range: 'bytes=1000-' });
     assert.deepEqual([r.status, r.body.length], [206, 4000], 'one picked up again goes on');
     assert.equal((await call(s, 'POST', `/api/files/${fileId}/links`, f.owner, { hours: 1, maxDownloads: 5000 })).status, 400, 'at most 1,000');
