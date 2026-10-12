@@ -237,7 +237,10 @@
       tr = pc.addTransceiver('video', { direction: 'sendonly', streams: [outStream], sendEncodings: [{ active: false, maxBitrate: p.kbps * 1000, maxFramerate: p.fps, scaleResolutionDownBy: downscale(p) }] });
       applyCodecs();
     }
-    pc.onicecandidate = e => queueCandidate(e.candidate ? e.candidate.toJSON() : { candidate: '', sdpMid: null, sdpMLineIndex: null });
+    pc.onicecandidate = e => {
+      if (e.candidate) noteNamed(e.candidate);
+      queueCandidate(e.candidate ? e.candidate.toJSON() : { candidate: '', sdpMid: null, sdpMLineIndex: null });
+    };
     pc.onconnectionstatechange = onState;
     try {
       // (kvm: the stats tick looks at the pair every 2 s instead)
@@ -376,6 +379,39 @@
     return s.includes(':') && /^[0-9a-f:.]+$/i.test(s) && /[1-9a-f]/i.test(s); // (IPv6, also with an IPv4 tail)
   }
 
+  // (1.17.4) The socket this page talks through gets a candidate when nothing named it. With screen capture only (no
+  // camera or microphone), Chromium takes the default route: one socket of each family, bound to every address, and a
+  // candidate only for the default route's address. A PC whose network has no IPv6 names none for its IPv6 socket, yet
+  // ICE uses it to reach a viewer's Tailscale IPv6 address (a phone on mobile data): the viewer then sees this PC at a
+  // port it was never told about ("prflx, no address") and hangs up after 5 s (the user's phone, 2026-10-12: every try
+  // over IPv6 failed, every one over IPv4 at home worked). So that socket's own candidate goes out: a host candidate
+  // with the unspecified address of its family (what it's bound to) and its port. The viewer puts this PC's attested
+  // address in it, as it does in every candidate of this page's, and then reads that address; its check is unchanged.
+  const named = new Set(); // "<ufrag> <port>" of every candidate this page gave out
+  const ufragNow = () => ((pc && pc.localDescription && /^a=ice-ufrag:(\S+)/m.exec(pc.localDescription.sdp)) || [])[1] || '';
+  function noteNamed(c) {
+    const p = c && typeof c.candidate === 'string' ? c.candidate.split(' ') : [];
+    if (p.length >= 8 && p[2].toLowerCase() === 'udp') named.add(ufragNow() + ' ' + p[5]);
+  }
+  async function nameOwnSocket() {
+    try {
+      if (!pc || !pc.localDescription) return;
+      const s = await pc.getStats();
+      let pair = null;
+      s.forEach(r => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = s.get(r.selectedCandidatePairId); });
+      const lc = pair && s.get(pair.localCandidateId), rc = pair && s.get(pair.remoteCandidateId);
+      if (!lc || !rc || !lc.port || (lc.protocol && lc.protocol !== 'udp')) return;
+      const ufrag = ufragNow(), key = ufrag + ' ' + lc.port, rip = String(rc.address || rc.ip || '');
+      if (!ufrag || named.has(key) || !isIp(rip)) return; // (named already, or the family isn't known yet)
+      named.add(key);
+      const v6 = rip.includes(':');
+      const mid = (/^a=mid:(\S+)/m.exec(pc.localDescription.sdp) || [])[1] || '0';
+      queueCandidate({ candidate: 'candidate:beam 1 udp ' + (v6 ? 2122262783 : 2122194687) + ' ' + (v6 ? '::' : '0.0.0.0') + ' ' + lc.port + ' typ host generation 0 ufrag ' + ufrag,
+        sdpMid: mid, sdpMLineIndex: 0, usernameFragment: ufrag });
+      log('told the viewer about the ' + (v6 ? 'IPv6' : 'IPv4') + ' socket it talks through (it had no candidate)');
+    } catch (e) { log('naming its socket: ' + e.name); }
+  }
+
   // The remote end of the selected pair (local addresses read as ""): Beam checks it before anything flows, and again
   // whenever it changes. A peer-reflexive remote (its checks came before its candidates) reads as "" until the
   // candidate it sent (rewritten to its attested address) replaces it: up to 5 s. One that never resolves fails Beam's
@@ -387,8 +423,10 @@
     reporting = true;
     try {
       let sel = await selected();
+      nameOwnSocket();
       for (let i = 0; i < 25 && pc && sel && !sel.ip; i++) { await new Promise(r => setTimeout(r, 200)); sel = await selected(); }
       if (!pc) return;
+      if (sel && sel.ip) nameOwnSocket();
       if (sel && !sel.ip) {
         // For beam.log: what the remote side looks like (kinds and counts only, never addresses).
         const s = await pc.getStats();

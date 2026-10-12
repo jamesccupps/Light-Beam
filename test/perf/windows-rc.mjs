@@ -260,8 +260,8 @@ async function stopServer() {
 }
 
 // ---------------------------------------------------------------- the viewer's WebRTC end: headless Edge
-async function startEdge() {
-  edge = spawn(EDGE, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--remote-debugging-address=127.0.0.1', `--user-data-dir=${dir('edge')}`,
+async function startEdge(extra = []) {
+  edge = spawn(EDGE, [...extra, '--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--remote-debugging-address=127.0.0.1', `--user-data-dir=${dir('edge')}`,
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync', '--disable-background-networking',
     '--disable-component-update', '--autoplay-policy=no-user-gesture-required', 'about:blank'], { windowsHide: true, stdio: 'ignore' });
   let target = null;
@@ -362,6 +362,14 @@ const VIEWER_SCRIPT = `window.V = (() => {
       return R > 150 && B > 150 && G < 110 ? 'magenta' : G > 150 && R < 110 && B < 110 ? 'green' : 'other ' + Math.round(R) + ',' + Math.round(G) + ',' + Math.round(B);
     },
     state() { return pc ? pc.connectionState : 'none'; },
+    // (1.17.4) the selected pair's remote end, as this viewer reads it
+    async selected() {
+      if (!pc) return null;
+      const s = await pc.getStats(); let pair = null;
+      s.forEach(r => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = s.get(r.selectedCandidatePairId); });
+      const rc = pair && s.get(pair.remoteCandidateId);
+      return rc ? { type: rc.candidateType || '', address: rc.address || '', port: rc.port || 0 } : null;
+    },
     close() { if (video) video.srcObject = null; if (pc) pc.close(); pc = null; sessionO = null; },
   };
 })(); 'ready'`;
@@ -370,9 +378,10 @@ const VIEWER_SCRIPT = `window.V = (() => {
 const viewerCtl = [];
 let live = null; // { id, host }
 let candQueue = [], candTimer = null, viewerEvents = null, keepCandidates = false;
+let candFilter = null; // (1.17.4) which of the viewer's candidates it sends (an IPv6-only viewer)
 function onViewerBinding(msg) {
   if (msg.k === 'ctl') viewerCtl.push({ at: Date.now(), m: msg.m });
-  else if (msg.k === 'cand' && live && !keepCandidates) {
+  else if (msg.k === 'cand' && live && !keepCandidates && (!candFilter || candFilter(msg.c))) {
     candQueue.push(msg.c);
     if (!candTimer) candTimer = setTimeout(async () => {
       candTimer = null;
@@ -524,6 +533,42 @@ try {
   await waitLog(/capture stopped|capture host closed$|capture host kept warm for the next session/, from, 12000);
   keepCandidates = false;
   await endViewer();
+
+  // 6b (1.17.4). A viewer that offers only its Tailscale IPv6 address, as a phone on mobile data does: this PC's capture
+  // page talks through a socket it had no candidate for (it takes the default route only, and this PC's network has no
+  // IPv6), so it names that socket; the viewer then reads this PC's attested IPv6 address, not "prflx, no address"
+  // (2026-10-12: the user's phone hung up on every try over IPv6). (Edge with media allowed: a socket and a candidate
+  // on each address, the IPv6 one among them; then Edge as it was, for the rest.)
+  if (ip6) {
+    cdp.close();
+    try { edge.kill(); } catch {}
+    await sleep(1500);
+    await startEdge(['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']);
+    // (a page of the scratch server's, a secure origin: about:blank gets no camera, and so no socket on each address)
+    await cdp.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/api/hello` });
+    await sleep(1500);
+    await evalIn(VIEWER_SCRIPT);
+    check(await evalIn('navigator.mediaDevices.getUserMedia({ video: true }).then(m => { window.__media = m; return true; }, () => false)'), '...(the viewer has a fake camera: Chrome then uses each of its addresses)');
+    from = logLines().length;
+    candFilter = c => !c.candidate || /^fd7a:115c:a1e0:/i.test(c.candidate.split(' ')[4] || '');
+    r = await startSession();
+    check(r.status === 201, 'an IPv6-only viewer asks');
+    const v6 = await waitLog(/Test Phone is controlling this PC \(peer \S+ is rc-test-machine, checked\)/, from, 20000);
+    check(!!v6 && /\(peer fd7a:/i.test(v6), `...this PC reaches it over Tailscale IPv6 (${v6 ? v6.replace(/.*\(peer (\S+) .*/, '$1').replace(/^fd7a:.*/i, 'fd7a:…') : 'not live'})`);
+    check(!!(await waitLog(/told the viewer about the IPv6 socket it talks through/, from, 5000)), '...its capture page names the IPv6 socket it talks through (it had no candidate)');
+    const seen = await waitFor(async () => { const x = await evalIn('V.selected()'); return x && x.type === 'host' && x.address ? x : null; }, 5000, 200);
+    const last = seen || await evalIn('V.selected()');
+    check(!!seen && seen.address.toLowerCase() === ip6.toLowerCase(), `...and the viewer reads this PC's attested IPv6 address (${last ? (last.type || '?') + ' ' + (!last.address ? '(no address)' : last.address.toLowerCase() === ip6.toLowerCase() ? 'the attested one' : 'another') : 'no pair'})`);
+    candFilter = null;
+    rc('stop');
+    await waitLog(/Test Phone stopped controlling this PC after \d+ s/, from, 8000);
+    await waitLog(/capture stopped|capture host closed$|capture host kept warm for the next session/, from, 12000);
+    await endViewer();
+    cdp.close();
+    try { edge.kill(); } catch {}
+    await sleep(1500);
+    await startEdge();
+  }
 
   // A viewer window of this PC's own, open before the session (it'll try controlling another device from here).
   forward(['--test-open-remote', otherId]);
