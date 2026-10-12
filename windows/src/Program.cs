@@ -240,11 +240,12 @@ namespace Beam
             Application.SetCompatibleTextRenderingDefault(false);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             Application.ThreadException += (s, e) => Log.Write("UI error: " + e.Exception);
-            AppDomain.CurrentDomain.UnhandledException += (s, e) => { Log.Write("Fatal: " + e.ExceptionObject); RcPointer.Emergency(); }; // (1.12.6: the pointer back)
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => { Log.Write("Fatal: " + e.ExceptionObject); RcPointer.Emergency(); FileWriter.FlushAll(); Log.Flush(); }; // (1.12.6: the pointer back; 1.17.3: what's queued)
             System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) => { Log.Error("Task", e.Exception); e.SetObserved(); };
             SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
 
             Application.Run(new App(opts, cfg));
+            FileWriter.FlushAll(); // (1.17.3) state.json and handled.json on disk before an update's new version reads them
             Pending.Wait(3000); // e.g. taking back an open sign-in request
             if (Handoff != null)
             {

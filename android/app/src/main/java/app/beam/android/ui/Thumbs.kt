@@ -17,6 +17,7 @@ import java.util.Collections
 import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
@@ -39,6 +40,7 @@ object Thumbs {
      * [keepShape] the view keeps its size (a gallery tile, 1.12) instead of taking the picture's shape.
      */
     fun bind(view: ImageView, key: String, load: () -> Bitmap?, keepShape: Boolean = false, onResult: (Boolean) -> Unit = {}) {
+        if (view.getTag(R.id.thumb_key) != key) cancelLoad(view)
         view.setTag(R.id.thumb_key, key)
         cache.get(key)?.let {
             show(view, it, keepShape)
@@ -52,7 +54,8 @@ object Thumbs {
             return
         }
         view.isVisible = true
-        scope.launch {
+        if ((view.getTag(R.id.thumb_job) as? Job)?.isActive == true) return // this preview is loading already
+        view.setTag(R.id.thumb_job, scope.launch {
             val bmp = try {
                 load()
             } catch (_: Exception) {
@@ -65,7 +68,16 @@ object Thumbs {
                     onResult(bmp != null)
                 }
             }
-        }
+        })
+    }
+
+    /**
+     * (1.13.3, audit) The view shows something else now (scrolled past, recycled): its preview's load, if it hasn't
+     * started yet, never runs. Only two load at a time, so a fast scroll used to queue every preview it passed.
+     */
+    private fun cancelLoad(view: ImageView) {
+        (view.getTag(R.id.thumb_job) as? Job)?.cancel()
+        view.setTag(R.id.thumb_job, null)
     }
 
     /** Signed out: previews don't stay, in memory or on disk (including the small copies of saved photos). */
@@ -127,6 +139,7 @@ object Thumbs {
     }
 
     fun clear(view: ImageView) {
+        cancelLoad(view)
         view.setTag(R.id.thumb_key, null)
         view.setImageDrawable(null)
     }
@@ -170,6 +183,7 @@ object Thumbs {
                 } catch (_: Exception) {
                     // No small copy this time: the next preview decodes the original again.
                 }
+                backfill(ctx, item, bmp)
                 return bmp
             } catch (_: Exception) {
                 // Deleted or unreadable: fall back to the server copy.
@@ -177,7 +191,8 @@ object Thumbs {
         }
         val thumb = thumbFile(ctx, item.id)
         if (thumb.exists()) BitmapFactory.decodeFile(touched(thumb).path)?.let { return it }
-        val api = BeamApp.from(ctx).api ?: return null
+        val app = BeamApp.from(ctx)
+        val api = app.api ?: return null
         if (item.thumb) {
             val bytes = api.thumb(item.id)
             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
@@ -186,6 +201,8 @@ object Thumbs {
         }
         if (local != null && item.isVideo) return videoFrame(ctx, local)
         if (!item.isImage || item.size > MAX_REMOTE_BYTES) return null
+        // (1.13.3, audit) "Wi-Fi only" for downloads holds for a preview's original too (up to 25 MB on mobile data)
+        if (app.prefs.wifiOnlyDownloads && app.network.metered) return null
         val part = File(thumb.parentFile, "${item.id}.part")
         try {
             api.openFile(item.id, 0).use { res ->
@@ -194,10 +211,30 @@ object Thumbs {
             }
             val bmp = decode(ImageDecoder.createSource(part))
             writeWhole(thumb) { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+            backfill(ctx, item, bmp)
             return bmp
         } finally {
             part.delete()
         }
+    }
+
+    /** Items this run made a server thumbnail for (once each). */
+    private val thumbsMade: MutableSet<String> = Collections.synchronizedSet(HashSet())
+
+    /**
+     * (1.13.3, audit) A picture decoded here from its original, that came without a thumbnail (from the command line or
+     * Beam for Linux, or too big for its sender to make one): its thumbnail goes to the server, once, in the background,
+     * so the other devices show it instead of downloading the original.
+     */
+    private fun backfill(ctx: Context, item: Item, bmp: Bitmap) {
+        if (item.thumb || !item.isImage || !thumbsMade.add(item.id)) return
+        val app = BeamApp.from(ctx)
+        val jpeg = try {
+            serverThumb(bmp)
+        } catch (_: Exception) {
+            null
+        } ?: return
+        app.scope.launch(Dispatchers.IO) { runCatching { app.api?.putThumb(item.id, jpeg) } }
     }
 
     /** A photo or video this device sent: keep a preview from the original, so it isn't downloaded again to show it. */

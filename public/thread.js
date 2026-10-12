@@ -541,7 +541,11 @@ function buildMedia(item) {
     const img = el('img', { alt: item.name, loading: 'lazy', decoding: 'async', draggable: 'true' });
     if (dims) { img.width = dims.w; img.height = dims.h; } else img.classList.add('unsized');
     img.src = hasThumb(item) ? thumbUrl(item) : fileUrl(item, true);
-    img.addEventListener('load', () => { img.classList.remove('unsized'); if (view.pinnedBottom) scrollToBottom(); }, { once: true });
+    img.addEventListener('load', () => {
+      img.classList.remove('unsized');
+      if (view.pinnedBottom) scrollToBottom();
+      if (!hasThumb(item)) backfillThumb(item, img); // (1.24.1) its original: a thumbnail for the others
+    }, { once: true });
     img.addEventListener('error', () => { if (hasThumb(item) && !img.dataset.fallback) { img.dataset.fallback = '1'; img.src = fileUrl(item, true); } }, { once: false });
     const box = el('button', { class: 'preview', type: 'button', 'aria-label': `Open ${item.name}` }, img);
     box.addEventListener('click', () => openLightbox(item));

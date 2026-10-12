@@ -448,6 +448,82 @@ namespace Beam
         }
     }
 
+    // (1.17.3, audit) A file written in the background, the latest text only: Write() takes the text (built by the
+    // caller on its own thread, as before) and returns; a pool thread writes it (Config.AtomicWrite: a temporary file,
+    // flushed to disk, then swapped in), and a newer text that comes meanwhile replaces one not yet written. The state
+    // files used to be written, and flushed to disk, on the UI thread at every mark-read and finished download.
+    // FlushAll() writes every pending text at once, after one being written: at exit (before an update's new version
+    // reads them) and after a fatal error.
+    class FileWriter
+    {
+        static readonly List<FileWriter> all = new List<FileWriter>();
+        static FileWriter() { AppDomain.CurrentDomain.ProcessExit += (s, e) => FlushAll(); } // (an exit that skips Program's)
+        readonly string path, what;
+        readonly object gate = new object(); // pending, scheduled
+        readonly object file = new object(); // one write at a time
+        string pending;
+        bool scheduled;
+
+        public FileWriter(string path, string what)
+        {
+            this.path = path;
+            this.what = what;
+            lock (all) all.Add(this);
+        }
+
+        public void Write(string text)
+        {
+            lock (gate)
+            {
+                pending = text;
+                if (scheduled) return;
+                scheduled = true;
+            }
+            System.Threading.Tasks.Task.Run(() => Drain());
+        }
+
+        void Drain()
+        {
+            while (true)
+            {
+                lock (file)
+                {
+                    string text;
+                    lock (gate)
+                    {
+                        text = pending;
+                        pending = null;
+                        if (text == null) { scheduled = false; return; }
+                    }
+                    Save(text);
+                }
+            }
+        }
+
+        void Save(string text)
+        {
+            try { Config.AtomicWrite(path, text); }
+            catch (Exception ex) { Log.Error("Saving " + what, ex); }
+        }
+
+        public void Flush()
+        {
+            lock (file)
+            {
+                string text;
+                lock (gate) { text = pending; pending = null; }
+                if (text != null) Save(text);
+            }
+        }
+
+        public static void FlushAll()
+        {
+            List<FileWriter> list;
+            lock (all) list = all.ToList();
+            foreach (var w in list) w.Flush();
+        }
+    }
+
     // A transfer that must survive a restart (see App.RestoreTransfers).
     class SavedUpload
     {
@@ -518,10 +594,14 @@ namespace Beam
         public List<SavedUpload> Uploads = new List<SavedUpload>();
         public List<SavedDownload> Downloads = new List<SavedDownload>();
 
+        readonly FileWriter handledWriter, stateWriter; // (1.17.3) written in the background
+
         public State(string dir)
         {
             handledFile = Path.Combine(dir, "handled.json");
             stateFile = Path.Combine(dir, "state.json");
+            handledWriter = new FileWriter(handledFile, "handled.json");
+            stateWriter = new FileWriter(stateFile, "state.json");
             try
             {
                 if (File.Exists(handledFile))
@@ -610,7 +690,7 @@ namespace Beam
                 d["baselineTs"] = BaselineTs;
                 d["serverId"] = ServerId;
                 d["ids"] = handledOrder.ToArray();
-                Config.AtomicWrite(handledFile, Json.Stringify(d));
+                handledWriter.Write(Json.Stringify(d));
             }
             catch (Exception ex) { Log.Error("Saving handled.json", ex); }
         }
@@ -664,7 +744,7 @@ namespace Beam
                 d["sendTo"] = sc;
                 d["uploads"] = Uploads.Select(u => (object)u.ToJson()).ToArray();
                 d["downloads"] = Downloads.Select(u => (object)u.ToJson()).ToArray();
-                Config.AtomicWrite(stateFile, Json.Stringify(d));
+                stateWriter.Write(Json.Stringify(d));
             }
             catch (Exception ex) { Log.Error("Saving state.json", ex); }
         }

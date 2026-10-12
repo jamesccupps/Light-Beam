@@ -1075,6 +1075,11 @@ async function makeThumb(file) {
     ({ source, w, h } = await videoFrame(file));
     if (!source) return null;
   } else return null;
+  return thumbOf(source, w, h);
+}
+
+// A picture (an ImageBitmap or a video frame) as a thumbnail: { blob, w, h } (w and h the picture's own), or null.
+async function thumbOf(source, w, h) {
   // (1.23.4, audit) 640 px: shown up to 320 CSS px, sharp on a 2× screen (320 was blurry on phones)
   const scale = Math.min(1, THUMB_PX / Math.max(w, h));
   const canvas = new OffscreenCanvas(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)));
@@ -1086,6 +1091,19 @@ async function makeThumb(file) {
     if (blob.size <= 256 * 1024) return { blob, w, h };
   }
   return null;
+}
+
+// (1.24.1, audit) A picture shown here from its original (sent without a thumbnail: from the command line or Beam for
+// Linux, or too big for its sender to make one) gets its thumbnail from this page, once: the other devices then show
+// that instead of downloading the original (up to 25 MB on a phone).
+const thumbsMade = new Set();
+async function backfillThumb(item, img) {
+  if (item.thumb || thumbsMade.has(item.id) || thumbsUnsupported || typeof OffscreenCanvas === 'undefined' || !img.naturalWidth) return;
+  thumbsMade.add(item.id);
+  try {
+    const t = await thumbOf(await createImageBitmap(img), img.naturalWidth, img.naturalHeight);
+    if (t && !itemMap.get(item.id)?.thumb) await api(`api/items/${item.id}/thumb?w=${t.w}&h=${t.h}`, { method: 'PUT', headers: { 'Content-Type': t.blob.type }, body: t.blob });
+  } catch {} // (deleted meanwhile, or a server without thumbnails: nothing to do)
 }
 
 // A frame from a second into the video (or 10%), for its poster; gives up after 5 s.

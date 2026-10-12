@@ -16,26 +16,74 @@ using Microsoft.Win32.SafeHandles;
 namespace Beam
 {
     // beam.log (1 MB, one old copy). Never log message text, keys or tokens: only ids, kinds and states.
+    // (1.17.3, audit) A line is stamped and queued; one background thread writes what's queued, a batch per opening of
+    // the file. Every line used to open, check, append to and close the file under one lock, on whichever thread logged
+    // (the UI's and remote control's too). Flush() writes the queue at once: at exit (ProcessExit, which also covers a
+    // forwarding instance's one line), after a fatal error, and before the log is read (DeviceLog).
     static class Log
     {
-        static readonly object sync = new object();
+        static readonly object sync = new object();   // the file: one batch at a time, in order
+        static readonly object queue = new object();  // pending, pendingLines, writer
+        static readonly StringBuilder pending = new StringBuilder();
+        static int pendingLines;
+        static System.Threading.Thread writer;
+        static readonly System.Threading.AutoResetEvent wake = new System.Threading.AutoResetEvent(false);
         public static string FilePath;
 
         public static void Write(string message)
         {
             try
             {
+                if (FilePath == null) return;
+                string line = (message ?? "").Replace("\r", " ").Replace("\n", " / ");
+                line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) + "  " + line + Environment.NewLine;
+                lock (queue)
+                {
+                    if (pendingLines >= 5000) return; // a disk that takes nothing: no endless queue
+                    pending.Append(line);
+                    pendingLines++;
+                    if (writer == null)
+                    {
+                        writer = new System.Threading.Thread(Run) { IsBackground = true, Name = "Beam log", Priority = System.Threading.ThreadPriority.BelowNormal };
+                        writer.Start();
+                        AppDomain.CurrentDomain.ProcessExit += (s, e) => Flush();
+                    }
+                }
+                wake.Set();
+            }
+            catch { }
+        }
+
+        static void Run()
+        {
+            while (true)
+            {
+                wake.WaitOne();
+                Flush();
+            }
+        }
+
+        public static void Flush()
+        {
+            try
+            {
                 lock (sync)
                 {
-                    if (FilePath == null) return;
+                    string text;
+                    lock (queue)
+                    {
+                        if (pendingLines == 0 || FilePath == null) return;
+                        text = pending.ToString();
+                        pending.Clear();
+                        pendingLines = 0;
+                    }
                     var info = new FileInfo(FilePath);
                     if (info.Exists && info.Length > 1024 * 1024)
                     {
                         File.Copy(FilePath, FilePath + ".old", true);
                         File.Delete(FilePath);
                     }
-                    string line = (message ?? "").Replace("\r", " ").Replace("\n", " / ");
-                    File.AppendAllText(FilePath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) + "  " + line + Environment.NewLine, new UTF8Encoding(false));
+                    File.AppendAllText(FilePath, text, new UTF8Encoding(false));
                 }
             }
             catch { }

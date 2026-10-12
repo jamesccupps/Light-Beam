@@ -451,7 +451,7 @@ class BeamApi(
         return UploadInfo.parse(json(request(url("/api/uploads")).post(body.toString().toRequestBody(JSON)).build()))
     }
 
-    /** `PUT /api/items/{id}/thumb` (API v3): a small JPEG preview of a picture or video this device sent. */
+    /** `PUT /api/items/{id}/thumb` (API v3): a small JPEG preview of a picture or video this device sent (1.13.3: or one decoded here that had none). */
     fun putThumb(id: String, jpeg: ByteArray) {
         execute(request(url("/api/items/$id/thumb")).put(jpeg.toRequestBody(JPEG)).build()).close()
     }

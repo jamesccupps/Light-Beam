@@ -46,4 +46,28 @@ class ThumbsTest {
         val kept = Thumbs.serverThumb(small)!!.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
         assertEquals("never enlarged", 300 to 200, kept.width to kept.height)
     }
+
+    /**
+     * (1.13.3, audit) A view shown something else before its preview's load started (scrolled past): that load never
+     * runs. Only two load at a time, so a fast scroll used to queue every preview it passed.
+     */
+    @Test
+    fun aPreviewScrolledPastIsNeverLoaded() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val ran = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+        val views = List(3) { android.widget.ImageView(app) }
+        fun busy(name: String): () -> Bitmap? = { ran[name] = true; gate.await(5, java.util.concurrent.TimeUnit.SECONDS); null }
+        Thumbs.bind(views[0], "test:busy1", busy("busy1"), keepShape = true)
+        Thumbs.bind(views[1], "test:busy2", busy("busy2"), keepShape = true)
+        Thumbs.bind(views[2], "test:passed", { ran["passed"] = true; null }, keepShape = true) // waits: both loaders busy
+        Thumbs.bind(views[2], "test:shown", { ran["shown"] = true; Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888) }, keepShape = true)
+        gate.countDown()
+        val until = System.currentTimeMillis() + 5_000
+        while (views[2].drawable == null && System.currentTimeMillis() < until) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+        assertTrue("the preview now there is shown", views[2].drawable != null && ran["shown"] == true)
+        assertEquals("the one scrolled past never loaded", null, ran["passed"])
+    }
 }

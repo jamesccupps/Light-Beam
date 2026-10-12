@@ -218,4 +218,19 @@ export default function register(test) {
     const px = await other.evaluate(`(async () => { const b = await createImageBitmap(await (await fetch('api/items/${item.id}/thumb')).blob()); return [b.width, b.height]; })()`);
     eq(px, [640, 480], 'the thumbnail itself is 640 px, sharp at 320 CSS px on a 2× screen (1.23.4)');
   });
+
+  test('a picture sent without a thumbnail (the command line, Beam for Linux) gets one from the first page that shows it (1.24.1)', async ctx => {
+    const page = await ctx.signedIn();
+    const pi = dev(ctx, 'Office Pi', 'linux');
+    await pi.me();
+    const meId = await page.evaluate('me.id');
+    const b64 = await page.evaluate(`(async () => { const c = new OffscreenCanvas(1200, 900); const g = c.getContext('2d'); g.fillStyle = '#37a'; g.fillRect(0, 0, 1200, 900);
+      const a = new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg', quality: 0.9 })).arrayBuffer()); let s = ''; for (const x of a) s += String.fromCharCode(x); return btoa(s); })()`);
+    const sent = await pi.file('from-the-pi.jpg', Buffer.from(b64, 'base64'), [meId]);
+    assert(sent.id && !sent.thumb, `sent without a thumbnail: ${JSON.stringify(sent).slice(0, 120)}`);
+    await page.evaluate(`openConv('${pi.id}')`);
+    await page.waitFor(`itemMap.get('${sent.id}')?.thumb === true`, 10000, 'the page made its thumbnail (the update event came back)');
+    eq(await page.evaluate(`(async () => { const b = await createImageBitmap(await (await fetch('api/items/${sent.id}/thumb')).blob()); return [b.width, b.height]; })()`), [640, 480], '640 px');
+    eq(page.errors, [], 'no page errors');
+  });
 }

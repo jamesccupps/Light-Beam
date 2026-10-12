@@ -20,7 +20,7 @@ namespace Beam
             if (app.Api == null || string.IsNullOrEmpty(id)) return;
             try
             {
-                string text = await Task.Run(() => Tail(Log.FilePath, MaxBytes));
+                string text = await Task.Run(() => { Log.Flush(); return Tail(Log.FilePath, MaxBytes); }); // (1.17.3: the queued lines too)
                 var body = new Dictionary<string, object>();
                 body["id"] = id;
                 body["name"] = "beam.log";
