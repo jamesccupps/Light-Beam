@@ -350,7 +350,11 @@ namespace Beam
             ".desktopthemepackfile", ".wsc", ".sct", ".xbap", ".mht", ".mhtml",
             // (1.7.2) cabinets, old help, Internet settings, Monad/console scripts, compiled Access databases
             ".cab", ".hlp", ".ins", ".isp", ".msh", ".msh1", ".msh2", ".mshxml", ".msh1xml", ".msh2xml", ".psc1", ".psc2",
-            ".ade", ".adp", ".mde", ".accde"
+            ".ade", ".adp", ".mde", ".accde",
+            // (1.17.5, security review L-2) scripts that run where Python or Git Bash is installed (the user's PCs have both),
+            // Remote Desktop files (they connect out, drives shared), Office add-in installers, OneNote packages, Java Web
+            // Start, Windows Sandbox and AutoHotkey files
+            ".py", ".pyw", ".pyz", ".pyzw", ".pyc", ".pyo", ".sh", ".bash", ".rdp", ".vsto", ".one", ".onepkg", ".jnlp", ".wsb", ".ahk"
         };
 
         public static bool IsExecutable(string path)

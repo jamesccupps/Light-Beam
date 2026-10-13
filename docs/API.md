@@ -19,7 +19,7 @@ is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keybo
 alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
 device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
 `device-logs` (shipped with 1.19's in Beam 1.20.0), 1.21 `apps`, 1.22 `linux` (Beam for Linux) and 1.23 `vnc` (control
-of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too). Use each one only when its flag is there; everything older keeps working.
+of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -40,6 +40,26 @@ sign-in over https sets `__Host-beam_key` and clears `beam_key`). The Windows ap
 
 - **A device token speaks for its device (v3).** Once a token is bound to a device, the server uses that device's id
   whatever `X-Beam-Device-Id` says. A token issued without a device id is bound to the first id it is used with.
+- **Trusted sign-ins (1.25, feature `trust`; the security review of 2026-10-13).** A sign-in is *trusted* when it was
+  made on purpose: with the password or the master key, with a pairing link or a sign-in approval from a trusted sign-in
+  (each passes its maker's trust on; a link that a device's own token makes, that token's), or when a trusted device
+  approves it (`PUT /api/devices/{id}/trust`). Tailscale's automatic sign-in (`POST /api/autopair`) never is, whatever
+  app it says it is: any program on any of the owner's machines (another Windows account, a process on a Pi, any app
+  on a phone, whose traffic Tailscale carries) gets one. The exception is the very first device of a brand-new Beam:
+  someone has to approve the rest. Sign-ins from before 1.25 kept what remote control allowed them: the Windows app's
+  key-bound one, the Android app's, anything made with the password, a link, an approval or the key; not a Linux
+  computer's, nor a browser's made by Tailscale.
+  - Needs a trusted sign-in, else `403 { "reason": "trusted" }`: starting remote control or keyboard and mouse; every
+    change to apps; phone notifications (sharing them, turning them on for a device, seeing and acting on them);
+    setting the first password, and changing or removing one without `current`; signing the others out; removing
+    another device; approving a move (and a move sign-in's export); moving (`POST`/`DELETE /api/move`); approving
+    devices; letting a blocked machine back in. Widening who signs in automatically and Beam's address (`publicUrl`)
+    answer `403 { "reason": "sign-in" }` as before.
+  - A sign-in that isn't trusted, naming the id of a device without a device key that has a trusted sign-in, gets a
+    device of its own (as a sign-in without the key does for a keyed device).
+  - `GET /api/me` says `auth.trusted`; each device in `GET /api/devices` says `trusted` (it has a trusted sign-in of
+    its own kind: an app's own, or a browser's own). A Linux computer may be trusted, but never starts a session
+    (`403 { "reason": "linux" }`).
 - **Moving off the master key (v3):**
   - A request authenticated with the master key and carrying a device id gets back an `X-Beam-Token: bt_…` response
     header. Browsers get a `Set-Cookie` instead. It is the same token every time for that device.
@@ -52,6 +72,8 @@ sign-in over https sets `__Host-beam_key` and clears `beam_key`). The Windows ap
   - The password and approval still work for a blocked machine; the owner decides those.
   - `POST /api/security/sign-out-others` also changes the master key and blocks every other device's machine.
     `{ "disableTailscaleSignIn": true }` also turns automatic Tailscale sign-in off, for "my phone was stolen".
+    **(1.25)** Only from a trusted sign-in (a borrowed computer signed in with the password still can); a session-only
+    one gets a session-only token back.
   - A device that still holds the master key can come back until the master key changes.
   - **The real kill switch for a lost device is removing it from your Tailscale account** (admin console). Beam can
     only block the machines it has seen.
@@ -214,7 +236,7 @@ neither header and are unaffected. Bearer requests are never affected.
 Beam can be moved to another machine with its data folder (`node server.js export` / `import`, or
 `import-from`; see README). The key, items, devices, sign-ins and `serverId` travel with it.
 
-- **(v3)** `POST /api/move { "to": "https://new-address" }` (any signed-in device):
+- **(v3)** `POST /api/move { "to": "https://new-address" }` (any signed-in device; **(1.25)** a trusted one):
   - The old server checks that `to/api/hello` answers with the same `serverId` and a valid **proof** for the master
     key.
   - It then remembers the new address in `data/settings.json`, sends the SSE event **`moved { movedTo }`** to every
@@ -236,11 +258,15 @@ Beam can be moved to another machine with its data folder (`node server.js expor
      "Beam moved to …".
 - **Browsers (v3):** the old address serves a small page that goes straight to the new address. If the browser was
   signed in there, it carries a one-time **handoff** in the fragment:
-  `https://new/#handoff=<exp>.<mac>&device=<id>&name=<name>`.
+  `https://new/#handoff=<exp>.<kind>.<mac>&device=<id>&name=<name>` (1.25; before, `<exp>.<mac>`).
   - `device` and `name` come from the old origin's `localStorage` (`beam.deviceId`, `beam.device`).
-  - The new page should adopt them, then call `POST /api/login { "handoff": "<exp>.<mac>" }` (same-origin). That sets
-    the cookie (`204`) for the device in `X-Beam-Device-Id` / the `beam_device_id` cookie.
+  - The new page should adopt them, then call `POST /api/login { "handoff": "…" }` (same-origin), the handoff as it
+    came. That sets the cookie (`204`) for the device in `X-Beam-Device-Id` / the `beam_device_id` cookie.
   - Handoffs last 10 minutes and work once.
+  - **(1.25)** `<kind>` is what the sign-in it was made for was, `t`rusted or `u`ntrusted and `l`asting or for this
+    `s`ession only (the MAC covers it): the new sign-in is the same. A handoff without one (from an older server) signs
+    in as not trusted, and like any sign-in that isn't trusted, it can't take the id of a device that has a trusted
+    sign-in: that browser gets a device of its own.
 - If the server simply stops answering for a long time, apps may look for their Beam again among the remembered
   `urls` and the tailnet peers. Verify `serverId` **and** `proof`.
 
@@ -476,10 +502,11 @@ an **All devices** conversation for broadcasts.
 | Method & path | Result |
 |---|---|
 | `GET /api/devices` | `{ "devices": [Device...], "you": "<your device id or null>" }`, online first |
-| `DELETE /api/devices/{id}` | Forget a device, **revoke its sign-ins and block its Tailscale machine from automatic sign-in** (v3) → `204`. A device still holding the master key comes back when it next connects |
+| `DELETE /api/devices/{id}` | Forget a device, **revoke its sign-ins and block its Tailscale machine from automatic sign-in** (v3) → `204`. A device still holding the master key comes back when it next connects. **(1.25)** Another device than the caller's own: a trusted sign-in (`403 reason "trusted"`) |
+| `PUT /api/devices/{id}/trust` | **(1.25, feature `trust`)** `{ "trusted": true\|false }`, from a trusted sign-in signed in for good → `200 { "device", "trusted" }`; event `devices`. True: that device's own sign-ins (its app's, or a browser's own; not a browser merged into an app on its machine) become trusted; `409` when it has none. False: all its sign-ins stop being trusted, and the remote control sessions they started end (`revoked`) |
 | `PUT /api/devices/me/status` | **(1.3)** the calling device reports its status (see below) → `204`; event `devices` |
 | `PUT /api/devices/me/name` | **(1.23.2)** `{ "name" }`: a Beam for Linux computer renamed from its window (see Beam for Linux) → `200 { "name" }`; event `devices`, and `rename` to its app |
-| `PUT /api/devices/{id}/settings`, `PUT /api/devices/me/settings` | **(1.5)** `{ "phoneNotifications": true\|false }` → `204`; event `devices`. When the value changes, the device itself gets the new list at once (see Phone notifications); switched off, also `notification-removed { "all": true }`. Any signed-in device may change any device's settings. `400` for unknown keys or a non-boolean, `404` unknown device |
+| `PUT /api/devices/{id}/settings`, `PUT /api/devices/me/settings` | **(1.5)** `{ "phoneNotifications": true\|false }` → `204`; event `devices`. When the value changes, the device itself gets the new list at once (see Phone notifications); switched off, also `notification-removed { "all": true }`. Any signed-in device may change any device's settings; **(1.25)** turning `phoneNotifications` on takes a trusted sign-in (`403 reason "trusted"`). `400` for unknown keys or a non-boolean, `404` unknown device |
 | `PUT /api/devices/me/backup` | **(1.8.1, feature `backups`)** an app keeps a copy of its own settings here: `{ "install": "<its id, 8–64 of A–Z a–z 0–9 _ ->", "app": "windows"\|"android", "version", "settings": {…} }` → `204`; event `devices`. Never a sign-in or a key. One per install (the same install replaces its own), the newest three per device; when a reinstall's new device is linked to the old one, they go along. `settings` is an object of at most 32 KB (`413` above). `403` for a session-only sign-in. What the apps keep: Windows (1.8.1) its Settings, hotkeys and remote control's devices; Android (1.8.2) `deviceName`, `stayConnected`, `autoCopy`, `autoDownload`, `wifiOnlyDownloads`, `maxDownloadMb`, `tileTarget` (`""` = ask), `mutedDevices`, `autoCopyDevices`, `shareNotifications`, `sharedApps` (package names), sent only when they changed. A reinstalled phone comes back with the same device id (from ANDROID_ID), so it finds its earlier install's here |
 | `GET /api/devices/{id}/backups`, `GET /api/devices/me/backups` | **(1.8.1)** `{ "device", "name", "backups": [{ "install", "app", "version", "at", "settings" }] }`, newest first: for an app to offer them back after a reinstall, or to set up a new PC like another. Any of the owner's devices signed in for good (`403` for a session-only sign-in). The device list says only when: `backup: { "at", "app" }` |
 | `POST /api/devices/{id}/ring` | **(1.3)** body `{ "stop"?: true }` → `202 { "online" }`; event `ring`. `404` unknown device, `409` a device that can't ring (`can.ring` is false) |
@@ -725,7 +752,8 @@ it for its signed-in user, never raising itself to administrator (an installer t
 there), and only once someone at that PC has allowed it: until then a request makes the PC ask (Install / Always allow /
 Not now; the app's `appsAllowed`, turned on only at the PC, see HOST-BRIDGE; from the Windows app 1.16.1 the question
 opens there by itself, near the clock, and the app's window shows a bar until it's answered). Adding, changing, installing and
-removing need a device signed in for good (`403 { reason: "temporary" }` for a session-only one). `data/apps.json`, the
+removing need a device signed in for good (`403 { reason: "temporary" }` for a session-only one), and **(1.25)** a trusted
+sign-in (`403 { reason: "trusted" }`: an app runs a program on every PC that allows apps). `data/apps.json`, the
 files in `data/app-files/<id>/` (both in exports and backups).
 
 App: `{ id (8 hex), kind: "github" | "file" | "winget", name, source ("owner/repo", the winget id, or null), version,
@@ -953,6 +981,10 @@ A phone shares the notifications of the apps its user picked; devices with `sett
 them and can reply, run an action or dismiss, which the phone then does. Feature `phone-notifications`.
 
 - **Audience** of a phone's notifications: every device with `phoneNotifications: true`, except that phone.
+- **(1.25) Trusted only.** The phone's sign-in that shares them, the audience's that see or act on them, and the one
+  that turns `phoneNotifications` on must be trusted (`403 { "reason": "trusted" }`); `notification`,
+  `notification-request` and `notification-request-done` go only to trusted sign-ins' streams (a browser that
+  same-machine linking merged into a PC shares the PC's id, not its trust).
 - **Privacy:** the content (titles, texts, lines, replies) lives only in the server's memory: never in a file, never in
   the log (log lines name the app at most). Only the audience gets it. Clients keep it in memory too. A server
   restart forgets every notification; its stream `hello` then has a new `instance`, and phones send their active
@@ -1070,21 +1102,19 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
 - **Every route** needs a device signed in for good: a session-only sign-in (a borrowed computer) gets
   `403 { "reason": "temporary" }`. Browsers need same-origin proof (CSRF), as everywhere. Every answer is
   `Cache-Control: no-store`.
-- **Which sign-ins.** The sign-in (its token) decides, never the device id it names. To start a session, or to be
-  or act as the PC, the request's sign-in must be one of these:
-  - **a Beam app's own sign-in**: made for Windows or Android, however it was made (Tailscale identity included). A
-    Windows sign-in must also be key-bound (see Device keys). The apps' own pages use it as their cookie, so the
-    Windows viewer window qualifies. So does the Android activity's cookie from `POST /api/login` with the app's token: a token made
-    from another keeps its platform and origin;
-  - **a browser sign-in made with something only the user has**: the password, a pairing link or code, a sign-in
-    request approved on another device, or the master key;
-  - the master key itself.
-
-  Never eligible, with `403 { "reason": "sign-in" }` ("sign in to Beam on this device with a pairing link, an approval
-  or the password"):
-  - a browser signed in by Tailscale identity (or, before 1.14.3, because a Beam app ran on the same machine). Any
-    Windows account on that machine gets those; a browser linked to an app's id is still refused;
-  - the CLI.
+- **Which sign-ins.** The sign-in (its token) decides, never the device id it names.
+  - **(1.25) To start a session (the viewer):** a trusted sign-in (see Credentials) of the Windows app (key-bound, see
+    Device keys), the Android app or a browser, or the master key. Not trusted: `403 { "reason": "trusted" }` (approve
+    the device on a trusted one: Settings → Devices). Never the CLI (`403 { "reason": "sign-in" }`), nor a Linux
+    computer, trusted or not (`403 { "reason": "linux" }`: the user's choice, a Beam for Linux computer is only ever
+    controlled). Until 1.25 "a Beam app's own sign-in" was what the client said it was, so Tailscale's automatic
+    sign-in naming the Android app could control PCs; a browser's could get there through a pairing link or an
+    approval it made itself.
+  - **To be or act as the PC:** a key-bound Windows app sign-in, Beam for Linux's own sign-in, or the master key, as
+    before (trust isn't needed to be controlled).
+  - The apps' own pages use the app's sign-in as their cookie, so the Windows viewer window qualifies; so does the
+    Android activity's cookie from `POST /api/login` with the app's token (a token made from another keeps its
+    platform, origin and trust).
 
   More:
   - The PC itself must be a key-bound Windows app sign-in (or the master key).
@@ -1278,11 +1308,11 @@ signed-in request, unless configured.
 ### Other
 | Method & path | Result |
 |---|---|
-| `GET /api/me` | `{ "ok": true, "you", "api": 3, "read": {...}, "auth": { "via": "master"|"token", "user", "role", "session"? }, "machine": { "name" } | null }`. `machine.name` is this device's Tailscale machine name when known (v3) |
+| `GET /api/me` | `{ "ok": true, "you", "api": 3, "read": {...}, "auth": { "via": "master"|"token", "user", "role", "session"?, "trusted" (1.25) }, "machine": { "name" } | null }`. `machine.name` is this device's Tailscale machine name when known (v3) |
 | `GET /api/info` | `{ "version", "api", "serverId", "features": [...], "uptime", "retentionDays", "maxItems", "maxUpload", "chunkSize", "maxChunkSize" (1.4), "maxStorage", "storage": { "used", "items", "files", "free", "total" }, "publicUrl", "urls", "tailscaleSignIn", "tailscaleOwners", "moving", "apps": { "windows", "android" }, "passwordSet", "ntfy", "settings", "family" (1.7: Beam Family's address from `BEAM_FAMILY_URL`, or null; see docs/FAMILY.md) }` |
 | `GET /api/pair` | `{ "key": "bp_…", "lanUrl", "publicUrl", "expiresAt", "link" }`. `key` is a single-use pairing token valid 15 minutes (v3; it was the master key). (1.23.3, S-2) `403` reason `temporary` for a session-only sign-in: a pairing link is a lasting sign-in |
-| `POST /api/password` | `{ "password", "current"? }` sets it (≥ 8 characters); `""` removes it. Changing or removing a set password takes `current` (1.7.2; `403 reason: "current-password"` without it or when wrong), except from a sign-in made deliberately (the password, a pairing link, an approval, the master key, a Beam app's own) |
-| `POST /api/security/sign-out-others` | **(v3)** optional body `{ "disableTailscaleSignIn": true }`. New master key, every sign-in revoked, every other device's Tailscale machine blocked, learned Tailscale owners dropped; the caller gets `{ "key": "bt_…", "revoked": n, "tailscaleSignIn" }` (and `X-Beam-Token` / a cookie). `409` when the key comes from `BEAM_KEY` |
+| `POST /api/password` | `{ "password", "current"? }` sets it (≥ 8 characters); `""` removes it. Changing or removing a set password takes `current` (1.7.2; `403 reason: "current-password"` without it or when wrong), except from a trusted sign-in (1.25; before, as remote control counted them). **(1.25)** Setting the first one takes a trusted sign-in (`403 reason "trusted"`): an automatic one could otherwise set it and sign in with it, trusted |
+| `POST /api/security/sign-out-others` | **(v3)** optional body `{ "disableTailscaleSignIn": true }`. New master key, every sign-in revoked, every other device's Tailscale machine blocked, learned Tailscale owners dropped; the caller gets `{ "key": "bt_…", "revoked": n, "tailscaleSignIn" }` (and `X-Beam-Token` / a cookie). `409` when the key comes from `BEAM_KEY`. **(1.25)** A trusted sign-in only (`403 reason "trusted"`); a session-only one's new token is session-only too |
 | `POST /api/logout` | Signs this browser out: revokes its token, clears the cookie, and sends `Clear-Site-Data: "cache", "storage"` (v3) |
 | `GET /api/logs?lines=200` | **(v3)** `{ "lines": [...] }`, the end of the server log (`data/logs/server.log`). **(1.14.3)** `403` for a session-only sign-in, as backups |
 | `GET /api/alerts` | **(1.3)** `{ "alerts": [Alert...] }`, the last 100, newest first (see Alerts) |

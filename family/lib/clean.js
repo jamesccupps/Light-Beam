@@ -14,8 +14,10 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { SAFE_INPUT } = require('./media'); // (1.25, security review F-1)
 
 const MAX_PHOTO = 200 * 1024 * 1024; // (read whole: photos are a few MB)
+const REMUX_MS = 30 * 60e3; // (1.25) a copy that takes longer is stopped (it had no limit)
 
 // The orientation (Exif tag 0x0112) in an APP1 block's payload ("Exif\0\0" + TIFF), or 0.
 function exifOrientation(payload) {
@@ -147,16 +149,21 @@ function kindOf(a, { isVideo, ffmpeg }) {
 
 function remux(ffmpeg, src, dest, name) {
   const format = VIDEO_FORMATS[(/\.([a-z0-9]+)$/i.exec(name)?.[1] || '').toLowerCase()];
-  const args = ['-hide_banner', '-v', 'error', '-y', '-i', src,
+  const args = ['-hide_banner', '-v', 'error', '-y', ...SAFE_INPUT, '-i', src,
     '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy',
     '-map_metadata', '-1', '-map_metadata:s:v', '-1', '-map_metadata:s:a', '-1', '-map_chapters', '-1',
     ...(format === 'mp4' || format === 'mov' ? ['-movflags', '+faststart'] : []), '-f', format, dest];
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
+    const timer = setTimeout(() => { err += '\n(stopped: it took over 30 minutes)'; child.kill(); }, REMUX_MS);
+    timer.unref?.();
     child.stderr.on('data', d => { err = (err + d).slice(-2000); });
-    child.on('error', reject);
-    child.on('exit', code => (code === 0 ? resolve() : reject(new Error(err.trim().split(/\r?\n/).pop() || `ffmpeg stopped (${code})`))));
+    child.on('error', e => { clearTimeout(timer); reject(e); });
+    child.on('exit', code => {
+      clearTimeout(timer);
+      code === 0 ? resolve() : reject(new Error(err.trim().split(/\r?\n/).pop() || `ffmpeg stopped (${code})`));
+    });
   });
 }
 

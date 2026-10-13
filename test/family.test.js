@@ -1527,6 +1527,62 @@ test('F-Y (1.23.5, audit): a name with an accented capital ("Émile") signs in h
   } finally { await s.stop(); }
 });
 
+test('F-Z (1.25, security review F-1): ffmpeg reads an upload only as a video file: a "video" that is really a playlist opens no address and no other file (neither the copy that plays everywhere nor the one without location data)', async () => {
+  if (!FFMPEG) { console.log('    (no ffmpeg here: set BEAM_TEST_FFMPEG to run F-Z)'); return; }
+  const hits = [];
+  const listener = http.createServer((req, res) => { hits.push(req.url); res.writeHead(404); res.end(); });
+  await new Promise(r => listener.listen(8849, '127.0.0.1', r));
+  const s = await start('playlist', 8848, { env: { BEAM_FAMILY_FFMPEG: FFMPEG } });
+  try {
+    const f = await family(s);
+    // A real little video on this machine, which the playlist names as its second segment (the first is an address).
+    const local = path.join(s.dir, 'elsewhere.mp4');
+    const made = spawnSync(FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=160x120:r=10:d=1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', local], { encoding: 'utf8', windowsHide: true });
+    assert.equal(made.status, 0, made.stderr);
+    const playlist = Buffer.from(['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:2', '#EXT-X-MEDIA-SEQUENCE:0',
+      '#EXTINF:1.0,', 'http://127.0.0.1:8849/segment.ts', '#EXTINF:1.0,', require('node:url').pathToFileURL(local).href, '#EXT-X-ENDLIST', ''].join('\n'));
+    const id = (await call(s, 'POST', '/api/uploads', f.owner, { name: 'holiday.mp4', size: playlist.length, mime: 'video/mp4' })).json.id;
+    let r = await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(f.owner), 'Content-Type': 'application/octet-stream' }, body: playlist });
+    assert.ok(r.status < 300, r.body);
+    const m = await post(s, f.owner, f.general, 'A video', { files: [id] });
+    let file;
+    for (let i = 0; i < 150; i++) {
+      file = (await call(s, 'GET', `/api/channels/${f.general}/messages`, f.owner)).json.messages.find(x => x.id === m.id).files[0];
+      if (file.play && file.play !== 'working') break;
+      await sleep(200);
+    }
+    assert.equal(file.play, 'failed', `no copy of it (${file.play})`);
+    // The copy without location data (a fast link's) is made by ffmpeg too.
+    r = await call(s, 'POST', `/api/files/${id}/links`, f.owner, { hours: 1, removeLocation: true });
+    assert.equal(r.status, 201, r.body);
+    const token = r.json.link.url.split('/f/')[1];
+    let info;
+    for (let i = 0; i < 100; i++) {
+      info = (await s.req('GET', `/api/links/${token}`)).json;
+      if (info.cleaning !== 'working') break;
+      await sleep(200);
+    }
+    assert.equal(info.cleaning, 'failed', JSON.stringify(info));
+    await sleep(300);
+    assert.deepEqual(hits, [], 'ffmpeg asked the network for nothing');
+    assert.ok(!fs.existsSync(path.join(s.data, 'play', `${id}.mp4`)), 'and made no copy');
+    // A real video still gets its copy without location data the same way.
+    const real = fs.readFileSync(local);
+    const realId = (await call(s, 'POST', '/api/uploads', f.owner, { name: 'real.mp4', size: real.length, mime: 'video/mp4' })).json.id;
+    r = await s.req('PUT', `/api/uploads/${realId}?offset=0`, { headers: { ...as(f.owner), 'Content-Type': 'application/octet-stream' }, body: real });
+    assert.ok(r.status < 300, r.body);
+    r = await call(s, 'POST', `/api/files/${realId}/links`, f.owner, { hours: 1, removeLocation: true });
+    assert.equal(r.status, 201, r.body);
+    const realToken = r.json.link.url.split('/f/')[1];
+    for (let i = 0; i < 100; i++) {
+      info = (await s.req('GET', `/api/links/${realToken}`)).json;
+      if (info.cleaning !== 'working') break;
+      await sleep(200);
+    }
+    assert.equal(info.cleaning, 'ready', JSON.stringify(info));
+  } finally { await s.stop(); listener.close(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

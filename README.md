@@ -748,6 +748,13 @@ The short version (the threat model and how to report a problem are in [SECURITY
   those keys private and backed up.
 - **Who signs in by itself:** only Tailscale accounts you trust: yours from the first sign-in, others only when you
   allow them in Settings → Security, from a sign-in made on purpose (password, pairing link, approval).
+- **What a device that signed in by itself can do (1.25):** send and receive. Controlling PCs, installing apps on
+  them, the phone's notifications, the password, moves and signing the others out take a *trusted* sign-in: one made
+  with the password, or with a pairing link or an approval from a trusted device, or approved once from a trusted
+  one (in Beam on a PC or in a browser: Settings → Devices → "Can control PCs and install apps" under it; the Android
+  app doesn't show it yet). The first device of a new Beam is
+  trusted. Tailscale's sign-in covers whole machines: any program or account on one of yours (an app on your phone,
+  say) could use it. A computer with Beam for Linux is only ever controlled, never controls.
 - Received files are never opened or run automatically. Uploaded files are served with a locked-down content policy,
   so an uploaded web page can't run scripts inside Beam.
 - **Beam Family** is the only part meant to face the internet (through Funnel), and it's a separate server that can't
