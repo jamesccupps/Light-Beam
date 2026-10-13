@@ -159,6 +159,8 @@ namespace Beam
             if ((method == "POST" || method == "DELETE") && path == "/api/move") return "moving the server";
             if (path.StartsWith("/api/admin/", StringComparison.Ordinal)) return "the server's admin actions";
             if (method == "POST" && path == "/api/rc/sessions") return "controlling another PC from this one";
+            // (1.17.5, server 1.25) letting another device control PCs and install apps (Settings → Devices)
+            if (method == "PUT" && path.StartsWith("/api/devices/", StringComparison.Ordinal) && path.EndsWith("/trust", StringComparison.Ordinal)) return "approving a device";
             return null;
         }
 

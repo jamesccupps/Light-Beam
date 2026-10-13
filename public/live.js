@@ -355,6 +355,7 @@ function applyMe(m) {
   if (m.machine?.name && learnMachineName(m.machine.name)) api('api/me').catch(() => {}); // tell the server the new name
   if (m.read && mergeReadMarks(m.read)) renderSidebar();
   me.temporary = Boolean(m.auth?.session || m.temporary);
+  if (typeof m.auth?.trusted === 'boolean') me.trusted = m.auth.trusted; // (1.25: may approve other devices)
   if (me.temporary && !cacheDisabled) disableOfflineCache(); // a borrowed computer keeps nothing
 }
 

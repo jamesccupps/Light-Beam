@@ -526,7 +526,7 @@ namespace Beam
                 Check(RcPolicy.DisplayName("Robin\u202E Laptop\r\n") == "Robin Laptop" && RcPolicy.DisplayName("") == "Another device" && RcPolicy.DisplayName(new string('x', 60)).Length == 40, "banner names: no control or direction characters, 40 at most");
                 var widens = new[] { "GET /api/pair", "GET /api/qr.svg", "GET /api/qr.png", "POST /api/login-requests/approve", "POST /api/password", "PATCH /api/settings",
                     "DELETE /api/settings/blocked-nodes/abc", "POST /api/security/sign-out-others", "POST /api/move", "DELETE /api/move", "GET /api/admin/export", "POST /api/admin/shutdown",
-                    "post /api/rc/sessions" };
+                    "post /api/rc/sessions", "PUT /api/devices/0123456789abcdef01234567/trust" };
                 var fine = new[] { "GET /api/settings", "POST /api/login-requests/deny", "GET /api/login-requests", "POST /api/rc/disable", "POST /api/rc/sessions/0123456789abcdef/end",
                     "GET /api/rc/sessions", "GET /api/items", "DELETE /api/devices/abc", "POST /api/text", "GET /api/devices", "PUT /api/devices/me/settings" };
                 Check(widens.All(x => RcPolicy.WidensAccess(x.Split(' ')[0], x.Split(' ')[1]) != null), "during a session the pages can't get a pairing link, approve a sign-in, set the password, change the server's settings, sign out others, move or administer the server, or control another PC");

@@ -238,7 +238,7 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   ].filter(Boolean);
   const facts = el('dl', { class: 'facts' }, ...rows.flatMap(([k, v, low]) => [el('dt', {}, k), el('dd', { class: low ? 'low' : null }, v)]));
   const buttons = deviceActions(d).map(a => el('button', { class: 'btn', type: 'button', disabled: Boolean(a.disabled), onclick: () => a.action() }, icon(a.icon), a.label));
-  const body = [facts, alertsSupported() && offlineAlertToggle(d), historySection(d)].filter(Boolean);
+  const body = [facts, trustToggle(d), alertsSupported() && offlineAlertToggle(d), historySection(d)].filter(Boolean);
   if (refresh) {
     const focusables = () => [...dlg.querySelectorAll('button, input')];
     const at = focusables().indexOf(document.activeElement);
@@ -349,6 +349,27 @@ async function loadAlerts() {
 async function setAlerts(fields) {
   await patchServerSettings({ alerts: fields });
   refreshDeviceInfo();
+}
+
+// (1.25, the security review) A device that signed in by itself (Tailscale) can send and receive, but controls PCs,
+// installs apps and sees the phone's notifications only once a device that can approves it here (PUT …/trust): in its
+// Device info and its row in Settings → Devices (`row`: the hint only while it isn't approved). Shown on such a device
+// for the others (a Linux computer can be approved, but never controls others).
+function trustToggle(d, row = false) {
+  if (!serverHas('trust') || !me.trusted || d.id === me.id || typeof d.trusted !== 'boolean') return null;
+  const hint = d.platform === 'linux'
+    ? 'Install apps and see the phone’s notifications from it. A Linux computer is only ever controlled, never controls others.'
+    : 'Also see the phone’s notifications. Devices that signed in by themselves (Tailscale) need this once.';
+  return toggle('Can control PCs and install apps', d.trusted, async (v, box) => {
+    try {
+      await apiJson(`api/devices/${encodeURIComponent(d.id)}/trust`, jsonBody({ trusted: v }, 'PUT'));
+      d.trusted = v;
+    } catch (err) {
+      box.checked = !v;
+      toast(friendlyError(err), { error: true });
+    }
+    refreshDeviceInfo();
+  }, { hint: row && d.trusted ? null : hint });
 }
 
 function offlineAlertToggle(d) {

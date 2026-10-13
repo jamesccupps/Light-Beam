@@ -229,7 +229,8 @@ function sectionDevices() {
           el('button', { class: 'btn small-btn ghost', type: 'button', onclick: () => removeDevice(d) }, v3 ? 'Sign out…' : 'Forget…')),
         ...rcDeviceRows(d),
         alerts && offlineAlertToggle(d),
-        phoneFeature() && toggle('Show phone notifications', phoneShownFor(d), (v, box) => setPhoneShown(d.id, v, box)))))),
+        phoneFeature() && toggle('Show phone notifications', phoneShownFor(d), (v, box) => setPhoneShown(d.id, v, box)),
+        trustToggle(d, true))))), // (1.25)
     note(v3 ? '“Sign out” cuts that device off and removes it from the list. Its history stays.' : '“Forget” removes a device from the list; it comes back if it connects again.'),
   ];
 }

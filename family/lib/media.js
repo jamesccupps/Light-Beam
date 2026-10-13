@@ -22,6 +22,10 @@ const path = require('node:path');
 const { httpError, sendFile, contentDisposition } = require('./http');
 
 const STUCK_MS = 5 * 60e3;          // an ffmpeg that says nothing this long is stopped
+// (1.25, security review F-1) ffmpeg and ffprobe read an upload only as a file, and only as a video container: never a
+// playlist, a manifest or a session description that names other files or addresses (an upload has no extension, so
+// its bytes decide what it is; FFmpeg 8.1 already won't probe those without one, an older one may). Input options.
+const SAFE_INPUT = ['-protocol_whitelist', 'file', '-format_whitelist', 'mov,matroska,avi,mpegts,flv,asf,ogg,hevc,h264,mpeg,m4v'];
 const MAX_RATE = 8e6;               // heavier than this (bits/s): a lighter copy, to stream through the public link
 const HDR = new Set(['smpte2084', 'arib-std-b67']);
 const VIDEO_NAME = /\.(mp4|m4v|mov|mkv|webm|avi|3gp|3g2|mts|m2ts|ts|hevc|wmv|flv)$/i;
@@ -87,7 +91,7 @@ function createMedia(ctx) {
   }
 
   async function probe(file) {
-    const r = await run(tools.ffprobe, ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', file]);
+    const r = await run(tools.ffprobe, ['-v', 'error', ...SAFE_INPUT, '-print_format', 'json', '-show_format', '-show_streams', file]);
     if (r.code !== 0) throw new Error(lastLine(r.stderr) || 'ffprobe couldn’t read it');
     const j = JSON.parse(r.stdout);
     const streams = j.streams || [];
@@ -141,7 +145,7 @@ function createMedia(ctx) {
     const duration = Number(info.format.duration) || Number(info.v.duration) || 0;
     const { vf, sdr } = videoFilters(info);
     const tmp = `${playPath(a.id)}.tmp`;
-    const args = ['-hide_banner', '-nostdin', '-y', '-v', 'error', '-progress', 'pipe:1', '-nostats', '-i', src,
+    const args = ['-hide_banner', '-nostdin', '-y', '-v', 'error', '-progress', 'pipe:1', '-nostats', ...SAFE_INPUT, '-i', src,
       '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn', '-map_metadata', '-1', '-map_chapters', '-1',
       '-vf', vf, '-fpsmax', '60', ...encoderArgs(encoder),
       ...(sdr ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'] : []),
@@ -282,4 +286,4 @@ function createMedia(ctx) {
   };
 }
 
-module.exports = { createMedia, isVideo, playName };
+module.exports = { createMedia, isVideo, playName, SAFE_INPUT };

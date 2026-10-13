@@ -837,8 +837,11 @@ test('1.7.2: automatic sign-in needs a Tailscale identity tailscaled confirms an
     r = await post(s, '/api/autopair', { client: 'app', name: 'Elsewhere' }, viaServe('100.64.60.1', 'alice@example.com', { Host: 'evil.example.com', 'X-Forwarded-Host': 'evil.example.com' }));
     assert.deepEqual([r.status, r.json.reason], [403, 'host'], r.body);
     assert.match(s.out, /Refused an automatic sign-in at an address that isn't this Beam's \(evil\.example\.com\)/);
-    // its own name, confirmed: signed in (the first account on a new Beam owns it)
+    // its own name, confirmed: signed in (the first account on a new Beam owns it; 1.25: that first device is trusted)
     r = await post(s, '/api/autopair', { client: 'app', platform: 'web', name: 'Alice browser' }, viaServe('100.64.60.1', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    // (another automatic sign-in isn't)
+    r = await post(s, '/api/autopair', { client: 'app', platform: 'web', name: 'Alice other browser' }, viaServe('100.64.60.1', 'alice@example.com'));
     assert.equal(r.status, 200, r.body);
     const ambient = { Authorization: `Bearer ${r.json.key}` };
     // a password set with the master key (a deliberate sign-in); from the Tailscale sign-in it changes only with it
@@ -1093,6 +1096,10 @@ test('B2: Tailscale identity sign-in: first owner, learned owners, checks and re
     const aliceKey = r.json.key;
     assert.ok(aliceKey.startsWith('bt_'));
     assert.equal((await s.req('GET', '/api/me', { headers: app(aliceKey, r.json.you) })).status, 200);
+    // (1.25) that first device of a new Beam is trusted; the others Tailscale signs in aren't
+    r = await post(s, '/api/autopair', { client: 'app', name: 'Alice tablet', platform: 'android' }, viaServe('100.64.30.31', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    const aliceAuto = r.json.key;
     // another of Alice's devices, a browser this time
     r = await s.req('POST', '/api/autopair', { headers: { ...viaServe('100.64.30.31', 'alice@example.com'), ...sameOrigin, Cookie: 'beam_device_id=alicephone1' } });
     assert.equal(r.status, 200);
@@ -1117,7 +1124,7 @@ test('B2: Tailscale identity sign-in: first owner, learned owners, checks and re
     assert.ok(!(await owners()).includes('bob@example.com'), 'not learned by being seen');
     r = await post(s, '/api/autopair', { client: 'app', name: 'Bob phone' }, viaServe('100.64.30.50', 'bob@example.com'));
     assert.equal(r.json.reason, 'not-owner');
-    r = await s.req('PATCH', '/api/settings', { headers: json(app(aliceKey, 'x')), body: JSON.stringify({ allowOwner: 'bob@example.com' }) });
+    r = await s.req('PATCH', '/api/settings', { headers: json(app(aliceAuto, 'x')), body: JSON.stringify({ allowOwner: 'bob@example.com' }) });
     assert.deepEqual([r.status, r.json.reason], [403, 'sign-in'], 'not from a sign-in Tailscale made by itself');
     r = await s.req('PATCH', '/api/settings', { headers: json(app(K, 'x')), body: JSON.stringify({ allowOwner: 'Bob@Example.com' }) });
     assert.equal(r.status, 200, r.body);
@@ -1134,7 +1141,7 @@ test('B2: Tailscale identity sign-in: first owner, learned owners, checks and re
     r = await post(s, '/api/autopair', { client: 'app' }, viaServe('100.64.30.50', 'bob@example.com'));
     assert.equal(r.json.reason, 'blocked', 'his machine was blocked when its device was removed');
     // RFC 2047 names (a list of owners is set from a sign-in made on purpose)
-    r = await s.req('PATCH', '/api/settings', { headers: json(app(aliceKey, 'x')), body: JSON.stringify({ tailscaleOwners: ['alice@example.com'] }) });
+    r = await s.req('PATCH', '/api/settings', { headers: json(app(aliceAuto, 'x')), body: JSON.stringify({ tailscaleOwners: ['alice@example.com'] }) });
     assert.equal(r.status, 403);
     await s.req('PATCH', '/api/settings', { headers: json(app(K, 'x')), body: JSON.stringify({ tailscaleOwners: ['alice@example.com', 'jürgen@example.com'] }) });
     r = await post(s, '/api/autopair', { client: 'app' }, viaServe('100.64.30.60', '=?utf-8?q?j=C3=BCrgen@example.com?='));
@@ -1330,6 +1337,12 @@ test('B4: moving: verified target, 410 + moved event, handoff for signed-in brow
     const K = old.key;
     const h = app(K, 'movedev0001', 'Mover');
     await sendText(old, h, 'before the move');
+    // (1.25: before the copy, so the new server knows these browsers and their sign-ins)
+    const b9 = from('100.64.70.9'); // (each browser on a machine of its own: from 127.0.0.1 it would join the app)
+    const b10 = from('100.64.70.10');
+    const login = await post(old, '/api/login', { secret: K }, { ...sameOrigin, Cookie: 'beam_device_id=browser0009', ...b9 });
+    const browserCookie = cookieValue(login);
+    const brief = cookieValue(await post(old, '/api/login', { secret: K, remember: false }, { ...sameOrigin, Cookie: 'beam_device_id=browser0010', ...b10 }));
     await sleep(300);
     fs.rmSync(path.join(TMP, 'move-new'), { recursive: true, force: true });
     copyDir(old.data, path.join(TMP, 'move-new', 'data'));
@@ -1341,8 +1354,6 @@ test('B4: moving: verified target, 410 + moved event, handoff for signed-in brow
     assert.equal(r.status, 409, 'nobody there');
     const ev = await openEvents(old.port, app(K, 'listener001', 'L', 'android'));
     await ev.wait('hello');
-    const login = await post(old, '/api/login', { secret: K }, { ...sameOrigin, Cookie: 'beam_device_id=browser0009' });
-    const browserCookie = cookieValue(login);
     r = await post(old, '/api/move', { to: `http://127.0.0.1:${neu.port}` }, h);
     assert.equal(r.status, 200, r.body);
     await ev.wait('moved', d => d.movedTo === `http://127.0.0.1:${neu.port}`);
@@ -1359,11 +1370,31 @@ test('B4: moving: verified target, 410 + moved event, handoff for signed-in brow
     assert.equal((await old.req('GET', '/moved.js')).status, 200);
     r = await old.req('GET', '/');
     assert.doesNotMatch(r.body, /beam-handoff/, 'strangers do not');
-    r = await post(neu, '/api/login', { handoff: handoff.replace(/&#(\d+);/g, (_, c) => String.fromCharCode(c)) }, { ...sameOrigin, Cookie: 'beam_device_id=browser0009' });
+    r = await post(neu, '/api/login', { handoff: handoff.replace(/&#(\d+);/g, (_, c) => String.fromCharCode(c)) }, { ...sameOrigin, Cookie: 'beam_device_id=browser0009', ...b9 });
     assert.equal(r.status, 204, r.body);
     assert.ok(cookieValue(r).startsWith('bt_'));
+    const meOn = async (c, id, at) => (await neu.req('GET', '/api/me', { headers: { Cookie: `beam_key=${c}; beam_device_id=${id}`, ...sameOrigin, ...at } })).json;
+    let me = await meOn(cookieValue(r), 'browser0009', b9);
+    assert.deepEqual([me.you, me.auth.trusted, me.auth.session], ['browser0009', true, undefined], '(1.25) the same device, as trusted as its sign-in was');
     r = await post(neu, '/api/login', { handoff }, sameOrigin);
     assert.equal(r.status, 403, 'a handoff works once');
+    // A session-only sign-in's handoff signs in for the session only.
+    const handoffOf = page => /name="beam-handoff" content="([^"]+)"/.exec(page)?.[1].replace(/&#(\d+);/g, (_, c) => String.fromCharCode(c));
+    r = await post(neu, '/api/login', { handoff: handoffOf((await old.req('GET', '/', { headers: { Cookie: `beam_key=${brief}` } })).body) }, { ...sameOrigin, Cookie: 'beam_device_id=browser0010', ...b10 });
+    assert.equal(r.status, 204, r.body);
+    assert.doesNotMatch([].concat(r.headers['set-cookie']).join(';'), /Max-Age|Expires/i, 'a session cookie');
+    me = await meOn(cookieValue(r), 'browser0010', b10);
+    assert.deepEqual([me.you, me.auth.trusted, me.auth.session], ['browser0010', true, true]);
+    // One from a server before 1.25 still works, as not trusted: it can't take the trusted browser's id.
+    const exp = Date.now() + 5 * 60e3;
+    const legacy = `${exp}.${crypto.createHmac('sha256', K).update(`handoff:${exp}`).digest('base64url')}`;
+    r = await post(neu, '/api/login', { handoff: legacy }, { ...sameOrigin, Cookie: 'beam_device_id=browser0009', ...b9 });
+    assert.equal(r.status, 204, r.body);
+    me = await meOn(cookieValue(r), 'browser0009', b9);
+    assert.equal(me.auth.trusted, false);
+    assert.notEqual(me.you, 'browser0009');
+    const forged = `${exp}.tl.${crypto.createHmac('sha256', K).update(`handoff:${exp}:ul`).digest('base64url')}`;
+    assert.equal((await post(neu, '/api/login', { handoff: forged }, sameOrigin)).status, 403, 'its kind is in the HMAC');
     assert.equal((await neu.req('GET', '/api/items', { headers: h })).json.items[0].text, 'before the move');
     // undo with the master key, from the command line
     const undo = await runNode(['moved-to', '--clear'], serverEnv(8792, old.dir));
@@ -5355,7 +5386,7 @@ test('1.6 Remote control: a sign-in naming the PC\'s device id from another mach
   } finally { await t.stop(); }
 });
 
-test('1.6 Remote control is for an app\'s own sign-in or a browser signed in with a link, an approval, the password or the key', async () => {
+test('1.6 Remote control is for an app\'s own sign-in or a browser signed in with a link, an approval, the password or the key; (1.25) an automatic one once approved', async () => {
   const t = await rcSetup('rc-eligible', { env: { BEAM_TAILSCALE_OWNERS: RC_USER } });
   try {
     const { s, K, pc, laptop, phone, status, rc } = t;
@@ -5375,19 +5406,19 @@ test('1.6 Remote control is for an app\'s own sign-in or a browser signed in wit
     };
     // Someone else on the laptop (another Windows account) opens Beam in a browser: Tailscale vouches for the
     // machine, which is the user's account, so the browser signs in by Tailscale identity; same-machine linking
-    // then merges it into the laptop app's id. The sign-in decides, not the id: refused.
+    // then merges it into the laptop app's id. The sign-in decides, not the id: refused (1.25: until it's approved).
     const tsWeb = await post(s, '/api/autopair', { client: 'web' }, { ...sameOrigin, Cookie: 'beam_device_id=rctsweb0001', ...viaServe(RC_NET.laptop.ip4, RC_USER) });
     assert.deepEqual([tsWeb.status, tsWeb.json.via], [200, 'tailscale'], tsWeb.body);
     const tsBrowser = { Cookie: `__Host-beam_key=${hostCookieValue(tsWeb)}; beam_device_id=rctsweb0001`, ...sameOrigin, ...viaServe(RC_NET.laptop.ip4, RC_USER) };
     assert.equal((await s.req('GET', '/api/me', { headers: tsBrowser })).headers['x-beam-you'], 'rclaptop001', 'linked to the laptop app');
-    await refused(tsBrowser, 'a browser signed in by Tailscale identity, merged into an app');
+    await refused(tsBrowser, 'a browser signed in by Tailscale identity, merged into an app', 'trusted');
     // (audit S-1) A browser on the same machine as a running Beam app isn't signed in by that alone, even naming the
     // app's id. A browser sign-in traded on (here the Tailscale one's) still can't control a PC.
     const ap = await post(s, '/api/autopair', { client: 'web', deviceId: 'rclaptop001' }, { ...sameOrigin, ...from(RC_NET.laptop.ip4) });
     assert.deepEqual([ap.status, ap.json.reason], [403, 'no-identity'], 'same-machine autopair: refused');
     const linked = await post(s, '/api/login', { secret: hostCookieValue(tsWeb) }, { ...sameOrigin, Cookie: 'beam_device_id=rclinked001' });
     assert.equal(linked.status, 204);
-    await refused({ Cookie: `beam_key=${cookieValue(linked)}; beam_device_id=rclinked001`, ...sameOrigin, ...from('100.64.91.79') }, 'a link made from it');
+    await refused({ Cookie: `beam_key=${cookieValue(linked)}; beam_device_id=rclinked001`, ...sameOrigin, ...from('100.64.91.79') }, 'a link made from it', 'trusted');
     // The CLI, even with a pairing link.
     const cliKey = (await s.req('GET', '/api/pair', { headers: phone })).json.key;
     await refused({ Authorization: `Bearer ${cliKey}`, 'X-Beam-Device-Id': 'rccli000001', 'X-Beam-Device': 'beam-cli', 'X-Beam-Platform': 'cli', ...from('100.64.91.83') }, 'the CLI');
@@ -5400,6 +5431,10 @@ test('1.6 Remote control is for an app\'s own sign-in or a browser signed in wit
     const winId = appSignIn.json.you;
     const winApp = { Authorization: `Bearer ${appSignIn.json.key}`, 'X-Beam-Device-Id': winId, 'X-Beam-Platform': 'windows', 'X-Beam-Profile': 'acacacacacacacac', 'X-Beam-App-Version': '1.6.0', ...from(RC_NET.laptop.ip4) };
     await refused(winApp, 'a Windows sign-in without its device key', 'device-key');
+    // (1.25) ...approved on a trusted device (here the laptop's master key): Tailscale made that sign-in by itself.
+    await refused({ ...winApp, 'X-Beam-Device-Key': KEY }, "the Windows app's own sign-in by Tailscale identity, not approved yet", 'trusted');
+    const approve = await s.req('PUT', `/api/devices/${winId}/trust`, { headers: json(laptop), body: '{"trusted":true}' });
+    assert.deepEqual([approve.status, approve.json.trusted], [200, true], approve.body);
     let id = await allowed({ ...winApp, 'X-Beam-Device-Key': KEY }, "the Windows app's own sign-in, with its device key");
     await rc('POST', `sessions/${id}/end`, pc);
     // ...the Android app's own sign-in (a pairing link), exchanged for its remote-control activity's cookie (POST
@@ -5452,10 +5487,12 @@ test('1.6 Remote control is for an app\'s own sign-in or a browser signed in wit
   } finally { await t.stop(); }
 });
 
-test('1.6 Remote control and sign-ins from before 1.6: an app\'s counts once the app uses it; a browser\'s by Tailscale never', async () => {
+test('1.6 Remote control and sign-ins from before 1.6: an app\'s is the app\'s once the app uses it; (1.25) one Tailscale made, an app\'s or a browser\'s, counts once approved', async () => {
   const t = await rcSetup('rc-legacy', { env: { BEAM_TAILSCALE_OWNERS: RC_USER } });
   try {
-    const appSignIn = await post(t.s, '/api/autopair', { client: 'app', deviceId: 'rclaptop001', name: 'Robin Laptop', platform: 'windows' }, viaServe(RC_NET.laptop.ip4, RC_USER));
+    // (1.25: an app of its own, on a machine of its own; one naming the laptop's id, which has a trusted sign-in, gets
+    // another id, and a new app with the laptop's Windows account would take the laptop over as a reinstall)
+    const appSignIn = await post(t.s, '/api/autopair', { client: 'app', deviceId: 'rcoldapp001', name: 'Old Laptop', platform: 'windows' }, viaServe(RC_NET.fresh.ip4, RC_USER));
     const webSignIn = await post(t.s, '/api/autopair', { client: 'web' }, { ...sameOrigin, Cookie: 'beam_device_id=rcoldweb001', ...viaServe(RC_NET.other.ip4, RC_USER) });
     assert.deepEqual([appSignIn.status, webSignIn.status], [200, 200]);
     await t.status(t.pc, { remoteControl: true });
@@ -5468,6 +5505,7 @@ test('1.6 Remote control and sign-ins from before 1.6: an app\'s counts once the
       delete tok.platform;
       delete tok.keyHash;
       delete tok.claimed;
+      delete tok.trusted;
     }
     fs.writeFileSync(file, JSON.stringify(store));
     t.s = await startServer('rc-legacy', 8791, { keep: true, env: t.env });
@@ -5475,18 +5513,22 @@ test('1.6 Remote control and sign-ins from before 1.6: an app\'s counts once the
     await pcEv.wait('hello');
     const startWith = h => t.s.req('POST', '/api/rc/sessions', { headers: { 'Content-Type': 'application/json', ...h }, body: '{"device":"rcdesk00001"}' });
     let r = await startWith({ Cookie: `__Host-beam_key=${hostCookieValue(webSignIn)}; beam_device_id=rcoldweb001`, ...sameOrigin, ...viaServe(RC_NET.other.ip4, RC_USER) });
-    assert.deepEqual([r.status, r.json.reason], [403, 'sign-in'], 'a browser signed in by Tailscale identity');
-    const lapApp = { Authorization: `Bearer ${appSignIn.json.key}`, 'X-Beam-Device-Id': 'rclaptop001', 'X-Beam-Platform': 'windows', 'X-Beam-Profile': RC_PROFILE.laptop, 'X-Beam-App-Version': '1.6.0', 'X-Beam-Device-Key': deviceKey(), ...from(RC_NET.laptop.ip4) };
-    r = await startWith({ Cookie: `beam_key=${appSignIn.json.key}`, 'X-Beam-Device-Id': 'rclaptop001', 'X-Beam-Platform': 'windows', ...sameOrigin, ...from(RC_NET.laptop.ip4) });
-    assert.deepEqual([r.status, r.json.reason], [403, 'sign-in'], "the app's token in a page, before the app itself has used it");
+    assert.deepEqual([r.status, r.json.reason], [403, 'trusted'], 'a browser signed in by Tailscale identity');
+    const lapApp = { Authorization: `Bearer ${appSignIn.json.key}`, 'X-Beam-Device-Id': 'rcoldapp001', 'X-Beam-Platform': 'windows', 'X-Beam-Profile': 'e5e5e5e5e5e5e5e5', 'X-Beam-App-Version': '1.6.0', 'X-Beam-Device-Key': deviceKey(), ...from(RC_NET.fresh.ip4) };
+    r = await startWith({ Cookie: `beam_key=${appSignIn.json.key}`, 'X-Beam-Device-Id': 'rcoldapp001', 'X-Beam-Platform': 'windows', ...sameOrigin, ...from(RC_NET.fresh.ip4) });
+    assert.deepEqual([r.status, r.json.reason], [403, 'trusted'], "the app's token in a page, before the app itself has used it");
     r = await startWith(lapApp);
-    assert.equal(r.status, 201, `the app's own requests: ${r.body}`);
+    assert.deepEqual([r.status, r.json.reason], [403, 'trusted'], "the app's own requests: Tailscale made that sign-in, never used with the key before 1.25");
     await sleep(600);
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const tok = Object.values(saved.tokens).find(x => x.device === 'rclaptop001' && x.via === 'tailscale');
+    const tok = Object.values(saved.tokens).find(x => x.device === 'rcoldapp001' && x.via === 'tailscale');
     assert.equal(tok?.platform, 'windows', 'remembered');
     assert.match(tok?.keyHash || '', /^[a-f0-9]{64}$/, 'key-bound on its first 1.6 request');
-    assert.match(t.s.out, /Robin Laptop's Beam app proves itself with its device key from now on/);
+    assert.match(t.s.out, /Old Laptop's Beam app proves itself with its device key from now on/);
+    const approve = await t.s.req('PUT', '/api/devices/rcoldapp001/trust', { headers: json(t.phone), body: '{"trusted":true}' });
+    assert.deepEqual([approve.status, approve.json.trusted], [200, true], approve.body);
+    r = await startWith(lapApp);
+    assert.equal(r.status, 201, `approved: ${r.body}`);
     pcEv.close();
   } finally { await t.stop(); }
 });
@@ -5756,6 +5798,166 @@ test('1.6 Remote control leaves nothing on disk or in the log: no session, SDP, 
   } finally { await t.stop(); }
 });
 
+// ---------------------------------------------------------------- 1.25 trusted sign-ins (security review 2026-10-13)
+
+test('1.25 trusted sign-ins (R-1/R-2): an automatic sign-in naming any app controls no PC, installs no app, sees and shares no phone notification, approves no move, signs nobody out; a link or approval it makes is no way round; a trusted device approves it; a Linux computer never controls', async () => {
+  const t = await rcSetup('trust125', { env: { BEAM_TAILSCALE_OWNERS: RC_USER } });
+  try {
+    const { s, laptop, status } = t;
+    await status(t.pc, { remoteControl: true });
+    const pcEv = await openEvents(s.port, t.pc, '/api/events?mode=background');
+    await pcEv.wait('hello');
+    const start = h => s.req('POST', '/api/rc/sessions', { headers: { 'Content-Type': 'application/json', ...h }, body: '{"device":"rcdesk00001"}' });
+    // Signed in by Tailscale from the phone's machine, each claiming an app (any app on the phone could do this)
+    const auto = async platform => {
+      const r = await post(s, '/api/autopair', { client: 'app', name: `Claims ${platform}`, platform }, viaServe(RC_NET.phone.ip4, RC_USER));
+      assert.equal(r.status, 200, r.body);
+      return r.json;
+    };
+    const asApp = (j, platform, extra = {}) => ({ Authorization: `Bearer ${j.key}`, 'X-Beam-Device-Id': j.you, 'X-Beam-Platform': platform, 'X-Beam-Profile': 'e5e5e5e5e5e5e5e5', 'X-Beam-App-Version': '1.6.0', ...from(RC_NET.phone.ip4), ...extra });
+    const android = await auto('android');
+    const droid = asApp(android, 'android');
+    let r = await start(droid);
+    assert.deepEqual([r.status, r.json?.reason], [403, 'trusted'], `android: ${r.body}`);
+    const windows = await auto('windows');
+    const win = asApp(windows, 'windows', { 'X-Beam-Device-Key': deviceKey() });
+    assert.equal((await s.req('GET', '/api/me', { headers: win })).status, 200); // its new device's key is taken on first use...
+    r = await start(win);
+    assert.deepEqual([r.status, r.json?.reason], [403, 'trusted'], `windows: ${r.body}`); // ...the sign-in still isn't trusted
+    const linux = await auto('linux');
+    r = await start(asApp(linux, 'linux'));
+    assert.deepEqual([r.status, r.json?.reason], [403, 'linux'], `linux: ${r.body}`);
+    // Nor anything else that takes a trusted sign-in.
+    const refused = async (label, method, route, body, h = droid) => {
+      const res = await s.req(method, route, { headers: json(h), ...(body !== undefined && { body: JSON.stringify(body) }) });
+      assert.deepEqual([res.status, res.json?.reason], [403, 'trusted'], `${label}: ${res.body}`);
+    };
+    await refused('apps', 'POST', '/api/apps', { winget: '7zip.7zip' });
+    await refused('turning phone notifications on', 'PUT', '/api/devices/me/settings', { phoneNotifications: true });
+    await refused('sharing notifications as a phone', 'PUT', '/api/phone/notifications/k1', { app: 'com.example', title: 'Hi' });
+    await refused('the first password', 'POST', '/api/password', { password: 'a password of mine' });
+    await refused('signing the others out', 'POST', '/api/security/sign-out-others', {});
+    await refused('removing a device', 'DELETE', '/api/devices/rclaptop001');
+    await refused('moving Beam', 'POST', '/api/move', { to: 'https://elsewhere.example' });
+    await refused('approving a device', 'PUT', `/api/devices/${android.you}/trust`, { trusted: true });
+    // A pairing link it makes signs in nothing trusted (Beam for Linux's window is made that way)...
+    const pairKey = (await s.req('GET', '/api/pair', { headers: droid })).json.key;
+    const viaLink = await post(s, '/api/login', { secret: pairKey }, { ...sameOrigin, Cookie: 'beam_device_id=rclinkweb01' });
+    assert.equal(viaLink.status, 204, viaLink.body);
+    r = await start({ Cookie: `beam_key=${cookieValue(viaLink)}; beam_device_id=rclinkweb01`, ...sameOrigin, ...from('100.64.91.90') });
+    assert.deepEqual([r.status, r.json?.reason], [403, 'trusted'], 'a link an automatic sign-in made');
+    // ...nor does approving its own request; and a move (a full copy of Beam, its key included) it can't approve at all.
+    const ask = async purpose => (await post(s, '/api/login-requests', { name: 'Mine', platform: 'web', ...(purpose && { purpose }) }, sameOrigin)).json;
+    const own = await ask();
+    assert.equal((await post(s, '/api/login-requests/approve', { code: own.code }, droid)).status, 200);
+    const got = await s.req('GET', `/api/login-requests/${own.id}`, { headers: { 'X-Beam-Login-Secret': own.secret } });
+    r = await start({ Authorization: `Bearer ${got.json.key}`, 'X-Beam-Device-Id': 'rcownreq001', ...from('100.64.91.91') });
+    assert.deepEqual([r.status, r.json?.reason], [403, 'trusted'], 'its own approval');
+    const move = await ask('move');
+    r = await post(s, '/api/login-requests/approve', { code: move.code }, droid);
+    assert.deepEqual([r.status, r.json?.reason], [403, 'trusted'], 'a move');
+    // A trusted device approves it: it controls PCs now. Taken away: its session ends, and no more.
+    r = await s.req('PUT', `/api/devices/${android.you}/trust`, { headers: json(laptop), body: '{"trusted":true}' });
+    assert.deepEqual([r.status, r.json?.trusted], [200, true], r.body);
+    assert.equal((await s.req('GET', '/api/devices', { headers: laptop })).json.devices.find(d => d.id === android.you).trusted, true);
+    assert.equal((await s.req('GET', '/api/me', { headers: droid })).json.auth.trusted, true);
+    r = await start(droid);
+    assert.equal(r.status, 201, r.body);
+    const sid = r.json.id;
+    r = await s.req('PUT', `/api/devices/${android.you}/trust`, { headers: json(laptop), body: '{"trusted":false}' });
+    assert.deepEqual([r.status, r.json?.trusted], [200, false]);
+    await pcEv.wait('rc-end', d => d.id === sid && d.reason === 'revoked');
+    assert.equal((await start(droid)).json?.reason, 'trusted');
+    // A Linux computer approved may install apps, but never controls.
+    assert.equal((await s.req('PUT', `/api/devices/${linux.you}/trust`, { headers: json(laptop), body: '{"trusted":true}' })).status, 200);
+    assert.equal((await start(asApp(linux, 'linux'))).json?.reason, 'linux');
+    // An automatic sign-in naming the phone's id (the phone has a trusted sign-in) gets a device of its own.
+    r = await post(s, '/api/autopair', { client: 'app', deviceId: 'rcphone0001', platform: 'android' }, viaServe(RC_NET.phone.ip4, RC_USER));
+    assert.equal(r.status, 200, r.body);
+    assert.notEqual(r.json.you, 'rcphone0001');
+    assert.match(s.out, /that isn't trusted named the device id of Pixel/);
+    // The phone's notifications reach a PC's trusted streams only, not a browser that signed in by Tailscale on that
+    // PC (same-machine linking merges it into the PC's device).
+    const tsWeb = await post(s, '/api/autopair', { client: 'web' }, { ...sameOrigin, Cookie: 'beam_device_id=rctsweb0002', ...viaServe(RC_NET.laptop.ip4, RC_USER) });
+    const tsBrowser = { Cookie: `__Host-beam_key=${hostCookieValue(tsWeb)}; beam_device_id=rctsweb0002`, ...sameOrigin, ...viaServe(RC_NET.laptop.ip4, RC_USER) };
+    assert.equal((await s.req('GET', '/api/me', { headers: tsBrowser })).headers['x-beam-you'], 'rclaptop001');
+    assert.equal((await s.req('PUT', '/api/devices/rclaptop001/settings', { headers: json(laptop), body: '{"phoneNotifications":true}' })).status, 204);
+    const lapEv = await openEvents(s.port, laptop);
+    const tsEv = await openEvents(s.port, tsBrowser);
+    await Promise.all([lapEv.wait('hello'), tsEv.wait('hello')]);
+    r = await s.req('PUT', '/api/phone/notifications/n1', { headers: json(t.phone), body: JSON.stringify({ app: 'com.whatsapp', title: 'Code', text: '123456' }) });
+    assert.equal(r.status, 204, r.body);
+    await lapEv.wait('notification');
+    await sleep(200);
+    assert.ok(!tsEv.events.some(e => e.event === 'notification'), 'not to the browser merged into it');
+    assert.equal((await s.req('GET', '/api/phone/notifications', { headers: tsBrowser })).json?.reason, 'trusted', 'nor by asking');
+    for (const e of [pcEv, lapEv, tsEv]) e.close();
+  } finally { await t.stop(); }
+});
+
+test('1.25 trusted sign-ins: a session-only sign-out of the others stays session-only; a fast link and Beam’s address take a lasting, trusted sign-in; the first device of a new Beam is trusted', async () => {
+  const ts = await fakeTailscale({ whois: { '100.64.70.1': { login: 'ann@example.com', node: 'ann-pc' }, '100.64.70.2': { login: 'ann@example.com', node: 'ann-phone' } } });
+  const s = await startServer('trust125b', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket } });
+  try {
+    // The very first device of a brand-new Beam signs in by Tailscale and is trusted; the next one isn't.
+    const first = await post(s, '/api/autopair', { client: 'app', name: 'Ann PC', platform: 'windows' }, viaServe('100.64.70.1', 'ann@example.com'));
+    assert.equal(first.status, 200, first.body);
+    const annPc = { Authorization: `Bearer ${first.json.key}`, 'X-Beam-Device-Id': first.json.you };
+    assert.equal((await s.req('GET', '/api/me', { headers: annPc })).json.auth.trusted, true, 'the first device');
+    const second = await post(s, '/api/autopair', { client: 'app', name: 'Ann phone', platform: 'android' }, viaServe('100.64.70.2', 'ann@example.com'));
+    assert.equal((await s.req('GET', '/api/me', { headers: { Authorization: `Bearer ${second.json.key}`, 'X-Beam-Device-Id': second.json.you } })).json.auth.trusted, false, 'the next');
+    // Beam's address (where pairing links and sign-in codes point) only from a trusted sign-in.
+    let r = await s.req('PATCH', '/api/settings', { headers: json({ Authorization: `Bearer ${second.json.key}`, 'X-Beam-Device-Id': second.json.you }), body: '{"publicUrl":"https://somewhere.example"}' });
+    assert.deepEqual([r.status, r.json?.reason], [403, 'sign-in'], r.body);
+    // A borrowed computer signed in with the password, for this session only, may sign the others out (a stolen phone)
+    // and stays a session-only sign-in.
+    await post(s, '/api/password', { password: 'ann’s own password' }, annPc);
+    const borrowed = await post(s, '/api/login', { secret: 'ann’s own password', remember: false }, { ...sameOrigin, Cookie: 'beam_device_id=annborrow01' });
+    assert.equal(borrowed.status, 204, borrowed.body);
+    const bc = { Cookie: `beam_key=${cookieValue(borrowed)}; beam_device_id=annborrow01`, ...sameOrigin, ...from('100.64.70.9') };
+    r = await s.req('POST', `/api/items/${'0'.repeat(16)}/fastlink`, { headers: json(bc), body: '{}' });
+    assert.ok([403, 404].includes(r.status), 'a fast link outlasts the session: not from it');
+    r = await post(s, '/api/security/sign-out-others', {}, bc);
+    assert.equal(r.status, 200, r.body);
+    const setCookie = [].concat(r.headers['set-cookie'] || []).join('\n');
+    assert.ok(!/Max-Age=\d/.test(setCookie), `the new cookie ends with the browser: ${setCookie}`);
+    const fresh = { Cookie: `beam_key=${cookieValue(r)}; beam_device_id=annborrow01`, ...sameOrigin, ...from('100.64.70.9') };
+    assert.deepEqual(pick((await s.req('GET', '/api/me', { headers: fresh })).json.auth, ['session', 'trusted']), { session: true, trusted: true });
+  } finally { await s.stop(); await ts.close(); }
+});
+
+test('1.25 sign-ins from before trust was kept: what could control PCs stays trusted (the Windows app’s key-bound one, the Android app’s, one made with the password); a browser’s by Tailscale and a Linux computer’s aren’t', async () => {
+  const t = await rcSetup('trust-before', { env: { BEAM_TAILSCALE_OWNERS: RC_USER } });
+  try {
+    const s = t.s;
+    const KEY = deviceKey();
+    const win = await post(s, '/api/autopair', { client: 'app', name: 'Old Laptop', platform: 'windows' }, viaServe(RC_NET.laptop.ip4, RC_USER));
+    const winApp = { Authorization: `Bearer ${win.json.key}`, 'X-Beam-Device-Id': win.json.you, 'X-Beam-Platform': 'windows', 'X-Beam-Profile': 'f6f6f6f6f6f6f6f6', 'X-Beam-Device-Key': KEY, ...from(RC_NET.laptop.ip4) };
+    assert.equal((await s.req('GET', '/api/me', { headers: winApp })).status, 200); // (key-bound from here)
+    const droid = await post(s, '/api/autopair', { client: 'app', name: 'Old Phone', platform: 'android' }, viaServe(RC_NET.phone.ip4, RC_USER));
+    const pi = await post(s, '/api/autopair', { client: 'app', name: 'Old Pi', platform: 'linux' }, viaServe(RC_NET.other.ip4, RC_USER));
+    const web = await post(s, '/api/autopair', { client: 'web' }, { ...sameOrigin, Cookie: 'beam_device_id=rcoldweb002', ...viaServe(RC_NET.fresh.ip4, RC_USER) });
+    await post(s, '/api/password', { password: 'an old password' }, t.laptop);
+    const pw = await post(s, '/api/login', { secret: 'an old password', client: 'app' }, { 'X-Beam-Device-Id': 'rcoldpass01' });
+    assert.equal(pw.status, 200, pw.body);
+    await sleep(500);
+    await s.stop();
+    // As 1.24 wrote them: no `trusted`.
+    const file = path.join(s.data, 'tokens.json');
+    const store = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const tok of Object.values(store.tokens)) delete tok.trusted;
+    fs.writeFileSync(file, JSON.stringify(store));
+    t.s = await startServer('trust-before', 8791, { keep: true, env: t.env });
+    const trusted = async h => (await t.s.req('GET', '/api/me', { headers: h })).json?.auth?.trusted;
+    assert.equal(await trusted(winApp), true, "the Windows app's key-bound sign-in");
+    assert.equal(await trusted({ Authorization: `Bearer ${droid.json.key}`, 'X-Beam-Device-Id': droid.json.you }), true, "the Android app's");
+    assert.equal(await trusted({ Authorization: `Bearer ${pw.json.key}`, 'X-Beam-Device-Id': 'rcoldpass01' }), true, 'one made with the password');
+    assert.equal(await trusted({ Authorization: `Bearer ${pi.json.key}`, 'X-Beam-Device-Id': pi.json.you }), false, "a Linux computer's (only ever controlled)");
+    assert.equal(await trusted({ Cookie: `__Host-beam_key=${hostCookieValue(web)}; beam_device_id=rcoldweb002`, ...sameOrigin, ...viaServe(RC_NET.fresh.ip4, RC_USER) }), false, 'a browser signed in by Tailscale');
+    assert.match(t.s.out, /Sign-ins from before 1\.25: \d+ trusted/);
+  } finally { await t.stop(); }
+});
+
 test('1.6 Device keys: trusted on first use from the Windows app\'s own sign-in; then its requests must carry it (403 device-key)', async () => {
   const t = await rcSetup('dk-tofu');
   try {
@@ -5788,7 +5990,7 @@ test('1.6 Device keys: trusted on first use from the Windows app\'s own sign-in;
 test('1.6 Device keys: a sign-in naming a keyed device without its key gets a device of its own; one by Tailscale can\'t set a key', async () => {
   const t = await rcSetup('dk-claim', { env: { BEAM_TAILSCALE_OWNERS: RC_USER } });
   try {
-    const { s, K, phone } = t;
+    const { s, phone } = t;
     const KEY = deviceKey();
     // Shop's app signs in by Tailscale identity (a new device) and shows its key.
     const own = await post(s, '/api/autopair', { client: 'app', name: 'Shop Desktop', platform: 'windows' }, viaServe(RC_NET.shop.ip4, RC_USER));
@@ -5816,16 +6018,17 @@ test('1.6 Device keys: a sign-in naming a keyed device without its key gets a de
     r = await s.req('GET', '/api/me', { headers: { Authorization: `Bearer ${approved}`, 'X-Beam-Device-Id': shopId, 'X-Beam-Platform': 'windows', ...from('100.64.91.23') } });
     assert.ok(r.status === 200 && r.json.you !== shopId, 'an approved request');
     assert.match(s.out, /A sign-in \(automatic\) named the device id of Shop Desktop without its device key: it gets a device of its own/);
-    // A device from before 1.6 (no key yet): a Tailscale sign-in that names it can't set its key; the app's own can.
-    const old = app(K, 'dkold000001', 'Camera PC', 'windows', { ...from(RC_NET.fresh.ip4), 'X-Beam-Profile': 'bcbcbcbcbcbcbcbc' });
-    await s.req('GET', '/api/me', { headers: old });
-    const taken = await post(s, '/api/autopair', { client: 'app', deviceId: 'dkold000001', name: 'Camera PC', platform: 'windows' }, viaServe(RC_NET.fresh.ip4, RC_USER));
-    assert.equal(taken.json.you, 'dkold000001');
-    const PROGRAM = deviceKey();
-    const program = { Authorization: `Bearer ${taken.json.key}`, 'X-Beam-Device-Id': 'dkold000001', 'X-Beam-Platform': 'windows', 'X-Beam-Profile': 'bcbcbcbcbcbcbcbc', 'X-Beam-Device-Key': PROGRAM, ...from(RC_NET.fresh.ip4) };
+    // A device from before 1.6 (no key yet) signed in by Tailscale identity: another such sign-in that names it gets its
+    // id (1.25: it has no trusted sign-in to protect; one that has, as with the master key, is in the 1.25 tests) but
+    // can't set its key; the app's own can.
+    const camera = () => post(s, '/api/autopair', { client: 'app', deviceId: 'dkold000001', name: 'Camera PC', platform: 'windows' }, viaServe(RC_NET.fresh.ip4, RC_USER));
+    const own2 = await camera();
+    const taken = await camera();
+    assert.deepEqual([own2.json.you, taken.json.you], ['dkold000001', 'dkold000001']);
+    const signedIn = (res, key) => ({ Authorization: `Bearer ${res.json.key}`, 'X-Beam-Device-Id': 'dkold000001', 'X-Beam-Platform': 'windows', 'X-Beam-Profile': 'bcbcbcbcbcbcbcbc', 'X-Beam-Device-Key': key, ...from(RC_NET.fresh.ip4) });
+    const program = signedIn(taken, deviceKey());
     assert.equal((await s.req('GET', '/api/me', { headers: program })).status, 200);
-    const REAL = deviceKey();
-    assert.equal((await s.req('GET', '/api/me', { headers: { ...old, 'X-Beam-Device-Key': REAL } })).status, 200, "the app's own sign-in sets it");
+    assert.equal((await s.req('GET', '/api/me', { headers: signedIn(own2, deviceKey()) })).status, 200, "the app's own sign-in sets it");
     assert.equal((await s.req('GET', '/api/me', { headers: program })).status, 403, 'and the other one is out');
   } finally { await t.stop(); }
 });

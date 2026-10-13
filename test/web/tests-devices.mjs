@@ -632,4 +632,30 @@ export default function register(test) {
     await release();
     await page.evaluate(`$('#chooseDlg').close()`);
   }, { timeout: 60000 });
+
+  test('trusted sign-ins (1.25): a device not approved yet has "Can control PCs and install apps" off in Settings → Devices (with why) and in Device info; on approves it, off takes it back', async ctx => {
+    const page = await ctx.signedIn();
+    await page.waitFor(`serverHas('trust') && me.trusted === true`, 8000, 'this sign-in (a pairing link) is trusted');
+    const name = `Work Laptop ${ctx.uid()}`; // (the shared server knows other laptops from other tests)
+    const laptop = app(ctx, name, 'windows');
+    await laptop.me();
+    const asKey = { Authorization: `Bearer ${ctx.srv.key}` };
+    const trusted = () => fetch(`${ctx.srv.base}/api/devices`, { headers: asKey }).then(r => r.json()).then(r => r.devices.find(d => d.id === laptop.id)?.trusted);
+    // As if it had signed in by itself (Tailscale): not approved.
+    const r = await fetch(`${ctx.srv.base}/api/devices/${laptop.id}/trust`, { method: 'PUT', headers: { ...asKey, 'Content-Type': 'application/json' }, body: '{"trusted":false}' }).then(x => x.json());
+    eq(r.trusted, false, JSON.stringify(r));
+    await page.waitFor(`deviceById('${laptop.id}')?.trusted === false`, 8000, 'the page hears it');
+    await page.evaluate(`openSettings('devices'); true`);
+    const box = `[...[...document.querySelectorAll('#set-devices .device-row')].find(r => r.textContent.includes(${JSON.stringify(name)}))?.querySelectorAll('label.check') || []].find(l => /Can control PCs and install apps/.test(l.textContent))`;
+    await page.waitFor(`${box}?.querySelector('input').checked === false`, 8000, 'off in its row');
+    assert(await page.evaluate(`/need this once/.test(${box}.textContent)`), 'and why, while it isn’t approved');
+    await page.evaluate(`${box}.querySelector('input').click(); true`);
+    assert(await until(ctx, async () => (await trusted()) === true), 'approved');
+    await page.evaluate(`$('#settingsDlg').close(); openDeviceInfo(deviceById('${laptop.id}')); true`);
+    const info = `[...document.querySelectorAll('#genBody label.check')].find(l => /Can control PCs and install apps/.test(l.textContent))`;
+    await page.waitFor(`${info}?.querySelector('input').checked === true`, 8000, 'on in its Device info');
+    await page.evaluate(`${info}.querySelector('input').click(); true`);
+    assert(await until(ctx, async () => (await trusted()) === false), 'taken back');
+    await page.evaluate(`$('#genDlg').close(); true`);
+  });
 }

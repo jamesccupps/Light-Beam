@@ -658,6 +658,7 @@ function openData() {
   alerts = loadState(FILE.alerts, { fallback: [], validate: validateAlerts, log }).value;
   history = loadState(FILE.history, { fallback: {}, validate: validateHistory, log }).value;
   apps = loadState(FILE.apps, { fallback: [], validate: validateApps, log }).value; // (1.21)
+  grandfatherTrust(); // (1.25)
   indexTokens();
   if (itemsNeedSave || loaded.source === 'tmp' || loaded.source === 'bak') persist();
 }
@@ -1064,8 +1065,9 @@ function keyMatches(candidate) {
   return crypto.timingSafeEqual(sha256raw(candidate), sha256raw(KEY));
 }
 
-function newTokenRecord({ device = null, via, session = false, scope = null, origin = null, platform = null, keyHash = null, claimed = false }) {
-  const record = { device, created: now(), lastUsed: now(), via, user: 'owner', role: 'owner' };
+function newTokenRecord({ device = null, via, session = false, scope = null, origin = null, platform = null, keyHash = null, claimed = false, trusted = false }) {
+  // (1.25) trusted: made on purpose (see isTrusted); every sign-in made from 1.25 on says so either way
+  const record = { device, created: now(), lastUsed: now(), via, user: 'owner', role: 'owner', trusted: Boolean(trusted) };
   if (session) record.session = true;
   if (scope) record.scope = scope;
   if (origin && origin !== via) record.origin = origin;
@@ -1098,6 +1100,42 @@ function deviceKeyOf(req) {
 // A sign-in token made or used with its device's current key.
 const keyBound = t => Boolean(t?.keyHash) && devices[resolveAlias(t.device || '')]?.keyHash === t.keyHash;
 
+// (1.25, security review 2026-10-13 R-1) A sign-in made on purpose: with the password, the master key, a pairing link
+// or an approval from a trusted sign-in, or approved on a trusted device later (PUT /api/devices/{id}/trust). Tailscale's
+// automatic sign-in never is, whatever app it says it is: any program on any of the owner's machines (another Windows
+// account, a process on a Pi, any app on the phone, whose traffic Tailscale carries) gets one. Remote control, apps,
+// the phone's notifications, the password, moves and signing the others out need it. Sign-ins from before 1.25 kept
+// what they could do (grandfatherTrust).
+const isTrusted = auth => auth?.via === 'master' || (auth?.via === 'token' && auth.token?.trusted === true);
+const hasTrustedSignIn = id => Object.values(tokenStore.tokens).some(t => t.trusted === true && t.device && resolveAlias(t.device) === id);
+// "<device id>|<platform>" of every device with a trusted sign-in of its own kind (an app's own, a browser's own; a
+// browser merged into an app is another kind): what the devices list says, and what approving a device approves.
+const trustedDevices = () => new Set(Object.values(tokenStore.tokens).filter(t => t.trusted === true && t.device && !t.scope).map(t => `${resolveAlias(t.device)}|${tokenPlatform(t)}`));
+const notTrusted = what => httpError(403, `This device can’t ${what} until it’s approved: in Beam on one of your PCs (or a browser that can), open Settings → Devices and turn on “Can control PCs and install apps” for it, or sign in here with the password, a pairing link or an approval`, { reason: 'trusted' });
+
+// Sign-ins from before 1.25 (no `trusted` yet) keep what they could do then, as remote control counted them
+// (rcSignInOk): the Windows app's key-bound one, the Android app's however it was made, anything made with the
+// password, a link, an approval or the key (the CLI's too); not a Linux computer's (the user, 2026-10-13: the Pi is only
+// ever controlled, never controls), nor a browser's made by Tailscale or by a Beam app on its machine. Once, at load.
+function grandfatherTrust() {
+  const before = t => {
+    const platform = tokenPlatform(t);
+    if (platform === 'windows') return keyBound(t);
+    if (platform === 'android') return tokenOrigin(t) !== 'autopair';
+    if (platform === 'linux') return false;
+    return RC_EXPLICIT.has(tokenOrigin(t));
+  };
+  let kept = 0, not = 0;
+  for (const t of Object.values(tokenStore.tokens)) {
+    if (typeof t.trusted === 'boolean') continue;
+    t.trusted = before(t) && devices[resolveAlias(t.device || '')]?.platform !== 'linux';
+    t.trusted ? kept++ : not++;
+  }
+  if (!kept && !not) return;
+  persistTokens();
+  log.info(`Sign-ins from before 1.25: ${kept} trusted (they could control PCs), ${not} not (automatic ones, a Linux computer's): approve one in Settings → Devices`);
+}
+
 // A Windows app's sign-in shows its device's key on this request (remote control asks for it even from the app's own
 // pages, cookie requests included: a copied sign-in alone can't control anything). True for every other sign-in.
 function windowsKeyShown(auth, req) {
@@ -1107,10 +1145,17 @@ function windowsKeyShown(auth, req) {
 }
 
 // A sign-in that names an existing device with a device key gets that id only with the key (keyHash, from the
-// request); any other gets an id of its own. How the sign-in was made is for the log.
-function claimableId(id, keyHash, how) {
+// request); any other gets an id of its own. How the sign-in was made is for the log. (1.25, security review R-1) A
+// sign-in that isn't trusted doesn't take over a device without a key that has a trusted sign-in (the phone, a Linux
+// computer, a browser): naming its id, which every signed-in device can see, it gets an id of its own.
+function claimableId(id, keyHash, how, trusted = true) {
   if (!id) return id;
   const d = devices[resolveAlias(id)];
+  if (d && !d.keyHash && !trusted && hasTrustedSignIn(d.id)) {
+    logOnce(`claim-trust ${d.id}`, `A sign-in (${how}) that isn't trusted named the device id of ${d.name}, which has a trusted one: it gets a device of its own`,
+      n => `${n} more sign-in${n === 1 ? '' : 's'} that aren't trusted named the device id of ${d.name}`);
+    return crypto.randomBytes(12).toString('hex');
+  }
   if (!d?.keyHash || keyHash === d.keyHash) return id;
   logOnce(`claim ${d.id}`, `A sign-in (${how}) named the device id of ${d.name} without its device key: it gets a device of its own`,
     n => `${n} more sign-in${n === 1 ? '' : 's'} named the device id of ${d.name} without its device key`);
@@ -1198,10 +1243,11 @@ function redeemPairing(hash, req) {
   if (!pairing || pairing.expires < now()) return null;
   delete tokenStore.pairing[hash];
   const key = deviceKeyOf(req);
-  const raw = claimableId(rawDeviceIdOf(req, new URL(req.url, 'http://beam')), key, 'pairing link');
+  const trusted = pairing.trusted === true; // (1.25: as trusted as the sign-in that made the link)
+  const raw = claimableId(rawDeviceIdOf(req, new URL(req.url, 'http://beam')), key, 'pairing link', trusted);
   tokenStore.tokens[hash] = newTokenRecord({
     device: raw ? resolveAlias(raw) : null, via: 'pairing', platform: explicitPlatform(req, new URL(req.url, 'http://beam')) || 'other',
-    keyHash: raw && key && devices[resolveAlias(raw)]?.keyHash === key ? key : null,
+    keyHash: raw && key && devices[resolveAlias(raw)]?.keyHash === key ? key : null, trusted,
   });
   indexTokens();
   persistTokens();
@@ -1623,13 +1669,14 @@ function noteSharedAddress(req, device) {
 
 function deviceList() {
   const signedIn = new Set(Object.values(tokenStore.tokens).map(t => t.device).filter(Boolean));
+  const trusted = trustedDevices(); // (1.25)
   return Object.values(devices)
     .map(d => {
       const ts = tailscaleOf(d);
       return {
         id: d.id, name: d.name, platform: d.platform, online: isOnline(d.id), lastSeen: d.lastSeen, user: d.user || 'owner',
         ...(d.appVersion && { appVersion: d.appVersion }),
-        signedIn: signedIn.has(d.id), ...(d.temporary && { temporary: true }),
+        signedIn: signedIn.has(d.id), ...(d.temporary && { temporary: true }), trusted: trusted.has(`${d.id}|${d.platform}`),
         ...(d.status && { status: publicStatus(d.status) }),
         ...(ts && { tailscale: { ...ts, ...tsStateOf(ts.ip) } }), // (1.17: + online, lastSeen, keyExpiry, expired)
         can: capabilitiesOf(d, ts),
@@ -1745,7 +1792,7 @@ const ownerChecks = new Map(); // login|device|on purpose -> time checked
 function learnOwner(req, deviceId, auth) {
   const header = identityFromHeaders(req);
   if (!header) return;
-  const deliberate = rcSignInOk(auth);
+  const deliberate = isTrusted(auth); // (1.25: was rcSignInOk, which an automatic sign-in naming an app passed)
   const key = `${header.login}|${deviceId || ''}|${deliberate}`;
   if (now() - (ownerChecks.get(key) || 0) < 10 * 60e3) return;
   ownerChecks.set(key, now());
@@ -2279,6 +2326,7 @@ function alertSettings() {
 }
 
 function raiseAlert(kind, deviceId, level, text) {
+  text = statusText(String(text)).slice(0, 1000); // (1.25, security review L-3: one line in the log and in ntfy, whatever a device sent)
   const alert = { id: crypto.randomBytes(6).toString('hex'), kind, device: deviceId || null, level, text, at: now() };
   alerts.unshift(alert);
   if (alerts.length > MAX_ALERTS) alerts.length = MAX_ALERTS;
@@ -2898,11 +2946,13 @@ function appById(id) {
   return app;
 }
 
-// Who may add, change, install and remove apps: a device signed in for good (not for a browser session only).
+// Who may add, change, install and remove apps: a device signed in for good (not for a browser session only), and
+// (1.25, security review R-1) trusted: an app runs a program on every PC that allows apps.
 function appsCaller(req, url) {
   if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t manage apps', { reason: 'temporary' });
   const me = resolveAlias(deviceIdOf(req, url) || '');
   if (devices[me]?.temporary) throw httpError(403, 'A device signed in for this session only can’t manage apps', { reason: 'temporary' });
+  if (!isTrusted(authOf(req))) throw notTrusted('manage apps');
   return me;
 }
 
@@ -3334,15 +3384,17 @@ const noteStats = { posted: 0, updated: 0, removed: 0, sharedThisHour: 0, reques
 const showsNotes = id => devices[id]?.settings?.phoneNotifications === true;
 // Who sees a phone's notifications: every device that shows them, except that phone itself.
 const audienceOf = phone => new Set(Object.keys(devices).filter(id => id !== phone && showsNotes(id)));
-const phoneConnected = phone => [...clients].some(c => c.deviceId === phone && !c.res.destroyed && !c.res.writableEnded);
+const phoneConnected = phone => [...clients].some(c => c.deviceId === phone && c.trusted && !c.res.destroyed && !c.res.writableEnded); // (1.25: one that hears requests)
 
 // Events about notifications go only to the devices concerned (no one else's stream is written to), and are urgent:
 // a background stream gets them at once.
-function sendTo(ids, event, data) {
+// (1.25) trustedOnly: only streams of trusted sign-ins (a phone's notifications and the replies to them: a browser that
+// same-machine linking merged into a PC or the phone shares that device's id, not its trust).
+function sendTo(ids, event, data, { trustedOnly = false } = {}) {
   if (!ids.size) return;
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const c of clients) {
-    if (!c.deviceId || !ids.has(c.deviceId) || c.res.writableEnded || c.res.destroyed) continue;
+    if (!c.deviceId || !ids.has(c.deviceId) || c.res.writableEnded || c.res.destroyed || (trustedOnly && !c.trusted)) continue;
     c.events++;
     writeTo(c, msg);
   }
@@ -3415,6 +3467,7 @@ function expireNotes() {
 function notePhone(req, url) {
   const phone = deviceIdOf(req, url);
   if (!phone || !devices[phone]) throw httpError(400, 'X-Beam-Device-Id is required');
+  if (!isTrusted(authOf(req))) throw notTrusted('share its notifications'); // (1.25, security review R-1)
   return phone;
 }
 
@@ -3453,7 +3506,7 @@ async function putPhoneNotification(req, res, [rawKey], url) {
     const names = [...audience].map(id => nameOf(id));
     log.info(`${whoName(phone)} shares notifications with ${names.length ? names.join(', ') : 'no device yet (none has "Show phone notifications" on)'}`);
   }
-  sendTo(audience, 'notification', note);
+  sendTo(audience, 'notification', note, { trustedOnly: true });
   send(res, 204);
 }
 
@@ -3485,6 +3538,7 @@ function clearPhoneNotifications(req, res, _m, url) {
 function requireAudience(req, url) {
   const me = deviceIdOf(req, url);
   if (!me || !showsNotes(me)) throw httpError(403, 'Phone notifications are off for this device', { reason: 'off' });
+  if (!isTrusted(authOf(req))) throw notTrusted('see the phone’s notifications'); // (1.25: 2FA codes, messages)
   return me;
 }
 
@@ -3557,7 +3611,7 @@ function startPhoneRequest(me, phone, kind, keys, extra) {
   timer.unref();
   phoneRequests.set(id, { id, phone, from: me, kind, keys, app, timer, started: now() });
   noteStats.requests[kind]++;
-  sendTo(new Set([phone]), 'notification-request', { request: id, kind, keys, ...extra, from: me, by: nameOf(me) });
+  sendTo(new Set([phone]), 'notification-request', { request: id, kind, keys, ...extra, from: me, by: nameOf(me) }, { trustedOnly: true });
   const what = kind === 'reply' ? `replied to a ${app} notification`
     : kind === 'action' ? `used an action on a ${app} notification`
     : keys.length > 1 ? `dismissed ${keys.length} notifications` : `dismissed a ${app} notification`;
@@ -3579,7 +3633,7 @@ function finishPhoneRequest(id, ok, error) {
     logOnce(`failed ${r.from} ${r.phone}`, `${nameOf(r.phone)} couldn't do what ${whoName(r.from)} asked (${r.kind}, ${r.app})`,
       n => `${nameOf(r.phone)} couldn't do ${n} more of ${whoName(r.from)}'s requests`);
   }
-  sendTo(new Set([r.from]), 'notification-request-done', { request: id, ok, ...(!ok && { error }) });
+  sendTo(new Set([r.from]), 'notification-request-done', { request: id, ok, ...(!ok && { error }) }, { trustedOnly: true });
   return true;
 }
 
@@ -3647,14 +3701,15 @@ async function dismissPhoneNotifications(req, res, _m, url) {
 async function answerPhoneRequest(req, res, [id], url) {
   const r = phoneRequests.get(id);
   const body = await readJson(req);
-  if (!r || r.phone !== deviceIdOf(req, url)) return send(res, 404, { error: 'No such request (it may have timed out)' });
+  if (!r || r.phone !== deviceIdOf(req, url) || !isTrusted(authOf(req))) return send(res, 404, { error: 'No such request (it may have timed out)' });
   if (typeof body.ok !== 'boolean') throw httpError(400, 'Expected {"ok": true} or {"ok": false, "error": "…"}');
   if (body.error !== undefined && typeof body.error !== 'string') throw httpError(400, 'error must be text');
   finishPhoneRequest(id, body.ok, body.ok ? undefined : noteText(body.error, 200, 'error') || 'failed');
   send(res, 204);
 }
 
-// PUT /api/devices/{id|me}/settings { phoneNotifications }: any signed-in device may set it for any device.
+// PUT /api/devices/{id|me}/settings { phoneNotifications }: any signed-in device may set it for any device; (1.25) on,
+// only a trusted one.
 async function putDeviceSettings(req, res, [id], url) {
   const target = id ? targetDevice(id) : devices[deviceIdOf(req, url)];
   if (!target) throw httpError(400, 'X-Beam-Device-Id is required');
@@ -3662,6 +3717,7 @@ async function putDeviceSettings(req, res, [id], url) {
   const unknown = Object.keys(body).filter(k => k !== 'phoneNotifications');
   if (unknown.length) throw httpError(400, `Unknown device setting: ${unknown.join(', ')}`);
   if (typeof body.phoneNotifications !== 'boolean') throw httpError(400, 'Expected {"phoneNotifications": true|false}');
+  if (body.phoneNotifications && !isTrusted(authOf(req))) throw notTrusted('turn on phone notifications');
   if (showsNotes(target.id) !== body.phoneNotifications) {
     log.info(`${target.name} ${body.phoneNotifications ? 'shows phone notifications now' : 'no longer shows phone notifications'} (set on ${whoName(deviceIdOf(req, url), 'a device')})`);
   }
@@ -3830,7 +3886,28 @@ const rcPcSignIn = auth => auth?.via === 'master' || (auth?.via === 'token' && (
 const RC_INELIGIBLE = {
   'sign-in': 'To control PCs from here, sign in to Beam on this device with a pairing link, an approval from another device or the password',
   profile: 'A Beam app must send X-Beam-Profile to use remote control',
+  // (1.25, security review R-1)
+  trusted: 'This device can’t control PCs until it’s approved: in Beam on one of your PCs (or a browser that can), open Settings → Devices and turn on “Can control PCs and install apps” for it',
+  linux: 'A computer with Beam for Linux can be controlled, but it doesn’t control other devices',
 };
+
+// (1.25) Who may start a session (the viewer): a trusted sign-in, of the Windows app (key-bound), the Android app or a
+// browser (never the CLI, nor a Linux computer: the user, 2026-10-13, the Pi is only ever controlled; 1.23 put `linux`
+// in RC_APP_PLATFORMS so its agent can be the PC, which also let it start sessions). Trust replaces rcSignInOk here: that
+// one took an automatic sign-in that named an app, and a browser approved later (PUT …/trust) must count.
+const RC_VIEWER_PLATFORMS = new Set(['windows', 'android', 'web']);
+function rcViewerIneligible(req, url, me) {
+  const auth = authOf(req);
+  if (devices[me]?.platform === 'linux') return 'linux';
+  if (auth?.via !== 'master') {
+    const platform = tokenPlatform(auth?.token);
+    if (platform === 'linux') return 'linux';
+    if (!RC_VIEWER_PLATFORMS.has(platform) || (platform === 'windows' && !keyBound(auth.token))) return 'sign-in';
+    if (!isTrusted(auth)) return 'trusted';
+  }
+  if (auth.source === 'bearer' && APP_PLATFORMS.has(explicitPlatform(req, url)) && !profileOf(req, url)) return 'profile';
+  return null;
+}
 
 // With Tailscale, a machine's user must be one of this Beam's owners (when the server knows them).
 const rcOwnerOk = user => !user || !owners().size || owners().has(user);
@@ -4099,7 +4176,7 @@ function rcNotAllowed(pc) {
 // to work it with the viewer's own keyboard and mouse.
 async function startRemoteControl(req, res, _m, url) {
   const me = rcCaller(req, url);
-  const why = rcIneligible(req, url);
+  const why = rcViewerIneligible(req, url, me);
   if (why) throw httpError(403, RC_INELIGIBLE[why], { reason: why });
   if (rcStarts.blocked(me)) {
     throw Object.assign(httpError(429, 'Too many remote control requests; try again in a minute'), { headers: { 'Retry-After': String(rcStarts.retryAfter(me)) } });
@@ -5087,7 +5164,7 @@ function getMe(req, res, _m, url) {
   const name = machineName(req);
   send(res, 200, {
     ok: true, you, api: API_VERSION, read: (you && readMarks[you]) || {},
-    auth: { via: auth.via, user: auth.user, role: auth.role, ...(auth.session && { session: true }) },
+    auth: { via: auth.via, user: auth.user, role: auth.role, ...(auth.session && { session: true }), trusted: isTrusted(auth) }, // (1.25)
     machine: name ? { name } : null,
   });
 }
@@ -5096,13 +5173,53 @@ function getDevices(req, res, _m, url) {
   send(res, 200, { devices: deviceList(), you: deviceIdOf(req, url) });
 }
 
+// (1.25, security review R-2) Another device is removed (and its machine kept from signing back in by itself) only by a
+// trusted sign-in: a borrowed computer signed in with the password still can (a stolen phone), an automatic one can't.
 function forgetDevice(req, res, [id]) {
   id = resolveAlias(id);
   if (!devices[id]) return send(res, 404, { error: 'Not found' });
+  if (id !== resolveAlias(deviceIdOf(req, new URL(req.url, 'http://beam')) || '') && !isTrusted(authOf(req))) throw notTrusted('remove other devices');
   log.info(`Removed the device "${nameOf(id)}" (by ${nameOf(deviceIdOf(req, new URL(req.url, 'http://beam')))})`);
   blockNodesOf([id], { except: callerNode(req), reason: `the device "${nameOf(id)}" was removed` });
   forgetDeviceNow(id, 'device removed');
   send(res, 204);
+}
+
+// PUT /api/devices/{id}/trust { trusted } (1.25, security review R-1): a trusted device lets another one control PCs,
+// install apps and see the phone's notifications (Settings → Devices: "Can control PCs and install apps"), or takes
+// that away. Approving trusts that device's own sign-ins (its app's, or a browser's own), not a browser merged into an
+// app on its machine; taking away is all of them, and ends the sessions they started. A Linux computer can be trusted
+// but never controls others (rcViewerIneligible).
+async function putDeviceTrust(req, res, [id], url) {
+  requireLasting(req, url, 'approve a device');
+  const auth = authOf(req);
+  if (!isTrusted(auth)) throw notTrusted('approve devices');
+  const target = targetDevice(id);
+  const body = await readJson(req);
+  if (typeof body.trusted !== 'boolean') throw httpError(400, 'Expected {"trusted": true|false}');
+  const changed = [];
+  for (const [hash, t] of Object.entries(tokenStore.tokens)) {
+    if (!t.device || resolveAlias(t.device) !== target.id || t.scope || (t.trusted === true) === body.trusted) continue;
+    if (body.trusted && tokenPlatform(t) !== target.platform) continue;
+    t.trusted = body.trusted;
+    changed.push(hash);
+  }
+  if (body.trusted && !changed.length && !trustedDevices().has(`${target.id}|${target.platform}`)) {
+    throw httpError(409, `${target.name} has no sign-in of its own to approve: sign it in again first`);
+  }
+  if (changed.length) {
+    persistTokens();
+    const set = new Set(changed);
+    for (const c of clients) if (c.tokenHash && set.has(c.tokenHash)) c.trusted = body.trusted;
+    if (!body.trusted) { // (the sessions they control; being controlled goes on)
+      const keys = new Set(changed.map(h => `t:${h}`));
+      for (const x of [...rcSessions.values()]) if (keys.has(x.viewerKey)) endRcSession(x, 'revoked');
+    }
+    const by = whoName(resolveAlias(deviceIdOf(req, url) || ''), 'A device');
+    log.info(body.trusted ? `${by} let ${target.name} control PCs, install apps and see the phone's notifications` : `${by} took away ${target.name}'s right to control PCs, install apps and see the phone's notifications`);
+    broadcastDevices();
+  }
+  send(res, 200, { device: target.id, trusted: trustedDevices().has(`${target.id}|${target.platform}`) });
 }
 
 // GET /api/items[?since=<cursor>]: the list (newest first, texts cut to 16 KB) with a cursor; with since, only what
@@ -5253,6 +5370,7 @@ async function forwardItem(req, res, [id], url) {
 // removeLocation? } → 201 { link } (1.15.0: at most so many downloads; a copy without location data, Family's choices).
 async function fastLinkItem(req, res, [id], url) {
   if (!FAMILY_URL) throw httpError(404, 'Fast links need Beam Family on this server (BEAM_FAMILY_URL)');
+  requireLasting(req, url, 'make a fast link (it outlasts this session)'); // (1.25, security review L-1)
   const item = findItem(id);
   if (!item) return send(res, 404, { error: 'Not found' });
   if (item.kind !== 'file') throw httpError(400, 'Only files get fast links');
@@ -6274,6 +6392,7 @@ function events(req, res, _m, url) {
     // take part at all (see rcPcStream, sendToViewer).
     temporary: Boolean(auth.session) || Boolean(devices[deviceId]?.temporary), machine, profile,
     credKey: rcCredKey(auth, machine, profile), rcOk: !rcIneligible(req, url), rcPc: rcPcSignIn(auth), rcKey: windowsKeyShown(auth, req),
+    trusted: isTrusted(auth), // (1.25: the phone's notifications go only to these; PUT …/trust changes it while open)
   };
   setStreamTimers(client);
   clients.add(client);
@@ -6358,12 +6477,14 @@ const FEATURES = [
   'linux', // (1.22.0: Beam for Linux: /install/linux, updates `linux`, status model/bootedAt/temperature/throttled, `hardware` alerts)
   'vnc', // (1.23.0: remote control of a Linux computer: rc sessions of kind vnc, relayed at GET /api/rc/sessions/{id}/vnc)
   'wake-relay', // (1.24.0: a wake also goes to Beam for Linux 1.3+, the `wake-relay` event; the answer's `relays`)
+  'trust', // (1.25.0: trusted sign-ins; devices' `trusted`, /api/me `auth.trusted`, PUT /api/devices/{id}/trust, 403 reason "trusted")
 ];
 
-// A pairing link for another device: a single-use token that becomes that device's own token (15 minutes).
-function createPairing(byDevice) {
+// A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)
+// trusted: whether the sign-in it makes is (that of the sign-in that made the link; at the server itself, yes).
+function createPairing(byDevice, trusted = true) {
   const token = randomSecret('bp_', 24);
-  tokenStore.pairing[sha256hex(token)] = { created: now(), expires: now() + PAIRING_TTL, by: byDevice || null, user: 'owner', role: 'owner' };
+  tokenStore.pairing[sha256hex(token)] = { created: now(), expires: now() + PAIRING_TTL, by: byDevice || null, user: 'owner', role: 'owner', trusted: Boolean(trusted) };
   persistTokens();
   return token;
 }
@@ -6380,7 +6501,9 @@ function requireLasting(req, url, what) {
 
 async function pairInfo(req, res, _m, url) {
   requireLasting(req, url, 'add a device');
-  const key = createPairing(deviceIdOf(req, url));
+  // (1.25, security review R-1) The device it adds is as trusted as this one: a link made by an automatic sign-in
+  // makes another (Beam for Linux's window, say), never a way round it.
+  const key = createPairing(deviceIdOf(req, url), isTrusted(authOf(req)));
   const lanUrl = lanBase();
   const publicUrl = (await publicBase()) || null;
   const base = publicUrl || lanUrl;
@@ -6463,9 +6586,12 @@ async function patchSettings(req, res) {
   // (1.7.3) Letting more in (another owner, automatic sign-in back on) takes a sign-in made on purpose, not one that
   // Tailscale or this machine's Beam app made by itself. Taking away needs no more than any sign-in.
   const widens = body.allowOwner !== undefined || body.tailscaleOwners !== undefined || body.tailscaleSignIn === true;
-  if (widens || body.unblockNode !== undefined) requireLasting(req, url, 'change who signs in automatically'); // (audit 2026-10-11 S-2)
-  if (widens && !rcSignInOk(authOf(req))) {
-    throw httpError(403, 'To change who signs in automatically, sign in on this device with the password, a pairing link or an approval first', { reason: 'sign-in' });
+  // (1.25, security review R-1/L-1) Also letting a blocked machine back in, and Beam's address (where pairing links and
+  // sign-in codes point): a trusted sign-in (rcSignInOk let an automatic one that named an app through).
+  const sensitive = widens || body.unblockNode !== undefined || body.publicUrl !== undefined;
+  if (sensitive) requireLasting(req, url, 'change who signs in automatically or Beam’s address'); // (audit 2026-10-11 S-2)
+  if (sensitive && !isTrusted(authOf(req))) {
+    throw httpError(403, 'To change who signs in automatically or Beam’s address, sign in on this device with the password, a pairing link or an approval first', { reason: 'sign-in' });
   }
   // Everything is checked before anything changes.
   const { unblockNode, allowOwner, removeOwner, ...rest } = body;
@@ -6533,6 +6659,7 @@ function unblockNodes(nodes) {
 
 function deleteBlockedNode(req, res, [node], url) {
   requireLasting(req, url, 'let a blocked device sign itself in again');
+  if (!isTrusted(authOf(req))) throw notTrusted('let a blocked device sign itself in again'); // (1.25)
   let id = node;
   try { id = decodeURIComponent(node); } catch {}
   if (!(settings.blockedNodes || []).some(b => b.node === id)) return send(res, 404, { error: 'Not found' });
@@ -6572,17 +6699,23 @@ async function login(req, res) {
   const ip = clientIp(req);
   const body = await readJson(req, { limit: 4096 });
   const url = new URL(req.url, 'http://beam');
-  const remember = body.remember !== false;
+  let remember = body.remember !== false;
   const client = body.client === 'app' ? 'app' : 'web';
   let via = null;
   let origin = null;
+  let trusted = false; // (1.25) the password and the master key are; a link or a handoff is as trusted as what it came from
   let platform = signInPlatform(req, url, body);
   let device = typeof body.deviceId === 'string' && DEVICE_ID.test(body.deviceId) ? body.deviceId : rawDeviceIdOf(req, url);
   // A valid link, device token or master key (an app's web view signing in with its own token, say) is no password
   // guess: it never touches the password limits. Password attempts and every wrong secret count, as before.
   const secret = typeof body.handoff === 'string' ? '' : String(body.secret ?? body.key ?? body.password ?? '').trim();
   if (typeof body.handoff === 'string') {
-    if (verifyHandoff(body.handoff)) via = 'handoff';
+    const handoff = verifyHandoff(body.handoff);
+    if (handoff) {
+      via = 'handoff';
+      trusted = handoff.trusted;
+      if (handoff.session) remember = false;
+    }
   } else {
     let key = secret;
     try { key = new URL(secret).searchParams.get('key') || secret; } catch {}
@@ -6590,6 +6723,7 @@ async function login(req, res) {
     if (linked) {
       via = linked.via;
       origin = linked.origin || null;
+      trusted = linked.trusted === true;
       if (linked.platform) platform = linked.platform;
       if (linked.device) device = linked.device; // a device's own token signs in as that device
     }
@@ -6608,10 +6742,13 @@ async function login(req, res) {
     await sleep(600);
     return send(res, 403, { error: hasPassword() ? 'That password or link isn’t right' : 'That link isn’t right. No sign-in password has been set yet.' });
   }
-  if (via === 'password') passwordIp.reset(ip);
+  if (via === 'password') {
+    passwordIp.reset(ip);
+    trusted = true;
+  }
   const key = deviceKeyOf(req);
-  device = claimableId(device ? resolveAlias(device) : null, key, via === 'password' ? 'password' : 'link or key');
-  const token = issueToken({ device: device ? resolveAlias(device) : null, via, session: !remember, origin, platform, keyHash: device && key && devices[resolveAlias(device)]?.keyHash === key ? key : null });
+  device = claimableId(device ? resolveAlias(device) : null, key, via === 'password' ? 'password' : 'link or key', trusted);
+  const token = issueToken({ device: device ? resolveAlias(device) : null, via, session: !remember, origin, platform, keyHash: device && key && devices[resolveAlias(device)]?.keyHash === key ? key : null, trusted });
   log.info(`Signed in ${device ? `"${nameOf(resolveAlias(device))}"` : 'a new device'} with ${via === 'password' ? 'the password' : via === 'handoff' ? 'a move handoff' : 'a link or key'} from ${describeWhereSync(req)}${remember ? '' : ' (this session only)'}`);
   withdrawRequestsOf(device && resolveAlias(device));
   if (client === 'app') return send(res, 200, { key: token, server: (await publicBase()) || originOf(req), ...(device && { you: resolveAlias(device) }) });
@@ -6622,18 +6759,18 @@ async function login(req, res) {
 // token for the same device, e.g. an app opening its web view). `pairingOnly`: only a pairing token (/?key=).
 function linkSecret(secret, { pairingOnly = false } = {}) {
   if (!secret) return null;
-  if (!pairingOnly && keyMatches(secret)) return { via: 'key' };
+  if (!pairingOnly && keyMatches(secret)) return { via: 'key', trusted: true };
   const hash = sha256hex(secret);
   const pairing = tokenStore.pairing[hash];
   if (pairing && pairing.expires > now()) {
     delete tokenStore.pairing[hash];
     persistTokens();
-    return { via: 'pairing' };
+    return { via: 'pairing', trusted: pairing.trusted === true }; // (1.25: as its maker)
   }
   if (pairingOnly) return null;
   const token = tokenStore.tokens[hash];
   if (token && !tokenExpired(token) && !token.scope) {
-    return { via: 'link', device: token.device && resolveAlias(token.device), origin: tokenOrigin(token), platform: tokenPlatform(token) };
+    return { via: 'link', device: token.device && resolveAlias(token.device), origin: tokenOrigin(token), platform: tokenPlatform(token), trusted: token.trusted === true };
   }
   return null;
 }
@@ -6643,10 +6780,12 @@ async function setPassword(req, res) {
   const body = await readJson(req);
   const next = body.password;
   if (typeof next !== 'string') throw httpError(400, 'Expected {"password": "..."}');
-  // Changing or removing a set password needs the current one (1.7.2), except from a sign-in made deliberately (as
-  // remote control counts them: the password, a pairing link, an approval, the master key, a Beam app's own): a
-  // browser that is only signed in because of Tailscale or an app on its machine can't take the password over.
-  if (hasPassword() && !rcSignInOk(authOf(req))) {
+  // Changing or removing a set password needs the current one (1.7.2), except from a trusted sign-in (1.25: was
+  // rcSignInOk): a device that is only signed in because of Tailscale can't take the password over, nor (1.25,
+  // security review R-1) set the first one and sign in with it as a trusted device.
+  const trusted = isTrusted(authOf(req));
+  if (!hasPassword() && !trusted) throw notTrusted('set the sign-in password');
+  if (hasPassword() && !trusted) {
     const ip = clientIp(req);
     if (passwordIp.blocked(ip)) throw httpError(429, 'Too many wrong attempts. Try again in a few minutes.');
     if (typeof body.current !== 'string' || !body.current) throw httpError(403, 'Type your current password to change it', { reason: 'current-password' });
@@ -6821,8 +6960,12 @@ async function answerLoginRequest(req, res, [action], url) {
   const { code } = await readJson(req);
   const r = findLoginRequest(code);
   const by = nameOf(deviceIdOf(req, url)) || deviceNameOf(req, url) || 'a signed-in device';
+  // (1.25, security review R-1) The sign-in it makes is as trusted as the approver, and a move (a full copy of Beam, its
+  // key included) only a trusted device approves: anything that reaches Beam can ask for one and knows its code.
+  const trusted = isTrusted(authOf(req));
+  if (action === 'approve' && r.purpose === 'move' && !trusted) throw notTrusted('approve a move (a full copy of Beam)');
   if (action === 'approve') {
-    const device = claimableId(r.deviceId ? resolveAlias(r.deviceId) : null, r.keyHash, 'approved request');
+    const device = claimableId(r.deviceId ? resolveAlias(r.deviceId) : null, r.keyHash, 'approved request', trusted);
     r.token = issueToken({
       device: device ? resolveAlias(device) : null,
       keyHash: device && r.keyHash && devices[resolveAlias(device)]?.keyHash === r.keyHash ? r.keyHash : null,
@@ -6830,6 +6973,7 @@ async function answerLoginRequest(req, res, [action], url) {
       session: !r.remember,
       scope: r.purpose === 'move' ? 'move' : null,
       platform: r.platform || 'web',
+      trusted,
     });
   }
   settleLoginRequest(r, action === 'approve' ? 'approved' : 'denied', by);
@@ -6853,6 +6997,9 @@ async function autoPair(req, res) {
   const client = body.client === 'app' ? 'app' : 'web';
   let via = null;
   let reason = 'no-identity';
+  // (1.25) An automatic sign-in is never trusted, except the very first device of a brand-new Beam (someone has to
+  // approve the rest; as the first Tailscale account becomes the owner).
+  const firstDevice = !settings.initialized && !Object.keys(devices).length && !Object.keys(tokenStore.tokens).length;
   const identity = await verifiedIdentity(req);
   if (identity?.mismatch) reason = identity.unconfirmed ? 'whois-unavailable' : 'whois-mismatch';
   else if (identity && !setting('tailscaleSignIn')) reason = 'disabled';
@@ -6878,8 +7025,9 @@ async function autoPair(req, res) {
   if (!deviceId && client === 'app') deviceId = crypto.randomBytes(12).toString('hex');
   const key = deviceKeyOf(req);
   let claimed = false;
+  const trusted = firstDevice && !Object.keys(tokenStore.tokens).length; // (still none while whois answered)
   if (deviceId) {
-    deviceId = resolveAlias(claimableId(resolveAlias(deviceId), key, 'automatic'));
+    deviceId = resolveAlias(claimableId(resolveAlias(deviceId), key, 'automatic', trusted));
     // A Tailscale sign-in for an app device that exists but has no device key yet can't set its key (deviceKeySeen):
     // another Windows account on that machine could otherwise take the device over first.
     claimed = via === 'tailscale' && client === 'app' && Boolean(devices[deviceId]) && !devices[deviceId].keyHash;
@@ -6896,8 +7044,9 @@ async function autoPair(req, res) {
   }
   const token = issueToken({
     device: deviceId || null, via: via === 'tailscale' ? 'tailscale' : 'autopair', platform: signInPlatform(req, url, body), claimed,
-    keyHash: deviceId && key && devices[deviceId]?.keyHash === key ? key : null,
+    keyHash: deviceId && key && devices[deviceId]?.keyHash === key ? key : null, trusted,
   });
+  if (trusted) log.info('The first device of this new Beam is trusted: it can approve the others (Settings → Devices)');
   log.info(`Signed in ${deviceId ? `"${nameOf(deviceId)}"` : 'a browser'} automatically (Tailscale account ${identity.login}) from ${describeWhereSync(req)}`);
   withdrawRequestsOf(deviceId);
   if (client === 'app') return send(res, 200, { key: token, server: (await publicBase()) || originOf(req), via, you: deviceId });
@@ -6924,12 +7073,14 @@ async function logout(req, res) {
 }
 
 // Signs out every other device: the master key changes (old clients holding it must sign in again), every
-// token is revoked, and the caller gets a fresh token.
+// token is revoked, and the caller gets a fresh token. (1.25, security review R-2) Only from a trusted sign-in (a
+// borrowed computer signed in with the password, for a stolen phone, still can), and a session-only one stays that.
 async function signOutOthers(req, res, _m, url) {
   if (env.BEAM_KEY) throw httpError(409, 'The master key is set by BEAM_KEY on the server; change it there instead');
+  const auth = authOf(req);
+  if (!isTrusted(auth)) throw notTrusted('sign out the other devices');
   const body = await readJson(req, { optional: true });
   const me = deviceIdOf(req, url);
-  const auth = authOf(req);
   const identity = identityFromHeaders(req);
   blockNodesOf(Object.keys(devices).filter(id => id !== me), { except: devices[me]?.tsNode || callerNode(req), reason: 'every other device was signed out' });
   if (body.disableTailscaleSignIn === true && ENV_SETTINGS.tailscaleSignIn === undefined) {
@@ -6955,11 +7106,12 @@ async function signOutOthers(req, res, _m, url) {
     device: me, via: 'sign-out-others', origin: auth.via === 'token' ? tokenOrigin(auth.token) : 'key',
     platform: auth.via === 'token' ? tokenPlatform(auth.token) : auth.source === 'cookie' ? 'web' : explicitPlatform(req, url) || 'other',
     keyHash: (auth.via === 'token' && keyBound(auth.token) && auth.token.keyHash) || (shownKey && devices[me]?.keyHash === shownKey ? shownKey : null),
+    session: Boolean(auth.session), trusted: true,
   });
   log.info(`${nameOf(me)} signed out every other device: new master key, ${revoked} sign-in${revoked === 1 ? '' : 's'} revoked`);
   endAllRcSessions('revoked', me);
   for (const c of clients) c.res.end();
-  const headers = auth.source === 'cookie' ? { 'Set-Cookie': authCookie(req, token) } : { 'X-Beam-Token': token };
+  const headers = auth.source === 'cookie' ? { 'Set-Cookie': authCookie(req, token, { session: Boolean(auth.session) }) } : { 'X-Beam-Token': token };
   broadcast('settings', publicSettings());
   send(res, 200, { key: token, revoked, tailscaleSignIn: setting('tailscaleSignIn') }, headers);
 }
@@ -7041,6 +7193,7 @@ function watchForTarget(to, by) {
 
 async function postMove(req, res, _m, url) {
   const auth = authOf(req);
+  if (!isTrusted(auth)) throw notTrusted('move Beam'); // (1.25: also pausing every change for 30 minutes while it waits)
   const body = await readJson(req);
   const to = normalizeBaseUrl(body.to);
   if (!to) throw httpError(400, 'Expected {"to": "https://new-address"}');
@@ -7072,6 +7225,7 @@ async function postMove(req, res, _m, url) {
 function deleteMove(req, res) {
   const auth = authOf(req);
   if (setting('movedTo') && auth?.via !== 'master') throw httpError(403, 'Only the master key can undo a move');
+  if (!isTrusted(auth)) throw notTrusted('call off a move'); // (1.25)
   if (ENV_SETTINGS.movedTo) throw httpError(409, 'The new address is set by BEAM_MOVED_TO on the server');
   const was = setting('movedTo');
   settings.movedTo = '';
@@ -7084,23 +7238,28 @@ function deleteMove(req, res) {
 }
 
 // A signed-in browser leaving the old server gets a handoff: HMAC(master key, expiry). The new server has the
-// same key, so it can check it and sign the browser in (POST /api/login { handoff }).
+// same key, so it can check it and sign the browser in (POST /api/login { handoff }). (1.25) The HMAC also covers
+// how the sign-in it was made for counts: trusted or not ('t'/'u'), lasting or this session only ('l'/'s'), so the
+// browser's sign-in at the new address is the same kind (and keeps its device id where a trusted one may). A handoff
+// from a server before 1.25 has neither: not trusted, lasting.
 const usedHandoffs = new Map(); // handoff -> expiry
 
-function makeHandoff() {
+function makeHandoff(auth) {
   const exp = now() + HANDOFF_TTL;
-  return `${exp}.${crypto.createHmac('sha256', KEY).update(`handoff:${exp}`).digest('base64url')}`;
+  const kind = `${isTrusted(auth) ? 't' : 'u'}${auth.session ? 's' : 'l'}`;
+  return `${exp}.${kind}.${crypto.createHmac('sha256', KEY).update(`handoff:${exp}:${kind}`).digest('base64url')}`;
 }
 
+// The handoff's kind ({trusted, session}), or null.
 function verifyHandoff(value) {
-  const m = /^(\d{10,16})\.([A-Za-z0-9_-]{43})$/.exec(value || '');
-  if (!m) return false;
+  const m = /^(\d{10,16})\.(?:([tu][ls])\.)?([A-Za-z0-9_-]{43})$/.exec(value || '');
+  if (!m) return null;
   const exp = Number(m[1]);
-  if (exp < now() || exp > now() + HANDOFF_TTL + 60e3 || usedHandoffs.has(value)) return false;
-  const expected = crypto.createHmac('sha256', KEY).update(`handoff:${exp}`).digest('base64url');
-  if (!crypto.timingSafeEqual(Buffer.from(m[2]), Buffer.from(expected))) return false;
+  if (exp < now() || exp > now() + HANDOFF_TTL + 60e3 || usedHandoffs.has(value)) return null;
+  const expected = crypto.createHmac('sha256', KEY).update(m[2] ? `handoff:${exp}:${m[2]}` : `handoff:${exp}`).digest('base64url');
+  if (!crypto.timingSafeEqual(Buffer.from(m[3]), Buffer.from(expected))) return null;
   usedHandoffs.set(value, exp);
-  return true;
+  return { trusted: m[2]?.[0] === 't', session: m[2]?.[1] === 's' };
 }
 
 const escapeHtml = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
@@ -7154,7 +7313,8 @@ function handleMoved(req, res, url) {
   if (pathname.endsWith('/moved.js')) return send(res, 200, MOVED_JS, { 'Content-Type': 'text/javascript; charset=utf-8' });
   // Only pages get the moved page; old cached scripts and styles must not be replaced by HTML.
   if (/\.(?!html?$)[a-z0-9]+$/i.test(pathname)) return send(res, 410, 'Beam has moved', { 'Content-Type': 'text/plain; charset=utf-8' });
-  const handoff = authOf(req) ? makeHandoff() : '';
+  const auth = authOf(req);
+  const handoff = auth ? makeHandoff(auth) : '';
   send(res, 200, movedPage(movedTo, handoff), {
     'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': MOVED_CSP, 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer',
   });
@@ -7332,6 +7492,8 @@ function snapshotState() {
 async function exportApi(req, res, _m, url) {
   const auth = authOf(req);
   if (auth.via !== 'master' && auth.scope !== 'move') throw httpError(403, 'Only the master key or an approved move can export this Beam');
+  // (1.25, security review R-1) a move approved by a trusted device (before 1.25 anything signed in could approve one)
+  if (!isTrusted(auth)) throw httpError(403, 'This move wasn’t approved on a trusted device: approve it again on one', { reason: 'trusted' });
   const freeze = url.searchParams.has('freeze');
   if (freeze) {
     moving = { until: now() + MOVE_FREEZE_MS, by: 'export for a move' };
@@ -7700,6 +7862,7 @@ const routes = [
   ['POST', '/api/rc/sessions/([a-f0-9]{16})/end', endRemoteControl],
   ['POST', '/api/rc/disable', disableRemoteControl],
   ['DELETE', `/api/devices/${DEV}`, forgetDevice],
+  ['PUT', `/api/devices/${DEV}/trust`, putDeviceTrust], // (1.25)
   ['POST', `/api/devices/${DEV}/ring`, ringDevice],
   ['POST', `/api/devices/${DEV}/wake`, wakeDevice],
   ['GET', `/api/devices/${DEV}/remote-desktop\\.rdp`, remoteDesktopFile],
@@ -7918,8 +8081,8 @@ async function handle(req, res) {
       const secret = url.searchParams.get('key');
       const linked = linkSecret(secret, { pairingOnly: true });
       if (linked) {
-        const device = claimableId(linked.device || rawDeviceIdOf(req, url), deviceKeyOf(req), 'link');
-        const token = issueToken({ device: device ? resolveAlias(device) : null, via: linked.via, origin: linked.origin, platform: linked.platform || 'web' });
+        const device = claimableId(linked.device || rawDeviceIdOf(req, url), deviceKeyOf(req), 'link', linked.trusted === true);
+        const token = issueToken({ device: device ? resolveAlias(device) : null, via: linked.via, origin: linked.origin, platform: linked.platform || 'web', trusted: linked.trusted === true });
         log.info(`Signed in ${device ? `"${nameOf(resolveAlias(device))}"` : 'a browser'} with a pairing link from ${describeWhereSync(req)}`);
         return send(res, 302, '', { Location: './', 'Set-Cookie': authCookie(req, token), 'Referrer-Policy': 'no-referrer' });
       }
@@ -7990,7 +8153,7 @@ async function handle(req, res) {
   }
   const deviceKey = deviceKeyOf(req);
   if (auth.via === 'token' && !auth.token.device) {
-    const raw = claimableId(rawDeviceIdOf(req, url), deviceKey, 'first use');
+    const raw = claimableId(rawDeviceIdOf(req, url), deviceKey, 'first use', auth.token.trusted === true);
     if (raw) {
       auth.token.device = auth.deviceId = resolveAlias(raw);
       persistTokens();
@@ -8035,7 +8198,7 @@ function offerDeviceToken(req, res, auth, deviceId) {
   const token = migrationToken(deviceId);
   const hash = sha256hex(token);
   if (!tokenStore.tokens[hash]) {
-    tokenStore.tokens[hash] = newTokenRecord({ device: deviceId, via: 'migration', platform: auth.source === 'cookie' ? 'web' : explicitPlatform(req, new URL(req.url, 'http://beam')) || 'other', keyHash: keyHash || null });
+    tokenStore.tokens[hash] = newTokenRecord({ device: deviceId, via: 'migration', platform: auth.source === 'cookie' ? 'web' : explicitPlatform(req, new URL(req.url, 'http://beam')) || 'other', keyHash: keyHash || null, trusted: true }); // (1.25: made for a master-key holder)
     tokenStore.tokens[hash].mid = deviceId; // (the device id its value is made from: `device` may follow a merge)
     indexTokens();
     persistTokens();

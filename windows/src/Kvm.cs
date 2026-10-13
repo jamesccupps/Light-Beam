@@ -353,8 +353,9 @@ namespace Beam
                 if (!links.Contains(l) || l.State != "asking") return;
                 string reason = Json.Str(ex.Body, "reason") ?? "";
                 l.Fails++;
-                int wait = reason == "busy" ? 60 : reason == "offline" || reason == "locked" ? 30 : reason == "not-allowed" || reason == "old-app" || reason == "not-owner" ? 300
-                    : ex.Status == 429 ? 60 : Backoff(l);
+                // (1.17.5) not approved yet (server 1.25's "trusted"): no sooner than the others that wait for someone
+                int wait = reason == "busy" ? 60 : reason == "offline" || reason == "locked" ? 30 : reason == "not-allowed" || reason == "old-app" || reason == "not-owner"
+                    || reason == "trusted" || reason == "sign-in" ? 300 : ex.Status == 429 ? 60 : Backoff(l);
                 Wait(l, wait, ex.Message);
                 return;
             }

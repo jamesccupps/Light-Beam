@@ -37,7 +37,10 @@ for the owner's family, which may face the internet.
   identity headers only from there; any program or account on that computer could pose as Tailscale traffic. Run the
   server on a computer only you use. The data folder is made private to the account Beam runs as.
 - **Your Tailscale account.** Devices signed in to it sign in to Beam by themselves (this can be turned off). Whoever
-  controls your Tailscale account controls that.
+  controls your Tailscale account controls that. Since 1.25 such an automatic sign-in only sends and receives: remote
+  control, installing apps, the phone's notifications, the password, moves and signing the others out take a *trusted*
+  sign-in (the password, a pairing link or approval from a trusted device, or approved on one), because Tailscale
+  vouches for a machine, not for the program or account on it.
 - **The `data` folder and the signing keys.** `data` holds the key, sign-ins and every stored item, unencrypted. The
   apps update from `dist` but install only builds signed with your keys (the Windows update key, the Android keystore):
   whoever has those keys can change every app.

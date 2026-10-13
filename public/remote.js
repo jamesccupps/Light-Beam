@@ -368,6 +368,7 @@ function rcEndedFromError(err) {
   if (err.status === 401) return rcEnded('signed-out');
   if (err.status === 403 && reason === 'temporary') return rcEnded('temporary');
   if (err.status === 403 && (reason === 'sign-in' || reason === 'autopair')) return rcEnded('sign-in');
+  if (err.status === 403 && (reason === 'trusted' || reason === 'linux')) return rcEnded(reason); // (1.25)
   if (err.status === 403 && reason === 'not-owner') return rcEnded('not-owner', { text: err.body?.error });
   if (err.status === 409 && reason === 'not-owner') return rcEnded('pc-not-owner', { text: err.body?.error });
   if (err.status === 403) return rcEnded('refused', { text: err.body?.error });
@@ -499,6 +500,9 @@ function rcEnded(reason, { text = '', by = '', from = '', endSession = false, en
     temporary: { title: 'Not with a sign-in for this session only', text: 'Remote control needs a device that is signed in to Beam for good, not one signed in just for this session.' },
     // (a browser signed in by itself, through Tailscale or a Beam app on the same machine: any account there has that)
     'sign-in': { title: 'Sign in to Beam here first', text: 'To control PCs from this browser, sign in to Beam here with a pairing link, an approval from another device or the password. (Add a device, on a device that’s signed in, makes a link.)' },
+    // (1.25) signed in by itself (Tailscale): one approval on a device that can, and it can
+    trusted: { title: 'Approve this device first', text: `This device signed in by itself, so it can’t control PCs yet. In Beam on one of your PCs, open Settings → Devices and turn on “Can control PCs and install apps” for ${rc.myName || me.name || 'this device'}.`, retry: true },
+    linux: { title: 'Not from a Linux computer', text: 'A computer with Beam for Linux can be controlled from your other devices, but it doesn’t control them.' },
     refused: { title: 'Beam refused that', text: text || 'This device can’t start remote control.' },
     'not-owner': { title: 'Not from this Tailscale account', text: text || 'This device’s Tailscale account isn’t one of this Beam’s owners, so it can’t control PCs.' },
     'pc-not-owner': { title: `${n} can’t be controlled`, text: text || `${n}’s Tailscale account isn’t one of this Beam’s owners.` },
