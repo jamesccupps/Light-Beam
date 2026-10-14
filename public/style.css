@@ -396,6 +396,11 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .paste-files img { display: block; max-width: 180px; max-height: 140px; border-radius: 8px; background: var(--surface-2); }
 .paste-files figcaption { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .file-preview, .logs { max-height: 65vh; overflow: auto; margin: 8px 0 0; padding: 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* (1.25.3) "Show only lines with…" over a preview or a log */
+.line-filter { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; margin-top: 8px; }
+.line-filter input[type="search"] { flex: 1 1 220px; }
+.line-filter .check { margin: 0; }
+.line-count:empty { display: none; }
 .shortcuts { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 8px 0; align-items: baseline; }
 .shortcuts dd { margin: 0; }
 .switcher { padding-bottom: 12px; }

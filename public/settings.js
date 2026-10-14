@@ -654,16 +654,20 @@ async function backupNow() {
 
 async function showLogs() {
   const pre = el('pre', { class: 'logs' }, 'Loading…');
+  const filter = lineFilter(pre, { important: true }); // (1.25.3)
+  let lines = 400;
   const refresh = async () => {
     try {
-      const res = await api('api/logs?lines=400');
+      const res = await api(`api/logs?lines=${lines}`);
       const type = res.headers.get('content-type') || '';
       const body = type.includes('json') ? await res.json() : await res.text();
-      pre.textContent = typeof body === 'string' ? body : (body.lines || []).join('\n');
+      filter.set(typeof body === 'string' ? body : (body.lines || []).join('\n'));
       pre.scrollTop = pre.scrollHeight;
     } catch (err) { pre.textContent = friendlyError(err); }
   };
-  openDialog({ title: 'Server log', body: pre, wide: true, buttons: [el('button', { class: 'btn', type: 'button', onclick: refresh }, 'Refresh')] });
+  // (1.25.3) 400 lines, then 2,000, then the 5,000 the server gives at most
+  const more = el('button', { class: 'btn ghost', type: 'button', onclick: () => { lines = Math.min(5000, lines * 5); more.hidden = lines >= 5000; refresh(); } }, 'More lines');
+  openDialog({ title: 'Server log', body: [filter.bar, pre], wide: true, buttons: [more, el('button', { class: 'btn', type: 'button', onclick: refresh }, 'Refresh')] });
   refresh();
 }
 

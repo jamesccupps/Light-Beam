@@ -9,7 +9,9 @@ const WINDOW = 60;
 const WINDOW_STEP = 120;
 const PREVIEW_IMAGE = /^image\/(png|jpeg|gif|webp|avif|bmp|x-icon)$/;
 const PREVIEW_VIDEO = /^video\/(mp4|webm|quicktime|ogg)$/;
-const TEXTLIKE = /^(text\/|application\/(json|xml|x-yaml|yaml|javascript|x-sh|x-httpd-php|sql|toml)$)|\.(txt|md|log|csv|tsv|json|xml|ya?ml|ini|conf|cfg|toml|js|mjs|ts|tsx|jsx|py|rb|go|rs|java|kt|cs|c|h|cpp|hpp|sh|ps1|bat|cmd|sql|html?|css|scss|env|gitignore|properties)$/i;
+// (1.25.3: PPCL programs, .reg exports, keys and certificates as text, subtitles, JSON Lines and more; one that isn't
+// text after all says so in its preview)
+const TEXTLIKE = /^(text\/|application\/(json|xml|x-yaml|yaml|javascript|x-sh|x-httpd-php|sql|toml)$)|\.(txt|md|log|csv|tsv|json|jsonl|ndjson|xml|xaml|ya?ml|ini|conf|cfg|toml|js|mjs|ts|tsx|jsx|py|rb|go|rs|java|kt|kts|gradle|cs|csproj|sln|c|h|cpp|hpp|sh|ps1|psm1|psd1|bat|cmd|vbs|lua|ahk|sql|html?|css|scss|env|gitignore|properties|ppcl|pcl|reg|nfo|srt|vtt|asc|pem|crt|diff|patch)$/i;
 const autoPreviewMax = () => (navigator.connection?.saveData ? 2 : 16) * 1024 * 1024;
 
 const view = {

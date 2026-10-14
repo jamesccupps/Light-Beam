@@ -314,4 +314,67 @@ export default function register(test) {
     })()`);
     eq(c, [true, 'second', null, 'pending', phone.id], 'the first chooser gives way; the second one picks');
   });
+
+  test('text preview (1.25.3): UTF-16 with its mark or without, the Windows code page and UTF-8 read right; a file that isn’t text says so; a big log’s end; “Show only lines with…”', async ctx => {
+    const { page, phone, meId } = await withPhone(ctx);
+    const utf16 = (s, bom = true) => Buffer.concat([bom ? Buffer.from([0xff, 0xfe]) : Buffer.alloc(0), Buffer.from(s, 'utf16le')]);
+    const lines = n => Array.from({ length: n }, (_, i) => `line ${i + 1}${i % 50 === 0 ? ' ERROR disk full' : ''}`).join('\r\n');
+    const files = [
+      ['ipconfig.txt', utf16('Windows IP Configuration\r\nIPv4 Address. . : 192.0.2.7\r\n')], // (Windows PowerShell's `>`)
+      ['nobom.log', utf16('started fine\r\nstill fine\r\n', false)],
+      ['ansi.csv', Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x3b, 0x31, 0x0d, 0x0a])], // "café;1" in Windows-1252
+      ['program.ppcl', Buffer.from('00010 C THE AIR HANDLER\n00020 ON(AHU1)\n')],
+      ['really.txt', PNG_1PX], // a picture named .txt
+      ['big.log', Buffer.from(lines(20000))],
+    ];
+    for (const [name, bytes] of files) await phone.file(name, bytes, [meId]);
+    await page.waitFor(`itemsIn('${phone.id}').length === ${files.length}`, 8000, 'the files');
+    eq(await page.evaluate(`TEXTLIKE.test('program.ppcl') && TEXTLIKE.test('settings.reg')`), true, 'PPCL and .reg are previewed');
+    const open = async name => {
+      await page.evaluate(`previewTextFile(itemsIn('${phone.id}').find(i => i.name === ${JSON.stringify(name)})); true`);
+      await page.waitFor(`$('#genDlg').open && $('#genTitle').textContent === ${JSON.stringify(name)} && !/^Loading/.test($('#genBody pre').textContent)`, 8000, `${name} shown`);
+      return page.evaluate(`[$('#genBody p').textContent, $('#genBody pre').textContent]`);
+    };
+    let [about, text] = await open('ipconfig.txt');
+    assert(/UTF-16/.test(about) && text.startsWith('Windows IP Configuration') && !text.includes('\u0000'), `${about} | ${text.slice(0, 80)}`);
+    [about, text] = await open('nobom.log');
+    assert(/UTF-16/.test(about) && text.startsWith('started fine'), `${about} | ${text.slice(0, 40)}`);
+    [about, text] = await open('ansi.csv');
+    assert(/Windows \(ANSI\)/.test(about) && text.startsWith('café;1'), `${about} | ${text}`);
+    [about, text] = await open('program.ppcl');
+    assert(/UTF-8/.test(about) && /ON\(AHU1\)/.test(text), `${about} | ${text}`);
+    [, text] = await open('really.txt');
+    assert(/doesn’t look like a text file/.test(text), text);
+    eq(await page.evaluate(`$('#genBody .line-filter').hidden`), true, 'no filter for it');
+    // A big log: its start, then its end, then only its lines with “error” (case doesn't count).
+    [about, text] = await open('big.log');
+    assert(/^The first 64 KB of/.test(about) && text.startsWith('line 1 ERROR'), about);
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent === 'End').click(); true`);
+    await page.waitFor(`/^The last 64 KB/.test($('#genBody p').textContent)`, 8000, 'its end');
+    text = await page.evaluate(`$('#genBody pre').textContent`);
+    assert(text.trimEnd().endsWith('line 20000') && !text.startsWith('line 1 '), text.slice(-40));
+    await page.evaluate(`(() => { const i = $('#genBody .line-filter input[type=search]'); i.value = 'error'; i.dispatchEvent(new Event('input')); return true; })()`);
+    await page.waitFor(`/ of /.test($('#genBody .line-count').textContent)`, 3000, 'filtered');
+    const shown = await page.evaluate(`$('#genBody pre').textContent.split('\\n')`);
+    assert(shown.length > 10 && shown.every(l => /ERROR disk full/.test(l)), shown.slice(0, 3).join(' | '));
+    await page.evaluate(`$('#genDlg').close()`);
+  });
+
+  test('server log (1.25.3): Settings → Server log shows only the lines with what you type, or only warnings and errors; More lines', async ctx => {
+    const page = await ctx.signedIn();
+    await page.waitFor(`serverHas('logs')`, 8000, 'the server has its log');
+    await page.evaluate(`showLogs(); true`);
+    await page.waitFor(`$('#genDlg').open && $('#genBody pre').textContent.length > 0 && !/^Loading/.test($('#genBody pre').textContent)`, 8000, 'the log');
+    const all = await page.evaluate(`$('#genBody pre').textContent.split('\\n').length`);
+    await page.evaluate(`(() => { const i = $('#genBody .line-filter input[type=search]'); i.value = 'signed in'; i.dispatchEvent(new Event('input')); return true; })()`);
+    await page.waitFor(`/ of /.test($('#genBody .line-count').textContent)`, 3000, 'filtered');
+    const lines = await page.evaluate(`$('#genBody pre').textContent.split('\\n')`);
+    assert(lines.length < all && lines.every(l => /signed in/i.test(l)), lines.slice(0, 3).join(' | '));
+    await page.evaluate(`(() => { const i = $('#genBody .line-filter input[type=search]'); i.value = ''; i.dispatchEvent(new Event('input')); $('#genBody .line-filter label.check input').click(); return true; })()`);
+    await page.waitFor(`/ of /.test($('#genBody .line-count').textContent)`, 3000, 'warnings and errors');
+    const important = await page.evaluate(`$('#genBody pre').textContent.split('\\n')`);
+    assert(important.every(l => /WARN|ERROR|FAIL|Crashed|Exception|!!|No warnings/i.test(l)), important.slice(0, 3).join(' | '));
+    eq(await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].map(b => b.textContent)`), ['More lines', 'Refresh']);
+    await page.evaluate(`$('#genDlg').close()`);
+  });
 }
