@@ -417,6 +417,13 @@
     <string name="pc_notifications_setup_title">Show this phone\'s notifications on</string>
     <string name="pc_notifications_setup_ok">Switch on</string>
     <string name="pc_notifications_change_failed">Couldn\'t change it: %1$s</string>
+    <!-- (server 1.25) approving a device that signed in by itself -->
+    <string name="trust_not_yet">not approved: can\'t control PCs or install apps</string>
+    <string name="trust_allow">Let it control PCs and install apps</string>
+    <string name="trust_revoke">Stop it controlling PCs and installing apps</string>
+    <string name="trust_allowed">%1$s can control PCs and install apps now</string>
+    <string name="trust_revoked">%1$s can\'t control PCs or install apps any more</string>
+    <string name="trust_change_failed">Couldn\'t change that: %1$s</string>
     <string name="pc_notifications_summary_off">Off</string>
     <string name="pc_notifications_summary_needs_access">On, but Beam needs notification access</string>
     <string name="pc_notifications_summary_needs_server">Needs Beam server 1.5</string>

@@ -31,12 +31,17 @@ function createLinks(ctx) {
   const urlOf = token => `${config.publicUrl || ''}/f/${token}`;
   const nameOf = id => (id && people().getUser?.(id)?.name) || db.get('SELECT name FROM users WHERE id = ?', id || '')?.name || 'Someone';
 
-  // A link's secret → { l, a } while it works (not expired or off, its file still here); else a 404, counted.
+  // (1.25.1, the 10-11 audit) A link works only while its maker's access is on: turned off, their links stop (and work
+  // again, within their time, if it's turned back on).
+  const working = l => l && !l.revoked_at && l.expires_at > now() && !db.get('SELECT disabled_at FROM users WHERE id = ?', l.created_by)?.disabled_at;
+
+  // A link's secret → { l, a } while it works (not expired or off, its maker's access on, its file still here); else a
+  // 404, counted.
   function open(req, token) {
     const ip = clientIp(req);
     if (misses.blocked(ip)) throw httpError(429, 'Too many tries: wait a minute');
     const l = TOKEN.test(String(token)) ? db.get('SELECT * FROM links WHERE token_hash = ?', hashOf(token)) : null;
-    const a = l && !l.revoked_at && l.expires_at > now() ? db.get('SELECT * FROM attachments WHERE id = ?', l.attachment_id) : null;
+    const a = working(l) ? db.get('SELECT * FROM attachments WHERE id = ?', l.attachment_id) : null;
     if (!a) {
       misses.hit(ip);
       throw httpError(404, 'This link doesn’t work any more: it expired, or it was switched off');
@@ -47,7 +52,7 @@ function createLinks(ctx) {
   // For lib/direct.js: what a link's visitor may read (only the link's file).
   function attachmentOf(link, fileId) {
     const l = db.get('SELECT * FROM links WHERE id = ?', link.id);
-    const a = l && !l.revoked_at && l.expires_at > now() ? db.get('SELECT * FROM attachments WHERE id = ?', l.attachment_id) : null;
+    const a = working(l) ? db.get('SELECT * FROM attachments WHERE id = ?', l.attachment_id) : null;
     if (!a || (fileId && fileId !== a.id)) throw httpError(404, 'Not found');
     if (l.clean) throw httpError(403, 'This link shares a copy without location data: over https only'); // (1.15.0)
     return a;

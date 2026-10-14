@@ -1583,6 +1583,33 @@ test('F-Z (1.25, security review F-1): ffmpeg reads an upload only as a video fi
   } finally { await s.stop(); listener.close(); }
 });
 
+test('F-AA (1.25.1, the 10-11 audit): a fast link stops while its maker’s access is turned off (over https and a direct connection, one already open too), and works again once it’s turned back on', async () => {
+  const s = await start('maker-off', 8847, { env: { BEAM_FAMILY_STUN: 'local', BEAM_FAMILY_URL: 'https://family.example.ts.net:8443' } });
+  const conns = [];
+  try {
+    const f = await family(s);
+    const mary = await join(s, f.owner, 'Mary');
+    const data = crypto.randomBytes(4096);
+    const id = (await call(s, 'POST', '/api/uploads', mary.who, { name: 'notes.pdf', size: data.length })).json.id;
+    await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...as(mary.who), 'Content-Type': 'application/octet-stream' }, body: data });
+    await call(s, 'POST', `/api/channels/${f.general}/messages`, mary.who, { files: [id] });
+    const r = await call(s, 'POST', `/api/files/${id}/links`, mary.who, { hours: 24 });
+    assert.equal(r.status, 201, r.body);
+    const token = r.json.link.url.split('/f/')[1];
+    const fileOf = () => s.req('GET', `/api/links/${token}/file`, { raw: true });
+    assert.ok((await fileOf()).body.equals(data), 'it works');
+    const conn = await directConnect(s, {}, `/api/links/${token}/direct`);
+    conns.push(conn);
+    assert.equal(conn.status, 200, conn.error);
+    assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, f.owner, { disabled: true })).status, 200);
+    assert.deepEqual([(await s.req('GET', `/api/links/${token}`)).status, (await fileOf()).status], [404, 404], 'turned off: gone');
+    await assert.rejects(conn.get(null), /Not found/, 'nor over the direct connection it had');
+    assert.equal((await directConnect(s, {}, `/api/links/${token}/direct`)).status, 404, 'nor a new one');
+    assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, f.owner, { disabled: false })).status, 200);
+    assert.ok((await fileOf()).body.equals(data), 'on again: it works again');
+  } finally { for (const c of conns) c.pc?.close(); await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

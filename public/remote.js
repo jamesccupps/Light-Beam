@@ -501,7 +501,7 @@ function rcEnded(reason, { text = '', by = '', from = '', endSession = false, en
     // (a browser signed in by itself, through Tailscale or a Beam app on the same machine: any account there has that)
     'sign-in': { title: 'Sign in to Beam here first', text: 'To control PCs from this browser, sign in to Beam here with a pairing link, an approval from another device or the password. (Add a device, on a device that’s signed in, makes a link.)' },
     // (1.25) signed in by itself (Tailscale): one approval on a device that can, and it can
-    trusted: { title: 'Approve this device first', text: `This device signed in by itself, so it can’t control PCs yet. In Beam on one of your PCs, open Settings → Devices and turn on “Can control PCs and install apps” for ${rc.myName || me.name || 'this device'}.`, retry: true },
+    trusted: { title: 'Approve this device first', text: `This device signed in by itself, so it can’t control PCs yet. In Beam on your phone or one of your PCs, open Settings → Devices and let ${rc.myName || me.name || 'this device'} control PCs and install apps.`, retry: true },
     linux: { title: 'Not from a Linux computer', text: 'A computer with Beam for Linux can be controlled from your other devices, but it doesn’t control them.' },
     refused: { title: 'Beam refused that', text: text || 'This device can’t start remote control.' },
     'not-owner': { title: 'Not from this Tailscale account', text: text || 'This device’s Tailscale account isn’t one of this Beam’s owners, so it can’t control PCs.' },

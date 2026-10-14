@@ -22,6 +22,11 @@ data class Device(
     val phoneNotifications: Boolean = false,
     /** When its Beam app last backed up its settings there (server 1.8.1 `backups`), or null. */
     val backupAt: Long? = null,
+    /**
+     * (server 1.25 `trust`) Whether it may control PCs, install apps and see the phone's notifications: signed in on
+     * purpose, or approved since. Null from an older server.
+     */
+    val trusted: Boolean? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("platform", platform)
         .put("online", online).put("lastSeen", lastSeen)
@@ -32,6 +37,7 @@ data class Device(
             appVersion?.let { put("appVersion", it) }
             if (phoneNotifications) put("settings", JSONObject().put("phoneNotifications", true))
             backupAt?.let { put("backup", JSONObject().put("at", it)) }
+            trusted?.let { put("trusted", it) }
         }
 
     companion object {
@@ -48,6 +54,7 @@ data class Device(
             appVersion = o.str("appVersion") ?: o.str("version"),
             phoneNotifications = o.optJSONObject("settings")?.optBoolean("phoneNotifications") == true,
             backupAt = o.optJSONObject("backup")?.optLong("at")?.takeIf { it > 0 },
+            trusted = o.optBool("trusted"),
         )
 
         fun parseList(a: JSONArray?): List<Device> =
@@ -299,8 +306,11 @@ data class ItemsPage(val items: List<Item>, val deleted: List<String>, val curso
 /** `POST /api/events/poke` (server 1.4). */
 data class PokeResult(val alive: Boolean, val mode: String?, val ping: Int)
 
-/** `GET /api/me`: who the server thinks this device is, and (API v3) its read markers. */
-data class MeResult(val you: String?, val read: Map<String, Long>)
+/**
+ * `GET /api/me`: who the server thinks this device is, (API v3) its read markers, and (server 1.25) whether this sign-in
+ * is trusted (may approve other devices); null from an older server.
+ */
+data class MeResult(val you: String?, val read: Map<String, Long>, val trusted: Boolean? = null)
 
 /**
  * `GET /api/info`. Everything past `version` is optional: older servers (API v2) leave it out, and the
@@ -356,6 +366,9 @@ data class ServerInfo(
 
 /** org.json's optString turns JSON null into the string "null"; this returns a real null. */
 fun JSONObject.str(key: String): String? = if (!has(key) || isNull(key)) null else optString(key)
+
+/** A boolean the server sent, or null when it didn't say (an older server). */
+fun JSONObject.optBool(key: String): Boolean? = if (opt(key) is Boolean) getBoolean(key) else null
 
 fun JSONArray?.strings(): List<String> =
     if (this == null) emptyList() else (0 until length()).mapNotNull { if (isNull(it)) null else optString(it) }

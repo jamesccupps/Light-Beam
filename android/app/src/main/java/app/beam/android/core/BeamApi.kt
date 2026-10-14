@@ -185,7 +185,7 @@ class BeamApi(
      */
     fun meResult(): MeResult {
         val o = json(request(url("/api/me")).get().build())
-        return MeResult(o.str("you"), o.optJSONObject("read").longs())
+        return MeResult(o.str("you"), o.optJSONObject("read").longs(), o.optJSONObject("auth")?.optBool("trusted"))
     }
 
     fun you(): String? = meResult().you
@@ -337,6 +337,15 @@ class BeamApi(
     fun setShowsPhoneNotifications(deviceId: String, on: Boolean) {
         val body = JSONObject().put("phoneNotifications", on).toString().toRequestBody(JSON)
         execute(request(url("/api/devices/$deviceId/settings")).put(body).build()).close()
+    }
+
+    /**
+     * (server 1.25 `trust`) `PUT /api/devices/{id}/trust { trusted }`: lets that device control PCs, install apps and see
+     * the phone's notifications, or takes it back (its remote control sessions end). Only from a trusted sign-in.
+     */
+    fun setTrusted(deviceId: String, trusted: Boolean) {
+        val body = JSONObject().put("trusted", trusted).toString().toRequestBody(JSON)
+        execute(request(url("/api/devices/$deviceId/trust")).put(body).build()).close()
     }
 
     /** `PUT /api/phone/notifications/{key}`: shares (or updates) one notification. [body]: see docs/API.md (1.5). */

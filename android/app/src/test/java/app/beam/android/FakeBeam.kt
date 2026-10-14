@@ -123,6 +123,13 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
 
     var devices: JSONArray = JSONArray()
 
+    /**
+     * (server 1.25, with "trust") Whether this phone's sign-in is trusted (`auth.trusted` in `/api/me`; null: not said),
+     * and each `PUT /api/devices/{id}/trust` (device id to the value asked for).
+     */
+    @Volatile var meTrusted: Boolean? = true
+    val trustCalls = CopyOnWriteArrayList<Pair<String, Boolean>>()
+
     private class Stream(val id: String, @Volatile var mode: String, val queue: LinkedBlockingQueue<String>)
 
     private val streams = CopyOnWriteArrayList<Stream>()
@@ -198,7 +205,21 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
         when {
             path == "/api/hello" -> json(ex, 200, JSONObject().put("beam", true).put("version", "1.4.0").put("serverId", serverId).put("api", helloApi))
             path == "/api/info" -> json(ex, 200, JSONObject().put("version", "1.4.0").put("api", 3).put("features", JSONArray(features)))
-            path == "/api/me" -> json(ex, 200, JSONObject().put("ok", true).put("you", ex.requestHeaders.getFirst("X-Beam-Device-Id")).put("read", JSONObject()))
+            path == "/api/me" -> json(ex, 200, JSONObject().put("ok", true).put("you", ex.requestHeaders.getFirst("X-Beam-Device-Id")).put("read", JSONObject())
+                .apply { if ("trust" in features) put("auth", JSONObject().put("via", "token").apply { meTrusted?.let { put("trusted", it) } }) })
+            path.startsWith("/api/devices/") && path.endsWith("/trust") && method == "PUT" -> {
+                if ("trust" !in features) return json(ex, 404, JSONObject().put("error", "Not found"))
+                if (meTrusted != true) return json(ex, 403, JSONObject().put("error", "This device can’t approve devices until it’s approved").put("reason", "trusted"))
+                val id = path.removePrefix("/api/devices/").removeSuffix("/trust")
+                val on = JSONObject(ex.requestBody.readBytes().decodeToString()).optBoolean("trusted")
+                trustCalls += id to on
+                for (i in 0 until devices.length()) {
+                    val d = devices.getJSONObject(i)
+                    if (d.optString("id") == id) d.put("trusted", on)
+                }
+                json(ex, 200, JSONObject().put("device", id).put("trusted", on))
+                send("devices", JSONObject().put("devices", devices))
+            }
             path == "/api/devices" -> json(ex, 200, JSONObject().put("devices", devices).put("you", ex.requestHeaders.getFirst("X-Beam-Device-Id")))
             path == "/api/items" && method == "GET" -> {
                 val q = query(ex)
