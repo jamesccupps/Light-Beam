@@ -12,6 +12,9 @@ import { assert, eq } from './harness.mjs';
 
 const PORT = 8828;
 const OWNER = 'owner@example.com';
+// (1.25.2, the security review's I-2) The owner's Beam Family password: set with the link `password` makes on the server's
+// PC; signed in by Tailscale, invites and other changes that let someone in take it, confirmed for 15 minutes.
+const OWNER_PASSWORD = 'the owner’s family password';
 
 async function familyServer(ctx, extra = {}) {
   const data = path.join(TMP, `family-${Date.now()}`);
@@ -28,7 +31,9 @@ async function familyServer(ctx, extra = {}) {
   const server = path.join(ctx.ROOT, 'family', 'server.js');
   let child = null;
   let log = '';
+  let confirmed = null; // the owner's confirmation (a cookie) for this run: a restart forgets it
   const run = async (more = {}) => {
+    confirmed = null;
     child = spawn(process.execPath, [server], { env: { ...env, ...more }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', d => { log += d; });
     child.stderr.on('data', d => { log += d; });
@@ -39,14 +44,37 @@ async function familyServer(ctx, extra = {}) {
   };
   await run(extra);
   const stop = async () => { const c = child; c.kill(); await new Promise(r => { c.once('exit', r); setTimeout(r, 3000); }); };
+  const ownerTs = { 'Tailscale-User-Login': OWNER, 'Tailscale-User-Name': 'Robin', 'X-Forwarded-For': '100.64.7.7' };
+  let passwordSet = false;
+  // The owner's password, once: their first visit (they own the space), then the link from the server's PC.
+  const ownerPassword = async () => {
+    if (passwordSet) return;
+    await fetch(`${base}/api/session`, { headers: ownerTs });
+    const out = spawnSync(process.execPath, [server, 'password'], { env, encoding: 'utf8' }).stdout;
+    const code = /\/join\/([A-Za-z0-9_-]{22})/.exec(out)?.[1];
+    if (!code) throw new Error(`no password link: ${out}`);
+    const r = await fetch(`${base}/api/invites/${code}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: OWNER_PASSWORD }) });
+    if (r.status !== 201) throw new Error(`the owner's password: ${r.status}`);
+    passwordSet = true;
+  };
+  const ownerConfirmed = async () => {
+    if (confirmed) return confirmed;
+    await ownerPassword();
+    const r = await fetch(`${base}/api/me/confirm`, { method: 'POST', headers: { ...ownerTs, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: OWNER_PASSWORD }) });
+    confirmed = r.headers.get('set-cookie')?.split(';')[0] || '';
+    return confirmed;
+  };
   const srv = {
+    ownerPassword,
     base, data, get log() { return log; },
     stop,
     // The same data, started again (with these settings too).
     restart: async more => { await stop(); await run(more); },
     // The API as someone (Tailscale login or a cookie).
+    // (1.25.2) the owner by Tailscale with their password confirmed, as their page is once it has asked
     call: async (who, method, p, body) => {
-      const headers = { ...(who.login ? { 'Tailscale-User-Login': who.login, 'Tailscale-User-Name': who.name || '', 'X-Forwarded-For': '100.64.7.7' } : { Cookie: who.cookie }), ...(body ? { 'Content-Type': 'application/json' } : {}) };
+      const cookie = who.login === OWNER ? await ownerConfirmed() : '';
+      const headers = { ...(who.login ? { 'Tailscale-User-Login': who.login, 'Tailscale-User-Name': who.name || '', 'X-Forwarded-For': '100.64.7.7', ...(cookie && { Cookie: cookie }) } : { Cookie: who.cookie }), ...(body ? { 'Content-Type': 'application/json' } : {}) };
       const res = await fetch(base + p, { method, headers, body: body ? JSON.stringify(body) : undefined });
       const text = await res.text();
       let json = null;
@@ -65,6 +93,12 @@ const FFMPEG = (() => {
   if (process.env.BEAM_TEST_FFMPEG) return fs.existsSync(process.env.BEAM_TEST_FFMPEG) ? process.env.BEAM_TEST_FFMPEG : null;
   return spawnSync('ffmpeg', ['-hide_banner', '-version'], { windowsHide: true }).status === 0 ? 'ffmpeg' : null;
 })();
+
+// (1.25.2) The page asks for the owner's password (a change that lets someone in, signed in by Tailscale): typed in.
+async function confirmInPage(page) {
+  await page.waitFor(`document.querySelector('dialog.dlg input[name=password]') !== null`, 5000, 'the page asks for the password');
+  await page.evaluate(`(() => { const i = document.querySelector('dialog.dlg input[name=password]'); i.value = ${JSON.stringify(OWNER_PASSWORD)}; i.form.requestSubmit(); return true; })()`);
+}
 
 // A page signed in by Tailscale (the headers tailscale serve adds: the identity, and the caller's Tailscale address).
 async function tailscalePage(ctx, login, name, opts = {}) {
@@ -122,10 +156,13 @@ export default function register(test) {
     await robin.waitFor(`location.pathname.startsWith('/c/') && document.querySelector('.composer textarea') !== null`, 10000, 'the owner in #general');
     eq(await robin.evaluate(`[document.querySelector('.side-head h1').textContent, [...document.querySelectorAll('.side-list .chan')].map(a => a.textContent.trim())]`),
       ['Family', ['general', 'photos']], 'the family space and its channels');
-    // An invite from the admin page, opened in another browser.
+    // An invite from the admin page, opened in another browser. (1.25.2) Signed in by Tailscale, it takes the owner's
+    // password (set with the server PC's link): asked once in the page.
+    await srv.ownerPassword();
     await robin.evaluate(`history.pushState({}, '', '/admin'); dispatchEvent(new PopStateEvent('popstate')); true`);
     await robin.waitFor(`[...document.querySelectorAll('button')].some(b => b.textContent.includes('Make an invite link'))`);
     await robin.evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Make an invite link')).click(); true`);
+    await confirmInPage(robin);
     await robin.waitFor(`Boolean(document.querySelector('.invite-link code')?.textContent)`, 5000, 'the invite link');
     const link = await robin.evaluate(`document.querySelector('.invite-link code').textContent`);
     assert(await robin.evaluate(`Boolean(document.querySelector('img.qr'))`), 'a QR code');
@@ -992,6 +1029,7 @@ export function registerLink(test) {
     eq(await robin.evaluate(`[document.querySelector('select[name=uses]') === window.__uses, document.querySelector('select[name=uses]').value, document.querySelector('select[name=days]').value, document.querySelector('input[aria-label=Name]').value]`),
       [true, '5', '30', 'Half typ'], 'the form as it was set');
     await robin.evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Make an invite link')).click(); true`);
+    await confirmInPage(robin); // (1.25.2)
     await robin.waitFor(`/0 of 5 used/.test(document.body.innerText)`, 5000, 'the link made as set up: up to 5 people');
     eq(robin.errors, [], 'no page errors');
   }, { timeout: 60000 });

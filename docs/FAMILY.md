@@ -117,6 +117,7 @@ node family/server.js --supervise   run it and restart it if it crashes
 node family/server.js stop          stop it cleanly (and its supervisor)
 node family/server.js invite [--admin] [--uses n] [--days n]
 node family/server.js invite --owner   the owner's link, when nobody owns it yet
+node family/server.js password [name]  (1.25.2) a one-use link that sets the owner's (or that person's) password
 node family/server.js status
 ```
 
@@ -162,6 +163,11 @@ Funnel is per port: Beam's own server stays on 443, tailnet-only.
 - **Over Tailscale** (your tailnet, and people you **share the machine with** in the Tailscale admin console):
   `tailscale serve` adds `Tailscale-User-Login` / `-Name` / `-Profile-Pic` and strips any a client sends. A known
   login is signed in at once. An invite link opened over Tailscale binds that login (no password needed).
+  - **(1.25.2)** Signed in this way, invites, password-reset links, roles and turning someone off also take your
+    password, asked once per 15 minutes in that browser: Tailscale vouches for a machine, not for the program on it (an
+    app on your phone, a process on a Pi), and those changes would let someone in. An owner or admin without a
+    password gets one with `node family/server.js password [name]` on the server's PC: a link, once, within 3 days
+    (Tailscale alone can't set a first one for them; a member can). Signed in with the password, nothing more is asked.
   - Sharing a machine needs a Tailscale account and app on the other person's side, and shares **every port** of it
     (Beam's own server too) unless the tailnet policy limits `autogroup:shared`, e.g. to `tcp:8443`. For family
     members, the public link is usually simpler.
@@ -224,6 +230,13 @@ are the browser's (the browser itself when it can't show one).
   run Family on a Tailscale machine of its own.
 - Admins can make a reset link for anyone's password (they could then sign in as them and read their messages): an
   admin is trusted with that, as with turning someone off.
+- **(1.25.2, Beam's security review I-2)** Signed in by Tailscale identity, anything on the person's machines is them
+  (Tailscale carries every app's traffic on a phone). So the changes that let someone in (`POST /api/invites`,
+  `POST /api/people/:id/reset`, `PATCH /api/people/:id`) take the person's password too: `POST /api/me/confirm
+  {password}` sets `fam_c` (`__Host-fam_c` over https; HttpOnly, SameSite=Lax, 15 minutes), kept in memory only (a
+  restart asks again); a wrong one is a `403 wrong-password` that counts like a sign-in. Changing a password takes the
+  current one, by Tailscale too; a first one by Tailscale only for a member, an owner's or admin's comes with the
+  server PC's link (`password`). A sign-in made with the password (a session) is deliberate already.
 - Anonymous visitors (the public address is in certificate logs) see the sign-in page only, not the family's name.
 - Notifications: Web Push signed with the server's VAPID key and encrypted for each browser (RFC 8291); only the push
   services browsers use (Google, Apple, Mozilla, Microsoft) are ever contacted.
@@ -240,7 +253,9 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   `GET /api/invites`, `DELETE /api/invites/:id`; `POST /api/people/:id/reset`.
 - `GET /api/bootstrap`: me, people, spaces, channels with unread/mention counts and notification levels.
 - Me: `PATCH /api/me {name, color, password, current}`, `PUT|DELETE /api/me/avatar`, `GET /api/me/sessions`,
-  `DELETE /api/me/sessions/:id|others`. Admins: `PATCH /api/people/:id {role, disabled}`.
+  `DELETE /api/me/sessions/:id|others`, (1.25.2) `POST /api/me/confirm {password}`. Admins: `PATCH /api/people/:id
+  {role, disabled}`. From a Tailscale sign-in, invites, reset links and those changes answer `403 { reason: "confirm" }`
+  until the password is confirmed, or `"password-needed"` without one (errors may carry a `reason`).
 - Spaces and channels: `PATCH /api/spaces/:id`, `POST /api/spaces/:id/channels`, `PATCH /api/channels/:id`,
   `POST /api/dms {people, name}`, `DELETE /api/channels/:id/members/me`.
 - Messages: `GET /api/channels/:id/messages?before|after|around`, `POST /api/channels/:id/messages {body, reply,

@@ -3771,7 +3771,7 @@ else process.exit(1);
     const other = r.json.id;
     await waitFor(() => /Didn't share this computer's screen with Desktop: the viewer is on another Tailscale account than this computer/.test(agent.out), 10000);
     await waitFor(async () => !(await rc('GET', 'sessions', laptop)).json.sessions.some(x => x.id === other), 5000);
-    assert.match(s.out, /request to control Desk Pi ended \(declined, by Desk Pi: the viewer is on another Tailscale account than this computer\)/);
+    await waitFor(() => /request to control Desk Pi ended \(declined, by Desk Pi: the viewer is on another Tailscale account than this computer\)/.test(s.out), 5000);
 
     // Turned off from another device: off at the computer too (only someone there turns it on again).
     assert.equal((await rc('POST', 'disable', laptop, { device: id })).status, 202);
@@ -5893,7 +5893,7 @@ test('1.25 trusted sign-ins (R-1/R-2): an automatic sign-in naming any app contr
     r = await post(s, '/api/autopair', { client: 'app', deviceId: 'rcphone0001', platform: 'android' }, viaServe(RC_NET.phone.ip4, RC_USER));
     assert.equal(r.status, 200, r.body);
     assert.notEqual(r.json.you, 'rcphone0001');
-    assert.match(s.out, /that isn't trusted named the device id of Pixel/);
+    await waitFor(() => /that isn't trusted named the device id of Pixel/.test(s.out), 5000); // (its log line can come after the answer)
     // The phone's notifications reach a PC's trusted streams only, not a browser that signed in by Tailscale on that
     // PC (same-machine linking merges it into the PC's device).
     const tsWeb = await post(s, '/api/autopair', { client: 'web' }, { ...sameOrigin, Cookie: 'beam_device_id=rctsweb0002', ...viaServe(RC_NET.laptop.ip4, RC_USER) });

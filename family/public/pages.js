@@ -197,7 +197,7 @@ export function settingsView() {
 
   async function changePassword() {
     const fields = [];
-    const needCurrent = state.me.password && !state.me.tailscale;
+    const needCurrent = state.me.password; // (1.25.2: signed in by Tailscale too)
     if (needCurrent) fields.push(field('Current password', h('input', { class: 'input', type: 'password', name: 'current', autocomplete: 'current-password', required: true })));
     fields.push(field('New password (at least 10 characters)', h('input', { class: 'input', type: 'password', name: 'password', autocomplete: 'new-password', minlength: 10, required: true })),
       field('The new password again', h('input', { class: 'input', type: 'password', name: 'again', autocomplete: 'new-password', minlength: 10, required: true })));
@@ -212,8 +212,14 @@ export function settingsView() {
   }
 
   async function removePassword() {
-    if (!(await confirmDialog({ title: 'Remove your password?', text: 'You’ll only be able to get in over Tailscale.', ok: 'Remove', danger: true }))) return;
-    try { await api('/api/me', { method: 'PATCH', body: { password: null } }); render(); } catch (err) { toast(err.message, { error: true }); }
+    // (1.25.2) with the current one, as a change
+    const done = await dialog({
+      title: 'Remove your password?', danger: true, ok: 'Remove',
+      body: [h('p', { class: 'muted' }, 'You’ll only be able to get in over Tailscale.'),
+        field('Current password', h('input', { class: 'input', type: 'password', name: 'current', autocomplete: 'current-password', required: true }))],
+      onSubmit: async v => { await api('/api/me', { method: 'PATCH', body: { password: null, current: v.current } }); return true; },
+    });
+    if (done === true) render();
   }
 
   async function signOut() {
