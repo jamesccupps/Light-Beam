@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -367,9 +367,12 @@ function run(cmd, args, { input, env, timeout } = {}) {
   });
 }
 
+// (1.3.1) Windows' own tools by their full paths: a bare name is looked for in the current folder first.
+const SYSTEM32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+
 function powershell(script, env) {
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  return run('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', encoded], { env });
+  return run(path.join(SYSTEM32, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', encoded], { env });
 }
 
 const b64 = s => Buffer.from(String(s), 'utf8').toString('base64');
@@ -515,7 +518,7 @@ async function pairingKey(cfg) {
 function openInBrowser(url) {
   if (!/^https?:\/\//i.test(url)) throw new Error(`Not a web address: ${url}`);
   // (no cmd.exe: it would read & | < > ^ % in the address as commands)
-  if (IS_WIN) return spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  if (IS_WIN) return spawn(path.join(SYSTEM32, 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   spawn(IS_MAC ? 'open' : 'xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
 }
 
@@ -591,16 +594,24 @@ async function printQr(text) {
 
 // ---------------------------------------------------------------- signing in
 
-// Beam servers on this tailnet: every online peer that answers /api/hello like Beam.
-async function discover() {
-  const status = await new Promise(resolve => {
-    const bins = IS_WIN ? ['tailscale', 'C:\\Program Files\\Tailscale\\tailscale.exe'] : ['tailscale'];
-    const tryAt = i => (i >= bins.length ? resolve(null) : execFile(bins[i], ['status', '--json'], { timeout: 5000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, out) => {
+// `tailscale <args>` with JSON out → its answer, or null (no Tailscale here, or no answer). (1.3.1) On Windows the
+// installed one by its full path first: a bare name is looked for in the current folder too. (tests: BEAM_TEST_TAILSCALE,
+// a Node.js script standing in for it)
+function tailscaleJson(args) {
+  return new Promise(resolve => {
+    const bins = process.env.BEAM_TEST_TAILSCALE ? [[process.execPath, process.env.BEAM_TEST_TAILSCALE]]
+      : IS_WIN ? [[path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Tailscale', 'tailscale.exe')], ['tailscale']] : [['tailscale']];
+    const tryAt = i => (i >= bins.length ? resolve(null) : execFile(bins[i][0], [...bins[i].slice(1), ...args], { timeout: 5000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, out) => {
       if (err?.code === 'ENOENT') return tryAt(i + 1);
       try { resolve(err ? null : JSON.parse(out)); } catch { resolve(null); }
     }));
     tryAt(0);
   });
+}
+
+// Beam servers on this tailnet: every online peer that answers /api/hello like Beam.
+async function discover() {
+  const status = await tailscaleJson(['status', '--json']);
   if (!status) return [];
   const peers = Object.values(status.Peer || {}).filter(p => p.Online && p.DNSName);
   const found = await Promise.all(peers.map(async p => {
@@ -1473,7 +1484,10 @@ async function startControl(cfg, request) {
   logLine(`${by} asked to control this computer`);
   try {
     if (!controlAllowed()) throw Object.assign(new Error('remote control is off here (beam control on)'), { reason: 'declined' });
+    const checked = viewerProblem(request.viewer); // (beside wayvnc's start: no time added)
     await startWayvnc();
+    const problem = await checked;
+    if (problem) throw Object.assign(new Error(problem), { reason: 'declined' });
     await api(cfg, `/api/rc/sessions/${id}/lease`, { method: 'POST' });
     session.lease = setInterval(() => {
       api(cfg, `/api/rc/sessions/${id}/lease`, { method: 'POST' }).catch(err => { if (err.status === 404 || err.status === 410) stopControl(id); });
@@ -1515,6 +1529,20 @@ async function startControl(cfg, request) {
     logLine(`Didn't share this computer's screen with ${by}: ${err.message}`);
     endControl(cfg, id, err.reason || 'failed', err.message);
   }
+}
+
+// (Beam for Linux 1.3.1, security review L-4) A check of this computer's own besides the server's, as Beam for Windows
+// makes of its peer: the viewer's Tailscale address (as the server saw it) belongs to this computer's own Tailscale
+// account. Without Tailscale here, the server's word stands. Null when it's fine, else why not (the viewer sees it).
+async function viewerProblem(viewer) {
+  const self = (await tailscaleJson(['status', '--json']))?.Self?.UserID;
+  if (self === undefined || self === null) return null;
+  const ip = typeof viewer?.ip === 'string' && /^[0-9a-f.:]{2,45}$/i.test(viewer.ip) ? viewer.ip : '';
+  if (!ip) return 'the viewer has no Tailscale address';
+  const who = await tailscaleJson(['whois', '--json', ip]);
+  const owner = who?.Node?.User ?? who?.UserProfile?.ID;
+  if (owner === undefined || owner === null) return 'Tailscale doesn’t know the viewer’s address';
+  return String(owner) === String(self) ? null : 'the viewer is on another Tailscale account than this computer';
 }
 
 // This end gives up the session: Beam hears why (the viewer sees its words), then it's let go here.

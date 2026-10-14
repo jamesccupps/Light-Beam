@@ -1111,7 +1111,7 @@ const hasTrustedSignIn = id => Object.values(tokenStore.tokens).some(t => t.trus
 // "<device id>|<platform>" of every device with a trusted sign-in of its own kind (an app's own, a browser's own; a
 // browser merged into an app is another kind): what the devices list says, and what approving a device approves.
 const trustedDevices = () => new Set(Object.values(tokenStore.tokens).filter(t => t.trusted === true && t.device && !t.scope).map(t => `${resolveAlias(t.device)}|${tokenPlatform(t)}`));
-const notTrusted = what => httpError(403, `This device can’t ${what} until it’s approved: in Beam on one of your PCs (or a browser that can), open Settings → Devices and turn on “Can control PCs and install apps” for it, or sign in here with the password, a pairing link or an approval`, { reason: 'trusted' });
+const notTrusted = what => httpError(403, `This device can’t ${what} until it’s approved: in Beam on your phone or one of your PCs, open Settings → Devices and let it (“Can control PCs and install apps”), or sign in here with the password, a pairing link or an approval`, { reason: 'trusted' });
 
 // Sign-ins from before 1.25 (no `trusted` yet) keep what they could do then, as remote control counted them
 // (rcSignInOk): the Windows app's key-bound one, the Android app's however it was made, anything made with the
@@ -3887,7 +3887,7 @@ const RC_INELIGIBLE = {
   'sign-in': 'To control PCs from here, sign in to Beam on this device with a pairing link, an approval from another device or the password',
   profile: 'A Beam app must send X-Beam-Profile to use remote control',
   // (1.25, security review R-1)
-  trusted: 'This device can’t control PCs until it’s approved: in Beam on one of your PCs (or a browser that can), open Settings → Devices and turn on “Can control PCs and install apps” for it',
+  trusted: 'This device can’t control PCs until it’s approved: in Beam on your phone or one of your PCs, open Settings → Devices and let it (“Can control PCs and install apps”)',
   linux: 'A computer with Beam for Linux can be controlled, but it doesn’t control other devices',
 };
 

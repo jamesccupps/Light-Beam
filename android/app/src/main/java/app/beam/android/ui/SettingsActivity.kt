@@ -167,6 +167,7 @@ class SettingsActivity : BaseActivity() {
         loadPasswordState()
         refreshInfo()
         loadAlerts()
+        loadTrust()
         lifecycleScope.launch(Dispatchers.IO) { app.remote.refreshSessions() }
     }
 
@@ -348,6 +349,7 @@ class SettingsActivity : BaseActivity() {
                 },
                 Format.deviceStatus(d.status, withOs = true),
                 d.appVersion?.let { "Beam $it" },
+                if (canApprove() && d.trusted == false) getString(R.string.trust_not_yet) else null,
                 if (d.id in offlineAlerts) getString(R.string.alerts_offline_on) else null,
                 if (d.id in app.prefs.mutedDevices) getString(R.string.muted) else null,
                 if (d.id in app.prefs.autoCopyDevices) getString(R.string.auto_copies) else null,
@@ -398,9 +400,25 @@ class SettingsActivity : BaseActivity() {
         } else {
             emptyList()
         }
+        // Server 1.25: a device that signed in by itself (Tailscale) controls PCs, installs apps and sees the phone's
+        // notifications only once a trusted device (this phone, say) lets it.
+        val trustEntry = if (canApprove() && d.trusted != null) {
+            listOf(
+                ActionSheet.Entry(if (d.trusted) R.drawable.ic_close else R.drawable.ic_check, getString(if (d.trusted) R.string.trust_revoke else R.string.trust_allow)) {
+                    val api = app.api ?: return@Entry
+                    lifecycleScope.launch {
+                        val error = withContext(Dispatchers.IO) { runCatching { api.setTrusted(d.id, !d.trusted) }.exceptionOrNull() }
+                        if (error != null) toast(getString(R.string.trust_change_failed, Format.error(error)))
+                        else toast(getString(if (d.trusted) R.string.trust_revoked else R.string.trust_allowed, d.name))
+                    }
+                },
+            )
+        } else {
+            emptyList()
+        }
         ActionSheet.show(
             this, d.name,
-            DeviceActions.entries(this, d, b.root) + alertEntry + phoneEntry + listOf(
+            DeviceActions.entries(this, d, b.root) + alertEntry + phoneEntry + trustEntry + listOf(
                 ActionSheet.Entry(R.drawable.ic_mute, getString(if (muted) R.string.unmute else R.string.mute)) {
                     app.prefs.mutedDevices = if (muted) app.prefs.mutedDevices - d.id else app.prefs.mutedDevices + d.id
                     bindDevices(app.repo.state.value.devices)
@@ -412,6 +430,20 @@ class SettingsActivity : BaseActivity() {
                 ActionSheet.Entry(R.drawable.ic_delete, getString(R.string.forget_device)) { forgetDevice(d) },
             ),
         )
+    }
+
+    // ---------------------------------------------------------------- approving devices (server 1.25 `trust`)
+
+    /** Whether this phone's own sign-in may approve devices (`auth.trusted` in /api/me); null until it's known. */
+    private var trustedHere: Boolean? = null
+
+    private fun canApprove() = trustedHere == true && app.repo.state.value.info?.lists("trust") == true
+
+    private fun loadTrust() {
+        lifecycleScope.launch {
+            trustedHere = withContext(Dispatchers.IO) { runCatching { app.api?.meResult()?.trusted }.getOrNull() }
+            bindDevices(app.repo.state.value.devices)
+        }
     }
 
     // ---------------------------------------------------------------- alerts (server 1.3)

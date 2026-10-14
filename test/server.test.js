@@ -3703,6 +3703,15 @@ fs.appendFileSync(${JSON.stringify(stubArgs)}, JSON.stringify(args) + '\\n');
 const at = args[args.indexOf('-u') + 1];
 net.createServer(c => { c.on('error', () => {}); c.write('RFB 003.008\\n'); c.on('data', d => c.write(d)); }).listen(at);
 `);
+    // (Beam for Linux 1.3.1) tailscale's stand-in: this computer and the laptop are one Tailscale account's (7), the
+    // desktop another's (9); an address it doesn't know: no answer.
+    const tsStub = path.join(TMP, 'vnc-tailscale.js');
+    fs.writeFileSync(tsStub, `const a = process.argv.slice(2);
+const users = { ${JSON.stringify(RC_NET.laptop.ip4)}: 7, ${JSON.stringify(RC_NET.pc.ip4)}: 9 };
+if (a[0] === 'status') console.log(JSON.stringify({ Self: { UserID: 7 } }));
+else if (a[0] === 'whois' && users[a[2]] !== undefined) console.log(JSON.stringify({ Node: { User: users[a[2]] }, UserProfile: { ID: users[a[2]] } }));
+else process.exit(1);
+`);
     const runDir = path.join(TMP, 'vnc-run');
     fs.rmSync(runDir, { recursive: true, force: true });
     fs.mkdirSync(runDir);
@@ -3720,7 +3729,7 @@ net.createServer(c => { c.on('error', () => {}); c.write('RFB 003.008\\n'); c.on
     assert.match(r.out, /Remote control of this computer is on/);
     assert.equal(cliConfig(home).remoteControl, true);
     const dev = async () => (await s.req('GET', '/api/devices', { headers: laptop })).json.devices.find(d => d.id === id);
-    const agentEnv = cleanEnv({ HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), BEAM_TEST_WAYVNC: stub, ...env });
+    const agentEnv = cleanEnv({ HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), BEAM_TEST_WAYVNC: stub, BEAM_TEST_TAILSCALE: tsStub, ...env });
     const child = spawn(process.execPath, [installed, 'agent', '--no-copy', '--no-notify'], { env: agentEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     children.add(child);
     const agent = { child, out: '', exited: new Promise(resolve => child.on('exit', code => { children.delete(child); resolve(code); })) };
@@ -3754,6 +3763,15 @@ net.createServer(c => { c.on('error', () => {}); c.write('RFB 003.008\\n'); c.on
     viewer.close();
     await waitFor(() => /Robin Laptop stopped controlling this computer/.test(agent.out), 5000);
     await waitFor(() => /Stopped wayvnc \(no one is controlling this computer\)/.test(agent.out), 5000);
+
+    // (1.3.1, security review L-4) A viewer whose Tailscale address is another account's, though the server let it
+    // start: the computer itself declines, and says why.
+    r = await rc('POST', 'sessions', t.pc, { device: id, kind: 'vnc' });
+    assert.equal(r.status, 201, r.body);
+    const other = r.json.id;
+    await waitFor(() => /Didn't share this computer's screen with Desktop: the viewer is on another Tailscale account than this computer/.test(agent.out), 10000);
+    await waitFor(async () => !(await rc('GET', 'sessions', laptop)).json.sessions.some(x => x.id === other), 5000);
+    assert.match(s.out, /request to control Desk Pi ended \(declined, by Desk Pi: the viewer is on another Tailscale account than this computer\)/);
 
     // Turned off from another device: off at the computer too (only someone there turns it on again).
     assert.equal((await rc('POST', 'disable', laptop, { device: id })).status, 202);
