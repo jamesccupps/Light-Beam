@@ -387,7 +387,9 @@ tailscale funnel --bg --https=8443 http://127.0.0.1:8766    # optional: a public
 ```
 
 - Open `https://<your computer>.<your tailnet>.ts.net:8443` from your own device over Tailscale: you're set up as the
-  owner. Invite the family from **People & channels** (a link, or a QR code to scan).
+  owner. Invite the family from **People & channels** (a link, or a QR code to scan). Since 1.25.2, invites,
+  password-reset links and the other changes that let someone in ask for your Family password when you're signed in
+  by Tailscale: run `node family/server.js password` on that PC once; it prints a link that sets it.
 - On Tailscale (your tailnet, or the machine shared with them) people are signed in by Tailscale. Through the public
   link they choose a name and a password; they don't need Tailscale.
 - It works in any browser and installs as an app on phones and computers (on an iPhone: Share → Add to Home Screen,

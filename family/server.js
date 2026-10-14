@@ -230,7 +230,8 @@ function serve() {
       const headers = {};
       if (status === 429 && err.extra?.retryAfter) headers['Retry-After'] = String(err.extra.retryAfter);
       if (res.headersSent) return res.destroy();
-      send(res, status, { error: err.status ? err.message : 'Something went wrong on the server' }, headers);
+      // (1.25.2) and why, for the app, when the error says (`reason`: the password a change takes, say)
+      send(res, status, { error: err.status ? err.message : 'Something went wrong on the server', ...(err.status && typeof err.extra?.reason === 'string' && { reason: err.extra.reason }) }, headers);
     }
   }
 
@@ -297,6 +298,26 @@ function commandInvite(flags, options) {
     const invite = auth.createInvite(db, { createdBy: null, role, maxUses: owner ? 1 : Math.min(50, Math.max(1, num(options.uses, 1))), days: Math.min(30, Math.max(1, num(options.days, 7))) });
     const base = config.publicUrl || LOCAL_URL;
     console.log(`Invite (${role}, until ${new Date(invite.expiresAt).toLocaleString()}):\n${base}/join/${invite.code}`);
+  } finally {
+    db.close();
+  }
+}
+
+// (1.25.2, the security review's I-2) A link that sets someone's password (the owner's, or that name's), made straight in
+// the database on this PC: how an owner or admin who signs in by Tailscale gets a first one (Tailscale alone can't set
+// it: that's anything on their machines). One use, three days; an older link for that person stops working.
+function commandPassword(name) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const db = openDb(FILE.db);
+  try {
+    const person = name
+      ? db.all('SELECT * FROM users').find(u => u.name.toLowerCase() === String(name).toLowerCase())
+      : db.get("SELECT * FROM users WHERE role = 'owner'");
+    if (!person) throw new Error(name ? `Nobody is called "${name}" here` : 'Nobody owns the family space yet: open Beam Family over Tailscale on your own device, or use "invite --owner"');
+    if (person.disabled_at) throw new Error(`${person.name}'s access is turned off`);
+    const invite = auth.createInvite(db, { createdBy: null, role: person.role, maxUses: 1, days: 3, userId: person.id });
+    const base = config.publicUrl || LOCAL_URL;
+    console.log(`A link that sets ${person.name}'s password (once, until ${new Date(invite.expiresAt).toLocaleString()}):\n${base}/join/${invite.code}`);
   } finally {
     db.close();
   }
@@ -382,6 +403,8 @@ const HELP = `Beam Family ${VERSION}
   node family/server.js invite [--admin] [--uses n] [--days n]
                                                  print an invite link
   node family/server.js invite --owner           the owner's link, when nobody owns the family space yet
+  node family/server.js password [name]          a link that sets the owner's (or that person's) password: an owner
+                                                 or admin signed in by Tailscale needs one for invites and the like
   node family/server.js status                   how many people and messages
   node family/server.js backup                   a backup now (it makes one every ${BACKUP.hours || '(off)'} h itself), into ${BACKUP.dir}
   node family/server.js restore <backup> [--force]
@@ -404,7 +427,7 @@ async function main() {
   if (flags.has('--help') || command === 'help') return console.log(HELP);
   if (flags.has('--supervise')) return supervise(argv.filter(a => a !== '--supervise'));
   if (!command) return serve();
-  const commands = { stop: commandStop, invite: () => commandInvite(flags, options), status: commandStatus, backup: commandBackup, restore: () => commandRestore(arg, flags) };
+  const commands = { stop: commandStop, invite: () => commandInvite(flags, options), password: () => commandPassword(arg), status: commandStatus, backup: commandBackup, restore: () => commandRestore(arg, flags) };
   if (!Object.hasOwn(commands, command)) {
     console.error(`Unknown command "${command}".\n\n${HELP}`);
     process.exitCode = 2;

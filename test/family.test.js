@@ -135,11 +135,35 @@ const call = (srv, method, route, who = {}, body) => srv.req(method, route, {
 });
 const sessionOf = res => /fam_s=([^;]*)/.exec([].concat(res.headers['set-cookie'] || []).join('\n'))?.[1];
 
-// An owner (by Tailscale) and the family space's channels.
+// (1.25.2, the security review's I-2) Someone signed in by Tailscale makes invites, reset links and role changes only
+// with their password confirmed: a first one with the link `password` makes on the server's PC, then
+// POST /api/me/confirm. → their headers with the confirmation's cookie.
+const OWNER_PASSWORD = 'the owner’s family password';
+const confirmCookieOf = res => /fam_c=([^;]*)/.exec([].concat(res.headers['set-cookie'] || []).join('\n'))?.[1];
+async function confirmAs(srv, who, password) {
+  const r = await call(srv, 'POST', '/api/me/confirm', who, { password });
+  assert.equal(r.status, 204, r.body);
+  return { ...as(who), Cookie: `fam_c=${confirmCookieOf(r)}` };
+}
+function passwordLink(srv, name = '') {
+  const r = spawnSync(process.execPath, [SERVER, 'password', ...(name ? [name] : [])], { env: srv.env, encoding: 'utf8' });
+  const code = /\/join\/([A-Za-z0-9_-]{22})/.exec(r.stdout)?.[1];
+  assert.ok(code, r.stdout + r.stderr);
+  return code;
+}
+async function withPassword(srv, who, password, name = '') {
+  const r = await call(srv, 'POST', `/api/invites/${passwordLink(srv, name)}`, {}, { password });
+  assert.equal(r.status, 201, r.body);
+  return confirmAs(srv, who, password);
+}
+
+// An owner (by Tailscale) and the family space's channels. (1.25.2) `owner` has a password and has confirmed it (its
+// invites and the like go through); `tsOwner`: the same Tailscale sign-in without that.
 async function family(srv) {
-  const owner = ts(OWNER, 'Robin');
-  const b = (await call(srv, 'GET', '/api/bootstrap', owner)).json;
-  return { owner, me: b.me, space: b.spaces[0].id, general: b.channels.find(c => c.name === 'general').id, photos: b.channels.find(c => c.name === 'photos').id };
+  const tsOwner = ts(OWNER, 'Robin');
+  const b = (await call(srv, 'GET', '/api/bootstrap', tsOwner)).json;
+  const owner = await withPassword(srv, tsOwner, OWNER_PASSWORD);
+  return { owner, tsOwner, me: b.me, space: b.spaces[0].id, general: b.channels.find(c => c.name === 'general').id, photos: b.channels.find(c => c.name === 'photos').id };
 }
 
 // A new person through an invite: by password (returns their cookie) or by Tailscale identity.
@@ -585,8 +609,9 @@ test('F-F: live events go only to who sees the conversation; a reconnect gets wh
       const hello = await ev.wait('hello');
       assert.equal((await call(s2, 'PUT', '/api/focus', mary.who, { client: hello.data.client, channel: dm, visible: true })).status, 204);
       assert.equal((await call(s2, 'PUT', '/api/focus', bob.who, { client: hello.data.client, channel: null })).status, 404, 'not someone else’s connection');
-      // Turned off: the stream ends at once.
-      await call(s2, 'PATCH', `/api/people/${mary.id}`, f.owner, { disabled: true });
+      // Turned off: the stream ends at once. (1.25.2: the owner's password confirmed again: a restart forgets it)
+      assert.equal((await call(s2, 'PATCH', `/api/people/${mary.id}`, f.owner, { disabled: true })).json.reason, 'confirm', 'asked again after a restart');
+      await call(s2, 'PATCH', `/api/people/${mary.id}`, await confirmAs(s2, f.tsOwner, OWNER_PASSWORD), { disabled: true });
       await waitFor(() => ev.closed);
       assert.equal((await call(s2, 'GET', '/api/bootstrap', mary.who)).status, 401);
     } finally { await s2.stop(); }
@@ -1608,6 +1633,60 @@ test('F-AA (1.25.1, the 10-11 audit): a fast link stops while its maker’s acce
     assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, f.owner, { disabled: false })).status, 200);
     assert.ok((await fileOf()).body.equals(data), 'on again: it works again');
   } finally { for (const c of conns) c.pc?.close(); await s.stop(); }
+});
+
+test('F-AB (1.25.2, the security review I-2): signed in by Tailscale (anything on the owner’s machines), invites, reset links, roles and turning someone off take the password, confirmed for 15 minutes; a first password for an owner or admin only with the link made on the server’s PC; a password sign-in needs nothing more', async () => {
+  const s = await start('confirm', 8848);
+  try {
+    const tsOwner = ts(OWNER, 'Robin');
+    assert.equal((await call(s, 'GET', '/api/bootstrap', tsOwner)).status, 200);
+    // No password yet: the changes say how to get one, and Tailscale alone can't set it.
+    let r = await call(s, 'POST', '/api/invites', tsOwner, {});
+    assert.deepEqual([r.status, r.json.reason], [403, 'password-needed']);
+    assert.match(r.json.error, /node family\\server\.js password/);
+    r = await call(s, 'PATCH', '/api/me', tsOwner, { password: 'a new owner password' });
+    assert.deepEqual([r.status, r.json.reason], [403, 'password-needed'], 'not a first password by Tailscale alone');
+    // The link from the server's PC sets it; then a change asks for it (reason confirm), a wrong one doesn't count.
+    r = await call(s, 'POST', `/api/invites/${passwordLink(s)}`, {}, { password: OWNER_PASSWORD });
+    assert.equal(r.status, 201, r.body);
+    r = await call(s, 'POST', '/api/invites', tsOwner, {});
+    assert.deepEqual([r.status, r.json.reason], [403, 'confirm']);
+    r = await call(s, 'POST', '/api/me/confirm', tsOwner, { password: 'not the password at all' });
+    assert.deepEqual([r.status, r.json.reason], [403, 'wrong-password'], 'a 403, not a 401: the page stays signed in');
+    assert.ok(!confirmCookieOf(r));
+    const owner = await confirmAs(s, tsOwner, OWNER_PASSWORD);
+    r = await call(s, 'POST', '/api/invites', owner, {});
+    assert.equal(r.status, 201, r.body);
+    const mary = await join(s, owner, 'Mary');
+    assert.equal((await call(s, 'POST', `/api/people/${mary.id}/reset`, owner)).status, 201);
+    assert.equal((await call(s, 'PATCH', `/api/people/${mary.id}`, owner, { role: 'admin' })).status, 200);
+    // Without the cookie (another program on the same machine), or someone else's: refused.
+    for (const who of [tsOwner, { ...tsOwner, Cookie: 'fam_c=guessed-confirmation-cookie' }]) {
+      r = await call(s, 'POST', `/api/people/${mary.id}/reset`, who);
+      assert.deepEqual([r.status, r.json.reason], [403, 'confirm']);
+      r = await call(s, 'PATCH', `/api/people/${mary.id}`, who, { disabled: true });
+      assert.deepEqual([r.status, r.json.reason], [403, 'confirm']);
+    }
+    // Changing the password by Tailscale takes the current one now.
+    r = await call(s, 'PATCH', '/api/me', tsOwner, { password: 'another owner password' });
+    assert.equal(r.status, 403);
+    r = await call(s, 'PATCH', '/api/me', tsOwner, { password: 'another owner password', current: OWNER_PASSWORD });
+    assert.equal(r.status, 200, r.body);
+    // Signed in with the password (a session), nothing more is asked.
+    r = await call(s, 'POST', '/api/signin', {}, { name: 'Robin', password: 'another owner password' });
+    assert.equal(r.status, 200, r.body);
+    assert.equal((await call(s, 'POST', '/api/invites', `fam_s=${sessionOf(r)}`, {})).status, 201);
+    // An admin by Tailscale, without a password: the same; and the link names them.
+    const ann = await join(s, owner, 'Ann', { login: 'ann@example.com', role: 'admin' });
+    r = await call(s, 'POST', '/api/invites', ann.who, {});
+    assert.deepEqual([r.status, r.json.reason], [403, 'password-needed']);
+    const annOk = await withPassword(s, ann.who, 'ann’s own long password', 'Ann');
+    assert.equal((await call(s, 'POST', '/api/invites', annOk, {})).status, 201);
+    // A member by Tailscale may still set a first password of their own (they make none of these changes).
+    const bob = await join(s, owner, 'Bob', { login: 'bob@example.com' });
+    assert.equal((await call(s, 'PATCH', '/api/me', bob.who, { password: 'bob’s long password' })).status, 200);
+    assert.match(s.out, /A wrong password for Robin confirming a change/);
+  } finally { await s.stop(); }
 });
 
 // ---------------------------------------------------------------- runner

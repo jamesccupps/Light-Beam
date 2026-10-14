@@ -1,8 +1,8 @@
 // Beam Family's app: starts up (join, sign in, or the app), finds its way (/c/<id>, /settings, /admin), keeps the
 // live connection, and tells the server what's on screen (so what you're looking at isn't pushed to your phone).
 
-import { h, fill, toast, isPhone, closeMenu } from './ui.js';
-import { api } from './api.js';
+import { h, fill, toast, isPhone, closeMenu, dialog, field } from './ui.js';
+import { api, onConfirmNeeded } from './api.js';
 import { state, on, applyBootstrap, applyEvent, channel, totals, sortedChannels, title } from './store.js';
 import { sidebarView } from './sidebar.js';
 import { conversationView } from './chat.js';
@@ -20,6 +20,18 @@ let events = null;
 let offlineTimer = null;
 
 try { const t = localStorage.getItem('family.theme'); if (t) setTheme(t); } catch {}
+
+// (1.25.2) Signed in by Tailscale, the changes that could let someone in take the password (then not again for 15
+// minutes in this browser).
+onConfirmNeeded(() => dialog({
+  title: 'Your Beam Family password',
+  body: [
+    h('p', { class: 'muted' }, 'Invites, password-reset links, admins and turning someone off take your password when you’re signed in through Tailscale. It isn’t asked again for 15 minutes.'),
+    field('Password', h('input', { type: 'password', name: 'password', autocomplete: 'current-password', required: true })),
+  ],
+  ok: 'Confirm',
+  onSubmit: async v => { await api('/api/me/confirm', { method: 'POST', body: { password: v.password } }); return true; },
+}).then(v => v === true));
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
   // A notification tapped while the app is open: go to that conversation.

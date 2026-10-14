@@ -1,6 +1,7 @@
 'use strict';
 // People: who's asking, signing in and out, invites, the owner's first visit, profiles, sessions, roles.
 
+const crypto = require('node:crypto');
 const QRCode = require('qrcode');
 const { newId, isId } = require('./ids');
 const { httpError, send, readJson, cookie, parseCookies } = require('./http');
@@ -8,6 +9,10 @@ const auth = require('./auth');
 
 const now = () => Date.now();
 const COLORS = 8; // avatar colours the app knows
+// (1.25.2) A password confirmed for 15 minutes (see requireConfirmedAdmin), and how an owner or admin who signs in by
+// Tailscale gets a first password: a link made on the server's own PC.
+const CONFIRM = 'fam_c';
+const NEEDS_PASSWORD = 'Set a Beam Family password first: on the PC Beam Family runs on, run “node family\\server.js password” and open the link it shows';
 const BIDI = /[‪-‮⁦-⁩‎‏؜]/g;
 
 // A shown name: 1–32 characters, no control or direction characters, single spaces.
@@ -103,6 +108,51 @@ function createPeople(ctx) {
     const user = requireUser(req);
     if (user.role === 'member') throw httpError(403, 'Only the family space’s admins can do that');
     return user;
+  }
+
+  // (1.25.2, the security review's I-2) Signed in by Tailscale identity, anything on the person's machines is them (a
+  // program on the Pi, any app on the phone: Tailscale carries all of it). So the changes that could let someone in
+  // (invites, password-reset links, roles, turning people off) also take their password, confirmed in this browser
+  // once per 15 minutes (POST /api/me/confirm). A sign-in made with the password needs nothing more. In memory only: a
+  // restart asks again.
+  const CONFIRM_MS = 15 * 60e3;
+  const confirmations = new Map(); // hash of the cookie's token → { userId, until }
+  const confirmCookie = req => (secure(req) ? `__Host-${CONFIRM}` : CONFIRM);
+  function confirmedFor(req, user) {
+    const jar = parseCookies(req);
+    const token = jar[`__Host-${CONFIRM}`] || jar[CONFIRM];
+    const c = token ? confirmations.get(auth.hashToken(token)) : null;
+    return Boolean(c && c.userId === user.id && c.until > now());
+  }
+
+  function requireConfirmedAdmin(req) {
+    const user = requireAdmin(req);
+    if (whoIs(req).via !== 'tailscale' || confirmedFor(req, user)) return user;
+    if (!user.pass_hash) throw httpError(403, NEEDS_PASSWORD, { reason: 'password-needed' });
+    throw httpError(403, 'Confirm with your Beam Family password first', { reason: 'confirm' });
+  }
+
+  // POST /api/me/confirm { password } → 204: this browser may make those changes for 15 minutes. A wrong password is a
+  // 403 (not 401: the page isn't signed out), counted like a sign-in.
+  async function confirmPassword(req, res) {
+    const user = requireUser(req);
+    const body = await readJson(req);
+    if (!user.pass_hash) throw httpError(403, NEEDS_PASSWORD, { reason: 'password-needed' });
+    const ip = auth.clientIp(req);
+    const name = user.name.toLowerCase();
+    if (!signinByIp.hit(ip) || failByNameIp.blocked(`${name}|${ip}`) || failByName.blocked(name)) throw httpError(429, 'Too many tries: wait a few minutes');
+    if (!(await auth.checkPassword(String(body.password ?? ''), user.pass_hash))) {
+      failByNameIp.hit(`${name}|${ip}`);
+      failByName.hit(name);
+      log.warn(`A wrong password for ${user.name} confirming a change, from ${ip}`);
+      throw httpError(403, 'That password isn’t right', { reason: 'wrong-password' });
+    }
+    for (const [hash, c] of confirmations) if (c.until <= now()) confirmations.delete(hash);
+    const token = crypto.randomBytes(24).toString('base64url');
+    confirmations.set(auth.hashToken(token), { userId: user.id, until: now() + CONFIRM_MS });
+    res.setHeader('Set-Cookie', cookie(confirmCookie(req), token, { maxAge: CONFIRM_MS / 1000, secure: secure(req) }));
+    audit(user.id, 'confirmed', ip);
+    send(res, 204);
   }
 
   const hasOwner = () => Boolean(db.get("SELECT 1 FROM users WHERE role = 'owner'"));
@@ -303,7 +353,7 @@ function createPeople(ctx) {
 
   // POST /api/people/:id/reset (admins) → { url, qr, expires }: a link that lets that person choose a new password.
   async function resetLink(req, res, { id }) {
-    const admin = requireAdmin(req);
+    const admin = requireConfirmedAdmin(req);
     const person = getUser(id);
     if (!person || person.disabled_at) throw httpError(404, 'No such person');
     if (person.role === 'owner' && admin.role !== 'owner') throw httpError(403, 'Only the owner can do that for the owner');
@@ -318,7 +368,7 @@ function createPeople(ctx) {
 
   // POST /api/invites { role?, uses?, days?, note? } (admins) → { id, code, url, expires }
   async function createInvite(req, res) {
-    const admin = requireAdmin(req);
+    const admin = requireConfirmedAdmin(req);
     const body = await readJson(req, { optional: true });
     const role = body.role === 'admin' ? 'admin' : 'member';
     if (role === 'admin' && admin.role !== 'owner') throw httpError(403, 'Only the owner can invite admins');
@@ -370,9 +420,12 @@ function createPeople(ctx) {
       changes.color = color;
     }
     if (body.password !== undefined) {
-      // Changing a password needs the current one, unless signed in by Tailscale (who already proved who they are).
-      // Those checks count like sign-ins (1.7.2: a stolen session could otherwise guess the password without limit).
-      if (user.pass_hash && whoIs(req).via !== 'tailscale') {
+      // Changing a password needs the current one (1.25.2: signed in by Tailscale too, which is anything on the
+      // person's machines), counted like sign-ins (1.7.2: a stolen session could otherwise guess it without limit). A
+      // first one from a Tailscale sign-in only for a member: an owner's or admin's would be the way past the password
+      // their changes take (requireConfirmedAdmin), so theirs comes with a link made on the server's PC (`password`).
+      if (!user.pass_hash && whoIs(req).via === 'tailscale' && user.role !== 'member') throw httpError(403, NEEDS_PASSWORD, { reason: 'password-needed' });
+      if (user.pass_hash) {
         const ip = auth.clientIp(req);
         const name = user.name.toLowerCase();
         if (!signinByIp.hit(ip) || failByNameIp.blocked(`${name}|${ip}`) || failByName.blocked(name)) throw httpError(429, 'Too many tries: wait a few minutes');
@@ -436,7 +489,7 @@ function createPeople(ctx) {
 
   // PATCH /api/people/:id { role?, disabled? }
   async function updatePerson(req, res, { id }) {
-    const admin = requireAdmin(req);
+    const admin = requireConfirmedAdmin(req);
     const body = await readJson(req);
     const person = getUser(id);
     if (!person) throw httpError(404, 'No such person');
@@ -478,6 +531,7 @@ function createPeople(ctx) {
       ['GET', '/api/invites', listInvites],
       ['DELETE', '/api/invites/:id', revokeInvite],
       ['PATCH', '/api/me', updateMe],
+      ['POST', '/api/me/confirm', confirmPassword],
       ['GET', '/api/me/sessions', listSessions],
       ['DELETE', '/api/me/sessions/:id', endSessions],
       ['PATCH', '/api/people/:id', updatePerson],

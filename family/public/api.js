@@ -8,7 +8,12 @@ export class ApiError extends Error {
   }
 }
 
-export async function api(path, { method = 'GET', body, type = null, signal } = {}) {
+// (1.25.2) A change that takes the password from someone signed in by Tailscale (403, reason "confirm"): the app asks
+// for it (onConfirmNeeded: resolves true once confirmed), and the change goes again, once.
+let confirmNeeded = null;
+export const onConfirmNeeded = fn => { confirmNeeded = fn; };
+
+export async function api(path, { method = 'GET', body, type = null, signal, again = false } = {}) {
   const init = { method, credentials: 'same-origin', headers: {}, signal };
   if (body !== undefined) {
     if (type) {
@@ -31,6 +36,9 @@ export async function api(path, { method = 'GET', body, type = null, signal } = 
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch {}
   if (!res.ok) {
+    if (res.status === 403 && data?.reason === 'confirm' && confirmNeeded && !again && await confirmNeeded()) {
+      return api(path, { method, body, type, signal, again: true });
+    }
     // (a refused sign-in is just a wrong password, not a sign-out)
     if (res.status === 401 && path !== '/api/signin') window.dispatchEvent(new CustomEvent('family:signed-out', { detail: data }));
     throw new ApiError(res.status, data?.error || `Something went wrong (${res.status})`, data);

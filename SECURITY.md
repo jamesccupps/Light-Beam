@@ -69,4 +69,7 @@ for the owner's family, which may face the internet.
 Beam Family is the only part meant to be reachable from the internet (through Tailscale Funnel). It's a separate
 process with its own data, listening on 127.0.0.1 only, and it can't do anything to your devices. People reach it
 with invite links and passwords (scrypt, rate-limited sign-ins, sessions in HttpOnly cookies); identity headers from
-Tailscale count only from the local machine, and Funnel never sends them. Details: [docs/FAMILY.md](docs/FAMILY.md#security-model).
+Tailscale count only from the local machine, and Funnel never sends them. Since 1.25.2, someone signed in by Tailscale
+identity also gives their password for the changes that let someone in (invites, password-reset links, roles, turning
+people off), since Tailscale vouches for a machine, not for the program on it; an owner's first password comes with a
+link made on the server's PC. Details: [docs/FAMILY.md](docs/FAMILY.md#security-model).
