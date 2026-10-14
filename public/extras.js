@@ -793,22 +793,112 @@ function pinchDistance() {
   return pts.length === 2 ? Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) : 0;
 }
 
-// ---------------------------------------------------------------- text file preview (first 64 KB), QR codes
+// ---------------------------------------------------------------- text file preview (64 KB of it), QR codes
+
+const PREVIEW_BYTES = 65536;
+const ENCODING_NAMES = { 'utf-8': 'UTF-8', 'utf-16le': 'UTF-16', 'utf-16be': 'UTF-16 (big-endian)', 'windows-1252': 'Windows (ANSI)' };
+
+// (1.25.3, from Slate's ways) What a text file's bytes are: UTF-8 (with a byte-order mark or without), UTF-16 with or
+// without its mark (what Windows PowerShell's `>` and .reg exports write), else the Windows code page: { text, encoding },
+// or null for bytes no text has (a binary file). `encoding`: already known (from the file's start, for its end);
+// `tail`: the bytes are the end of the file, so its first line, likely cut in two, goes; `cut`: more of the file follows.
+function decodeText(bytes, { encoding = null, tail = false, cut = false } = {}) {
+  let enc = encoding;
+  let start = 0;
+  if (!enc && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) { enc = 'utf-8'; start = 3; }
+  else if (!enc && bytes[0] === 0xff && bytes[1] === 0xfe) { enc = 'utf-16le'; start = 2; }
+  else if (!enc && bytes[0] === 0xfe && bytes[1] === 0xff) { enc = 'utf-16be'; start = 2; }
+  if (!enc) {
+    // UTF-16 without its mark: mostly ASCII, so a zero in every other byte; any other zero byte: not text.
+    const sample = bytes.subarray(0, 4096);
+    let even = 0, odd = 0;
+    for (let i = 0; i < sample.length; i++) if (sample[i] === 0) (i % 2 ? odd++ : even++);
+    const half = sample.length / 2;
+    if (odd > half * 0.3 && even < half * 0.05) enc = 'utf-16le';
+    else if (even > half * 0.3 && odd < half * 0.05) enc = 'utf-16be';
+    else if (even + odd) return null;
+  }
+  // Not UTF-8 (a byte UTF-8 never has, but for a character the 64 KB cut in two at either end): the Windows code page.
+  if (!enc) {
+    try { new TextDecoder('utf-8', { fatal: true }).decode(wholeChars(bytes, tail, cut)); enc = 'utf-8'; } catch { enc = 'windows-1252'; }
+  }
+  let text = new TextDecoder(enc).decode(bytes.subarray(start));
+  const controls = (text.slice(0, 4096).match(/[\u0000-\u0008\u000e-\u001a\u001c-\u001f]/g) || []).length;
+  if (controls > Math.min(text.length, 4096) * 0.02) return null;
+  if (tail) { const nl = text.indexOf('\n'); if (nl >= 0 && nl < text.length - 1) text = text.slice(nl + 1); }
+  return { text, encoding: enc };
+}
+
+// UTF-8 bytes without a character the window cut in two: at their start (a file's end: `tail`) and at their end (more
+// of the file follows: `cut`).
+function wholeChars(b, tail, cut) {
+  let s = 0;
+  if (tail) while (s < 3 && s < b.length && (b[s] & 0xc0) === 0x80) s++;
+  if (!cut) return b.subarray(s);
+  let i = b.length - 1;
+  while (i > s && b.length - i < 4 && (b[i] & 0xc0) === 0x80) i--;
+  const need = b[i] >= 0xf0 ? 4 : b[i] >= 0xe0 ? 3 : b[i] >= 0xc0 ? 2 : 1;
+  return b.subarray(s, i >= s && b.length - i < need ? i : b.length);
+}
+
+// (1.25.3) "Show only lines with…" for a text in a <pre> (a file's preview, a log), case not counting; `important`: a
+// switch for warnings and errors only. It filters a moment after typing stops. → { bar, set(text) }.
+const IMPORTANT_LINE = /\b(WARN(ING)?|ERROR|FATAL|FAIL(ED|URE)?|Crashed|Exception)\b|!!/i;
+function lineFilter(pre, { important = false } = {}) {
+  let all = '';
+  let only = false;
+  const input = el('input', { type: 'search', placeholder: 'Show only lines with…', 'aria-label': 'Show only lines with', autocomplete: 'off' });
+  const count = el('span', { class: 'muted small line-count', 'aria-live': 'polite' });
+  const apply = () => {
+    const q = input.value.trim().toLowerCase();
+    if (!q && !only) { pre.textContent = all; count.textContent = ''; return; }
+    const lines = all.split('\n');
+    const hits = lines.filter(l => (!q || l.toLowerCase().includes(q)) && (!only || IMPORTANT_LINE.test(l)));
+    pre.textContent = hits.length ? hits.join('\n') : q ? 'No line has that.' : 'No warnings or errors.';
+    count.textContent = `${hits.length.toLocaleString()} of ${lines.length.toLocaleString()} lines`;
+  };
+  let timer = 0;
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(apply, 150); });
+  const bar = el('div', { class: 'line-filter' }, input,
+    important && toggle('Warnings and errors only', false, v => { only = v; apply(); }), count);
+  return { bar, set(text) { all = text; apply(); } };
+}
 
 async function previewTextFile(item) {
   const pre = el('pre', { class: 'file-preview' }, 'Loading…');
-  const buttons = [HOST
-    ? el('button', { class: 'btn', type: 'button', onclick: () => hostDo(isSaved(item.id) ? 'openFile' : 'saveFile', { itemId: item.id }) }, isSaved(item.id) ? 'Open' : 'Save')
-    : el('button', { class: 'btn', type: 'button', onclick: () => downloadItem(item) }, 'Download')];
-  openDialog({ title: item.name, body: [pre], buttons, wide: true });
-  try {
-    const res = await api(`api/file/${item.id}`, { headers: { Range: 'bytes=0-65535' } });
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes.subarray(0, 65536));
-    pre.textContent = text + (item.size > 65536 ? '\n\n… (showing the first 64 KB)' : '');
-  } catch (err) {
-    pre.textContent = friendlyError(err);
-  }
+  const about = el('p', { class: 'muted small' });
+  const filter = lineFilter(pre);
+  const big = item.size > PREVIEW_BYTES;
+  let encoding = null;
+  // The file's start, or (a big one) its end: logs grow at the bottom.
+  const show = async end => {
+    pre.textContent = 'Loading…';
+    try {
+      const from = end ? Math.floor(Math.max(0, item.size - PREVIEW_BYTES) / 2) * 2 : 0; // (an even place: UTF-16 stays whole)
+      const res = await api(`api/file/${item.id}`, { headers: { Range: `bytes=${from}-${from + PREVIEW_BYTES - 1}` } });
+      const got = decodeText(new Uint8Array(await res.arrayBuffer()).subarray(0, PREVIEW_BYTES), { encoding, tail: from > 0, cut: from + PREVIEW_BYTES < item.size });
+      if (!got) {
+        about.textContent = formatSize(item.size);
+        filter.bar.hidden = true;
+        pre.textContent = 'This doesn’t look like a text file: it has bytes no text has. Open it in an app instead.';
+        return;
+      }
+      encoding = got.encoding;
+      about.textContent = `${big ? `${end ? 'The last' : 'The first'} 64 KB of ${formatSize(item.size)}` : formatSize(item.size)} · ${ENCODING_NAMES[encoding] || encoding}`;
+      filter.set(got.text);
+      pre.scrollTop = end ? pre.scrollHeight : 0;
+    } catch (err) {
+      pre.textContent = friendlyError(err);
+    }
+  };
+  const buttons = [
+    ...(big ? [el('button', { class: 'btn ghost', type: 'button', onclick: () => show(false) }, 'Start'), el('button', { class: 'btn ghost', type: 'button', onclick: () => show(true) }, 'End')] : []),
+    HOST
+      ? el('button', { class: 'btn', type: 'button', onclick: () => hostDo(isSaved(item.id) ? 'openFile' : 'saveFile', { itemId: item.id }) }, isSaved(item.id) ? 'Open' : 'Save')
+      : el('button', { class: 'btn', type: 'button', onclick: () => downloadItem(item) }, 'Download'),
+  ];
+  openDialog({ title: item.name, body: [about, filter.bar, pre], buttons, wide: true });
+  show(false);
 }
 
 function showQr(text) {

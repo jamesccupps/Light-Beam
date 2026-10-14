@@ -407,6 +407,9 @@ export default function register(test) {
     await page.waitFor(`$('#genTitle')?.textContent === 'Shop PC: beam.log' && /History: nothing new/.test($('#genBody pre.logs')?.textContent || '')`, 8000, 'the log shown');
     const foot = await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].map(b => b.textContent.trim())`);
     assert(foot.includes('Copy') && foot.includes('Save'), JSON.stringify(foot));
+    // (1.25.3) only the lines with what's typed
+    await page.evaluate(`(() => { const i = $('#genBody .line-filter input[type=search]'); i.value = 'history'; i.dispatchEvent(new Event('input')); return true; })()`);
+    await page.waitFor(`$('#genBody .line-count').textContent === '1 of 3 lines' && /^[^\\n]*History: nothing new$/.test($('#genBody pre.logs').textContent)`, 3000, 'the log filtered');
     await page.evaluate(`$('#genDlg').close()`);
   });
 

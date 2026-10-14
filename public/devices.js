@@ -112,7 +112,9 @@ async function showDeviceLog(d) {
   toast(`Asking ${d.name} for its Beam log…`, { ms: 4000 });
   let r;
   try { r = await apiJson(`api/devices/${encodeURIComponent(d.id)}/log`, jsonBody({})); } catch (err) { toast(friendlyError(err), { error: true }); return; }
-  const pre = el('pre', { class: 'logs' }, r.text || '(empty)');
+  const pre = el('pre', { class: 'logs' });
+  const filter = lineFilter(pre, { important: true }); // (1.25.3; Copy and Save take the whole log)
+  filter.set(r.text || '(empty)');
   const copy = el('button', { class: 'btn', type: 'button', onclick: async () => {
     try { await navigator.clipboard.writeText(r.text || ''); toast('Copied'); } catch { toast('Copying didn’t work here: use Save', { error: true }); }
   } }, icon('copy'), 'Copy');
@@ -122,7 +124,7 @@ async function showDeviceLog(d) {
     a.click();
     a.remove();
   } }, icon('download'), 'Save');
-  openDialog({ title: `${d.name}: ${r.name || 'beam.log'}`, body: [note(`The last ${formatSize(r.size || 0)}, as of ${clock(r.at || Date.now())}.`), pre], wide: true, buttons: [copy, save] });
+  openDialog({ title: `${d.name}: ${r.name || 'beam.log'}`, body: [note(`The last ${formatSize(r.size || 0)}, as of ${clock(r.at || Date.now())}.`), filter.bar, pre], wide: true, buttons: [copy, save] });
   pre.scrollTop = pre.scrollHeight;
 }
 
