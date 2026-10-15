@@ -2753,6 +2753,13 @@ test('1.19 updates one PC at a time: a new Windows build goes to this server’s
     await sleep(2500);
     assert.ok(!offered(streams.shop, '1.15.0') && !offered(streams.cam, '1.15.0'), 'stopped there');
     assert.deepEqual(pick((await settingsNow()).rollout.halted, ['problem']), { problem: 'it didn’t start (health check)' });
+    // ...nor when one asks or connects later (1.25.4, the user's audit of 2026-10-14: until then both were offered it)
+    assert.equal((await s.req('GET', '/api/updates', { headers: shop })).json.windows, undefined, 'not when it asks');
+    const later = await openEvents(s.port, cam);
+    await later.wait('hello');
+    await sleep(500);
+    assert.ok(!offered(later, '1.15.0'), 'not when it connects');
+    later.close();
     // ...unless offered to every PC anyway
     r = await post(s, '/api/updates/release', {}, shop);
     assert.equal(r.status, 200, r.body);
@@ -5858,6 +5865,16 @@ test('1.25 trusted sign-ins (R-1/R-2): an automatic sign-in naming any app contr
     await refused('removing a device', 'DELETE', '/api/devices/rclaptop001');
     await refused('moving Beam', 'POST', '/api/move', { to: 'https://elsewhere.example' });
     await refused('approving a device', 'PUT', `/api/devices/${android.you}/trust`, { trusted: true });
+    // (1.25.4, the user's audit of 2026-10-14) nor the owner's tools: a Windows build to every PC (also by turning "one PC
+    // first" off), the server's log, a PC's log and history, the backups, the metrics
+    await refused('offering a Windows build to every PC', 'POST', '/api/updates/release', {});
+    await refused('turning one PC first off', 'PATCH', '/api/settings', { stagedUpdates: false });
+    await refused('the server’s log', 'GET', '/api/logs');
+    await refused('a PC’s log', 'POST', '/api/devices/rcdesk00001/log', {});
+    await refused('a PC’s history', 'GET', '/api/devices/rcdesk00001/history');
+    await refused('the backups', 'GET', '/api/backups');
+    await refused('a backup now', 'POST', '/api/backups');
+    await refused('the metrics', 'GET', '/api/metrics');
     // A pairing link it makes signs in nothing trusted (Beam for Linux's window is made that way)...
     const pairKey = (await s.req('GET', '/api/pair', { headers: droid })).json.key;
     const viaLink = await post(s, '/api/login', { secret: pairKey }, { ...sameOrigin, Cookie: 'beam_device_id=rclinkweb01' });

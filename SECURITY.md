@@ -38,15 +38,17 @@ for the owner's family, which may face the internet.
   server on a computer only you use. The data folder is made private to the account Beam runs as.
 - **Your Tailscale account.** Devices signed in to it sign in to Beam by themselves (this can be turned off). Whoever
   controls your Tailscale account controls that. Since 1.25 such an automatic sign-in only sends and receives: remote
-  control, installing apps, the phone's notifications, the password, moves and signing the others out take a *trusted*
-  sign-in (the password, a pairing link or approval from a trusted device, or approved on one), because Tailscale
-  vouches for a machine, not for the program or account on it.
+  control, installing apps, the phone's notifications, the password, moves, signing the others out and (1.25.4) the
+  owner's tools (the server's log, each PC's log and history, backups, a Windows update to every PC at once) take a
+  *trusted* sign-in (the password, a pairing link or approval from a trusted device, or approved on one), because
+  Tailscale vouches for a machine, not for the program or account on it.
 - **The `data` folder and the signing keys.** `data` holds the key, sign-ins and every stored item, unencrypted. The
   apps update from `dist` but install only builds signed with your keys (the Windows update key, the Android keystore):
-  whoever has those keys can change every app.
+  whoever has those keys can change every app. A first install (the Windows app, the Android app, Beam for Linux) is
+  taken as the server hands it out: only the updates after it are checked against the key it came with.
 - **The server itself.** Messages and files are not end-to-end encrypted: the server stores and relays them.
 - **Apps on every PC** (off until allowed at each PC): installers are checked against the SHA-256 and size in your
-  server's own list, which any device signed in for good can add to. That makes sure a PC installs what the list says,
+  server's own list, which a trusted sign-in can add to (1.25). That makes sure a PC installs what the list says,
   not that the list is trustworthy: whoever controls your server's list can install programs on every PC that allows
   it. Unlike the Beam apps' own updates, the list isn't signed with a key the server never holds.
 
