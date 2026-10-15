@@ -464,7 +464,8 @@ curl -fsSL https://beam.your-tailnet.ts.net/install/linux | bash -s -- --uninsta
 ```
 
 It needs no root: Node.js 20 or later from the computer, else its own from nodejs.org (checked against its checksums),
-the app and the `beam` command in your home folder, a systemd user service that starts with the computer. Then:
+the app and the `beam` command in your home folder, a systemd user service that starts with the computer. The first
+install takes the app from your server as it is; its updates after that are checked against the key inside it. Then:
 - files sent to it land in `~/Downloads/Beam`; text goes to its clipboard, with a notification, when it has a desktop;
 - with a desktop, **Beam is in its menu** (Internet → Beam): Beam in a window of its own, to drop files on and paste text
   into (`beam window` from a terminal);
@@ -747,16 +748,18 @@ The short version (the threat model and how to report a problem are in [SECURITY
   and other accounts on it could pose as Tailscale traffic. Run the server on a computer only you use.
 - **Updates are signed:** the apps install what your server's `dist` folder offers only when it's signed with the key
   they were built with (Windows: `windows\build.cmd`'s key; Android: your keystore, checked by Android itself). Keep
-  those keys private and backed up.
+  those keys private and backed up. A first install is taken as your server hands it out (the Windows app, the
+  Android app, Beam for Linux): only the updates after it are checked against the key it came with.
 - **Who signs in by itself:** only Tailscale accounts you trust: yours from the first sign-in, others only when you
   allow them in Settings → Security, from a sign-in made on purpose (password, pairing link, approval).
 - **What a device that signed in by itself can do (1.25):** send and receive. Controlling PCs, installing apps on
-  them, the phone's notifications, the password, moves and signing the others out take a *trusted* sign-in: one made
-  with the password, or with a pairing link or an approval from a trusted device, or approved once from a trusted
-  one (in Beam on your phone, a PC or a browser: Settings → Devices, that device → "Can control PCs and install
-  apps"). The first device of a new Beam is
-  trusted. Tailscale's sign-in covers whole machines: any program or account on one of yours (an app on your phone,
-  say) could use it. A computer with Beam for Linux is only ever controlled, never controls.
+  them, the phone's notifications, the password, moves, signing the others out and (1.25.4) the owner's tools (the
+  server's log, each PC's log and history, backups, a Windows update to every PC at once) take a *trusted* sign-in:
+  one made with the password, or with a pairing link or an approval from a trusted device, or approved once from a
+  trusted one (in Beam on your phone, a PC or a browser: Settings → Devices, that device → "Can control PCs and install
+  apps"). The first device of a new Beam is trusted. Tailscale's sign-in covers whole machines: any program or account
+  on one of yours (an app on your phone, say) could use it. A computer with Beam for Linux is only ever controlled,
+  never controls.
 - Received files are never opened or run automatically. Uploaded files are served with a locked-down content policy,
   so an uploaded web page can't run scripts inside Beam.
 - **Beam Family** is the only part meant to face the internet (through Funnel), and it's a separate server that can't

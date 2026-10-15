@@ -53,8 +53,10 @@ sign-in over https sets `__Host-beam_key` and clears `beam_key`). The Windows ap
     change to apps; phone notifications (sharing them, turning them on for a device, seeing and acting on them);
     setting the first password, and changing or removing one without `current`; signing the others out; removing
     another device; approving a move (and a move sign-in's export); moving (`POST`/`DELETE /api/move`); approving
-    devices; letting a blocked machine back in. Widening who signs in automatically and Beam's address (`publicUrl`)
-    answer `403 { "reason": "sign-in" }` as before.
+    devices; letting a blocked machine back in. **(1.25.4, the owner's audit of 2026-10-14)** Also offering a Windows
+    build to every PC (`POST /api/updates/release`, and `stagedUpdates: false`), the server's log, a PC's log and
+    history, the server's backups (seeing them, making one) and the metrics. Widening who signs in automatically and
+    Beam's address (`publicUrl`) answer `403 { "reason": "sign-in" }` as before.
   - A sign-in that isn't trusted, naming the id of a device without a device key that has a trusted sign-in, gets a
     device of its own (as a sign-in without the key does for a keyed device).
   - `GET /api/me` says `auth.trusted`; each device in `GET /api/devices` says `trusted` (it has a trusted sign-in of
@@ -302,10 +304,12 @@ Apps update themselves from the Beam server.
   `windows` for them (browsers, the command line and the master key still see it). Once the pilot runs it (its
   `X-Beam-App-Version`) and has for 10 minutes and is connected, everyone gets `app-update`. A pilot that reports the
   build didn't install (its status `update.problem` for that version) stops it there: an `update` alert, and the others
-  keep their version until `POST /api/updates/release` offers it to every PC anyway. A pilot that hasn't installed it
+  keep their version until `POST /api/updates/release` offers it to every PC anyway (**1.25.4:** also when they ask or
+  connect later; before, only the announcement at the stop was held back). A pilot that hasn't installed it
   within 30 minutes hands over to another online PC. Only when more than one Windows app is known. The setting
   `stagedUpdates` (true unless turned off; `BEAM_STAGED_UPDATES=0` overrides) turns it off; turning it off on the way
-  offers it to every PC. `GET /api/settings` → `rollout`: `{ "version", "pilot", "pilotName", "since", "installedAt",
+  offers a build still on its pilot to every PC (not one stopped there), so it takes a trusted sign-in (1.25.4).
+  `GET /api/settings` → `rollout`: `{ "version", "pilot", "pilotName", "since", "installedAt",
   "releaseAt", "released", "halted": { "at", "problem" } | null, "running", "pcs" }`, or `null`.
 
 ## Every request
@@ -634,7 +638,7 @@ a device offline for 10 minutes or more.
 |---|---|
 | `GET /api/devices/me/history/since` | `{ "System": "<ISO>" \| null, "Application": "<ISO>" \| null }`: the newest record the server keeps from the calling PC, per log. Report from a minute before it (the server keeps each record once); with `null`, from 30 days back |
 | `POST /api/devices/me/history` | `{ "events": [Record...] }` (600 at most, body 4 MB at most) → `{ "added", "since" }`. Records of other kinds, older than 120 days or in the future are skipped. A new power loss, blue screen or forced power-off raises a `powerLoss` alert (see Alerts) |
-| `GET /api/devices/{id}/history?days=30` | `{ "device", "name", "entries": [Entry...], "up", "at" }`: 1–120 days (30 unless asked). `up`: `{ "since", "kind", "text" }`, the latest start of Windows, or `null` |
+| `GET /api/devices/{id}/history?days=30` | `{ "device", "name", "entries": [Entry...], "up", "at" }`: 1–120 days (30 unless asked). `up`: `{ "since", "kind", "text" }`, the latest start of Windows, or `null`. **(1.25.4)** A trusted sign-in signed in for good (`403`; reason `trusted` for one that isn't trusted) |
 
 A **Record** is one of Windows' event records as the PC read it: `{ "log": "System" | "Application", "id": <event id>,
 "provider": "<provider name>", "time": "<ISO>", "rec": <record number>, "data": ["<each value as text>", ...] }`: dates
@@ -693,7 +697,7 @@ streams only) and the answer back, and keeps nothing.
 
 | Method & path | Result |
 |---|---|
-| `POST /api/devices/{id}/log` | `{ "name", "text", "size", "at" }` (`Cache-Control: no-store`), within 30 s. `409` when it can't (too old, offline, no answer in time); `403` for a session-only sign-in |
+| `POST /api/devices/{id}/log` | `{ "name", "text", "size", "at" }` (`Cache-Control: no-store`), within 30 s. `409` when it can't (too old, offline, no answer in time); `403` for a session-only sign-in, and **(1.25.4)** `403 reason "trusted"` for one that isn't trusted |
 | `POST /api/devices/me/log` | the PC's answer: `{ "id", "name", "text" }` (1 MB at most is passed on, the end of it) → `204`; `404` for a request that isn't for this device or timed out |
 
 ### Beam for Linux (1.22)
@@ -1314,7 +1318,7 @@ signed-in request, unless configured.
 | `POST /api/password` | `{ "password", "current"? }` sets it (≥ 8 characters); `""` removes it. Changing or removing a set password takes `current` (1.7.2; `403 reason: "current-password"` without it or when wrong), except from a trusted sign-in (1.25; before, as remote control counted them). **(1.25)** Setting the first one takes a trusted sign-in (`403 reason "trusted"`): an automatic one could otherwise set it and sign in with it, trusted |
 | `POST /api/security/sign-out-others` | **(v3)** optional body `{ "disableTailscaleSignIn": true }`. New master key, every sign-in revoked, every other device's Tailscale machine blocked, learned Tailscale owners dropped; the caller gets `{ "key": "bt_…", "revoked": n, "tailscaleSignIn" }` (and `X-Beam-Token` / a cookie). `409` when the key comes from `BEAM_KEY`. **(1.25)** A trusted sign-in only (`403 reason "trusted"`); a session-only one's new token is session-only too |
 | `POST /api/logout` | Signs this browser out: revokes its token, clears the cookie, and sends `Clear-Site-Data: "cache", "storage"` (v3) |
-| `GET /api/logs?lines=200` | **(v3)** `{ "lines": [...] }`, the end of the server log (`data/logs/server.log`). **(1.14.3)** `403` for a session-only sign-in, as backups |
+| `GET /api/logs?lines=200` | **(v3)** `{ "lines": [...] }`, the end of the server log (`data/logs/server.log`). **(1.14.3)** `403` for a session-only sign-in, as backups; **(1.25.4)** `403 reason "trusted"` for one that isn't trusted |
 | `GET /api/alerts` | **(1.3)** `{ "alerts": [Alert...] }`, the last 100, newest first (see Alerts) |
 | `GET /api/connections` | **(1.17, feature `connections`)** how tailscaled on this server reaches each device's machine: `{ "tailscale": true, "server": { "name", "keyExpiry", "expired"? }, "machines": [{ "id", "name", "platform", "online", "machine": { "name", "ip", "self"?, "online", "lastSeen"?, "keyExpiry", "expired"? }, "path" }], "at" }`. One row per machine, named after its Beam app (a browser on it shares the row; `online` when any of them is). `path`: `{ "via": "direct", "lan" }` (lan: an address of the same network), `{ "via": "peer-relay" }` or `{ "via": "relay", "relay": "nyc" }` (Tailscale's relay, by region), plus `at` and, from a test, `ms` and `tested: true`; `null` until tailscaled has used a path to it (an idle machine has none). `tailscale: false` (and no `server`) when the server doesn't see Tailscale **(1.18)** Each machine also has `speed` (its devices' latest speed test, `{ "down", "up", "at" }` in Mbit/s, or `null`), `speedTest: true` when its Beam app can be asked for one (Windows 1.13 or later), and `here: true` for the asking device's own machine (that one tests in its own page) |
 | `POST /api/connections/{id}/test` | **(1.17)** three disco pings to that device's machine now (`tailscale ping`; about 3 s, longer for a machine that doesn't answer) → `{ "path": { "via", "lan"?, "relay"?, "ms", "at", "tested": true } }` (the way of the last answer, the middle delay of the answers that took it; a sleeping phone answers slower), or `{ "path": null }` when nothing answered. One test per machine at a time (a second request gets the same answer). `409` for a device without a Tailscale machine, or the server's own |
@@ -1324,15 +1328,15 @@ signed-in request, unless configured.
 | `POST /api/speedtest/result` | **(1.18)** `{ "down", "up" }` (Mbit/s, what this device measured), `"id"` when it was asked → `{ "speed" }`, kept as its latest. A test: requests one after another, each bigger while they're quick (256 KB up to 16 MB), for about 3 s each way and 64 MB at most each, through the address the device's transfers use |
 | `POST /api/events/poke` | **(1.4)** see Background streams |
 | `POST /api/clear-cache` | **(1.4, feature `clear-cache`)** no sign-in needed, changes nothing on the server → `204` with `Clear-Site-Data: "cache"` (and `Cache-Control: no-store`): the browser drops what it cached from this Beam (thumbnails, files viewed inline, which are cached for a year). Call it after a `401` confirmed to come from your own Beam, once you have wiped your data. Only from Beam's own pages: a `Sec-Fetch-Site` other than `same-origin`, or a foreign `Origin`, gets `403 { reason: "csrf" }` |
-| `GET /api/metrics` | **(1.4)** how the server is doing (see Metrics). **(1.14.3)** `403` for a session-only sign-in, as backups |
+| `GET /api/metrics` | **(1.4)** how the server is doing (see Metrics). **(1.14.3)** `403` for a session-only sign-in, as backups; **(1.25.4)** `403 reason "trusted"` for one that isn't trusted |
 | `POST /api/move`, `DELETE /api/move` | **(v3)** see When the server moves |
 | `GET /api/admin/export` | **(v3)** the whole Beam as a `.tar.gz` (master key, or a token from an approved `purpose: "move"` request). `?freeze` pauses changes until a move completes |
-| `GET /api/backups` | **(1.8.1, feature `backups`)** this server's own backups: `{ "dir", "hours", "keep", "filesMB", "running", "last": { "at", "name", "bytes", "files", "filesLeftOut", "why" } \| { "at", "error" } \| null, "backups": [{ "name", "at", "bytes" }] }` (newest first). A backup is an export (`beam-backup-<UTC time>.tar.gz`), made every `BEAM_BACKUP_HOURS` into `BEAM_BACKUP_DIR`; the newest `BEAM_BACKUP_KEEP` are kept. Item files go in while they add up to `BEAM_BACKUP_FILES_MB`, the smallest first (1.14.3; before, all or none): `files` is true when every one went in, `filesLeftOut` counts the rest (also in the archive's `beam-export.json`); a file left out isn't in the backup's item list. Restore: stop Beam, then `node server.js import <backup> --force`. `403` for a session-only sign-in. **(1.23.3, S-11)** Without `BEAM_BACKUP_DIR`: `beam-backups` next to the data folder (a plain `backups` there that already holds Beam's backups stays in use), or `backups` inside it when the data folder is at a drive's root |
-| `POST /api/backups` | **(1.8.1)** a backup now (Settings → Server, `node server.js backup`) → `201` with the same as `GET`; one at a time (a second gets the one being written). `500` if writing it failed |
+| `GET /api/backups` | **(1.8.1, feature `backups`)** this server's own backups: `{ "dir", "hours", "keep", "filesMB", "running", "last": { "at", "name", "bytes", "files", "filesLeftOut", "why" } \| { "at", "error" } \| null, "backups": [{ "name", "at", "bytes" }] }` (newest first). A backup is an export (`beam-backup-<UTC time>.tar.gz`), made every `BEAM_BACKUP_HOURS` into `BEAM_BACKUP_DIR`; the newest `BEAM_BACKUP_KEEP` are kept. Item files go in while they add up to `BEAM_BACKUP_FILES_MB`, the smallest first (1.14.3; before, all or none): `files` is true when every one went in, `filesLeftOut` counts the rest (also in the archive's `beam-export.json`); a file left out isn't in the backup's item list. Restore: stop Beam, then `node server.js import <backup> --force`. `403` for a session-only sign-in. **(1.23.3, S-11)** Without `BEAM_BACKUP_DIR`: `beam-backups` next to the data folder (a plain `backups` there that already holds Beam's backups stays in use), or `backups` inside it when the data folder is at a drive's root. **(1.25.4)** `403 reason "trusted"` for a sign-in that isn't trusted |
+| `POST /api/backups` | **(1.8.1)** a backup now (Settings → Server, `node server.js backup`) → `201` with the same as `GET`; one at a time (a second gets the one being written). `500` if writing it failed. **(1.25.4)** A trusted sign-in only (`403 reason "trusted"`): each backup removes the oldest beyond `BEAM_BACKUP_KEEP` |
 | `POST /api/admin/shutdown` | **(v3)** stops the server cleanly; master key, from the server machine only (`node server.js stop`) |
 | `GET /api/qr.svg?data=…`, `GET /api/qr.png?data=…` | a QR code (signed-in only) |
 | `GET /api/updates` | see App updates |
-| `POST /api/updates/release` | **(1.19, feature `staged-updates`)** the Windows build waiting on the PC that tries it first (or stopped there) goes to every PC now → `{ "rollout" }`; `409` when nothing is waiting; `403` for a session-only sign-in |
+| `POST /api/updates/release` | **(1.19, feature `staged-updates`)** the Windows build waiting on the PC that tries it first (or stopped there) goes to every PC now → `{ "rollout" }`; `409` when nothing is waiting; `403` for a session-only sign-in, and **(1.25.4)** `403 reason "trusted"` for one that isn't trusted |
 | `GET /download/windows` | the Windows app (`Beam.exe`), if built |
 | `GET /download/android` | the Android app (`beam.apk`), if built |
 

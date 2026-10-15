@@ -354,7 +354,10 @@ namespace Beam
             // (1.17.5, security review L-2) scripts that run where Python or Git Bash is installed (the user's PCs have both),
             // Remote Desktop files (they connect out, drives shared), Office add-in installers, OneNote packages, Java Web
             // Start, Windows Sandbox and AutoHotkey files
-            ".py", ".pyw", ".pyz", ".pyzw", ".pyc", ".pyo", ".sh", ".bash", ".rdp", ".vsto", ".one", ".onepkg", ".jnlp", ".wsb", ".ahk"
+            ".py", ".pyw", ".pyz", ".pyzw", ".pyc", ".pyo", ".sh", ".bash", ".rdp", ".vsto", ".one", ".onepkg", ".jnlp", ".wsb", ".ahk",
+            // (1.17.6, the user's audit of 2026-10-14, I1) Windows update and provisioning packages, certificates and their
+            // stores and lists (they open Windows' install wizard), MOF files
+            ".msu", ".ppkg", ".cer", ".crt", ".der", ".p7b", ".p7c", ".p7r", ".spc", ".pfx", ".p12", ".sst", ".stl", ".crl", ".mof"
         };
 
         public static bool IsExecutable(string path)

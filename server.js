@@ -2689,6 +2689,9 @@ async function postHistory(req, res, _m, url) {
 // GET /api/devices/{id}/history[?days=30]: { device, name, entries (newest first), up, at }.
 function getHistory(req, res, [id], url) {
   const target = targetDevice(id);
+  // (1.25.4, the user's audit M1) what each PC did and when: as a PC's log
+  if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read a device’s history');
+  if (!isTrusted(authOf(req))) throw notTrusted('read a device’s history');
   const days = Math.min(120, Math.max(1, Math.floor(Number(url.searchParams.get('days')) || 30)));
   const h = history[target.id];
   // (offline now for 10 minutes or more: that spell too, still going)
@@ -2860,6 +2863,7 @@ async function askDeviceLog(req, res, [id], url) {
   const target = targetDevice(id);
   await readJson(req, { optional: true });
   if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read a PC’s log');
+  if (!isTrusted(authOf(req))) throw notTrusted('read a PC’s log'); // (1.25.4, the user's audit M1)
   if (!canSendLog(target)) throw httpError(409, `${target.name} can’t send its log (that needs Beam for Windows ${LOG_APP_MIN} or later, or Beam for Linux)`);
   if (!isOnline(target.id)) throw httpError(409, `${target.name} is offline`);
   const askId = crypto.randomBytes(8).toString('hex');
@@ -6266,12 +6270,13 @@ function noticeWindowsBuild(updates) {
 }
 
 // What a device is offered: the build being rolled out only to the pilot among the Windows apps (a rollout without a
-// pilot takes the first Windows app that connects).
+// pilot takes the first Windows app that connects). (1.25.4, the user's audit of 2026-10-14) A build stopped at its pilot
+// stays held back too: until then any PC that asked or connected after the stop was offered it.
 function offersFor(deviceId, updates) {
-  const r = activeRollout();
+  const r = settings.rollout?.released ? null : settings.rollout; // (waiting on its pilot, or stopped there)
   const d = devices[resolveAlias(deviceId || '')];
   if (!r || !updates.windows || updates.windows.sha256 !== r.sha256 || d?.platform !== 'windows' || d.id === r.pilot) return updates;
-  if (!r.pilot && d.appVersion && isOnline(d.id)) {
+  if (!r.halted && !r.pilot && d.appVersion && isOnline(d.id)) {
     r.pilot = d.id;
     r.since = now();
     log.info(`Windows ${r.version}: offered to ${d.name} first (the first PC to connect)`);
@@ -6343,6 +6348,8 @@ function rolloutInfo() {
 // POST /api/updates/release: the build waiting on its pilot (or stopped there) goes to every PC now.
 async function releaseUpdate(req, res, _m, url) {
   if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t do that');
+  // (1.25.4, the user's audit M1) also a build that failed on its pilot: a trusted sign-in only
+  if (!isTrusted(authOf(req))) throw notTrusted('offer a Windows build to every PC');
   await readJson(req, { optional: true });
   const r = settings.rollout;
   if (!r || r.released) throw httpError(409, 'No Windows build is waiting to go to every PC');
@@ -6593,6 +6600,8 @@ async function patchSettings(req, res) {
   if (sensitive && !isTrusted(authOf(req))) {
     throw httpError(403, 'To change who signs in automatically or Beam’s address, sign in on this device with the password, a pairing link or an approval first', { reason: 'sign-in' });
   }
+  // (1.25.4, the user's audit) Turning "one PC first" off sends a build still on its pilot to every PC at once.
+  if (body.stagedUpdates === false && !isTrusted(authOf(req))) throw notTrusted('send Windows builds to every PC at once');
   // Everything is checked before anything changes.
   const { unblockNode, allowOwner, removeOwner, ...rest } = body;
   const nodes = unblockNode === undefined ? [] : [].concat(unblockNode);
@@ -6668,9 +6677,11 @@ function deleteBlockedNode(req, res, [node], url) {
   send(res, 200, publicSettings());
 }
 
-// (audit B-3/S-3) The activity log names devices, accounts, addresses and file names: a lasting sign-in only, as backups.
+// (audit B-3/S-3) The activity log names devices, accounts, addresses and file names: a lasting sign-in only, as backups;
+// (1.25.4, the user's audit M1) and a trusted one.
 async function getLogs(req, res, _m, url) {
   if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read the activity log');
+  if (!isTrusted(authOf(req))) throw notTrusted('read the server’s log');
   const lines = Math.min(5000, Math.max(1, Number(url.searchParams.get('lines')) || 200));
   send(res, 200, { lines: await log.tail(lines) });
 }
@@ -7602,6 +7613,7 @@ function backupsInfo(list) {
 // GET /api/backups: where they go, how often, the last one and the ones there (names, times, sizes).
 async function getBackups(req, res) {
   if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t see backups');
+  if (!isTrusted(authOf(req))) throw notTrusted('see the backups'); // (1.25.4, the user's audit M1)
   send(res, 200, backupsInfo(await listBackups()));
 }
 
@@ -7609,6 +7621,8 @@ async function getBackups(req, res) {
 async function postBackup(req, res) {
   const auth = authOf(req);
   if (auth.session) throw httpError(403, 'A sign-in for this browser session only can’t make backups');
+  // (1.25.4, the user's audit) each one prunes to the newest BACKUP_KEEP: fourteen in a row would replace them all
+  if (!isTrusted(auth)) throw notTrusted('make backups');
   const who = auth.via === 'master' && machineOf(req) === 'host' && !viaTrustedProxy(req) ? 'asked on this PC' : `asked by ${whoName(deviceIdOf(req, new URL(req.url, 'http://beam')), 'a device')}`;
   try { await backupNow(who); } catch (err) { throw httpError(500, `The backup failed: ${err.message}`); }
   send(res, 201, backupsInfo(await listBackups()));
@@ -7780,6 +7794,7 @@ function watchLoop() {
 function getMetrics(req, res) {
   // (audit B-3) a lasting sign-in, as backups and the activity log (every sign-in is an owner today: `role` can't tell)
   if (authOf(req).session) throw httpError(403, 'A sign-in for this browser session only can’t read the metrics');
+  if (!isTrusted(authOf(req))) throw notTrusted('read the metrics'); // (1.25.4, the user's audit M1)
   const ms = ns => (Number.isFinite(ns) && loopHist?.count ? Math.round(ns / 1e4) / 100 : null);
   const loop = { utilization: Math.round(performance.eventLoopUtilization().utilization * 1e4) / 1e4, since: loopSince || null, p50: ms(loopHist?.percentile(50)), p99: ms(loopHist?.percentile(99)), max: ms(loopHist?.max) };
   watchLoop();
