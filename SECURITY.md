@@ -51,6 +51,11 @@ for the owner's family, which may face the internet.
   server's own list, which a trusted sign-in can add to (1.25). That makes sure a PC installs what the list says,
   not that the list is trustworthy: whoever controls your server's list can install programs on every PC that allows
   it. Unlike the Beam apps' own updates, the list isn't signed with a key the server never holds.
+- **Shared folders** (1.26, off until chosen at each PC): a PC shows and sends files only from the folders chosen at that
+  PC, and only to the devices ticked there; the server says which device asks (a trusted sign-in), so whoever controls
+  the server could ask as any of them. A PC never shows or follows anything outside a chosen folder, hidden or system
+  files, names starting with "." (where keys like `.ssh` live), links or junctions; it won't share a whole drive, the
+  profile folder or above it, a network folder, AppData, Windows or Program Files. Nothing can be changed there.
 
 ## Trade-offs, on purpose
 

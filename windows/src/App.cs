@@ -734,6 +734,12 @@ namespace Beam
                 case "app-uninstall":
                     Apps.OnUninstall(d);
                     break;
+                case "files-request": // Beam 1.26: another device looks in this PC's shared folders (chosen here)
+                    Shares.OnRequest(this, d);
+                    break;
+                case "files-copy": // ...and copies files from one: sent to it as anything is
+                    Shares.OnCopy(this, d);
+                    break;
                 case "upload": // a file still arriving (Beam 1.4 servers can already serve what has arrived)
                     OnUploadProgress(d);
                     break;
@@ -1097,7 +1103,7 @@ namespace Beam
         }
 
         // A device id -> its name (else the text as given, e.g. when the server already sent a name).
-        string ByName(string idOrName)
+        public string ByName(string idOrName)
         {
             if (string.IsNullOrEmpty(idOrName)) return null;
             var dev = DeviceById(idOrName);
@@ -2022,8 +2028,9 @@ namespace Beam
             }
         }
 
-        // Files are uploaded natively (resumable, surviving restarts). Folders are zipped first.
-        public int SendFiles(IEnumerable<string> paths, List<string> to, bool notify, string origin, Action<UploadJob> finished)
+        // Files are uploaded natively (resumable, surviving restarts). Folders are zipped first. (1.18) mayDelete false:
+        // never the outbox's delete-after-sending (a shared folder's copies: the original always stays).
+        public int SendFiles(IEnumerable<string> paths, List<string> to, bool notify, string origin, Action<UploadJob> finished, bool mayDelete = true)
         {
             int count = 0;
             foreach (var p in paths)
@@ -2054,7 +2061,7 @@ namespace Beam
                 job.Name = Path.GetFileName(p);
                 try { var fi = new FileInfo(p); job.Size = fi.Length; job.MtimeTicks = fi.LastWriteTimeUtc.Ticks; } catch { }
                 job.Mime = FileUtil.MimeFor(p);
-                job.DeleteWhenDone = p.StartsWith(Cfg.OutgoingFolder + "\\", StringComparison.OrdinalIgnoreCase);
+                job.DeleteWhenDone = mayDelete && p.StartsWith(Cfg.OutgoingFolder + "\\", StringComparison.OrdinalIgnoreCase);
                 Persist(job);
                 up.Enqueue(job);
                 if (TransferChanged != null) TransferChanged(job);
@@ -2406,6 +2413,16 @@ namespace Beam
             s["allowRemoteControl"] = ServerHas("remote-control") ? (object)Cfg.AllowRemoteControl : null;
             // Beam 1.21 (null: the server has no apps). As for remote control: the page can turn it off, never on.
             s["appsAllowed"] = ServerHas("apps") ? (object)Cfg.AppsAllowed : null;
+            // (1.18, Beam 1.26; null: the server has none) The folders shared from here and who sees each: read-only (the
+            // page opens SharedFoldersForm, bridge `sharedFolders`).
+            s["sharedFolders"] = ServerHas("shared-folders") ? (object)Cfg.SharedFolders.Select(f =>
+            {
+                var o = new Dictionary<string, object>();
+                o["name"] = f.Name;
+                o["path"] = f.Path;
+                o["devices"] = f.Devices.Select(ByName).Cast<object>().ToArray();
+                return (object)o;
+            }).ToArray() : null;
             // (1.16.1) Apps waiting for an answer here, oldest first: the page's bar (read-only; answered in the question).
             s["appAsks"] = ServerHas("apps") ? (object)Apps.Asks.OrderBy(a => a.At).Select(a =>
             {
@@ -2590,6 +2607,42 @@ namespace Beam
             if (!Ui.TestOffscreen) { rcForm.Activate(); Native.SetForegroundWindow(rcForm.Handle); }
         }
 
+        SharedFoldersForm sharesForm;
+
+        // (1.18) Settings → This PC → Shared folders…: chosen only here, never from the page, and not while this PC is
+        // controlled (the viewer could tick itself).
+        public void ShowSharedFolders(Form owner)
+        {
+            if (!ServerHas("shared-folders") || RcBlocks("changing shared folders")) return;
+            if (sharesForm != null && !sharesForm.IsDisposed) { sharesForm.Activate(); return; }
+            sharesForm = new SharedFoldersForm(this);
+            Ui.PlaceForTest(sharesForm);
+            sharesForm.FormClosed += (s2, e2) => sharesForm = null;
+            if (owner != null) sharesForm.Show(owner); else sharesForm.Show();
+            if (!Ui.TestOffscreen) { sharesForm.Activate(); Native.SetForegroundWindow(sharesForm.Handle); }
+        }
+
+        // (tests, a custom --config only) The Shared folders window: open, shot:<png>, save, close.
+        void SharesTest(string cmd)
+        {
+            if (cmd == "open") { ShowSharedFolders(null); Log.Write("Shared folders (test): " + (sharesForm != null ? "open, " + sharesForm.Describe() : "not opened")); return; }
+            if (sharesForm == null || sharesForm.IsDisposed) { Log.Write("Shared folders (test): no window"); return; }
+            if (cmd.StartsWith("shot:")) { sharesForm.Shot(cmd.Substring(5)); Log.Write("Shared folders (test): shot"); }
+            else if (cmd == "save") sharesForm.SaveForTest();
+            else if (cmd == "close") sharesForm.Close();
+        }
+
+        // The folders as SharedFoldersForm saved them (one that can't be shared is left out), kept and logged.
+        public void SetSharedFolders(List<SharedFolder> list, string from)
+        {
+            if (RcBlocks("changing shared folders")) return;
+            Cfg.SharedFolders = list.Where(f => Shares.Refusal(f.Path, Cfg) == null).ToList();
+            Cfg.Save();
+            Log.Write("Shared folders (" + from + "): " + (Cfg.SharedFolders.Count == 0 ? "none" : string.Join("; ",
+                Cfg.SharedFolders.Select(f => f.Name + " (" + f.Path + ") with " + (f.Devices.Count == 0 ? "no device" : string.Join(", ", f.Devices.Select(ByName)))))));
+            MarkChanged();
+        }
+
         // The page's "Control" (bridge openRemote): a window of its own on <server>/#remote=<id>. Null, or what's wrong.
         public string OpenRemote(string device)
         {
@@ -2770,6 +2823,7 @@ namespace Beam
             if (o.Family) OpenFamilyWhenKnown(o.Updated != null || o.UpdateFailed != null); // (after an update: without the focus)
             if (o.TestFamily != null && Cfg.CustomPath) FamilyTest(o.TestFamily);
             if (o.TestApps != null && Cfg.CustomPath) Apps.TestCommand(o.TestApps);
+            if (o.TestShares != null && Cfg.CustomPath) SharesTest(o.TestShares);
             if (o.RemoveApp != null) Apps.RemoveFromWindows(o.RemoveApp); // (1.16: Windows' Installed apps → Uninstall)
         }
 

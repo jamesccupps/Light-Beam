@@ -413,6 +413,72 @@ export default function register(test) {
     await page.evaluate(`$('#genDlg').close()`);
   });
 
+  test('shared folders (1.26): Device info → Shared folders asks the PC, opens its one folder, goes into a subfolder and back up, filters, and copies the ticked files here', async ctx => {
+    const page = await ctx.signedIn();
+    await recordToasts(page);
+    await page.waitFor(`serverHas('shared-folders')`, 8000, 'the server offers it');
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Shop PC', 'windows', ctx.nextIp(), '1.18.0');
+    await pc.me();
+    const stream = pc.stream();
+    ctx.defer(() => stream.close());
+    await page.waitFor(`deviceById('${pc.id}')?.online === true && deviceById('${pc.id}')?.can?.files === true`, 8000, 'online, and shares folders');
+    // The PC's stand-in answers what it's asked: one folder (Downloads) with a subfolder and two files
+    const asked = [];
+    let seen = 0;
+    const answer = async () => {
+      for (const e of stream.events.slice(seen)) {
+        seen++;
+        if (e.event === 'files-request') {
+          asked.push(e.data);
+          const body = !e.data.share ? { ok: true, shares: [{ id: 'a1b2c3d4', name: 'Downloads' }] }
+            : e.data.path === 'Photos' ? { ok: true, share: 'a1b2c3d4', name: 'Downloads', path: 'Photos', entries: [{ n: 'beach.jpg', s: 2048, m: Date.now() }] }
+              : { ok: true, share: 'a1b2c3d4', name: 'Downloads', path: '', entries: [{ n: 'Photos', dir: true, m: Date.now() }, { n: 'report.pdf', s: 1048576, m: Date.now() - 86400e3 }, { n: 'setup.exe', s: 5242880, m: Date.now() }] };
+          await pc.post('/api/devices/me/files', { id: e.data.id, ...body });
+        } else if (e.event === 'files-copy') {
+          asked.push(e.data);
+          await pc.post('/api/devices/me/files', { id: e.data.id, ok: true, sending: e.data.names.length, skipped: [] });
+        }
+      }
+    };
+    const pump = setInterval(() => answer().catch(() => {}), 100);
+    ctx.defer(() => clearInterval(pump));
+    await page.evaluate(`openDeviceInfo(deviceById('${pc.id}'))`);
+    await page.waitFor(`[...$('#genFoot').querySelectorAll('button')].some(b => b.textContent.trim() === 'Shared folders')`, 5000, 'the button');
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent.trim() === 'Shared folders').click()`);
+    // Its only folder opens at once: folders first, then files with their sizes; Copy is off until a file is ticked
+    await page.waitFor(`$('#genTitle')?.textContent === 'Shop PC: Downloads' && $$('#genBody .shared-row').length === 3`, 8000, 'the folder');
+    const rows = await page.evaluate(`[...$$('#genBody .shared-row')].map(r => r.textContent)`);
+    assert(/^Photos/.test(rows[0]) && /^report\.pdf1\.0 MB/.test(rows[1]), JSON.stringify(rows));
+    assert(await page.evaluate(`$('#genFoot .shared-copy').disabled`), 'nothing ticked: Copy is off');
+    // Into Photos, and back up
+    await page.evaluate(`$$('#genBody .shared-row.dir')[0].click()`);
+    await page.waitFor(`$('#genTitle').textContent === 'Shop PC: Photos' && /beach\\.jpg/.test($('#genBody .shared-list').textContent) && /Downloads/.test($('#genBody .shared-crumbs').textContent)`, 8000, 'the subfolder');
+    await page.evaluate(`$('#genBody .shared-row.up').click()`);
+    await page.waitFor(`$('#genTitle').textContent === 'Shop PC: Downloads' && $$('#genBody .shared-row').length === 3`, 8000, 'back up');
+    // The filter, then both files ticked and copied
+    await page.evaluate(`(() => { const i = $('#genBody .shared-filter'); i.value = 'PDF'; i.dispatchEvent(new Event('input')); return true; })()`);
+    await page.waitFor(`$$('#genBody .shared-row').length === 1 && /report\\.pdf/.test($('#genBody .shared-row').textContent)`, 3000, 'filtered');
+    await page.evaluate(`(() => { const i = $('#genBody .shared-filter'); i.value = ''; i.dispatchEvent(new Event('input')); return true; })()`);
+    await page.evaluate(`[...$$('#genBody .shared-row.file input')].forEach(b => b.click())`);
+    await page.waitFor(`!$('#genFoot .shared-copy').disabled && /Copy 2 files to this device/.test($('#genFoot .shared-copy').textContent)`, 3000, 'two ticked');
+    await page.evaluate(`$('#genFoot .shared-copy').click()`);
+    await page.waitFor(`__toasts.some(t => /Shop PC is sending 2 files: they arrive in your conversation with it/.test(t))`, 8000, 'the toast');
+    const copy = asked.find(a => a.names);
+    assert(copy && copy.share === 'a1b2c3d4' && copy.path === '' && JSON.stringify(copy.names) === '["report.pdf","setup.exe"]', JSON.stringify(copy));
+    assert(await page.evaluate(`$('#genFoot .shared-copy').disabled`), 'the ticks are cleared');
+    await page.evaluate(`$('#genDlg').close()`);
+    eq(page.errors, [], 'no page errors');
+    // The Windows app's This PC: the folders and who sees each (read-only); its button asks the app for its own window
+    const { page: host } = await hostPage(ctx, { features: ['transfers', 'localFiles', 'settings', 'openPanel', 'sharedFolders'],
+      settings: { sharedFolders: [{ name: 'Downloads', path: 'D:/Shared/Downloads', devices: ['Robin Laptop', 'Pixel'] }] } });
+    await host.waitFor(`paired && hostState.ready`);
+    await host.evaluate(`openSettings('pc')`);
+    await host.waitFor(`/Shared folders/.test($('#set-pc')?.textContent || '') && /Downloads \\(D:\\/Shared\\/Downloads\\): Robin Laptop, Pixel/.test($('#set-pc').textContent)`, 5000, 'the folders');
+    await host.evaluate(`[...$('#set-pc').querySelectorAll('button')].find(b => /Shared folders…/.test(b.textContent)).click()`);
+    await host.waitFor(`__host.log.some(m => m.type === 'sharedFolders')`, 3000, 'the app’s own window');
+    eq(host.errors, [], 'no page errors (This PC)');
+  });
+
   test('apps (1.21): Settings → Apps adds an app (winget, a file), installs it on all PCs (a PC asks first, then says it’s installed) and uninstalls it; This PC’s switch', async ctx => {
     const page = await ctx.signedIn();
     await recordToasts(page);

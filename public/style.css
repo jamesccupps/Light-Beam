@@ -401,6 +401,18 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .line-filter input[type="search"] { flex: 1 1 220px; }
 .line-filter .check { margin: 0; }
 .line-count:empty { display: none; }
+/* (1.26) a PC's shared folders: a folder's rows (folders open, files tick), a filter, Copy to this device */
+.shared-crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; margin: 0 0 8px; overflow-wrap: anywhere; }
+.shared-filter { width: 100%; margin: 0 0 8px; }
+.shared-list { display: flex; flex-direction: column; max-height: 60vh; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
+.shared-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto; align-items: center; gap: 4px 10px; width: 100%; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--border); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.shared-row:last-child { border-bottom: 0; }
+.shared-row:hover { background: var(--surface-2); }
+.shared-row input[type="checkbox"] { margin: 0; width: 16px; height: 16px; }
+.shared-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shared-size, .shared-when { white-space: nowrap; text-align: right; }
+.shared-list > .note, .shared-list > p { margin: 10px 12px; }
+@media (max-width: 560px) { .shared-row { grid-template-columns: 22px minmax(0, 1fr) auto; } .shared-when { display: none; } }
 .shortcuts { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 8px 0; align-items: baseline; }
 .shortcuts dd { margin: 0; }
 .switcher { padding-bottom: 12px; }

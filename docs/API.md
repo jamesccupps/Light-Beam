@@ -19,7 +19,7 @@ is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keybo
 alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
 device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
 `device-logs` (shipped with 1.19's in Beam 1.20.0), 1.21 `apps`, 1.22 `linux` (Beam for Linux) and 1.23 `vnc` (control
-of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials). Use each one only when its flag is there; everything older keeps working.
+of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials), and 1.26 `shared-folders` (a PC's folders shared with some devices). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -55,7 +55,8 @@ sign-in over https sets `__Host-beam_key` and clears `beam_key`). The Windows ap
     another device; approving a move (and a move sign-in's export); moving (`POST`/`DELETE /api/move`); approving
     devices; letting a blocked machine back in. **(1.25.4, the owner's audit of 2026-10-14)** Also offering a Windows
     build to every PC (`POST /api/updates/release`, and `stagedUpdates: false`), the server's log, a PC's log and
-    history, the server's backups (seeing them, making one) and the metrics. Widening who signs in automatically and
+    history, the server's backups (seeing them, making one) and the metrics; **(1.26)** a PC's shared folders (looking,
+    copying). Widening who signs in automatically and
     Beam's address (`publicUrl`) answer `403 { "reason": "sign-in" }` as before.
   - A sign-in that isn't trusted, naming the id of a device without a device key that has a trusted sign-in, gets a
     device of its own (as a sign-in without the key does for a keyed device).
@@ -405,7 +406,7 @@ can't pass for it.
   "status": { "battery": { "level": 64, "charging": false }, "storage": { "free": 51200000000, "total": 256000000000 },
               "os": "Android 16", "at": 1790723000000 },
   "tailscale": { "name": "pixel-9", "dns": "pixel-9.tail1234.ts.net", "ip": "100.70.248.8", "online": true, "keyExpiry": 1806278692000 },
-  "can": { "ring": true, "wake": false, "remoteDesktop": false, "remoteControl": false, "log": false, "apps": false },
+  "can": { "ring": true, "wake": false, "remoteDesktop": false, "remoteControl": false, "log": false, "apps": false, "files": false },
   "settings": { "phoneNotifications": false } }
 ```
 - `online` is true while the device holds an open `/api/events` connection.
@@ -437,6 +438,8 @@ can't pass for it.
     on (`status.remoteControl`) and tied to its app on a Tailscale machine, that isn't locked (`status.locked`) and
     wasn't turned off from another device since (see Remote control).
   - `log` **(1.20)**: a Windows PC with the Beam app 1.14 or later, which sends its log when asked (see A PC's log).
+  - `files` **(1.26)**: a Windows PC with the Beam app 1.18 or later, which can share folders (see Shared folders; what it
+    shares with whom is only known by asking it).
 - **MAC addresses are never sent to clients.** Devices report them, but only the server uses them, to wake the device.
 - `settings` (1.5): the device's own settings, which any signed-in device may change (`PUT /api/devices/{id}/settings`):
   - `phoneNotifications`: it shows phone notifications (see Phone notifications). Always present, `false` by default.
@@ -700,6 +703,22 @@ streams only) and the answer back, and keeps nothing.
 | `POST /api/devices/{id}/log` | `{ "name", "text", "size", "at" }` (`Cache-Control: no-store`), within 30 s. `409` when it can't (too old, offline, no answer in time); `403` for a session-only sign-in, and **(1.25.4)** `403 reason "trusted"` for one that isn't trusted |
 | `POST /api/devices/me/log` | the PC's answer: `{ "id", "name", "text" }` (1 MB at most is passed on, the end of it) → `204`; `404` for a request that isn't for this device or timed out |
 
+### Shared folders (1.26)
+Feature `shared-folders`. A PC's folders that some of the owner's devices may look in and copy files from, chosen only at
+that PC (Beam for Windows 1.18: Settings → This PC → Shared folders…, the folders and for each the devices that see it);
+read-only. The server relays, for a trusted sign-in made to last, and says who asks; the PC decides and answers; nothing is
+kept on the server. A copy is an ordinary send from the PC to the device that asked (items from it, `to` that device).
+Devices' `can.files`: a Windows app 1.18 or later. What a PC never shows or sends: anything outside the folder, hidden or
+system entries, names starting with `.`, links and junctions (of reparse points only OneDrive's placeholders and Windows'
+compressed or deduplicated files); a folder can't be a whole drive, the profile folder or above it, a network folder, or
+inside AppData, Windows or Program Files.
+
+| Method & path | Result |
+|---|---|
+| `POST /api/devices/{id}/files` | `{ "share"?, "path"? }` (the folder's id, and a folder inside it: steps joined with `/`) → without `share`: `{ "shares": [{ "id", "name" }] }`, the folders shared with this device; with it: `{ "share", "name", "path", "entries": [{ "n", "dir"?, "s", "m" }], "more"? }` (folders first; 2000 at most; `path` as the folders are named on disk; `s` bytes, `m` ms). `Cache-Control: no-store`. A trusted sign-in made to last (`403` reason `trusted` / `temporary`); `409` too old, offline, no answer within 15 s, or asking about itself; `429` while 4 of this device's requests to that PC wait; the PC's no: `403 { reason: "not-shared" }`, `404 { reason: "not-found" }` (no such folder, or one it doesn't show), `409 { reason: "error" }`, with its words in `error` |
+| `POST /api/devices/{id}/files/copy` | `{ "share", "path", "names": [...] }` (1–100 names in that folder) → `{ "sending", "skipped": [{ "n", "why" }] }`: the PC sends those it can (files only) to this device; the same errors |
+| `POST /api/devices/me/files` | the PC's answer: `{ "id", "ok": true, … }` as above, or `{ "id", "ok": false, "reason", "error" }` (1 MB at most; names cleaned of control and bidi characters) → `204`; `404` for a request that isn't for this device or timed out |
+
 ### Beam for Linux (1.22)
 Feature `linux`. A Raspberry Pi (or another Linux computer that stays on) as a device of its own: the command-line client
 (`cli/beam.js`) run as a service, `beam agent`. `linux/build.mjs` makes it into `dist/beam-linux.js` (the client with
@@ -928,6 +947,7 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk`, `tailscaleKey` (1.17) and `powerLoss` (1.18) |
 | `speed-test` | **(1.18)** `{ "id" }`, to the asked device's own streams only (at once): run a speed test (see Speed tests) and send the result with this `id` |
 | `log-request` | **(1.20)** `{ "id" }`, to the asked PC's own streams only (at once): send the end of its log with this `id` (see A PC's log) |
+| `files-request`, `files-copy` | **(1.26)** `{ "id", "by", "byName", "share", "path" }` (+ `"names"` for a copy), to the asked PC's own streams only (at once): answer with this `id` if `by` is one of the folder's devices (see Shared folders) |
 | `wake-relay` | **(1.24)** `{ "device", "name", "macs", "by" }`, to one stream of each connected Beam for Linux 1.3+ (not the device itself): send Wake-on-LAN for those MAC addresses on this computer's networks |
 | `notification`, `notification-removed`, `notification-request`, `notification-request-done` | **(1.5)** see Phone notifications; only the devices concerned get them, urgent on background streams |
 | `rc-request`, `rc-signal`, `rc-end`, `rc-disable` | **(1.6)** see Remote control; only the devices named get them, urgent on background streams |

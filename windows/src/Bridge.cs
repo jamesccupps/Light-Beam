@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -215,6 +215,10 @@ namespace Beam
                 }
                 case "allowApps": // (1.16) "Let Beam install apps on this PC": on through the native confirmation, at this PC
                     if (!app.Cfg.AppsAllowed) app.Apps.Toggle("Settings on this PC");
+                    Reply(id, Obj("settings", app.SettingsObject()));
+                    break;
+                case "sharedFolders": // (1.18) Shared folders…: the native window (the folders and devices are chosen only there)
+                    app.ShowSharedFolders(win);
                     Reply(id, Obj("settings", app.SettingsObject()));
                     break;
                 case "appAsk": // (1.16.1) the window's bar: an app waiting here brings up its question (installing is agreed

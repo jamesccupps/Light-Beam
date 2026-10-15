@@ -190,6 +190,7 @@ function sectionPc() {
     hotkeys.length > 0 && field('Hotkeys', el('ul', { class: 'plain' }, ...hotkeys)),
     ...rcPcRows(s), // (1.6: shown when the app reports allowRemoteControl)
     ...appsPcRows(s), // (1.21: shown when the app reports appsAllowed)
+    ...sharedPcRows(s), // (1.26: shown when the app reports sharedFolders; files.js)
     el('h4', {}, 'Updates'),
     note(`Beam app ${u.current || s.app?.version || hostState.version || ''}${s.app && s.app.installed === false ? ' (running from outside its install folder)' : ''}. ${updateText}`),
     toggle('Install updates automatically', s.autoUpdate, v => set({ autoUpdate: v })),

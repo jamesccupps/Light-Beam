@@ -9,6 +9,6 @@ namespace Beam
 {
     static class AppVersion
     {
-        public const string Text = "1.17.7";
+        public const string Text = "1.18.0";
     }
 }
