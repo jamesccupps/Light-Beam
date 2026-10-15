@@ -238,11 +238,21 @@ function openDeviceInfo(d, { refresh = false } = {}) {
     beamVersionOf(d) && ['Beam', beamVersionOf(d)],
     (d.tailscale?.dns || d.tailscale?.ip) && ['Tailscale', d.tailscale.dns || d.tailscale.ip],
     key && ['Tailscale sign-in', key.text, key.low],
+    d.backup?.at && ['Settings backed up', timeAgo(d.backup.at)], // (1.8.1; Settings → Devices' rows said it before the remake)
     s.at && ['Reported', timeAgo(s.at)],
   ].filter(Boolean);
   const facts = el('dl', { class: 'facts' }, ...rows.flatMap(([k, v, low]) => [el('dt', {}, k), el('dd', { class: low ? 'low' : null }, v)]));
   const buttons = deviceActions(d).map(a => el('button', { class: 'btn', type: 'button', disabled: Boolean(a.disabled), onclick: () => a.action() }, icon(a.icon), a.label));
-  const body = [facts, trustToggle(d), alertsSupported() && offlineAlertToggle(d), historySection(d)].filter(Boolean);
+  // Everything about this device in one place (Settings → Devices opens this): its switches, remote control, history,
+  // signing it out.
+  const other = d.id !== me.id;
+  const rc = rcDeviceRows(d);
+  const body = [facts,
+    card(null, trustToggle(d), alertsSupported() && offlineAlertToggle(d),
+      other && phoneFeature() && switchRow('Show phone notifications', phoneShownFor(d), (v, box) => setPhoneShown(d.id, v, box))),
+    rc.length > 0 && el('div', { class: 'dev-rc' }, ...rc),
+    historySection(d),
+    other && el('div', { class: 'dev-end' }, el('button', { class: 'btn small-btn ghost danger', type: 'button', onclick: () => removeDevice(d) }, serverHas('tokens') ? 'Sign out…' : 'Forget…'))].filter(Boolean);
   if (refresh) {
     const focusables = () => [...dlg.querySelectorAll('button, input')];
     const at = focusables().indexOf(document.activeElement);
@@ -357,14 +367,14 @@ async function setAlerts(fields) {
 
 // (1.25, the security review) A device that signed in by itself (Tailscale) can send and receive, but controls PCs,
 // installs apps and sees the phone's notifications only once a device that can approves it here (PUT …/trust): in its
-// Device info and its row in Settings → Devices (`row`: the hint only while it isn't approved). Shown on such a device
-// for the others (a Linux computer can be approved, but never controls others).
+// Device info, and in Settings → Devices while it isn't approved (`row`). Shown on such a device for the others (a Linux
+// computer can be approved, but never controls others).
 function trustToggle(d, row = false) {
   if (!serverHas('trust') || !me.trusted || d.id === me.id || typeof d.trusted !== 'boolean') return null;
   const hint = d.platform === 'linux'
     ? 'Install apps and see the phone’s notifications from it. A Linux computer is only ever controlled, never controls others.'
     : 'Also see the phone’s notifications. Devices that signed in by themselves (Tailscale) need this once.';
-  return toggle('Can control PCs and install apps', d.trusted, async (v, box) => {
+  return switchRow('Can control PCs and install apps', d.trusted, async (v, box) => {
     try {
       await apiJson(`api/devices/${encodeURIComponent(d.id)}/trust`, jsonBody({ trusted: v }, 'PUT'));
       d.trusted = v;
@@ -376,40 +386,44 @@ function trustToggle(d, row = false) {
   }, { hint: row && d.trusted ? null : hint });
 }
 
-function offlineAlertToggle(d) {
+// In its Device info, or (`label`: its name) in Settings → Alerts' list of devices.
+function offlineAlertToggle(d, label = null) {
   const watched = (serverSettings?.alerts?.offline || []).includes(d.id);
-  return toggle('Alert me when it goes offline', watched, v => {
+  return switchRow(label || 'Alert me when it goes offline', watched, v => {
     const list = new Set(serverSettings?.alerts?.offline || []);
     if (v) list.add(d.id); else list.delete(d.id);
     setAlerts({ offline: [...list] });
-  }, { hint: 'After 10 minutes offline, and again when it’s back.' });
+  }, { hint: label ? null : 'After 10 minutes offline, and again when it’s back.' });
 }
 
 function sectionAlerts() {
   const a = serverSettings?.alerts;
-  if (!a) return note('This Beam server doesn’t send alerts.');
-  const watched = (a.offline || []).map(id => nameOf(id));
-  const parts = [
-    note('Alerts show up here and on your devices (and through ntfy, if the server has it set up).'),
-    toggle('A device’s battery is low', a.battery, v => setAlerts({ battery: v }), { hint: '15% or less and not charging.' }),
-    toggle('A device is running out of storage', a.storage, v => setAlerts({ storage: v }), { hint: 'Less than 2 GB (or 5%) free.' }),
-    toggle('The Beam server’s disk is almost full', a.serverDisk, v => setAlerts({ serverDisk: v })),
-    typeof a.tailscaleKey === 'boolean' && toggle('A Tailscale sign-in is running out', a.tailscaleKey, v => setAlerts({ tailscaleKey: v }), { hint: 'Two weeks and three days before, for your devices and this server.' }), // (1.17)
-    typeof a.powerLoss === 'boolean' && toggle('A PC lost power or crashed', a.powerLoss, v => setAlerts({ powerLoss: v }), { hint: 'When it’s back on after a power loss, a freeze, a blue screen or being forced off.' }), // (1.18)
-    typeof a.setup === 'boolean' && toggle('Something in Beam’s setup is wrong', a.setup, v => setAlerts({ setup: v }), { hint: 'The setup check (Settings → Server) looks every 6 hours: servers starting with Windows, Tailscale, backups, every PC up to date and starting with Windows.' }), // (1.20)
-    typeof a.hardware === 'boolean' && toggle('A Raspberry Pi is too hot or short of power', a.hardware, v => setAlerts({ hardware: v }), { hint: 'Its processor at 80 °C or more, or a power supply too weak for it (Beam for Linux says).' }), // (1.22)
-    field('Devices going offline', note(watched.length ? `Watching ${watched.join(', ')}.` : 'None yet. Turn it on for a device under Devices.')),
-    el('h4', {}, 'Recent alerts'),
-  ];
+  if (!a) return card(null, cardInfo('This Beam server doesn’t send alerts.'));
+  const others = devices.filter(d => d.id !== me.id).sort((x, y) => (y.online - x.online) || x.name.localeCompare(y.name));
+  let recent;
   if (!recentAlerts) {
-    parts.push(note('Loading…'));
+    recent = cardInfo('Loading…');
     loadAlerts().then(() => { if ($('#settingsDlg').open) renderSettings(); });
-  } else if (!recentAlerts.length) parts.push(note('No alerts so far.'));
+  } else if (!recentAlerts.length) recent = cardInfo('No alerts so far.');
   else {
-    parts.push(el('ul', { class: 'alert-list' }, ...recentAlerts.slice(0, 30).map(x => el('li', { class: x.level === 'warn' ? 'warn-row' : '' },
-      icon(x.level === 'warn' ? 'alert' : 'bell'), el('span', { class: 'alert-text' }, x.text), el('span', { class: 'muted small' }, x.at ? shortWhen(x.at) : '')))));
+    recent = el('ul', { class: 'set-row alert-list' }, ...recentAlerts.slice(0, 30).map(x => el('li', { class: x.level === 'warn' ? 'warn-row' : '' },
+      icon(x.level === 'warn' ? 'alert' : 'bell'), el('span', { class: 'alert-text' }, x.text), el('span', { class: 'muted small' }, x.at ? shortWhen(x.at) : ''))));
   }
-  return parts;
+  return [
+    intro('Alerts show up here and on your devices (and through ntfy, if the server has it set up).'),
+    card('Tell me when',
+      switchRow('A device’s battery is low', a.battery, v => setAlerts({ battery: v }), { hint: '15% or less and not charging.' }),
+      switchRow('A device is running out of storage', a.storage, v => setAlerts({ storage: v }), { hint: 'Less than 2 GB (or 5%) free.' }),
+      switchRow('The Beam server’s disk is almost full', a.serverDisk, v => setAlerts({ serverDisk: v })),
+      typeof a.tailscaleKey === 'boolean' && switchRow('A Tailscale sign-in is running out', a.tailscaleKey, v => setAlerts({ tailscaleKey: v }), { hint: 'Two weeks and three days before, for your devices and this server.' }), // (1.17)
+      typeof a.powerLoss === 'boolean' && switchRow('A PC lost power or crashed', a.powerLoss, v => setAlerts({ powerLoss: v }), { hint: 'When it’s back on after a power loss, a freeze, a blue screen or being forced off.' }), // (1.18)
+      typeof a.setup === 'boolean' && switchRow('Something in Beam’s setup is wrong', a.setup, v => setAlerts({ setup: v }), { hint: 'The setup check (Settings → Server) looks every 6 hours: servers starting with Windows, Tailscale, backups, every PC up to date and starting with Windows.' }), // (1.20)
+      typeof a.hardware === 'boolean' && switchRow('A Raspberry Pi is too hot or short of power', a.hardware, v => setAlerts({ hardware: v }), { hint: 'Its processor at 80 °C or more, or a power supply too weak for it (Beam for Linux says).' })), // (1.22)
+    others.length > 0 && card('A device goes offline',
+      cardInfo('After 10 minutes offline, and again when it’s back.'),
+      ...others.map(d => offlineAlertToggle(d, d.name))),
+    card('Recent alerts', recent),
+  ];
 }
 
 // ---------------------------------------------------------------- remote control, the chat app's side: Control, Settings
@@ -454,14 +468,19 @@ const rcLineText = s => (s.kind === 'kvm'
   ? (s.state === 'live' ? `Using ${nameOf(s.viewer)}’s keyboard and mouse` : `${nameOf(s.viewer)}’s keyboard and mouse are connecting`)
   : s.state === 'live' ? `Being controlled from ${nameOf(s.viewer)}` : `${nameOf(s.viewer)} is connecting to control it`);
 
-// Settings → Devices, under a PC: who controls it (End), and turning remote control off. Never on: that's only at
-// the PC itself.
+// A PC's sessions going on (who controls it, End): under it in Settings → Devices and in its Device info.
+function rcSessionLines(d) {
+  if (!rcFeature() || !d) return [];
+  return (rcSessionList || []).filter(x => x.host === d.id).map(s => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'),
+    el('span', {}, rcLineText(s)), ' · ',
+    el('button', { class: 'linkish', type: 'button', onclick: () => endRcFromHere(s, d) }, 'End')));
+}
+
+// A PC's Device info: its sessions, and turning remote control off. Never on: that's only at the PC itself.
 function rcDeviceRows(d) {
   if (!rcFeature() || !d) return [];
   if (rcTurningOff.has(d.id) && d.status?.remoteControl !== true) rcTurningOff.delete(d.id);
-  const out = (rcSessionList || []).filter(x => x.host === d.id).map(s => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'),
-    el('span', {}, rcLineText(s)), ' · ',
-    el('button', { class: 'linkish', type: 'button', onclick: () => endRcFromHere(s, d) }, 'End')));
+  const out = rcSessionLines(d);
   if (d.status?.remoteControl === true) {
     out.push(rcTurningOff.has(d.id) ? el('p', { class: 'muted small' }, `Turning off remote control on ${d.name}…`)
       : el('div', { class: 'dev-actions' }, el('button', { class: 'btn small-btn ghost', type: 'button', onclick: () => disableRemote(d) }, icon('power'), 'Turn off remote control')));
@@ -479,38 +498,37 @@ async function endRcFromHere(s, d) {
 }
 
 async function disableRemote(d) {
+  const fromInfo = $('#genDlg').open && $('#genDlg').dataset.device === d.id; // (its Device info comes back after the question)
   const ok = await confirmDialog({
     title: `Turn off remote control on ${d.name}?`,
     text: `A session going on ends at once, and nobody can control ${d.name} until someone turns “Allow remote control” on again at that PC.`,
     confirm: 'Turn off', danger: true,
   });
-  if (!ok) return;
+  if (!ok) { if (fromInfo) openDeviceInfo(deviceById(d.id)); return; }
   try {
     await api('api/rc/disable', jsonBody({ device: d.id }));
     rcTurningOff.add(d.id);
     toast(`Turning off remote control on ${d.name}`);
   } catch (err) { toast(friendlyError(err), { error: true }); }
   if ($('#settingsDlg')?.open) renderSettings();
+  if (fromInfo) openDeviceInfo(deviceById(d.id));
 }
 
-// Settings → This PC (the Windows app): its own switch, which the page can only turn off (`native-only` for on), and
-// who may control it (read-only here: the list is changed in the app's own settings).
-function rcPcRows(s) {
-  if (typeof s?.allowRemoteControl !== 'boolean') return [];
+// Settings → Control & sharing (the Windows app): its own switch, which the page can only turn off (`native-only` for
+// on), and who may control it (read-only here: the list is changed in the app's own settings).
+function rcPcCard(s) {
+  if (typeof s?.allowRemoteControl !== 'boolean') return null;
   const mine = (rcSessionList || []).filter(x => x.host === me.id);
   const allowed = Array.isArray(s.remoteControlDevices) ? s.remoteControlDevices.filter(x => x && typeof x.id === 'string') : null;
-  return [
-    el('h4', {}, 'Remote control'),
+  return card('Remote control',
     s.allowRemoteControl
-      ? el('div', { class: 'field rc-pc' }, el('p', { class: 'small' }, 'On: your devices can see and control this PC. It shows a banner while they do, with Stop (or press Ctrl+Alt+Shift+F12).'),
-        el('div', { class: 'dev-actions' }, el('button', { class: 'btn small-btn ghost', type: 'button', onclick: async () => {
-          const r = await hostDo('setSettings', { settings: { allowRemoteControl: false } });
-          if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
-        } }, icon('power'), 'Turn off remote control')))
-      : note('Off. To let your devices control this PC, turn on “Allow remote control” in Beam’s menu in the taskbar corner (it asks you to confirm).'),
-    allowed && field('Can be controlled from', el('p', { class: 'small rc-allowed' }, allowed.length ? allowed.map(x => cleanName(x.name) || nameOf(x.id)).join(', ') : 'No device yet'),
-      note('The list is changed in Beam’s own settings on this PC: tray → Remote control devices…')),
-    ...mine.map(x => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'), el('span', {}, rcLineText(x)), ' · ',
-      el('button', { class: 'linkish', type: 'button', onclick: () => endRcFromHere(x, { name: 'this PC' }) }, 'End'))),
-  ].filter(Boolean);
+      ? inlineRow('On: your devices can see and control this PC', smallBtn('Turn off remote control', async () => {
+        const r = await hostDo('setSettings', { settings: { allowRemoteControl: false } });
+        if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
+      }, { kind: 'ghost', ic: 'power' }), 'It shows a banner while they do, with Stop (or press Ctrl+Alt+Shift+F12).')
+      : cardInfo('Off. To let your devices control this PC, turn on “Allow remote control” in Beam’s menu in the taskbar corner (it asks you to confirm).'),
+    allowed && stackRow('Can be controlled from', el('p', { class: 'small rc-allowed' }, allowed.length ? allowed.map(x => cleanName(x.name) || nameOf(x.id)).join(', ') : 'No device yet'),
+      el('small', { class: 'muted' }, 'Changed in Beam’s own settings on this PC: tray → Remote control devices…')),
+    mine.length > 0 && el('div', { class: 'set-row' }, ...mine.map(x => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'), el('span', {}, rcLineText(x)), ' · ',
+      el('button', { class: 'linkish', type: 'button', onclick: () => endRcFromHere(x, { name: 'this PC' }) }, 'End')))));
 }

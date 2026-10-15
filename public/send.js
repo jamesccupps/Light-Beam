@@ -221,7 +221,7 @@ let flushing = false;
 // What's queued for the cache's Beam is shown and sent; what's queued for another Beam (after a sign-in elsewhere)
 // stays stored, out of sight, until that Beam signs this page in again, for 30 days at most. Entries from before they
 // recorded their Beam are this one's if the cache knows it; otherwise the first Beam that answers takes them.
-let otherBeamOutbox = 0; // how many wait for another Beam (Settings → This device can discard them)
+let otherBeamOutbox = 0; // how many wait for another Beam (Settings → General can discard them)
 async function loadOutbox() {
   if (cacheDisabled) return; // nothing stored to read (a dormant history's outbox waits where it is)
   let others = 0;

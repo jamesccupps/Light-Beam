@@ -55,11 +55,16 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   Linux 1.1), Beam is in its menu: a window of its own to drop files on, paste text into and see what came. Its screen,
   mouse and keyboard from your other devices (Beam 1.23, Beam for Linux 1.2): its desktop's own VNC server, relayed
   by Beam, shown with noVNC; turned on only at the computer.
+- **Shared folders** (Beam 1.26, the Windows app 1.18): a PC shares the folders you choose there with the devices you
+  tick; those devices browse them and copy files from them, and nothing there is ever changed or deleted.
 
 ## Next
 - **Remote control, further:** what's left of the delay is the network and the PC's capture inside Edge (a capture of
-  Beam's own might take 10–15 ms off it, for a lot of work): a Lowest delay mode, capture straight into the hardware
-  encoder, decoding on the phone with WebCodecs, full-colour text, sound.
+  Beam's own might take 10–15 ms off it, for a lot of work): big screen changes (a window opening) measured as well as
+  small ones, a bandwidth floor across the internet sized from a speed test (so a big change doesn't hold up what comes
+  after it: on fast local links since the Windows app 1.17.7), forward error correction where both ends are Beam's own,
+  a Lowest delay mode, maybe sending the frames itself (WebCodecs over a data channel) or capturing straight into the
+  hardware encoder as Parsec does, decoding on the phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Linux, further:** an always-on Pi waking the PCs on its own network, the Apps page for Linux (.deb files, apt), a
@@ -76,8 +81,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   (servers signing their requests), big files going direct.
 
 ## Later
-- **Everyday:** an optional automatic clipboard, photo backup, fetching a file from another device, folder sync, the
-  phone as a remote, quick actions, reminders.
+- **Everyday:** an optional automatic clipboard, photo backup, folder sync, the phone as a remote, quick actions,
+  reminders.
 - **More platforms:** iPhone, Mac and Linux apps; the Android app on the Play Store as a client for anyone's own Beam.
 - **Sharing:** a browser extension (links for people without an account: ✅ Beam Family's fast links, 1.9).
 - **Security and server:** end-to-end encryption, a code-signed Windows app, a server dashboard.

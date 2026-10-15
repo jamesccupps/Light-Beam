@@ -1462,16 +1462,19 @@ export default function register(test) {
     const s = await (await fetch(`${ctx.srv.base}/api/rc/sessions`, { method: 'POST', headers: { ...other.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ device: pc.id }) })).json();
     assert(s.id, 'a session');
     await page.evaluate(`openSettings('devices'); true`);
-    const row = `[...document.querySelectorAll('#set-devices .device-row')].find(r => r.textContent.includes(${JSON.stringify(pc.name)}))`;
+    const row = `[...document.querySelectorAll('#set-devices .dev-item')].find(r => r.textContent.includes(${JSON.stringify(pc.name)}))`;
     await page.waitFor(`/is connecting to control it|Being controlled from/.test(${row}?.textContent || '')`, 8000, 'who controls it');
     await page.evaluate(`[...${row}.querySelectorAll('.rc-line button')].find(b => b.textContent === 'End').click(); true`);
     await pc.page.waitFor(`fakePc.rec.events.some(e => e.ev === 'rc-end' && e.id === '${s.id}')`, 5000, 'ended from Settings');
     await page.waitFor(`!/is connecting to control it|Being controlled from/.test(${row}?.textContent || '')`, 8000, 'gone from the list');
-    // Turn off remote control (never on): confirmed, then the PC hears rc-disable.
-    await page.evaluate(`[...${row}.querySelectorAll('button')].find(b => b.textContent === 'Turn off remote control').click(); true`);
-    await page.waitFor(`$('#genDlg').open`, 3000, 'confirm');
+    // Turn off remote control (never on), in its Device info: confirmed, then the PC hears rc-disable.
+    await page.evaluate(`openDeviceInfo(deviceById('${pc.id}')); true`);
+    const off = `[...$('#genBody').querySelectorAll('button')].find(b => b.textContent === 'Turn off remote control')`;
+    await page.waitFor(`$('#genDlg').open && Boolean(${off})`, 5000, 'Device info: Turn off remote control');
+    await page.evaluate(`${off}.click(); true`);
+    await page.waitFor(`$('#genDlg').open && /Turn off remote control on/.test($('#genTitle').textContent)`, 3000, 'confirm');
     await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent === 'Turn off').click(); true`);
-    await page.waitFor(`/Turning off remote control/.test(${row}?.textContent || '')`, 5000, 'turning off');
+    await page.waitFor(`$('#genDlg').open && /Turning off remote control/.test($('#genBody').textContent)`, 5000, 'turning off (its Device info again)');
     const disabled = await pc.page.waitFor(`fakePc.rec.events.some(e => e.ev === 'rc-disable') || null`, 5000, 'rc-disable').catch(() => false);
     if (!disabled) {
       // (this harness's PC stream only keeps rc-* events it parses: rc-disable is one)
@@ -1493,10 +1496,10 @@ export default function register(test) {
     await chat.page.waitFor(`paired && hostState.ready && deviceById('${pc.id}')?.can?.remoteControl === true`, 10000, 'host mode, the PC known');
     await chat.page.evaluate(`deviceActions(deviceById('${pc.id}')).find(a => a.label === 'Control').action(); true`);
     await chat.page.waitFor(`__host.log.some(m => m.type === 'openRemote' && m.device === '${pc.id}')`, 5000, 'openRemote');
-    await chat.page.evaluate(`openSettings('pc'); true`);
-    await chat.page.waitFor(`/Remote control/.test($('#set-pc').textContent) && /Robin Laptop/.test($('#set-pc').textContent)`, 5000, 'This PC: remote control');
-    assert(await chat.page.evaluate(`/changed in Beam’s own settings/.test($('#set-pc').textContent) && !$('#set-pc').querySelector('.rc-allowed input')`), 'the list is read-only');
-    await chat.page.evaluate(`[...$('#set-pc').querySelectorAll('button')].find(b => b.textContent === 'Turn off remote control').click(); true`);
+    await chat.page.evaluate(`openSettings('control'); true`);
+    await chat.page.waitFor(`/Remote control/.test($('#set-control').textContent) && /Robin Laptop/.test($('#set-control').textContent)`, 5000, 'Control & sharing: remote control');
+    assert(await chat.page.evaluate(`/Changed in Beam’s own settings/.test($('#set-control').textContent) && !$('#set-control').querySelector('.rc-allowed input')`), 'the list is read-only');
+    await chat.page.evaluate(`[...$('#set-control').querySelectorAll('button')].find(b => b.textContent === 'Turn off remote control').click(); true`);
     await chat.page.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings?.allowRemoteControl === false)`, 5000, 'turned off through the app');
     assert(!(await chat.page.evaluate(`__host.log.some(m => m.type === 'setSettings' && m.settings?.allowRemoteControl === true)`)), 'never on');
     // The viewer window (beamHost.window = "remote").

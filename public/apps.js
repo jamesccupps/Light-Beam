@@ -24,16 +24,15 @@ function onAppsEvent() {
 const appPcs = () => devices.filter(d => d.platform === 'windows' && !d.temporary);
 
 function sectionApps() {
-  if (!appsState) { loadApps(); return note('Loading…'); }
+  if (!appsState) { loadApps(); return card(null, cardInfo('Loading…')); }
   const pcs = appPcs();
   const older = pcs.filter(d => !d.can?.apps);
   return [
-    note('Your own apps on your PCs: from a GitHub repository’s releases, a file you send, or winget. The first time, each PC asks before Beam installs anything there (Install, Always allow, Not now). Apps go in for the PC’s signed-in user; Beam never installs as administrator (an installer that needs that asks on the PC).'),
+    intro('Your own apps on your PCs: from a GitHub repository’s releases, a file you send, or winget. The first time, each PC asks before Beam installs anything there. Apps go in for the PC’s signed-in user, never as administrator (an installer that needs that asks on the PC).'),
     appsState.error && el('p', { class: 'warn small' }, appsState.error),
-    appsState.apps.length ? el('ul', { class: 'app-list' }, ...appsState.apps.map(appRow)) : note('No apps yet: add one below.'),
-    el('h4', {}, 'Add an app'),
-    ...addAppRows(),
-    older.length > 0 && note(`${older.map(d => d.name).join(', ')} ${older.length > 1 ? 'need' : 'needs'} Beam for Windows 1.16 or later to install apps.`),
+    appsState.apps.length ? listCard('Your apps', appsState.apps.map(appRow), { class: 'set-rows set-list app-list' }) : card('Your apps', cardInfo('No apps yet: add one below.')),
+    card('Add an app', ...addAppRows().map(f => el('div', { class: 'set-row' }, f))),
+    older.length > 0 && el('p', { class: 'muted small' }, `${older.map(d => d.name).join(', ')} ${older.length > 1 ? 'need' : 'needs'} Beam for Windows 1.16 or later to install apps.`),
   ];
 }
 
@@ -194,21 +193,17 @@ async function removeApp(a) {
   } catch (err) { toast(friendlyError(err)); }
 }
 
-// This PC (host mode): Beam installs apps here without asking only once someone here allowed it.
-function appsPcRows(s) {
-  if (typeof s?.appsAllowed !== 'boolean') return [];
-  return [
-    el('h4', {}, 'Apps'),
+// Settings → Control & sharing (host mode): Beam installs apps here without asking only once someone here allowed it.
+function appsPcCard(s) {
+  if (typeof s?.appsAllowed !== 'boolean') return null;
+  return card('Installing apps',
     s.appsAllowed
-      ? el('div', { class: 'field' }, el('p', { class: 'small' }, 'On: apps you install from Beam’s Apps page on your other devices go onto this PC without asking, each with a notice.'),
-        el('div', { class: 'dev-actions' }, el('button', { class: 'btn small-btn ghost', type: 'button', onclick: async () => {
-          const r = await hostDo('setSettings', { settings: { appsAllowed: false } });
-          if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
-        } }, icon('power'), 'Ask first again')))
-      : el('div', { class: 'field' }, el('p', { class: 'small' }, 'Beam asks here before installing an app from your other devices (Install, Always allow, Not now).'),
-        hostHas('allowApps') && el('div', { class: 'dev-actions' }, el('button', { class: 'btn small-btn', type: 'button', onclick: async () => {
-          const r = await hostDo('allowApps');
-          if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
-        } }, 'Let Beam install apps…'))),
-  ];
+      ? inlineRow('On: apps from Beam’s Apps page go onto this PC without asking', smallBtn('Ask first again', async () => {
+        const r = await hostDo('setSettings', { settings: { appsAllowed: false } });
+        if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
+      }, { kind: 'ghost', ic: 'power' }), 'Each with a notice here.')
+      : inlineRow('Beam asks here before installing an app from your other devices', hostHas('allowApps') && smallBtn('Let Beam install apps…', async () => {
+        const r = await hostDo('allowApps');
+        if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
+      }), 'Install, Always allow or Not now, each time.'));
 }

@@ -1,8 +1,6 @@
 'use strict';
 // Starts Beam: identity, the cached history (instant, and readable offline), then the server.
 
-const WEB_VERSION = '1.6.0';
-
 // Every dialog's × closes it, and so does a click on the dimmed area around it (not a sign-in approval: Esc there means
 // "decide later"). Both ends of the click count: a text selection dragged out of the dialog doesn't close it. (1.17:
 // the remote control viewer's page binds these too: its Picture panel's × did nothing there.)
@@ -51,6 +49,7 @@ function bindUI() {
   bindMenu();
   bindLightbox();
   bindPicking();
+  bindSettings();
   bindGallery();
 
   $('#backBtn').addEventListener('click', () => (gallery.open ? closeGalleryByUser() : history.state?.conv ? history.back() : showList()));
@@ -81,7 +80,7 @@ function bindUI() {
 
   $('#pairBtn').addEventListener('click', openPairDialog);
   $('#settingsBtn').addEventListener('click', () => openSettings());
-  $('#meBtn').addEventListener('click', async () => { await openSettings('device'); $('#set-device input')?.focus(); });
+  $('#meBtn').addEventListener('click', async () => { await openSettings('general'); $('#set-general input[type=text]')?.focus(); });
   bindDialogs();
 
   $('#copyAddressBtn').addEventListener('click', () => copyText($('#pairAddress').textContent, 'Address copied'));

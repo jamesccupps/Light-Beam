@@ -141,7 +141,7 @@ function onHostEvent(m) {
       // The tray's "Settings" and "Add a device…".
       for (const d of $$('dialog[open]')) if (d.id !== 'approveDlg') d.close();
       if (m.panel === 'pair') openPairDialog();
-      else if (m.panel === 'settings') openSettings('pc');
+      else if (m.panel === 'settings') openSettings('general');
       break;
     default:
       break; // unknown events are ignored (forward compatibility)

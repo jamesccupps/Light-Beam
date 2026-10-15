@@ -16,7 +16,7 @@
 //   touch mode, and per PC the picture's settings). The chat app's scripts are loaded, but none of them start in
 //   this mode (no history, no cache, no outbox).
 // This file is loaded only on that page (1.12.2: app.js adds it for #remote=, so the chat app doesn't load its
-// ~130 KB); RC_ID is app.js's. The chat app's side (Control, Settings → Devices, Settings → This PC) is in devices.js.
+// ~130 KB); RC_ID is app.js's. The chat app's side (Control, Settings → Devices, Settings → Control & sharing) is in devices.js.
 
 const RC_MODES = ['text', 'motion'];  // Sharp text (30 fps, 8 Mbps) / Smooth motion (60 fps, 16 Mbps): the PC applies them
 // The picture's settings (1.8), per PC: [value, label, more]. Auto: sharp while the screen is still, smooth while it
@@ -511,7 +511,7 @@ function rcEnded(reason, { text = '', by = '', from = '', endSession = false, en
     unreachable: { title: 'Can’t reach Beam', text: text || net.cause || offlineCause(), retry: true },
     error: { title: 'Something went wrong', text, retry: true },
     rate: { title: 'Too many tries', text: text || 'Wait a minute, then try again.', retry: true },
-    'not-allowed': { title: `Remote control is off on ${n}`, text: `To allow it, turn on “Allow remote control” in Beam on ${n} (its menu in the taskbar corner, or Settings → This PC).`, retry: true },
+    'not-allowed': { title: `Remote control is off on ${n}`, text: `To allow it, turn on “Allow remote control” in Beam on ${n} (its menu in the taskbar corner).`, retry: true },
     locked: { title: `${n} is locked: use Remote Desktop`, text: 'Remote control works while someone is signed in and the PC is unlocked. Remote Desktop can sign in to it.', rdp: true, retry: true },
     offline: { title: `${n} isn’t connected to Beam`, text: 'Turn it on, or start Beam on it.', retry: true },
     busy: { title: `${n} is busy`, text: text || `${n} is being controlled from another device.`, retry: true },

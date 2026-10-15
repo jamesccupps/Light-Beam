@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------- shared folders (Beam 1.26, Beam for Windows 1.18)
-// A PC's folders shared with this device, chosen only at that PC (Settings → This PC → Shared folders…: the folders, and
+// A PC's folders shared with this device, chosen only at that PC (Settings → Control & sharing → Shared folders…: the folders, and
 // for each the devices that see it): look in them here and copy files over. The PC sends what's ticked the way it sends
 // anything, so the files arrive in its conversation with this device (and a Beam app saves them as it saves anything).
 // Each look is a fresh question through the server (POST /api/devices/{id}/files, …/files/copy); nothing is kept. The
@@ -27,7 +27,7 @@ async function openSharedFolders(d) {
       ? [note(`The folders ${d.name} shares with this device. Open one, tick files and copy them here.`),
         el('div', { class: 'shared-list', role: 'list' }, ...shares.map(s => el('button', { class: 'shared-row dir', type: 'button', onclick: () => openSharedFolder(s.id, '') },
           icon('folder'), el('span', { class: 'shared-name' }, s.name))))]
-      : [note(`Nothing on ${d.name} is shared with this device. At ${d.name}: Settings → This PC → Shared folders…, add a folder and tick ${me.name || 'this device'}.`)],
+      : [note(`Nothing on ${d.name} is shared with this device. At ${d.name}: Settings → Control & sharing → Shared folders…, add a folder and tick ${me.name || 'this device'}.`)],
   });
   sharedView.dlgGen = dialogGen;
 }
@@ -109,21 +109,19 @@ async function copySharedPicked() {
   renderSharedFolder();
 }
 
-// This PC (host mode, Beam for Windows 1.18): the folders shared from here and who sees each (chosen only in the app's own
-// window: Shared folders…).
-function sharedPcRows(s) {
-  if (!Array.isArray(s?.sharedFolders)) return [];
+// Settings → Control & sharing (host mode, Beam for Windows 1.18): the folders shared from here and who sees each (chosen
+// only in the app's own window: Shared folders…).
+function sharedPcCard(s) {
+  if (!Array.isArray(s?.sharedFolders)) return null;
   const list = s.sharedFolders;
-  return [
-    el('h4', {}, 'Shared folders'),
-    el('div', { class: 'field' },
-      el('p', { class: 'small' }, list.length
-        ? 'The devices ticked for a folder can look in it and copy files from it, nothing else on this PC; they can’t change anything here.'
-        : 'Nothing is shared: your other devices can’t see this PC’s files.'),
-      ...list.map(f => el('p', { class: 'small' }, el('b', {}, f.name), ` (${f.path}): ${f.devices?.length ? f.devices.join(', ') : 'no device yet'}`)),
-      hostHas('sharedFolders') && el('div', { class: 'dev-actions' }, el('button', { class: 'btn small-btn', type: 'button', onclick: async () => {
-        const r = await hostDo('sharedFolders');
-        if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
-      } }, icon('folder'), 'Shared folders…'))),
-  ];
+  return card('Shared folders',
+    cardInfo(list.length
+      ? 'The devices ticked for a folder can look in it and copy files from it, nothing else on this PC; they can’t change anything here.'
+      : 'Nothing is shared: your other devices can’t see this PC’s files.'),
+    ...list.map(f => el('div', { class: 'set-row set-share' }, el('span', { class: 'set-text' }, el('b', {}, f.name),
+      el('small', { class: 'muted block' }, f.path), el('small', { class: 'block' }, f.devices?.length ? `Seen from ${f.devices.join(', ')}` : 'No device yet')))),
+    hostHas('sharedFolders') && buttonRow(smallBtn('Shared folders…', async () => {
+      const r = await hostDo('sharedFolders');
+      if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
+    }, { ic: 'folder' })));
 }

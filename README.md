@@ -81,7 +81,7 @@ Every device needs the **Tailscale app**, signed in to the same account. Then:
    or the Beam app) and tap **Approve**. Signed-in devices also pop up an Approve / Deny prompt by themselves. You can
    also type the code under **Add device → Approve a sign-in**, or `beam approve <code>`. Always check that the code
    matches before approving.
-3. **Password.** Set one in **Settings → Sign-in password**, then type it on any sign-in screen. On a computer that
+3. **Password.** Set one in **Settings → Security → Sign-in password**, then type it on any sign-in screen. On a computer that
    isn't yours, sign in **for this session only**: it ends when the browser closes, or after 12 hours unused.
 4. **Pairing link.** Shown under **Add device** (or `node server.js pair`). It works once, within 15 minutes.
 
@@ -162,7 +162,7 @@ address, so the browser becomes part of that device instead of a separate entry.
     pick **More choices → Use a different account**.
 - **Alerts** (Settings → Alerts): a device's battery is low, its storage is nearly full, the Beam server's disk is
   nearly full, or a Tailscale sign-in is about to run out (two weeks and three days before; the server's own matters
-  most: when it runs out, no device can reach Beam). For the devices you pick in Settings → Devices, also when one goes
+  most: when it runs out, no device can reach Beam). For the devices you pick (Settings → Alerts, or a device’s Device info), also when one goes
   offline (with why, when Tailscale can tell: the PC is on but Beam isn't running, or it's off or asleep) and comes back.
   Also when a PC is back on after losing power, freezing, a blue screen or being forced off.
 - **History** (in Device info): what happened to a device, newest first, from Windows' own records: each restart and
@@ -173,7 +173,7 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Beam log** (in a PC's Device info): the end of that PC's Beam log, sent by its Beam app when you ask, from any of
   your devices. Nothing is kept on the server, and Beam never writes message text, keys or sign-ins into its log.
 - **Shared folders** (Beam 1.26, the Windows app 1.18): copy files from another of your PCs without remoting in. At the
-  PC, Settings → This PC → **Shared folders…** chooses the folders, and for each one the devices that may see it
+  PC, Settings → Control & sharing → **Shared folders…** chooses the folders, and for each one the devices that may see it
   (nothing until you add a folder; only there, never from another device, and not while the PC is being controlled).
   Then on those devices, that PC's Device info → **Shared folders**: look in its folders, tick files and **Copy to this
   device**. The PC sends them the way it sends anything (they arrive in your conversation with it) and shows a notice.
@@ -218,12 +218,12 @@ address, so the browser becomes part of that device instead of a separate entry.
   - Choose which PCs show them under **Show on**.
   - The Quick Settings tile **PC notifications** switches sharing on and off with one tap.
   - Replies need **Stay connected** on.
-- **On each PC:** the tray menu's **Show phone notifications** checkbox, also in Settings → This PC.
+- **On each PC:** the tray menu's **Show phone notifications** checkbox, also in Settings → Notifications.
   - A pop-up appears for each new notification, grouped per app ("3 new from WhatsApp").
   - Clicking one opens the **Phone** panel in the chat window, ready to reply.
-  - **Show message text in pop-ups** (Settings → This PC) can be turned off: pop-ups then just say "WhatsApp · new
+  - **Show message text in pop-ups** (Settings → Notifications) can be turned off: pop-ups then just say "WhatsApp · new
     notification", and the text stays inside Beam.
-- **In a browser:** Settings → This device (off by default). The Phone entry sits under All devices.
+- **In a browser:** Settings → Notifications (off by default). The Phone entry sits under All devices.
 - **Privacy:**
   - Beam never saves notification text on the server, the PCs or the phone. It's kept in memory only, and only sent
     to the PCs you chose.
@@ -260,7 +260,7 @@ address, so the browser becomes part of that device instead of a separate entry.
   for administrator rights, Remote Desktop closes, and Beam's Control works. The PC's own monitor then shows your
   desktop, unlocked.
   **Ctrl+Alt+Shift+F12** on the PC ends every session at once. You can also end a session, or turn remote control off
-  for a PC, from any of your devices (Settings → Devices). Nothing but the PC itself can turn it on.
+  for a PC, from any of your devices (Settings → Devices, then the PC). Nothing but the PC itself can turn it on.
 - **In the viewer:** the Picture panel (fit the PC to this screen, off unless you turn it on (Windows app 1.12.7: a new
   resolution makes some apps, like Windows' Settings, lay out wrong until reopened): its resolution changes to suit the
   screen you view it on and goes back when you disconnect; Auto, Sharp text, Smooth motion or Data saver; picture size, frame rate, data limit, codec and details, kept per PC), choose a screen, full
@@ -316,7 +316,7 @@ address, so the browser becomes part of that device instead of a separate entry.
   there; an .msi or a setup program runs (with the switches you give it for a quiet install). Beam never installs as
   administrator: an installer that needs that shows Windows' own prompt on that PC.
 - **Each PC asks once:** until someone at the PC allows it, a request there asks **Install** (this once), **Always
-  allow** or **Not now**. Turn it on or off later with the tray menu's **Let Beam install apps** (or Settings → This PC).
+  allow** or **Not now**. Turn it on or off later with the tray menu's **Let Beam install apps** (or Settings → Control & sharing).
 - **Where it is:** the Apps page shows each PC's state (installed and its version, waiting for someone at the PC,
   couldn't install and why), with **Uninstall** per PC, **Check for a new version** and **Remove**.
 
@@ -332,7 +332,7 @@ address, so the browser becomes part of that device instead of a separate entry.
   - **Ctrl+Alt+Shift+S** snips part of the screen and sends it.
   - **Ctrl+Alt+G** copies the latest text you received.
 - **Sending files:** right-click files or folders in Explorer → **Send to → Beam → *device***, or drop them in the
-  `Beam\To <device>` folders you set up under Settings → This PC.
+  `Beam\To <device>` folders you set up under Settings → Sending.
 - **Receiving:**
   - Text goes onto the clipboard; you can keep it out of clipboard history.
   - Files are saved to `Downloads\Beam` and marked as downloaded from the internet. Big ones start saving while
@@ -340,7 +340,7 @@ address, so the browser becomes part of that device instead of a separate entry.
   - Clicking a notification opens a link or copies text. A picture or a video opens in its conversation; another file
     shows in its folder. A notification for several things at once opens their conversation at the newest.
   - Programs are only ever shown in Explorer, never run.
-- **Links open themselves** (optional, Settings → This PC → "Open links sent to this PC automatically"): a link you
+- **Links open themselves** (optional, Settings → Receiving → "Open links sent to this PC automatically"): a link you
   send to this PC by itself opens in the browser right away.
 - **Updates** install themselves from your server. If a new version fails to start, Beam goes back to the previous one
   on its own. A new version goes to one PC first (the server's own, when its Beam app is on); the others get it once it
@@ -526,7 +526,7 @@ node server.js export          # save everything to beam-export-<date>.tar.gz (a
 node server.js help            # all commands
 ```
 
-- **Logs:** `data/logs/server.log` (timestamped; the last 25 MB are kept). Also under **Settings → Server log** on any
+- **Logs:** `data/logs/server.log` (timestamped; the last 25 MB are kept). Also under **Settings → Server → Server log** on any
   signed-in device. Besides sign-ins, settings changes and errors, it records:
   - **Devices:** when each one comes online and goes offline, and which Beam version it runs. Short blips, like a phone
     switching networks, are left out.
@@ -596,7 +596,7 @@ identity is kept in `data/tailscale`. Moving the whole data folder to new hardwa
 - **Each PC's Beam app** keeps a copy of its settings on your Beam, sent whenever they change: its name, where files
   are saved, hotkeys, Send to, the outbox, notification choices and which devices may control it. Never its sign-in or
   device key. After a reinstall or a reset, Beam offers once to put them back. Turning remote control back on still asks
-  at the PC, with the same devices ticked. Settings → This PC → **Restore settings…** does it any time, also from
+  at the PC, with the same devices ticked. Settings → General → **Restore settings…** does it any time, also from
   another PC's backup.
 - **The phone's Beam app** (1.8.2) keeps its settings there too: its name, what it receives and downloads, the Quick
   Settings tile's device, muted and auto-copy devices, and which apps' notifications go to your PCs. After a reinstall

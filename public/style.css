@@ -419,20 +419,89 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .switcher .choose-list { max-height: 50vh; }
 .note { padding: 8px 12px; border-radius: 10px; background: var(--accent-soft); font-size: 13.5px; }
 
-/* ---------- settings ---------- */
-/* The dialog itself never scrolls: its title and × stay put, the sections scroll beside the list of them. */
+/* ---------- settings (remade 2026-10-15: one page at a time, grouped; cards of rows; switches) ---------- */
+/* The dialog itself never scrolls: its title and × stay put, a page scrolls beside the list of pages. It keeps one size
+   from page to page. */
+#settingsDlg { width: min(880px, calc(100vw - 24px)); height: min(760px, calc(100dvh - 32px)); }
 #settingsDlg[open] { display: flex; flex-direction: column; overflow: hidden; }
-.settings { display: grid; flex: 1 1 auto; grid-template-columns: 170px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 16px; min-height: 0; }
-.settings-nav { display: flex; flex-direction: column; gap: 2px; align-self: start; }
-.settings-nav button { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
-.settings-nav button .i { width: 17px; height: 17px; }
-.settings-nav button:hover { background: var(--surface-2); color: var(--text); }
-.settings-nav button[aria-current="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.settings-body { position: relative; overflow-y: auto; padding-right: 4px; }
-.set-section { padding: 4px 0 14px; border-bottom: 1px solid var(--border); scroll-margin-top: 4px; }
-.set-section:last-child { border-bottom: 0; }
-.set-section h3 { margin: 8px 0 4px; font-size: 16px; }
-.set-section h4 { margin: 14px 0 4px; font-size: 13.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+#settingsDlg .dlg-head { justify-content: flex-start; }
+#settingsDlg .dlg-head h2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-back { display: none; margin-left: -10px; }
+.settings { display: grid; flex: 1 1 auto; grid-template-columns: 212px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 22px; min-height: 0; }
+.settings-nav { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; padding: 2px 2px 8px; }
+.set-search { position: relative; flex: none; }
+.set-search .i { position: absolute; left: 10px; top: 50%; width: 16px; height: 16px; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.dlg .set-search input { width: 100%; height: 36px; padding: 0 10px 0 32px; border-radius: 9px; font-size: 14px; }
+#settingsNav { display: flex; flex-direction: column; gap: 12px; }
+.set-group { display: flex; flex-direction: column; gap: 1px; }
+.set-group-label { padding: 0 10px 4px; font-size: 11.5px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+#settingsNav button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+#settingsNav button .i { flex: none; width: 17px; height: 17px; color: var(--muted); }
+#settingsNav button span { flex: 1; min-width: 0; }
+#settingsNav button .chev { display: none; }
+#settingsNav button:hover { background: var(--surface-2); }
+#settingsNav button[aria-current="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+#settingsNav button[aria-current="true"] .i { color: var(--accent); }
+.settings-body { position: relative; min-height: 0; overflow-y: auto; padding: 2px 6px 16px 2px; }
+.settings [hidden] { display: none !important; }
+.set-page > h3 { margin: 4px 0 12px; font-size: 19px; }
+.set-page + .set-page { margin-top: 8px; }
+.dlg .set-intro { margin: -4px 0 14px; }
+.set-intro-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: -4px 0 14px; }
+.dlg .set-intro-row .set-intro { margin: 0; }
+.set-intro-row .btn { flex: none; }
+.set-card { margin: 0 0 18px; }
+.set-card > h4 { margin: 0 0 6px 2px; font-size: 13px; font-weight: 650; color: var(--muted); }
+.set-rows { margin: 0; padding: 0; list-style: none; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.set-rows > * + * { border-top: 1px solid var(--border); }
+.set-row, .dlg .set-row { margin: 0; padding: 12px 14px; }
+.set-inline { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.set-text { flex: 1; min-width: 0; }
+.set-inline > .btn, .set-inline > input { flex: none; }
+.set-stack { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.set-label { font-weight: 600; font-size: 14px; }
+.set-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.set-row > .field, .set-row .linkrow, .set-row .device-list, .set-row .dev-actions { margin: 0; }
+.dlg .set-stack > input, .dlg .set-stack > .linkrow { flex: none; }
+.set-stack > p, .dlg .set-stack > p, .set-row .facts { margin: 0; }
+.set-inline input.num { flex: none; width: 104px; height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); color: inherit; font: inherit; font-size: 15px; }
+.set-inline input.num:disabled { opacity: .5; }
+.set-shortcut { display: grid; grid-template-columns: minmax(150px, auto) 1fr; gap: 4px 16px; align-items: baseline; }
+.set-shortcut kbd { justify-self: start; }
+.set-row.alert-list { padding-top: 4px; padding-bottom: 4px; }
+.set-row .rc-line:first-child { margin-top: 0; }
+.set-empty { padding: 24px 4px; }
+.set-goto { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.set-goto:hover { color: var(--accent); }
+.set-goto .i { color: var(--muted); }
+/* A switch: still a checkbox (the label, Space and screen readers work as before), drawn as a sliding switch. */
+.check.switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0; padding: 12px 14px; }
+.check.switch > span { flex: 1; min-width: 0; }
+.check.switch input { appearance: none; -webkit-appearance: none; position: relative; flex: none; width: 40px; height: 22px; margin: 0; border-radius: 999px; background: var(--border); cursor: pointer; transition: background-color .15s; }
+.check.switch input::before { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .15s; }
+.check.switch input:checked { background: var(--accent); }
+.check.switch input:checked::before { transform: translateX(18px); }
+.check.switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.check.switch.off { cursor: default; }
+.check.switch.off > span { opacity: .55; }
+.check.switch input:disabled { opacity: .45; cursor: default; }
+/* Devices: a row opens its Device info; under it only what needs you (approving it, a session going on). */
+.dev-item { display: flex; flex-direction: column; }
+.dev-open { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 14px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.dev-open:hover { background: var(--surface-2); }
+.dev-open .dev-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.dev-open .chev { flex: none; color: var(--muted); }
+.dev-extra { padding: 0 14px 10px 68px; }
+.dev-extra .check.switch { padding: 6px 0 0; }
+.dev-extra .rc-line { margin: 2px 0 0; }
+.set-list > .conn-row { display: flex; gap: 12px; padding: 10px 14px; }
+.set-rows .app-row { padding: 12px 14px; border-bottom: 0; }
+.set-share .set-text b { font-weight: 600; }
+.hotkeys li { margin: 4px 0; }
+/* Device info: its switches as a card, then remote control, history, and Sign out at the end. */
+#genDlg .set-card { margin: 12px 0; }
+.dev-rc { margin: 8px 0; }
+.dev-end { display: flex; justify-content: flex-end; margin-top: 14px; }
 .path { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; padding: 6px 10px; border-radius: 8px; background: var(--bg); }
 .plain { list-style: none; margin: 4px 0; padding: 0; }
 .plain li { margin: 3px 0; }
@@ -777,18 +846,42 @@ html.remote-mode .rc {
   .msg { max-width: 88%; }
   .sidebar { border-right: 0; background: var(--bg); }
   .thread-head { padding-left: 12px; }
-  .settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .settings-nav { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
-  .settings-nav button { flex: none; }
   .dlg { padding: 0 16px 18px; }
   .dlg-head { padding-top: 16px; }
   .icon-btn { width: var(--touch); height: var(--touch); }
   .new-pill { bottom: 80px; }
 }
+/* ---------- settings on a phone: the whole screen, the list of pages first, a page with ‹ back ---------- */
+@media (max-width: 760px) {
+  #settingsDlg { width: 100%; height: 100%; max-width: 100%; max-height: 100%; margin: 0; padding: 0 16px max(16px, env(safe-area-inset-bottom)); border: 0; border-radius: 0; background: var(--bg); }
+  #settingsDlg .dlg-head { background: var(--bg); padding-top: max(12px, env(safe-area-inset-top)); }
+  .settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0; }
+  #settingsDlg.on-list .settings-body { display: none; }
+  #settingsDlg.on-page .settings-nav { display: none; }
+  #settingsDlg.searching .settings { grid-template-rows: auto minmax(0, 1fr); gap: 12px; }
+  #settingsDlg.searching #settingsNav { display: none; }
+  #settingsDlg.searching .settings-nav { overflow: visible; padding-bottom: 0; }
+  #settingsDlg.on-page .set-back, #settingsDlg.searching .set-back { display: inline-grid; }
+  #settingsDlg.on-page .set-page > h3 { display: none; }
+  .dlg .set-search input { height: 42px; font-size: 16px; background: var(--surface); }
+  #settingsNav { gap: 18px; }
+  .set-group { gap: 0; }
+  #settingsNav button { min-height: 50px; padding: 0 14px; border: 1px solid var(--border); border-top: 0; border-radius: 0; background: var(--surface); font-size: 15.5px; }
+  #settingsNav .set-group-label + button { border-top: 1px solid var(--border); border-radius: 12px 12px 0 0; }
+  #settingsNav .set-group button:last-child { border-radius: 0 0 12px 12px; }
+  #settingsNav .set-group-label + button:last-child { border-radius: 12px; }
+  #settingsNav button .chev { display: block; width: 15px; height: 15px; }
+  #settingsNav button[aria-current="true"] { background: var(--surface); color: var(--text); font-weight: 400; }
+  #settingsNav button[aria-current="true"] .i { color: var(--muted); }
+  .set-intro-row { flex-wrap: wrap; }
+  .set-inline { flex-wrap: wrap; }
+  .dev-extra { padding-left: 14px; }
+}
 @media (prefers-reduced-motion: reduce) {
   .fact.ringing .i { animation: none; }
   .spinner, .rc-spin { animation-duration: 2.4s; }
   .rc.full .rc-bar { transition: none; }
+  .check.switch input, .check.switch input::before { transition: none; }
   .rc-fx.tap, .rc-fx.right { animation: none; opacity: .6; }
   .rc-fx.hold { animation: none; opacity: .5; transform: none; }
   .rc-fx.hold.armed { animation: none; opacity: 1; }
