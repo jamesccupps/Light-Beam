@@ -228,9 +228,13 @@ export default function register(test) {
     const phone = dev(ctx, 'Pixel');
     await phone.me();
     await page.evaluate(`openSettings('devices')`);
-    await page.waitFor(`$('#set-devices')?.textContent.includes('Pixel') && $('#set-server')?.textContent.includes('used by')`, 8000, 'devices and storage');
+    await page.waitFor(`$('#set-devices')?.textContent.includes('Pixel')`, 8000, 'devices');
+    await page.evaluate(`showSettingsPage('security')`);
+    await page.waitFor(`$('#set-security input[type=password]') !== null`, 5000, 'Security');
     await page.evaluate(`(() => { const i = $('#set-security input[type=password]'); i.value = 'correct horse battery'; i.nextElementSibling.click(); })()`);
     await page.waitFor(`server.info && server.info.passwordSet === true`, 5000, 'password set');
+    await page.evaluate(`showSettingsPage('server')`);
+    await page.waitFor(`$('#set-server')?.textContent.includes('used by') && $('#set-server input[type=number]') !== null`, 8000, 'storage and retention');
     await page.evaluate(`(() => { const i = $('#set-server input[type=number]'); i.value = '21'; i.dispatchEvent(new Event('change')); })()`);
     await page.waitFor(`serverSettings && serverSettings.retentionDays === 21`, 5000, 'retention changed');
     const s = await (await fetch(`${ctx.srv.base}/api/settings`, { headers: { Authorization: `Bearer ${ctx.srv.key}` } })).json();
@@ -243,7 +247,7 @@ export default function register(test) {
     await page.waitFor(`/\\?key=bp_/.test($('#pairLink').value) && /Works once/.test($('#pairLinkExpiry').textContent)`, 5000, 'single-use link with expiry');
   });
 
-  test('settings (1.8.1): Server → Backups (where, how often, the last one) and Back up now; Devices says when a PC’s settings were backed up', async ctx => {
+  test('settings (1.8.1): Server → Backups (where, how often, the last one) and Back up now; a PC’s Device info says when its settings were backed up', async ctx => {
     const page = await ctx.signedIn();
     const pc = dev(ctx, 'Desk PC', 'windows');
     await pc.me();
@@ -254,12 +258,14 @@ export default function register(test) {
     await page.waitFor(`/A backup of this Beam every 24 h/.test($('#set-server')?.textContent || '') && /None yet/.test($('#set-server').textContent)`, 8000, 'Backups: none yet');
     await page.evaluate(`[...$$('#set-server button')].find(b => b.textContent === 'Back up now').click(); true`);
     await page.waitFor(`/The last: just now \\(/.test($('#set-server').textContent)`, 15000, 'backed up now');
-    await page.evaluate(`openSettings('devices')`);
-    await page.waitFor(`/Settings backed up just now/.test([...$$('#set-devices .device-row')].find(r => /Desk PC/.test(r.textContent))?.textContent || '')`, 8000, 'Devices: the PC’s settings backed up');
+    await page.waitFor(`Boolean(deviceById('${pc.id}')?.backup)`, 8000, 'the page knows the PC and its backup');
+    await page.evaluate(`$('#settingsDlg').close(); openDeviceInfo(deviceById('${pc.id}')); true`);
+    await page.waitFor(`$('#genDlg').open && /Settings backed up\\s*just now/.test($('#genBody').textContent)`, 8000, 'Device info: the PC’s settings backed up');
+    await page.evaluate(`$('#genDlg').close(); true`);
     eq(page.errors, [], 'no page errors');
   });
 
-  test('settings: only the sections scroll, its title and × stay in view (devices listed, a small window); a click outside closes it', async ctx => {
+  test('settings: only the page scrolls, its title and × stay in view (a long page, a small window); a click outside closes it', async ctx => {
     const page = await ctx.signedIn();
     await page.viewport(1000, 640);
     for (const name of ['Pixel', 'Laptop', 'Camera PC']) await dev(ctx, name).me();
@@ -269,20 +275,56 @@ export default function register(test) {
     // opening it scrolled the title and × out of view.
     const r = await page.evaluate(`(async () => {
       const d = $('#settingsDlg'), b = $('#settingsBody');
+      showSettingsPage('help');
       const deep = el('span', { class: 'visually-hidden' }, 'Battery ');
       b.lastElementChild.append(deep);
-      jumpToSection('help');
+      await new Promise(res => setTimeout(res, 50));
+      b.scrollTop = b.scrollHeight;
       await new Promise(res => setTimeout(res, 50));
       const head = d.querySelector('.dlg-head').getBoundingClientRect(), box = d.getBoundingClientRect();
-      const out = { dialogScrolls: d.scrollHeight > d.clientHeight + 1, dialogTop: d.scrollTop, sectionsMoved: b.scrollTop > 0, headInView: head.top >= box.top && head.bottom <= box.bottom };
+      const out = { dialogScrolls: d.scrollHeight > d.clientHeight + 1, dialogTop: d.scrollTop, pageScrolled: b.scrollTop > 0, headInView: head.top >= box.top && head.bottom <= box.bottom };
       deep.remove();
       return out;
     })()`);
-    eq(r, { dialogScrolls: false, dialogTop: 0, sectionsMoved: true, headInView: true }, 'one scrolling area');
+    eq(r, { dialogScrolls: false, dialogTop: 0, pageScrolled: true, headInView: true }, 'one scrolling area');
     const left = await page.evaluate(`$('#settingsDlg').getBoundingClientRect().left`);
     const p = { x: Math.max(2, Math.round(left / 2)), y: 300 };
     for (const type of ['mousePressed', 'mouseReleased']) await page.send('Input.dispatchMouseEvent', { type, x: p.x, y: p.y, button: 'left', clickCount: 1 });
     await page.waitFor(`!$('#settingsDlg').open`, 3000, 'closed by a click outside');
+  });
+
+  test('settings, remade (2026-10-15): one page at a time by group; the search finds rows on every page and Esc clears it; old section names open the right page; a phone shows the list first and ‹ goes back', async ctx => {
+    const page = await ctx.signedIn();
+    await dev(ctx, 'Pixel').me();
+    await page.evaluate(`openSettings('devices')`);
+    await page.waitFor(`$('#set-devices')?.textContent.includes('Pixel')`, 8000, 'Devices');
+    eq(await page.evaluate(`[$$('#settingsBody > .set-page').length, $('#settingsNav [aria-current="true"]').dataset.page, [...$$('#settingsNav .set-group-label')].map(x => x.textContent)]`),
+      [1, 'devices', ['This device', 'All devices', 'Your Beam']], 'one page, its button current, the groups');
+    await page.evaluate(`$('#settingsNav [data-page="security"]').click()`);
+    await page.waitFor(`$('#set-security') !== null && !$('#set-devices')`, 3000, 'Security instead');
+    const search = q => page.evaluate(`(() => { const s = $('#settingsSearch'); s.value = ${JSON.stringify(q)}; s.dispatchEvent(new Event('input')); return true; })()`);
+    await search('password');
+    await page.waitFor(`$('#settingsDlg').classList.contains('searching') && $('#set-security') !== null`, 3000, 'results');
+    eq(await page.evaluate(`[...$$('#settingsBody .set-page')].map(p => p.id)`), ['set-security'], 'only Security has a password');
+    await search('battery');
+    await page.waitFor(`$('#set-alerts') !== null && [...$$('#set-alerts label.check')].filter(l => !l.closest('[hidden]')).length === 1`, 3000, 'Alerts: just the battery switch');
+    await search('zzzz nothing');
+    await page.waitFor(`/No settings match/.test($('#settingsBody').textContent)`, 3000, 'nothing found');
+    await page.evaluate(`$('#settingsSearch').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); true`);
+    await page.waitFor(`!$('#settingsDlg').classList.contains('searching') && $('#settingsSearch').value === '' && $('#set-security') !== null && $('#settingsDlg').open`, 3000, 'Esc: the page again, Settings open');
+    await page.evaluate(`openSettings('device')`);
+    await page.waitFor(`$('#set-general input[type=text]') !== null`, 3000, 'the old "device": General');
+    await page.evaluate(`$('#settingsDlg').close()`);
+    // A phone: the list of pages, then a page with its name in the head and ‹ back.
+    await page.viewport(390, 844, true);
+    await page.evaluate(`openSettings()`);
+    await page.waitFor(`$('#settingsDlg').classList.contains('on-list') && $('#settingsBody').children.length === 0`, 3000, 'the list of pages');
+    await page.evaluate(`$('#settingsNav [data-page="alerts"]').click()`);
+    await page.waitFor(`$('#settingsDlg').classList.contains('on-page') && $('#set-alerts') !== null && $('#settingsTitle').textContent === 'Alerts'`, 3000, 'Alerts, its name in the head');
+    await page.evaluate(`$('#settingsBack').click()`);
+    await page.waitFor(`$('#settingsDlg').classList.contains('on-list') && $('#settingsTitle').textContent === 'Settings'`, 3000, 'back to the list');
+    await page.evaluate(`$('#settingsDlg').close()`);
+    eq(page.errors, [], 'no page errors');
   });
 
   test('dialogs: one that replaces another (or a second chooser) is not ended by the first one closing', async ctx => {

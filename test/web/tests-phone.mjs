@@ -194,7 +194,7 @@ export default function register(test) {
     await ctx.sleep(500);
     eq(await page.evaluate(`[phone.shown, document.querySelector('#convList .phone-row') === null, phone.notes.size]`), [false, true, 0], 'off by default: nothing here');
     // This device: on.
-    await page.evaluate(`openSettings('device'); true`);
+    await page.evaluate(`openSettings('notifications'); true`);
     await page.waitFor(`[...document.querySelectorAll('#settingsDlg label.check')].some(l => /Show phone notifications here/.test(l.textContent))`, 5000, 'the switch');
     const box = `[...document.querySelectorAll('#settingsDlg label.check')].find(l => /Show phone notifications here/.test(l.textContent)).querySelector('input')`;
     eq(await page.evaluate(`${box}.checked`), false, 'off');
@@ -202,12 +202,12 @@ export default function register(test) {
     await page.waitFor(`phone.shown && phone.notes.size === 1 && document.querySelector('#convList .phone-row') !== null`, 8000, 'on: the Phone entry and its notification');
     eq(await (await fetch(`${ctx.srv.base}/api/devices`, { headers: { Authorization: `Bearer ${ctx.srv.key}` } })).json().then(r => r.devices.find(d => d.id === meId)?.settings?.phoneNotifications), true, 'a server setting');
     await page.evaluate(`$('#settingsDlg').close(); true`);
-    // Settings → Devices: switched for another device.
+    // Settings → Notifications: switched for another device.
     const laptopName = `Laptop ${ctx.uid()}`; // (the shared server knows other laptops from other tests)
     const other = dev(ctx, laptopName, 'windows');
     await other.me();
-    await page.evaluate(`openSettings('devices'); true`);
-    const devBox = `[...[...document.querySelectorAll('#set-devices .device-row')].find(r => r.textContent.includes('${laptopName}'))?.querySelectorAll('label.check') || []].find(l => /Show phone notifications/.test(l.textContent))?.querySelector('input')`;
+    await page.evaluate(`openSettings('notifications'); true`);
+    const devBox = `[...document.querySelectorAll('#set-notifications label.check')].find(l => l.textContent.trim() === '${laptopName}')?.querySelector('input')`;
     await page.waitFor(`Boolean(${devBox})`, 5000, 'the per-device switch');
     await page.evaluate(`${devBox}.click(); true`);
     for (let i = 0; i < 30; i++) {
@@ -330,17 +330,17 @@ export default function register(test) {
     const { page, appId } = await hostPage(ctx, { features, settings: { phoneNotifications: false, phonePopupText: true } });
     await page.waitFor(`paired && net.state === 'online' && hostState.ready`, 10000, 'host mode');
     // This PC: the app's switch, changed through the bridge (the app does the PUT); This device has none here.
-    await page.evaluate(`openSettings('device'); true`);
+    await page.evaluate(`openSettings('general'); true`);
     await ctx.sleep(300);
-    eq(await page.evaluate(`/Show phone notifications/.test($('#set-device').textContent)`), false, 'not under This device');
-    await page.evaluate(`openSettings('pc'); true`);
-    const pcLabel = re => `[...document.querySelectorAll('#set-pc label.check')].find(l => ${re}.test(l.textContent))`;
+    eq(await page.evaluate(`/Show phone notifications/.test($('#set-general').textContent)`), false, 'not under General');
+    await page.evaluate(`openSettings('notifications'); true`);
+    const pcLabel = re => `[...document.querySelectorAll('#set-notifications label.check')].find(l => ${re}.test(l.textContent))`;
     const pcBox = `${pcLabel('/Show phone notifications on this PC/')}?.querySelector('input')`;
     await page.waitFor(`Boolean(${pcBox}) && !${pcBox}.checked`, 5000, 'This PC shows the app’s value');
     // "Show message text in pop-ups": this PC's own, right under it (it can be turned off before the notifications
     // go on), with the note that Windows keeps pop-ups.
     const textBox = `${pcLabel('/Show message text in pop-ups/')}?.querySelector('input')`;
-    eq(await page.evaluate(`[${textBox}?.checked, /Notification Center until they’re cleared/.test(${pcLabel('/Show message text in pop-ups/')}?.textContent), ${pcLabel('/Show phone notifications on this PC/')}.nextElementSibling === ${pcLabel('/Show message text in pop-ups/')}]`),
+    eq(await page.evaluate(`[${textBox}?.checked, /Notification Center/.test(${pcLabel('/Show message text in pop-ups/')}?.textContent), ${pcLabel('/Show phone notifications on this PC/')}.nextElementSibling === ${pcLabel('/Show message text in pop-ups/')}]`),
       [true, true, true], 'Show message text in pop-ups: on, with its note, next to the switch');
     await page.evaluate(`${textBox}.click(); true`);
     await page.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings?.phonePopupText === false && !('phoneNotifications' in m.settings)) && ${textBox}?.checked === false`, 5000, 'asked the app (that field only)');
@@ -363,9 +363,9 @@ export default function register(test) {
     // The app on a server older than 1.5 (phoneNotifications null): neither switch.
     const older = await hostPage(ctx, { features, settings: { phoneNotifications: null, phonePopupText: true } });
     await older.page.waitFor(`paired && hostState.ready`, 10000, 'host mode (older server)');
-    await older.page.evaluate(`openSettings('pc'); true`);
-    await older.page.waitFor(`/Copy received text/.test($('#set-pc')?.textContent || '')`, 5000, 'This PC');
-    eq(await older.page.evaluate(`/Show phone notifications|Show message text in pop-ups/.test($('#set-pc').textContent)`), false, 'neither switch');
+    await older.page.evaluate(`openSettings('notifications'); true`);
+    await older.page.waitFor(`/Clicking a notification about a link/.test($('#set-notifications')?.textContent || '')`, 5000, 'Notifications');
+    eq(await older.page.evaluate(`/Show phone notifications on this PC|Show message text in pop-ups/.test($('#set-notifications').textContent)`), false, 'neither switch');
   }, { requires: FEATURE });
 
   test('phone notifications: a hidden page keeps the count but renders nothing until it’s shown', async ctx => {

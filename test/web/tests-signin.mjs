@@ -294,7 +294,7 @@ export default function register(test) {
     eq(await page.evaluate(`idbGetAll('outbox').then(l => [items.some(i => i.text === 'history on its Beam'), outbox.size, l.length])`), [false, 0, 1], 'the old history is gone, its outbox stored, out of sight');
     eq((await textsOn(other)).filter(t => /written while/.test(t)), [], 'not sent to the other Beam');
     await page.evaluate(`openSettings('device'); true`);
-    await page.waitFor(`$('#settingsDlg').open && /1 unsent message for another Beam server/.test($('#settingsDlg').textContent)`, 5000, 'Settings → This device says so');
+    await page.waitFor(`$('#settingsDlg').open && /1 unsent message for another Beam server/.test($('#settingsDlg').textContent)`, 5000, 'Settings → General says so');
     await page.evaluate(`$('#settingsDlg').close(); true`);
     // Its Beam is back, and this browser signs in there again: the message goes out.
     await page.goto('about:blank');

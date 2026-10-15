@@ -193,7 +193,7 @@ export default function register(test) {
     await page.waitFor(`serverSettings.alerts.battery === true`, 5000, 'battery alerts back on');
   });
 
-  test('alerts: "Alert me when it goes offline" per device (Settings → Devices), then offline and back-online alerts', async ctx => {
+  test('alerts: a device’s offline alert (Settings → Alerts, "A device goes offline"), then offline and back-online alerts', async ctx => {
     const fast = await ctx.startServer(8822, { BEAM_TEST_TIMEOUTS: '1' }); // a watched device alerts after 1.5 s offline
     ctx.defer(() => fast.stop());
     const phone = app(ctx, 'Pixel', 'android', fast);
@@ -202,10 +202,10 @@ export default function register(test) {
     let offline = phone.online();
     const page = await ctx.signedIn({ server: fast });
     await recordToasts(page);
-    await page.evaluate(`openSettings('devices')`);
-    const row = `[...$$('#set-devices .device-row')].find(r => /Pixel/.test(r.textContent))`;
-    await page.waitFor(`serverSettings?.alerts && /55%/.test(${row}?.textContent)`, 8000, 'device row with its status');
-    await page.evaluate(`${row}.querySelector('label.check input').click()`);
+    await page.evaluate(`openSettings('alerts')`);
+    const row = `[...$$('#set-alerts label.check')].find(l => l.textContent.trim() === 'Pixel')`;
+    await page.waitFor(`serverSettings?.alerts && Boolean(${row})`, 8000, 'its switch under “A device goes offline”');
+    await page.evaluate(`${row}.querySelector('input').click()`);
     await page.waitFor(`serverSettings.alerts.offline.includes('${phone.id}')`, 5000, 'offline alert on');
     assert((await settingsOf(fast)).alerts.offline.includes(phone.id), 'saved on the server');
     offline();
@@ -214,8 +214,8 @@ export default function register(test) {
     ctx.defer(() => offline());
     await page.waitFor(`__toasts.some(t => /Pixel is back online/.test(t))`, 10000, 'back-online alert');
     // Still on after a re-render, and turning it off saves the whole (now empty) list.
-    await page.waitFor(`${row}.querySelector('label.check input').checked`, 3000);
-    await page.evaluate(`${row}.querySelector('label.check input').click()`);
+    await page.waitFor(`${row}.querySelector('input').checked`, 3000);
+    await page.evaluate(`${row}.querySelector('input').click()`);
     await page.waitFor(`serverSettings.alerts.offline.length === 0`, 5000, 'offline alert off');
   }, { timeout: 60000 });
 
@@ -417,7 +417,7 @@ export default function register(test) {
     const page = await ctx.signedIn();
     await recordToasts(page);
     await page.waitFor(`serverHas('shared-folders')`, 8000, 'the server offers it');
-    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Shop PC', 'windows', ctx.nextIp(), '1.18.0');
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Files PC', 'windows', ctx.nextIp(), '1.18.0');
     await pc.me();
     const stream = pc.stream();
     ctx.defer(() => stream.close());
@@ -446,15 +446,15 @@ export default function register(test) {
     await page.waitFor(`[...$('#genFoot').querySelectorAll('button')].some(b => b.textContent.trim() === 'Shared folders')`, 5000, 'the button');
     await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent.trim() === 'Shared folders').click()`);
     // Its only folder opens at once: folders first, then files with their sizes; Copy is off until a file is ticked
-    await page.waitFor(`$('#genTitle')?.textContent === 'Shop PC: Downloads' && $$('#genBody .shared-row').length === 3`, 8000, 'the folder');
+    await page.waitFor(`$('#genTitle')?.textContent === 'Files PC: Downloads' && $$('#genBody .shared-row').length === 3`, 8000, 'the folder');
     const rows = await page.evaluate(`[...$$('#genBody .shared-row')].map(r => r.textContent)`);
     assert(/^Photos/.test(rows[0]) && /^report\.pdf1\.0 MB/.test(rows[1]), JSON.stringify(rows));
     assert(await page.evaluate(`$('#genFoot .shared-copy').disabled`), 'nothing ticked: Copy is off');
     // Into Photos, and back up
     await page.evaluate(`$$('#genBody .shared-row.dir')[0].click()`);
-    await page.waitFor(`$('#genTitle').textContent === 'Shop PC: Photos' && /beach\\.jpg/.test($('#genBody .shared-list').textContent) && /Downloads/.test($('#genBody .shared-crumbs').textContent)`, 8000, 'the subfolder');
+    await page.waitFor(`$('#genTitle').textContent === 'Files PC: Photos' && /beach\\.jpg/.test($('#genBody .shared-list').textContent) && /Downloads/.test($('#genBody .shared-crumbs').textContent)`, 8000, 'the subfolder');
     await page.evaluate(`$('#genBody .shared-row.up').click()`);
-    await page.waitFor(`$('#genTitle').textContent === 'Shop PC: Downloads' && $$('#genBody .shared-row').length === 3`, 8000, 'back up');
+    await page.waitFor(`$('#genTitle').textContent === 'Files PC: Downloads' && $$('#genBody .shared-row').length === 3`, 8000, 'back up');
     // The filter, then both files ticked and copied
     await page.evaluate(`(() => { const i = $('#genBody .shared-filter'); i.value = 'PDF'; i.dispatchEvent(new Event('input')); return true; })()`);
     await page.waitFor(`$$('#genBody .shared-row').length === 1 && /report\\.pdf/.test($('#genBody .shared-row').textContent)`, 3000, 'filtered');
@@ -462,7 +462,7 @@ export default function register(test) {
     await page.evaluate(`[...$$('#genBody .shared-row.file input')].forEach(b => b.click())`);
     await page.waitFor(`!$('#genFoot .shared-copy').disabled && /Copy 2 files to this device/.test($('#genFoot .shared-copy').textContent)`, 3000, 'two ticked');
     await page.evaluate(`$('#genFoot .shared-copy').click()`);
-    await page.waitFor(`__toasts.some(t => /Shop PC is sending 2 files: they arrive in your conversation with it/.test(t))`, 8000, 'the toast');
+    await page.waitFor(`__toasts.some(t => /Files PC is sending 2 files: they arrive in your conversation with it/.test(t))`, 8000, 'the toast');
     const copy = asked.find(a => a.names);
     assert(copy && copy.share === 'a1b2c3d4' && copy.path === '' && JSON.stringify(copy.names) === '["report.pdf","setup.exe"]', JSON.stringify(copy));
     assert(await page.evaluate(`$('#genFoot .shared-copy').disabled`), 'the ticks are cleared');
@@ -472,9 +472,9 @@ export default function register(test) {
     const { page: host } = await hostPage(ctx, { features: ['transfers', 'localFiles', 'settings', 'openPanel', 'sharedFolders'],
       settings: { sharedFolders: [{ name: 'Downloads', path: 'D:/Shared/Downloads', devices: ['Robin Laptop', 'Pixel'] }] } });
     await host.waitFor(`paired && hostState.ready`);
-    await host.evaluate(`openSettings('pc')`);
-    await host.waitFor(`/Shared folders/.test($('#set-pc')?.textContent || '') && /Downloads \\(D:\\/Shared\\/Downloads\\): Robin Laptop, Pixel/.test($('#set-pc').textContent)`, 5000, 'the folders');
-    await host.evaluate(`[...$('#set-pc').querySelectorAll('button')].find(b => /Shared folders…/.test(b.textContent)).click()`);
+    await host.evaluate(`openSettings('control')`);
+    await host.waitFor(`/Shared folders/.test($('#set-control')?.textContent || '') && /DownloadsD:\\/Shared\\/DownloadsSeen from Robin Laptop, Pixel/.test($('#set-control').textContent)`, 5000, 'the folders');
+    await host.evaluate(`[...$('#set-control').querySelectorAll('button')].find(b => /Shared folders…/.test(b.textContent)).click()`);
     await host.waitFor(`__host.log.some(m => m.type === 'sharedFolders')`, 3000, 'the app’s own window');
     eq(host.errors, [], 'no page errors (This PC)');
   });
@@ -537,12 +537,12 @@ export default function register(test) {
     // The Windows app's This PC: on → "Ask first again" turns it off; off → the app's own confirmation.
     const { page: host } = await hostPage(ctx, { state: {} });
     await host.waitFor(`paired && hostState.ready`);
-    await host.evaluate(`hostState.settings.appsAllowed = true; openSettings('pc')`);
-    await host.waitFor(`/without asking, each with a notice/.test($('#set-pc')?.textContent || '')`, 5000, 'on');
-    await host.evaluate(`[...$('#set-pc').querySelectorAll('button')].find(b => /Ask first again/.test(b.textContent)).click()`);
+    await host.evaluate(`hostState.settings.appsAllowed = true; openSettings('control')`);
+    await host.waitFor(`/go onto this PC without asking/.test($('#set-control')?.textContent || '')`, 5000, 'on');
+    await host.evaluate(`[...$('#set-control').querySelectorAll('button')].find(b => /Ask first again/.test(b.textContent)).click()`);
     await host.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings.appsAllowed === false)`, 3000, 'off: setSettings');
     await host.evaluate(`hostState.settings.appsAllowed = false; renderSettings()`);
-    await host.waitFor(`/Beam asks here before installing an app/.test($('#set-pc')?.textContent || '')`, 5000, 'off');
+    await host.waitFor(`/Beam asks here before installing an app/.test($('#set-control')?.textContent || '')`, 5000, 'off');
     // (1.16.1) An app waiting for an answer at this PC: a bar at the top of the window (not only a notification and the
     // tray menu). Install… brings up the app's own question; Not now answers; the bar goes when the app says so.
     await host.evaluate(`$('#settingsDlg').close(); hostState.settings.appAsks = [{ id: 'old1', name: 'Slate' }]; renderBanner()`);
@@ -630,38 +630,37 @@ export default function register(test) {
         ? (window.__renamed = { method: o.method, body: JSON.parse(o.body) }, Promise.resolve(new Response('{"name":"OCC Pi"}', { status: 200, headers: { 'Content-Type': 'application/json' } })))
         : window.__realFetch(u, o)`);
     const own = await page.evaluate(`me.name`);
-    eq(await page.evaluate(`(() => { const d = deviceById(me.id); d.platform = 'linux'; d.name = 'Pi'; showDeviceLabel(); openSettings('device');
-      const input = $('#set-device input[type=text]');
-      const shown = [$('#deviceLabel').textContent, input.value, input.disabled, /How this computer appears on your other devices/.test($('#set-device').textContent)];
+    eq(await page.evaluate(`(() => { const d = deviceById(me.id); d.platform = 'linux'; d.name = 'Pi'; showDeviceLabel(); openSettings('general');
+      const input = $('#set-general input[type=text]');
+      const shown = [$('#deviceLabel').textContent, input.value, input.disabled, /How this computer appears on your other devices/.test($('#set-general').textContent)];
       input.value = '  OCC Pi '; input.dispatchEvent(new Event('change'));
       return shown; })()`), ['Pi', 'Pi', false, true], 'the computer’s name, in the footer and Settings');
     await page.waitFor(`window.__renamed !== null`, 5000, 'sent to Beam');
     eq(await page.evaluate(`window.__renamed`), { method: 'PUT', body: { name: 'OCC Pi' } });
     eq(await page.evaluate(`me.name`), own, 'the page’s own name is left alone');
-    eq(await page.evaluate(`(() => { const d = deviceById(me.id); d.platform = 'windows'; d.name = 'Desktop'; openSettings('device');
-      const input = $('#set-device input[type=text]');
-      return [input.value, input.disabled, /This browser is part of Desktop: its Beam app sets the name/.test($('#set-device').textContent)]; })()`),
+    eq(await page.evaluate(`(() => { const d = deviceById(me.id); d.platform = 'windows'; d.name = 'Desktop'; openSettings('general');
+      const input = $('#set-general input[type=text]');
+      return [input.value, input.disabled, /This browser is part of Desktop: its Beam app sets the name/.test($('#set-general').textContent)]; })()`),
       ['Desktop', true, true], 'next to Beam for Windows: its name, not changed here');
     await page.evaluate(`$('#settingsDlg').close(); deviceById(me.id).platform = 'web'; deviceById(me.id).name = me.name; showDeviceLabel(); window.fetch = window.__realFetch`);
     eq(page.errors, [], 'no page errors');
   });
 
-  test('host: This PC offers "Open links sent to this PC automatically"', async ctx => {
+  test('host: Receiving offers "Open links sent to this PC automatically"', async ctx => {
     const { page } = await hostPage(ctx, { state: {} });
     await page.waitFor(`paired && hostState.ready`);
-    await page.evaluate(`hostState.settings.autoOpenLinks = false; openSettings('pc')`);
-    await page.waitFor(`$('#set-pc') !== null && /Open links sent to this PC automatically/.test($('#set-pc').textContent)`, 5000, 'toggle shown');
-    const receiving = await page.evaluate(`(() => { const h = [...$('#set-pc').querySelectorAll('h4')]; const toggle = [...$('#set-pc').querySelectorAll('label.check')].find(l => /Open links sent/.test(l.textContent));
-      return h.filter(x => x.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).at(-1).textContent; })()`);
-    eq(receiving, 'Receiving', 'under Receiving');
-    await page.evaluate(`[...$('#set-pc').querySelectorAll('label.check')].find(l => /Open links sent/.test(l.textContent)).querySelector('input').click()`);
+    await page.evaluate(`hostState.settings.autoOpenLinks = false; openSettings('receiving')`);
+    await page.waitFor(`$('#set-receiving') !== null && /Open links sent to this PC automatically/.test($('#set-receiving').textContent)`, 5000, 'switch shown');
+    const card = await page.evaluate(`[...$('#set-receiving').querySelectorAll('label.check')].find(l => /Open links sent/.test(l.textContent)).closest('.set-card').querySelector('h4').textContent`);
+    eq(card, 'Links', 'in the Links card');
+    await page.evaluate(`[...$('#set-receiving').querySelectorAll('label.check')].find(l => /Open links sent/.test(l.textContent)).querySelector('input').click()`);
     await page.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings.autoOpenLinks === true)`, 3000, 'setSettings sent');
     // An older app without the setting: no toggle.
     const { page: old } = await hostPage(ctx);
     await old.waitFor(`paired && hostState.ready`);
-    await old.evaluate(`delete hostState.settings.autoOpenLinks; openSettings('pc')`);
-    await old.waitFor(`$('#set-pc') !== null && /Receiving/.test($('#set-pc').textContent)`, 5000);
-    assert(!(await old.evaluate(`/Open links sent/.test($('#set-pc').textContent)`)), 'hidden when the app has no such setting');
+    await old.evaluate(`delete hostState.settings.autoOpenLinks; openSettings('receiving')`);
+    await old.waitFor(`$('#set-receiving') !== null && /Copy received text/.test($('#set-receiving').textContent)`, 5000);
+    assert(!(await old.evaluate(`/Open links sent/.test($('#set-receiving').textContent)`)), 'hidden when the app has no such setting');
   });
 
   test('pickers: a cold start with nothing saved waits for the device list (no lone "All devices" to tap)', async ctx => {
@@ -715,7 +714,7 @@ export default function register(test) {
     eq(r.trusted, false, JSON.stringify(r));
     await page.waitFor(`deviceById('${laptop.id}')?.trusted === false`, 8000, 'the page hears it');
     await page.evaluate(`openSettings('devices'); true`);
-    const box = `[...[...document.querySelectorAll('#set-devices .device-row')].find(r => r.textContent.includes(${JSON.stringify(name)}))?.querySelectorAll('label.check') || []].find(l => /Can control PCs and install apps/.test(l.textContent))`;
+    const box = `[...[...document.querySelectorAll('#set-devices .dev-item')].find(r => r.textContent.includes(${JSON.stringify(name)}))?.querySelectorAll('label.check') || []].find(l => /Can control PCs and install apps/.test(l.textContent))`;
     await page.waitFor(`${box}?.querySelector('input').checked === false`, 8000, 'off in its row');
     assert(await page.evaluate(`/need this once/.test(${box}.textContent)`), 'and why, while it isn’t approved');
     await page.evaluate(`${box}.querySelector('input').click(); true`);

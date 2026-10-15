@@ -705,7 +705,7 @@ streams only) and the answer back, and keeps nothing.
 
 ### Shared folders (1.26)
 Feature `shared-folders`. A PC's folders that some of the owner's devices may look in and copy files from, chosen only at
-that PC (Beam for Windows 1.18: Settings → This PC → Shared folders…, the folders and for each the devices that see it);
+that PC (Beam for Windows 1.18: Settings → Control & sharing → Shared folders…, the folders and for each the devices that see it);
 read-only. The server relays, for a trusted sign-in made to last, and says who asks; the PC decides and answers; nothing is
 kept on the server. A copy is an ordinary send from the PC to the device that asked (items from it, `to` that device).
 Devices' `can.files`: a Windows app 1.18 or later. What a PC never shows or sends: anything outside the folder, hidden or
@@ -764,7 +764,7 @@ renames a Beam for Linux computer from any of its own sign-ins (the window, the 
 any device name); event `devices`; `400` for another kind of device or an empty name. The name is the computer's at
 once, over the one its app still sends, until the app sends the new one: the app's streams get `rename { "name" }` now
 and on each connect until then, and Beam for Linux 1.2.1 keeps it in `~/.beam.json` (`device`) and sends it from then
-on (an older app never does: the name set here stays). The web app's Settings → This device shows such a page's app's
+on (an older app never does: the name set here stays). The web app's Settings → General shows such a page's app's
 name (and the footer's "This device"): Beam for Linux's is changed there, another app's only in that app.
 `~/.beam.json` is written whole beside itself and then renamed into place (1.2.1).
 

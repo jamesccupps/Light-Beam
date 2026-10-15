@@ -61,7 +61,7 @@ export default function register(test) {
     await page.evaluate(`(() => { const t = document.querySelector('#thread .msg.theirs .text'); const r = t.getBoundingClientRect(); t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 10 })); })()`);
     await ctx.sleep(200);
     await shot(page, 'desktop-menu');
-    await page.evaluate(`closeMenu(); openSettings('security')`);
+    await page.evaluate(`closeMenu(); openSettings('server')`);
     await page.waitFor(`$('#set-server')?.textContent.includes('used by')`, 8000);
     await ctx.sleep(300);
     await shot(page, 'desktop-settings');
@@ -175,8 +175,8 @@ export default function register(test) {
     await host.evaluate(`__host.emit({ type: 'transfer', transfer: { id: 'down:x', kind: 'download', auto: true, conversations: ['androidpixel0001'], name: 'Holiday video.mp4', size: 50331648, done: 20971520, rate: 0, eta: -1, state: 'retrying', status: 'Connection problem, retrying in 8 s', canCancel: true, canRetry: true } })`);
     await ctx.sleep(500);
     await shot(host, 'host-thread');
-    await host.evaluate(`hostState.settings.autoOpenLinks = false; openSettings('pc')`);
-    await host.waitFor(`$('#set-pc')?.textContent.includes('Save files to')`, 5000);
+    await host.evaluate(`hostState.settings.autoOpenLinks = false; openSettings('receiving')`);
+    await host.waitFor(`$('#set-receiving')?.textContent.includes('Save files to')`, 5000);
     await ctx.sleep(300);
     await shot(host, 'host-settings-this-pc');
   }, { timeout: 180000 });

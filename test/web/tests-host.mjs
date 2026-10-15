@@ -100,7 +100,10 @@ export default function register(test) {
     assert(await page.evaluate(`${hostLog('viewing')}.some(m => m.conversation === '${admin.id}')`), 'tells the app which conversation is on screen');
     assert(await page.evaluate(`${hostLog('read')}.some(m => m.conversation === '${admin.id}' && m.ts > 0)`), 'tells the app what was read');
     assert(await page.evaluate(`!('Notification' in window) || Notification.permission !== 'granted' || true`), 'no web notifications');
-    assert(await page.evaluate(`$('#set-notifications') === null`), 'no notification settings');
+    await page.evaluate(`openSettings('notifications'); true`);
+    await page.waitFor(`/Clicking a notification about a link/.test($('#set-notifications')?.textContent || '')`, 5000, 'the app’s switches');
+    assert(await page.evaluate(`!/Notifications when something arrives|This browser/.test($('#set-notifications').textContent)`), 'no browser notification settings');
+    await page.evaluate(`$('#settingsDlg').close(); true`);
   });
 
   test('host: a 401 goes to the app once, quietly, with no retry loop', async ctx => {
@@ -233,10 +236,12 @@ export default function register(test) {
     await page.evaluate(`__host.emit({ type: 'navigate', conversation: '${admin.id}', itemId: '${item.id}' })`);
     await page.waitFor(`current === '${admin.id}' && document.querySelector('[data-id="${item.id}"]')?.classList.contains('flash')`, 3000, 'opened and highlighted');
     await page.evaluate(`__host.emit({ type: 'openPanel', panel: 'settings' })`);
-    await page.waitFor(`$('#settingsDlg').open && $('#set-pc') !== null`, 5000, 'settings open with This PC');
-    const text = await page.evaluate(`$('#set-pc').textContent`);
-    assert(/Copy received text/.test(text) && /Save files to/.test(text) && /Switch server/.test(text) && /Ctrl\+Alt\+B/.test(text), 'This PC shows the app’s settings');
-    await page.evaluate(`[...$('#set-pc').querySelectorAll('label.check')].find(l => /Copy received text/.test(l.textContent)).querySelector('input').click()`);
+    await page.waitFor(`$('#settingsDlg').open && $('#set-general') !== null && /Switch server/.test($('#set-general').textContent)`, 5000, 'settings open on General');
+    const pageText = async id => { await page.evaluate(`showSettingsPage('${id}')`); return page.evaluate(`$('#set-${id}').textContent`); };
+    const receiving = await pageText('receiving');
+    assert(/Copy received text/.test(receiving) && /Save files to/.test(receiving), 'Receiving shows the app’s settings');
+    assert(/Ctrl\+Alt\+B/.test(await pageText('sending')), 'Sending shows its hotkeys');
+    await page.evaluate(`showSettingsPage('receiving'); [...$('#set-receiving').querySelectorAll('label.check')].find(l => /Copy received text/.test(l.textContent)).querySelector('input').click()`);
     await page.waitFor(`${hostLog('setSettings')}.some(m => m.settings.autoCopy === false)`, 3000, 'setSettings sent');
     await page.evaluate(`$('#settingsDlg').close(); __host.emit({ type: 'openPanel', panel: 'pair' })`);
     await page.waitFor(`$('#pairDlg').open`, 5000, 'Add a device opened');
@@ -245,7 +250,7 @@ export default function register(test) {
 
   test('host: the tray’s "Settings" works right after the handshake, and the footer names this PC', async ctx => {
     const { page } = await hostPage(ctx, { afterHello: [{ type: 'openPanel', panel: 'settings' }] });
-    await page.waitFor(`$('#settingsDlg').open && $('#set-pc') !== null && /Copy received text/.test($('#set-pc').textContent)`, 8000, 'This PC open');
+    await page.waitFor(`$('#settingsDlg').open && $('#set-general') !== null && /Start Beam when I sign in to Windows/.test($('#set-general').textContent)`, 8000, 'General open');
     eq(await page.evaluate(`$('#deviceLabel').textContent`), 'Test PC', 'footer shows the device name');
   });
 

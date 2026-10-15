@@ -457,7 +457,7 @@ function patchPhoneRow() {
 // ---------------------------------------------------------------- the switch ("Show phone notifications")
 
 // A per-device server setting; any signed-in device can set it for any device. The Windows app owns its own PC's
-// (its tray, and Settings → This PC through the bridge); everything else goes straight to the server.
+// (its tray, and Settings → Notifications through the bridge); everything else goes straight to the server.
 function phoneShownFor(d) { return Boolean(d?.settings?.phoneNotifications); }
 
 async function setPhoneShown(id, on, input) {

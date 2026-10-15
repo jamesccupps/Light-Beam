@@ -288,13 +288,21 @@
     </div>
   </dialog>
 
+  <!-- Settings (remade 2026-10-15, settings.js): the pages by group beside the page shown; a phone shows the list first. -->
   <dialog id="settingsDlg" class="dlg wide" aria-labelledby="settingsTitle">
     <div class="dlg-head">
+      <button id="settingsBack" class="icon-btn set-back" type="button" aria-label="All settings"><svg class="i" aria-hidden="true"><use href="#i-back"/></svg></button>
       <h2 id="settingsTitle">Settings</h2>
       <button class="icon-btn" type="button" data-close aria-label="Close"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="settings">
-      <nav id="settingsNav" class="settings-nav" aria-label="Settings sections"></nav>
+      <nav class="settings-nav" aria-label="Settings pages">
+        <div class="set-search">
+          <svg class="i" aria-hidden="true"><use href="#i-search"/></svg>
+          <input id="settingsSearch" type="search" placeholder="Search settings" aria-label="Search settings" autocomplete="off" spellcheck="false">
+        </div>
+        <div id="settingsNav"></div>
+      </nav>
       <div id="settingsBody" class="settings-body"></div>
     </div>
   </dialog>

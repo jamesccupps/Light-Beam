@@ -388,7 +388,7 @@ function applyDevices(list) {
   phoneAudienceChanged(); // shown here (or not any more)?
   refreshDeviceInfo();
   if (HOST && !$('#settingsDlg').open) return;
-  if ($('#settingsDlg').open && settingsSection === 'devices') renderSettings();
+  if ($('#settingsDlg').open && settingsShowsDevices()) renderSettings();
 }
 
 const sameJson = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
