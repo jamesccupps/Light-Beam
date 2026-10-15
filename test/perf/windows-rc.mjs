@@ -335,8 +335,20 @@ const VIEWER_SCRIPT = `window.V = (() => {
     async offer(sdp) {
       const o = (/^o=\\S+ (\\d+)/m.exec(sdp) || [])[1];
       if (!pc || o !== sessionO) { fresh(); sessionO = o; }
-      await pc.setRemoteDescription({ type: 'offer', sdp });
+      // (1.17.7) As remote.js does: the offer's own a=candidate lines come out and go through the rewrite (a later
+      // offer, a renegotiation, carries the PC's gathered ones; added raw, this viewer checked the PC's LAN address)
+      const lines = sdp.split(/\\r\\n|\\n/), kept = [], inSdp = [], mids = [];
+      let mi = -1;
+      for (const l of lines) { if (l.startsWith('m=')) mids[++mi] = null; else if (l.startsWith('a=mid:') && mi >= 0) mids[mi] = l.slice(6).trim(); }
+      mi = -1;
+      for (const l of lines) {
+        if (l.startsWith('m=')) mi++;
+        if (l.startsWith('a=candidate:')) { inSdp.push({ candidate: l.slice(2), sdpMid: mids[mi] === undefined ? null : mids[mi], sdpMLineIndex: Math.max(0, mi) }); continue; }
+        if (!l.startsWith('a=end-of-candidates')) kept.push(l);
+      }
+      await pc.setRemoteDescription({ type: 'offer', sdp: kept.join('\\r\\n') });
       for (const c of pending.splice(0)) pc.addIceCandidate(c).catch(() => {});
+      for (const c of inSdp) for (const r of rewrite(c)) pc.addIceCandidate(r).catch(() => {});
       const a = await pc.createAnswer();
       await pc.setLocalDescription(a);
       return a.sdp;
@@ -620,6 +632,14 @@ try {
   }
   const stats = await waitCtl('stats', t0, 6000, m => !!m.codec);
   check(!!stats, `the host sends stats with its encoder (${stats ? stats.codec + ' / ' + stats.encoder + ', ' + stats.w + '×' + stats.h : 'none'})`);
+  {
+    // 1.17.7: a fast link (both ends on this PC: a round trip of about 0 ms) gets a bandwidth floor after two ticks, the
+    // profile's limit at most (Sharp text: 8 Mbps), by a renegotiation; the viewer's stats say it.
+    const on = await waitLog(/Remote control page: a bandwidth floor of \d+ kbps \(/, from, 12000);
+    check(!!on && /floor of 8000 kbps \((a round trip of \d+ ms|Tailscale direct on the LAN)\)$/.test(on), `a fast link gets a bandwidth floor, Sharp text's 8 Mbps (1.17.7: ${on ? on.replace(/.*floor of /, '') : 'none'})`);
+    const floored = await waitCtl('stats', Date.now(), 8000, m => m.floor === 8000);
+    check(!!floored, `...and the stats say it (${floored ? 'floor ' + floored.floor + ', network about ' + floored.avail + ' kbps' : 'not within 8 s'})`);
+  }
   const state = await waitCtl('state', t0, 4000);
   check(!!state && state.locked === false, 'the host sends its state (locked / secure / elevated)');
   // 1.11: how Tailscale reaches the viewer, from this PC's own `tailscale status` (the fake: through the relay in New
@@ -758,6 +778,7 @@ try {
   await send('ctl', { t: 'quality', mode: 'motion' });
   const q = await waitCtl('quality', t1, 4000);
   check(!!q && q.mode === 'motion' && q.maxFps === 60 && q.maxKbps === 16000, 'Smooth motion: 60 fps / 16 Mbps');
+  check(!!(await waitLog(/a bandwidth floor of 12000 kbps \(the profile changed\), was 8000$/, from, 5000)), '...and the floor follows its limit: 12 Mbps at most (1.17.7)');
   // 1.8: the picture's settings apply at once (here Data saver); the fit changes this test instance's made-up screen
   // (FakeDisplay: never a real one), noted in config.json first, and answers with the new sizes; Fit off puts it back;
   // a hidden viewer gets no frames.
@@ -768,6 +789,18 @@ try {
   check(!!(await waitLog(/the viewer's picture settings: saver, size auto, auto fps, auto kbps, codec auto$/, from, 2000)), '...in beam.log');
   const st18 = await waitCtl('stats', Date.now(), 5000, m => m.profile === 'saver');
   check(!!st18 && st18.srcW > 0 && st18.down >= 1 && st18.maxFps === 15, `the stats say so, with the screen's size and how much smaller it goes (${st18 ? st18.srcW + '×' + st18.srcH + ', 1/' + st18.down + ', ' + st18.w + '×' + st18.h : 'none'})`);
+  check(!!(await waitLog(/no bandwidth floor \(not for this picture\)$/, from, 5000)) && !!(await waitCtl('stats', Date.now(), 5000, m => m.profile === 'saver' && m.floor === 0)),
+    'Data saver: no floor (1.17.7)');
+  {
+    // 1.17.7: a codec the viewer picks renegotiates the live connection, and the session goes on. The answer to a later
+    // offer carries the viewer's own candidates (its mDNS name among them): added as they were, ICE took that pair and the
+    // peer check hung up ("the peer stayed unresolved", the floor's renegotiation in this suite's first run).
+    const cs = logLines().length;
+    await send('ctl', { t: 'settings', mode: 'saver', size: 'auto', vw: 0, vh: 0, fps: 0, kbps: 0, codec: 'vp9', net: '' });
+    const vp9 = await waitCtl('stats', Date.now(), 10000, m => /vp9/i.test(m.codec || ''));
+    await sleep(6000); // (the peer check's 5 s for an address that doesn't resolve)
+    check(!!vp9 && count(/stopped controlling this PC|the peer stayed unresolved/, cs) === 0, `a codec picked on a live session (VP9): renegotiated, the session goes on (1.17.7: ${vp9 ? vp9.codec : 'no VP9 within 10 s'})`);
+  }
   t1 = Date.now();
   await send('ctl', { t: 'fit', on: true, w: 1920, h: 1200, dpr: 1.25, scale: true });
   const disp = await waitCtl('display', t1, 6000);

@@ -34,6 +34,8 @@
   let pendingRemote = [], outCands = [], candTimer = 0, restartTimer = 0, statsTimer = 0, prev = null, lastSelected = null;
   let codecNow = null, encoderNow = null, ended = false, candidatesIn = 0, candidatesAdded = 0, recapturing = null, kvm = false;
   let startSet = false; // (1.17) the first answer has had its start bitrate
+  // (1.17.7) The bandwidth floor (see floorNext): its kbps while on (0: off), and the link as this PC's Tailscale sees it
+  let floor = { kbps: 0, off: false, fast: 0, bad: 0 }, pathLan = false;
   // (1.12.4) Pictures through the clipboard: the `clip` channel of their own (on `ctl` a big one would hold up the pings),
   // Beam's parts sent as it drains (at most 1 MB waiting in it), the viewer's passed to Beam.
   let clipOut = [];
@@ -308,34 +310,91 @@
     return Math.max(300, Math.min(net > 0 ? Math.round(net * 0.8) : 4000, 8000, profile().kbps));
   }
 
-  // `x-google-start-bitrate` on each video codec of the viewer's answer (the sending side takes it from there).
-  function withStartBitrate(sdp, kbps) {
+  // Bitrates (`x-google-start-bitrate=…;x-google-min-bitrate=…`) on each video codec of the viewer's answer (the sending
+  // side takes them from there).
+  function withBitrates(sdp, params) {
     const pts = [];
     sdp.replace(/^a=rtpmap:(\d+) (AV1|H264|VP9|VP8)\/90000/gm, (all, pt) => { pts.push(pt); return all; });
     let out = sdp;
     for (const pt of pts) {
       const fmtp = new RegExp('^(a=fmtp:' + pt + ' [^\\r\\n]*)', 'm');
-      if (fmtp.test(out)) out = out.replace(fmtp, (all, line) => line + ';x-google-start-bitrate=' + kbps);
-      else out = out.replace(new RegExp('^(a=rtpmap:' + pt + ' [^\\r\\n]*)(\\r?\\n)', 'm'), (all, line, eol) => line + eol + 'a=fmtp:' + pt + ' x-google-start-bitrate=' + kbps + eol);
+      if (fmtp.test(out)) out = out.replace(fmtp, (all, line) => line + ';' + params);
+      else out = out.replace(new RegExp('^(a=rtpmap:' + pt + ' [^\\r\\n]*)(\\r?\\n)', 'm'), (all, line, eol) => line + eol + 'a=fmtp:' + pt + ' ' + params + eol);
     }
     return out;
+  }
+
+  // (1.17.7) The answer's own a=candidate lines come out (they go through the rewrite instead), and a=end-of-candidates
+  // too, as the viewer does with this page's offers (remote.js rcStripCandidates). The answer to a later offer (a
+  // renegotiation: the floor, a codec the viewer picks) carries the viewer's candidates gathered by then, its mDNS name
+  // among them; added as they were, ICE took that pair and Beam's peer check, unable to read its address, hung up
+  // (windows-rc, 2026-10-15: "the peer stayed unresolved", 7 s after the floor came on).
+  function stripCandidates(sdp) {
+    const lines = sdp.split(/\r\n|\n/);
+    const mids = [];
+    let m = -1;
+    for (const line of lines) {
+      if (line.startsWith('m=')) mids[++m] = null;
+      else if (line.startsWith('a=mid:') && m >= 0) mids[m] = line.slice(6).trim();
+    }
+    const out = [], candidates = [];
+    m = -1;
+    for (const line of lines) {
+      if (line.startsWith('m=')) m++;
+      if (line.startsWith('a=candidate:')) { candidates.push({ candidate: line.slice(2), sdpMid: mids[m] === undefined ? null : mids[m], sdpMLineIndex: Math.max(0, m) }); continue; }
+      if (line.startsWith('a=end-of-candidates')) continue;
+      out.push(line);
+    }
+    return { sdp: out.join('\r\n'), candidates };
+  }
+
+  // (1.17.7) A bandwidth floor on a link that has shown it's fast (the cloud session's brief, and its bench on Desktop:
+  // Beam-dev\plan\rc-big-1015.md). WebRTC's estimate stays near what a mostly still screen sends (~4 Mbps), so a window
+  // opening (~120 KB in AV1) went out over ~180 ms and everything after it waited (Measure the delay's square: p90 154 ms;
+  // with 12 Mbps: 27; the window 230 → 146 ms). A floor holds where a higher start doesn't, and a still screen sends no
+  // more for it. On once the link is fast two ticks running (Tailscale direct on the LAN, or a round trip of 10 ms or
+  // less, with no loss); never on mobile data, in Data saver or for keyboard and mouse; at most the profile's limit.
+  // Off for the rest of the session after two ticks of loss over 2% or a round trip over 30 ms (a link that can't carry
+  // it). The answer of every renegotiation carries it while it's on. Pure (rc-floor-check.mjs runs it): `s` the floor
+  // now, `t` this tick { rtt, lost, lan, allowed, limit }; returns the next one, with `act` 'on' / 'off' / '' and `why`.
+  function floorNext(s, t) {
+    const n = { kbps: s.kbps, off: s.off, fast: s.fast, bad: s.bad, act: '', why: '' };
+    if (n.off) return n;
+    const want = t.allowed ? Math.min(12000, t.limit) : 0;
+    if (n.kbps) {
+      const lossy = t.lost != null && t.lost > 2, slow = t.rtt != null && t.rtt > 30;
+      n.bad = lossy || slow ? n.bad + 1 : 0;
+      if (n.bad >= 2) Object.assign(n, { kbps: 0, off: true, act: 'off', why: lossy ? 'loss ' + t.lost + '%' : 'a round trip of ' + t.rtt + ' ms' });
+      else if (want < 2000) Object.assign(n, { kbps: 0, fast: 0, act: 'off', why: 'not for this picture' });
+      else if (want !== n.kbps) Object.assign(n, { kbps: want, act: 'on', why: 'the profile changed' });
+      return n;
+    }
+    n.fast = want >= 2000 && (t.lan || (t.rtt != null && t.rtt <= 10)) && !(t.lost != null && t.lost > 2) ? n.fast + 1 : 0;
+    if (n.fast >= 2) Object.assign(n, { kbps: want, act: 'on', why: t.lan ? 'Tailscale direct on the LAN' : 'a round trip of ' + t.rtt + ' ms' });
+    return n;
   }
 
   async function onSignal(m) {
     if (!pc) return;
     if (m.kind === 'answer') {
       if (pc.signalingState !== 'have-local-offer' || typeof m.sdp !== 'string') return;
-      // (1.17) The first answer only: a later one (a codec switch, an ICE restart) keeps the network's estimate.
-      if (!startSet && !kvm) {
-        startSet = true;
-        const kbps = startKbps();
+      // (1.17.7) Its own candidates only through the rewrite (stripCandidates).
+      const { sdp: answer, candidates: inAnswer } = stripCandidates(m.sdp);
+      // (1.17) The start bitrate on the first answer only: a later one (a codec switch, an ICE restart) keeps the
+      // network's estimate. (1.17.7) The floor on every answer while it's on.
+      const params = [];
+      let start = 0;
+      if (!startSet && !kvm) { startSet = true; start = startKbps(); params.push('x-google-start-bitrate=' + start); }
+      if (floor.kbps && !kvm) params.push('x-google-min-bitrate=' + floor.kbps);
+      if (params.length) {
         try {
-          await pc.setRemoteDescription({ type: 'answer', sdp: withStartBitrate(m.sdp, kbps) });
-          log('the first picture starts at ' + kbps + ' kbps' + (cfg && cfg.net ? ' (this viewer had ' + cfg.net + ' kbps last time)' : ''));
-        } catch (e) { log('the start bitrate: ' + e.name); }
+          await pc.setRemoteDescription({ type: 'answer', sdp: withBitrates(answer, params.join(';')) });
+          if (start) log('the first picture starts at ' + start + ' kbps' + (cfg && cfg.net ? ' (this viewer had ' + cfg.net + ' kbps last time)' : ''));
+        } catch (e) { log('the answer\'s bitrates: ' + e.name); }
       }
-      if (pc.signalingState === 'have-local-offer') await pc.setRemoteDescription({ type: 'answer', sdp: m.sdp });
+      if (pc.signalingState === 'have-local-offer') await pc.setRemoteDescription({ type: 'answer', sdp: answer });
       for (const c of pendingRemote.splice(0)) addCandidate(c);
+      for (const c of inAnswer) { candidatesIn++; for (const r of rewrite(c)) { candidatesAdded++; addCandidate(r); } }
       await applyParams();
     } else if (m.kind === 'candidates') {
       for (const c of Array.isArray(m.candidates) ? m.candidates : []) {
@@ -607,6 +666,7 @@
         lost: back && Number.isFinite(back.fractionLost) ? Math.round(back.fractionLost * 1000) / 10 : null,
         rtt: back && Number.isFinite(back.roundTripTime) ? ms(back.roundTripTime) : pair ? ms(pair.currentRoundTripTime) : null,
         video: videoOn, encMs, sendMs,
+        floor: floor.kbps, // (1.17.7)
       };
       post(st);
       sendCtl(st);
@@ -614,6 +674,14 @@
       if (st.qlr === 'cpu' && codecNow && codecNow.toLowerCase() !== 'h264' && settings.codec === 'auto') cpuStrikes++; else cpuStrikes = 0;
       if (cpuStrikes >= 3 && !h264First) { h264First = true; await renegotiate('the CPU is the limit: switching to H.264'); }
       autoStep(st.fps, kbps);
+      // (1.17.7) The floor: on, changed or off by a renegotiation (the next answer carries it, or not); only once Beam's
+      // peer check has passed (no video flows before it, and a renegotiation then would bring the viewer's candidates in
+      // the middle of the check)
+      const f = !verified || ended ? Object.assign({}, floor, { act: '' }) : floorNext(floor, { rtt: st.rtt, lost: st.lost, lan: pathLan, allowed: !kvm && settings.net !== 'cellular' && profile().name !== 'saver', limit: profile().kbps });
+      const was = floor.kbps;
+      floor = f;
+      if (f.act === 'on') await renegotiate('a bandwidth floor of ' + f.kbps + ' kbps (' + f.why + ')' + (was ? ', was ' + was : ''));
+      else if (f.act === 'off') await renegotiate('no bandwidth floor' + (f.off ? ' for the rest of this session' : '') + ' (' + f.why + ')');
     }
     if (pc && pc.connectionState === 'connected') {
       const sel = await selected();
@@ -720,7 +788,12 @@
     switch (m.t) {
       case 'signal': onSignal(m).catch(err => log('signal ' + m.kind + ': ' + (err && err.name))); break;
       case 'verified': onVerified(m).catch(err => log('verified: ' + (err && err.name))); break;
-      case 'send': if (m.ch === 'ctl' && m.m && typeof m.m === 'object') sendCtl(m.m); break;
+      case 'send':
+        if (m.ch === 'ctl' && m.m && typeof m.m === 'object') {
+          if (m.m.t === 'path') pathLan = m.m.via === 'direct' && m.m.lan === true; // (1.17.7: the floor's "fast")
+          sendCtl(m.m);
+        }
+        break;
       case 'clipout': if (typeof m.d === 'string' && m.d.length <= 80000) { clipOut.push(m.d); drainClip(); } break;
       case 'quality': setQuality(m).catch(() => {}); break;
       case 'settings': setSettings(m).catch(err => log('settings: ' + (err && err.name))); break;
