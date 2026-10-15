@@ -3460,13 +3460,18 @@ test('1.23.2 Beam for Linux renamed from its window: the name sticks over the ap
     child.stderr.on('data', d => { agent.out += d; });
     runs.push(agent);
     await waitFor(() => cliConfig(home).device === 'OCC Pi', 15000);
-    assert.match(agent.out, /This computer is called OCC Pi in Beam now/);
+    // (its log line comes a moment after the file: on one core it once wasn't there yet)
+    await waitFor(() => /This computer is called OCC Pi in Beam now/.test(agent.out), 5000);
     // And at once while it's connected.
     r = await rename('Pi at the office');
     assert.equal(r.status, 200);
     await waitFor(() => cliConfig(home).device === 'Pi at the office', 10000);
     assert.equal(await nameNow(), 'Pi at the office');
-    // The app having said it, its own name counts again (here: the command line's, for this one run).
+    // The app having said it, its own name counts again (here: the command line's, for this one run). Its next request
+    // says it: here the answer to a log request. (1.25.4: on CI's runner the status report it sends after a rename was
+    // once a report already on its way with the name before, so it never said the new one in time.)
+    r = await post(s, `/api/devices/${id}/log`, {}, admin);
+    assert.equal(r.status, 200, r.body);
     await waitFor(async () => (await cli(['status'], { home, env: { BEAM_DEVICE: 'Pi Three' } })).code === 0 && await nameNow() === 'Pi Three', 10000, 300);
 
     // Only a Beam for Linux computer is renamed here.
