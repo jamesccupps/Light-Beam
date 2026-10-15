@@ -1407,6 +1407,7 @@ function rcHostStats(m) {
     fps: num(m.fps, 1000), kbps: num(m.kbps, 1e7), maxFps: num(m.maxFps, 1000), maxKbps: num(m.maxKbps, 1e7),
     avail: num(m.avail, 1e7), lost: num(m.lost, 100), rtt: num(m.rtt, 1e5), auto: m.auto === true, video: m.video !== false,
     encMs: num(m.encMs, 1000), sendMs: num(m.sendMs, 1000), // (1.12.6) a frame's encoding, and its packets' wait to go out
+    floor: num(m.floor, 1e6), // (a Windows app 1.17.7) the bandwidth floor on a fast link, kbps (0: none)
   };
   if (['text', 'motion', 'saver'].includes(m.profile)) rc.profile = m.profile;
 }
@@ -2863,7 +2864,7 @@ function rcRenderDetails() {
     ['Screen', mon ? `${mon.w}×${mon.h} at ${Math.round(mon.scale * 100)}%${rc.fitted ? ', fitted to this one' : ''}` : ''],
     ['Picture', s.w && s.h ? `${s.w}×${s.h}${h?.down > 1.01 ? ` (sent at 1/${h.down.toFixed(2).replace(/\.?0+$/, '')})` : ''}` : ''],
     ['Frames', s.fps != null ? `${s.fps} fps${h?.maxFps ? `, up to ${h.maxFps}` : ''}` : ''],
-    ['Data', s.kbps != null ? `${rate(s.kbps)}${h?.maxKbps ? `, limit ${rate(h.maxKbps)}` : ''}${h?.avail ? `, network about ${rate(h.avail)}` : ''}` : ''],
+    ['Data', s.kbps != null ? `${rate(s.kbps)}${h?.maxKbps ? `, limit ${rate(h.maxKbps)}` : ''}${h?.avail ? `, network about ${rate(h.avail)}` : ''}${h?.floor ? `, at least ${rate(h.floor)} (a fast link)` : ''}` : ''],
     ['Codec', [s.codec || rc.hostCodec, rc.encoder && `encoder ${rc.encoder}${hw(rc.encoder)}`, rc.decoder && `decoder ${rc.decoder}`].filter(Boolean).join(' · ')],
     ['Delay', [s.picMs != null && `about ${rcLag()} ms from a touch to the picture`, s.picMs != null && `${s.picMs} ms from the PC’s screen to this one`,
       rtt != null && `${rtt} ms round trip`, s.jitterMs != null && `${s.jitterMs} ms buffered here`, h?.lost != null && `${h.lost}% lost`].filter(Boolean).join(' · ')],

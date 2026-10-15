@@ -595,6 +595,9 @@ export default function register(test) {
     // Anything else from the PC is dropped.
     await pc.js(`fakePc.send('ctl', { t: 'path', via: 'teleport', relay: '<b>x</b>' })`);
     await page.waitFor(`rc.path === null && !/Tailscale,/.test(rcUi.details.textContent)`, 3000, 'an unknown path: dropped');
+    // (a Windows app 1.17.7) The PC's bandwidth floor on a fast link, in the details' Data row.
+    await pc.js(`fakePc.send('ctl', { t: 'stats', codec: 'AV1', fps: 30, kbps: 900, w: 1920, h: 1080, srcW: 1920, srcH: 1080, down: 1, maxFps: 60, maxKbps: 15000, avail: 12500, floor: 12000 })`);
+    await page.waitFor(`/network about 12\\.5 Mbps, at least 12\\.0 Mbps \\(a fast link\\)/.test(rcUi.details.textContent)`, 5000, 'the details: the floor');
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 90000 });
 
