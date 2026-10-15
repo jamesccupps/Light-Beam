@@ -172,6 +172,14 @@ address, so the browser becomes part of that device instead of a separate entry.
   own PC reads its own when the server starts (`BEAM_OWN_HISTORY=off` turns that off).
 - **Beam log** (in a PC's Device info): the end of that PC's Beam log, sent by its Beam app when you ask, from any of
   your devices. Nothing is kept on the server, and Beam never writes message text, keys or sign-ins into its log.
+- **Shared folders** (Beam 1.26, the Windows app 1.18): copy files from another of your PCs without remoting in. At the
+  PC, Settings → This PC → **Shared folders…** chooses the folders, and for each one the devices that may see it
+  (nothing until you add a folder; only there, never from another device, and not while the PC is being controlled).
+  Then on those devices, that PC's Device info → **Shared folders**: look in its folders, tick files and **Copy to this
+  device**. The PC sends them the way it sends anything (they arrive in your conversation with it) and shows a notice.
+  Read-only: nothing on the PC can be changed or deleted from elsewhere, and nothing else is visible: no hidden files,
+  nothing starting with ".", no shortcuts or links to other folders. A whole drive, your user folder itself, AppData,
+  Windows and Program Files can't be shared. It takes a trusted sign-in.
 - **Setup check** (Settings → Server → Setup): Beam looks at its own setup every 6 hours and alerts when something is
   wrong: the servers start when Windows does, Tailscale runs unattended, devices come in over https, backups are
   recent, there's room on the disk, every PC runs the latest Beam and starts it with Windows, no Tailscale sign-in runs

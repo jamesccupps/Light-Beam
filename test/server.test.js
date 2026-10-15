@@ -2024,8 +2024,8 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     assert.equal(d.status.macs, undefined);
     // (1.17: + Tailscale's own view of the machine: the fake says nothing about Online or a key expiry)
     assert.deepEqual(d.tailscale, { name: 'gaming-pc', dns: 'gaming-pc.tail1234.ts.net', ip: '100.64.50.1', online: false, keyExpiry: null });
-    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false });
-    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false });
+    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false, files: false });
+    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false, files: false });
     // a partial report keeps the rest; null clears a field
     r = await put({ battery: null });
     assert.equal(r.status, 204);
@@ -2881,6 +2881,90 @@ test('1.20 a PC’s log from anywhere: asked through the server, answered by the
     r = await post(s, '/api/devices/shoppc00120/log', {}, laptop);
     assert.equal(r.status, 409);
     assert.match(r.json.error, /didn’t send its log in time/);
+    st.close();
+  } finally { await s.stop(); }
+});
+
+test('1.26 shared folders: a PC\'s folders, browsed and copied from another device through the server (the PC decides and answers; trusted sign-ins only; names cleaned; nothing kept)', async () => {
+  const s = await startServer('files126', 8795);
+  try {
+    const K = s.key;
+    const laptop = app(K, 'laptop00126', 'Robin Laptop', 'windows', { 'X-Beam-App-Version': '1.17.7', ...from('100.64.26.5') });
+    const shop = app(K, 'shoppc00126', 'Shop Desktop', 'windows', { 'X-Beam-App-Version': '1.18.0', ...from('100.64.26.2') });
+    const old = app(K, 'oldpc000126', 'Old PC', 'windows', { 'X-Beam-App-Version': '1.17.7', ...from('100.64.26.3') });
+    for (const h of [laptop, shop, old]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('shared-folders'));
+    const devs = (await s.req('GET', '/api/devices', { headers: laptop })).json.devices;
+    assert.equal(devs.find(d => d.id === 'shoppc00126').can.files, true);
+    assert.equal(devs.find(d => d.id === 'oldpc000126').can.files, false, 'needs Beam for Windows 1.18');
+    assert.match((await post(s, '/api/devices/shoppc00126/files', {}, laptop)).json.error, /Shop Desktop is offline/);
+    assert.match((await post(s, '/api/devices/oldpc000126/files', {}, laptop)).json.error, /needs Beam for Windows 1\.18\.0 or later/);
+    assert.match((await post(s, '/api/devices/laptop00126/files', {}, laptop)).json.error, /this device’s own folders/);
+
+    const st = await openEvents(s.port, shop);
+    await st.wait('hello');
+    const answer = (ev, body) => post(s, '/api/devices/me/files', { id: ev.data.id, ...body }, shop);
+    // (the next request the PC gets, among the events from `at` on)
+    const nextAsk = (name, at) => waitFor(() => st.events.slice(at).find(e => e.event === name), 5000);
+    // The folders shared with this device (what the PC says; an id that isn't one dropped)
+    let at = st.events.length;
+    let asked = post(s, '/api/devices/shoppc00126/files', {}, laptop);
+    let ev = await nextAsk('files-request', at);
+    assert.deepEqual(pick(ev.data, ['by', 'byName', 'share', 'path']), { by: 'laptop00126', byName: 'Robin Laptop', share: '', path: '' }, 'the PC is told who asks');
+    assert.equal((await post(s, '/api/devices/me/files', { id: ev.data.id, ok: true, shares: [] }, laptop)).status, 404, 'only the PC asked answers');
+    assert.equal((await answer(ev, { ok: true, shares: [{ id: 'a1b2c3d4', name: 'Downloads' }, { id: '../x', name: 'Bad' }] })).status, 204);
+    let r = await asked;
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json, { shares: [{ id: 'a1b2c3d4', name: 'Downloads' }] });
+    assert.equal(r.headers['cache-control'], 'no-store');
+    // A folder in it: its entries, names without control or bidi characters, nameless ones dropped
+    at = st.events.length;
+    asked = post(s, '/api/devices/shoppc00126/files', { share: 'a1b2c3d4', path: 'Photos/2026' }, laptop);
+    ev = await nextAsk('files-request', at);
+    assert.equal(ev.data.share, 'a1b2c3d4');
+    assert.equal(ev.data.path, 'Photos/2026');
+    await answer(ev, { ok: true, share: 'a1b2c3d4', name: 'Downloads', path: 'Photos/2026', more: true, entries: [{ n: 'Sub', dir: true, m: 5 }, { n: 'report‮fdp.exe', s: 10, m: 7, extra: 1 }, { n: '\u0007', s: 1 }, { n: 'bad size', s: -3 }] });
+    r = await asked;
+    assert.deepEqual(r.json, { share: 'a1b2c3d4', name: 'Downloads', path: 'Photos/2026', entries: [{ n: 'Sub', dir: true, s: 0, m: 5 }, { n: 'reportfdp.exe', s: 10, m: 7 }, { n: 'bad size', s: 0, m: 0 }], more: true });
+    // The PC's no: its words and reason, as 403 / 404 / 409
+    for (const [reason, status] of [['not-shared', 403], ['not-found', 404], ['made-up', 409]]) {
+      at = st.events.length;
+      asked = post(s, '/api/devices/shoppc00126/files', { share: 'a1b2c3d4' }, laptop);
+      ev = await nextAsk('files-request', at);
+      await answer(ev, { ok: false, reason, error: `No (${reason})` });
+      r = await asked;
+      assert.deepEqual([r.status, r.json.reason, r.json.error], [status, reason === 'made-up' ? 'error' : reason, `No (${reason})`], reason);
+    }
+    // A copy: the PC sends what it can (an ordinary send, not through here) and says what it left out
+    at = st.events.length;
+    asked = post(s, '/api/devices/shoppc00126/files/copy', { share: 'a1b2c3d4', path: '', names: ['a.txt', 'b.txt'] }, laptop);
+    ev = await nextAsk('files-copy', at);
+    assert.deepEqual(pick(ev.data, ['by', 'share', 'path', 'names']), { by: 'laptop00126', share: 'a1b2c3d4', path: '', names: ['a.txt', 'b.txt'] });
+    await answer(ev, { ok: true, sending: 1, skipped: [{ n: 'b.txt', why: 'not a file' }] });
+    r = await asked;
+    assert.deepEqual(r.json, { sending: 1, skipped: [{ n: 'b.txt', why: 'not a file' }] });
+    assert.match(s.out, /Robin Laptop asked Shop Desktop for 1 file from a shared folder/);
+    // What the asker may send
+    for (const [body, what] of [[{ share: 'x' }, 'a share that isn’t an id'], [{ path: 'a'.repeat(1025) }, 'a path too long'], [{ nope: 1 }, 'an unknown field']]) {
+      assert.equal((await post(s, '/api/devices/shoppc00126/files', body, laptop)).status, 400, what);
+    }
+    for (const [body, what] of [[{ share: 'a1b2c3d4', names: [] }, 'no names'], [{ share: 'a1b2c3d4', names: Array(101).fill('a') }, '101 names'], [{ names: ['a'] }, 'no share'], [{ share: 'a1b2c3d4', names: ['a\nb'] }, 'a name with a line break']]) {
+      assert.equal((await post(s, '/api/devices/shoppc00126/files/copy', body, laptop)).status, 400, what);
+    }
+    // A sign-in for this browser session only: no
+    await post(s, '/api/password', { password: 'files pass 126' }, laptop);
+    const session = cookieValue(await post(s, '/api/login', { secret: 'files pass 126', remember: false }, { ...sameOrigin, Cookie: 'beam_device_id=fsession126' }));
+    r = await post(s, '/api/devices/shoppc00126/files', {}, cookie(session, 'fsession126', sameOrigin));
+    assert.deepEqual([r.status, r.json.reason], [403, 'temporary']);
+    // Four waiting from one device at most; then no answer in time
+    at = st.events.length;
+    const waiting = [1, 2, 3, 4].map(() => post(s, '/api/devices/shoppc00126/files', {}, laptop));
+    await waitFor(() => st.events.slice(at).filter(e => e.event === 'files-request').length >= 4, 3000);
+    r = await post(s, '/api/devices/shoppc00126/files', {}, laptop);
+    assert.equal(r.status, 429, 'a fifth while four wait');
+    for (const w of await Promise.all(waiting)) { assert.equal(w.status, 409); assert.match(w.json.error, /didn’t answer in time/); }
+    const kept = fs.readdirSync(s.data).filter(f => f.endsWith('.json')).filter(f => /reportfdp|a1b2c3d4/.test(fs.readFileSync(path.join(s.data, f), 'utf8')));
+    assert.deepEqual(kept, [], 'nothing of the folders kept in the data folder');
     st.close();
   } finally { await s.stop(); }
 });
@@ -5880,6 +5964,8 @@ test('1.25 trusted sign-ins (R-1/R-2): an automatic sign-in naming any app contr
     await refused('the backups', 'GET', '/api/backups');
     await refused('a backup now', 'POST', '/api/backups');
     await refused('the metrics', 'GET', '/api/metrics');
+    await refused('a PC’s shared folders (1.26)', 'POST', '/api/devices/rcdesk00001/files', {});
+    await refused('a copy from them', 'POST', '/api/devices/rcdesk00001/files/copy', { share: 'a1b2c3d4', names: ['a'] });
     // A pairing link it makes signs in nothing trusted (Beam for Linux's window is made that way)...
     const pairKey = (await s.req('GET', '/api/pair', { headers: droid })).json.key;
     const viaLink = await post(s, '/api/login', { secret: pairKey }, { ...sameOrigin, Cookie: 'beam_device_id=rclinkweb01' });

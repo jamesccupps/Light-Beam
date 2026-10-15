@@ -104,6 +104,8 @@ function deviceActions(d) {
   if (can.remoteDesktop && (!HOST || (hostHas('remoteDesktop') && rdpHost(d)))) acts.push({ label: 'Remote Desktop', icon: 'screen', action: () => remoteDesktop(d) });
   // (1.20) its Beam log, from anywhere (Beam for Windows 1.14+)
   if (can.log && d.online && d.id !== me.id && serverHas('device-logs')) acts.push({ label: 'Beam log', icon: 'file', action: () => showDeviceLog(d) });
+  // (1.26) the folders it shares with this device (Beam for Windows 1.18+; chosen there): files.js
+  if (canBrowseShared(d)) acts.push({ label: 'Shared folders', icon: 'folder', action: () => openSharedFolders(d) });
   return acts;
 }
 

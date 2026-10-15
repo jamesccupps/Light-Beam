@@ -48,6 +48,7 @@ namespace Beam
         public string TestHistory;   // tests (1.13): the PC's history ("send", "read")
         public string TestKvm;       // tests (1.12): keyboard and mouse across PCs ("on:ids", "off", "edge[:h]", "move:dx,dy", "btn:b:down|up", "wheel:d", "key:vk,scan,ext:down|up", "where")
         public string TestBridge;    // tests: a host bridge message as if the chat page sent it (the reply goes to beam.log)
+        public string TestShares;    // tests (1.18): the Shared folders window ("open", "shot:<png>", "save", "close")
         public string TestOpenRemote; // tests: the viewer window for that device, as the page's "Control" opens it
         public string TestFamily;    // tests (1.10): the Family window "minimize", "restore" or "close", as the user would
         public string TestApps;      // tests (1.16): apps ("answer:<id>:install|always|notnow", "allow:on|off", "state")
@@ -100,6 +101,7 @@ namespace Beam
                 else if (lower == "--test-history" && more) o.TestHistory = args[++i];
                 else if (lower == "--test-kvm" && more) o.TestKvm = args[++i];
                 else if (lower == "--test-bridge" && more) o.TestBridge = args[++i];
+                else if (lower == "--test-shares" && more) o.TestShares = args[++i];
                 else if (lower == "--test-open-remote" && more) o.TestOpenRemote = args[++i];
                 else if (lower == "--test-family" && more) o.TestFamily = args[++i];
                 else if (lower == "--test-apps" && more) o.TestApps = args[++i];
@@ -162,6 +164,7 @@ namespace Beam
             if (TestHistory != null) { list.Add("--test-history"); list.Add(TestHistory); }
             if (TestKvm != null) { list.Add("--test-kvm"); list.Add(TestKvm); }
             if (TestBridge != null) { list.Add("--test-bridge"); list.Add(TestBridge); }
+            if (TestShares != null) { list.Add("--test-shares"); list.Add(TestShares); }
             if (TestOpenRemote != null) { list.Add("--test-open-remote"); list.Add(TestOpenRemote); }
             if (TestFamily != null) { list.Add("--test-family"); list.Add(TestFamily); }
             if (TestApps != null) { list.Add("--test-apps"); list.Add(TestApps); }
@@ -275,7 +278,7 @@ namespace Beam
                 && !opts.PickClipboard && !opts.Screenshot && !opts.CopyLatest && !opts.Hide && !opts.TestPoke && opts.TestMode == null && opts.Updated == null
                 && opts.TestTransfer == null && opts.TestPhone == null && !opts.TestClickBalloon && opts.TestEventName == null
                 && opts.TestRc == null && opts.TestBackups == null && opts.TestHistory == null && opts.TestKvm == null && opts.TestBridge == null && opts.TestOpenRemote == null
-                && opts.TestApps == null && opts.RemoveApp == null) opts.Show = true;
+                && opts.TestApps == null && opts.RemoveApp == null && opts.TestShares == null) opts.Show = true;
             for (int i = 0; i < 6; i++)
             {
                 if (IpcServer.Send(PipeName(), opts.ToArgs(), 1000)) return 0;
