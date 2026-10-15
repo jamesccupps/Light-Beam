@@ -254,6 +254,29 @@ export default function register(test) {
     eq(await page.evaluate(`$('#deviceLabel').textContent`), 'Test PC', 'footer shows the device name');
   });
 
+  test('host: Check now says what it found; a web app deployed while the window stayed open is noticed (index.html’s file versions) and Check now loads it (2026-10-15)', async ctx => {
+    const { page } = await hostPage(ctx);
+    await page.waitFor(`paired && hostState.ready`, 10000, 'host mode');
+    await page.evaluate(`window.__toasts = []; { const o = toast; toast = (m, x) => { __toasts.push(m); return o(m, x); }; } true`);
+    await page.evaluate(`openSettings('general'); true`);
+    const check = `[...$('#set-general').querySelectorAll('button')].find(b => b.textContent === 'Check now')`;
+    await page.waitFor(`Boolean(${check})`, 5000, 'Check now');
+    await page.evaluate(`${check}.click(); true`);
+    await page.waitFor(`__toasts.some(t => /Beam app 1\\.2\\.0 is up to date/.test(t))`, 5000, 'it says so (the page used to redraw the same line)');
+    assert(await page.evaluate(`__host.log.some(m => m.type === 'checkForUpdates')`), 'asked the app');
+    eq(await page.evaluate(`checkWebFiles(true)`), false, 'the same web app on the server');
+    // A newer web app on the server (as after a deploy without a restart): its index.html names another settings.js.
+    await page.evaluate(`window.__realFetch = window.fetch; window.fetch = (u, o) => /index\\.html\\?files=/.test(String(u))
+      ? window.__realFetch(u, o).then(r => r.text()).then(t => new Response(t.replace(/settings\\.js\\?v=[0-9a-f]+/, 'settings.js?v=0123456789'), { headers: { 'Content-Type': 'text/html' } }))
+      : window.__realFetch(u, o); true`);
+    await ctx.sleep(2100); // (Check now looks at most every 2 s)
+    await page.evaluate(`window.__marker = 1; ${check}.click(); true`);
+    await page.waitFor(`typeof window.__marker === 'undefined' || __toasts.some(t => /A newer version of this window is ready: loading it/.test(t))`, 5000, 'found and said');
+    await page.waitFor(`typeof window.__marker === 'undefined'`, 8000, 'the window reloaded itself');
+    await page.waitFor(`typeof paired !== 'undefined' && paired && hostState.ready`, 10000, 'and is back');
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('host: Copy image goes through the app (its page may be http: no image clipboard); a type Windows can’t read goes as PNG; an older app: the browser’s way', async ctx => {
     const { page, appId } = await hostPage(ctx);
     await page.waitFor(`paired && hostState.ready`);

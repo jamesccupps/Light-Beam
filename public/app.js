@@ -50,6 +50,7 @@ function bindUI() {
   bindLightbox();
   bindPicking();
   bindSettings();
+  setInterval(() => checkWebFiles(), 30 * 60e3); // (also while hidden: then it reloads at once, unseen)
   bindGallery();
 
   $('#backBtn').addEventListener('click', () => (gallery.open ? closeGalleryByUser() : history.state?.conv ? history.back() : showList()));
@@ -188,6 +189,7 @@ function onVisibility() {
   else if (!live.watchdog) sync('visible'); // older servers send no pings we could trust: catch up (cheap: nothing is rebuilt)
   scheduleCheckRead();
   pickUpShares();
+  checkWebFiles(); // (a web app deployed while this page stayed open; at most every 10 minutes)
 }
 
 // ---------------------------------------------------------------- Android share sheet (the service worker parks shared items)
