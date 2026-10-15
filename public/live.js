@@ -625,6 +625,31 @@ function maybeReloadForUpdate(web) {
 }
 let pendingUpdateReload = '';
 
+// (2026-10-15) A page open for days, the Windows app's window above all, heard of a new web app only in a `hello`,
+// which comes only when its event stream reconnects: after a web-only deploy (no server restart) the user still had
+// the old Settings. Now it also compares the file versions in the server's index.html with its own: when it's shown
+// again, every 30 minutes, and on the Windows app's Check now. (index.html by that name: the service worker leaves it
+// to the network.) Resolves true when a newer web app is there.
+let webFilesCheckedAt = 0;
+const fileVersions = doc => new Map([...doc.querySelectorAll('script[src], link[href]')]
+  .map(e => /^([^?#]+)\?v=([0-9a-f]+)/.exec(e.getAttribute('src') || e.getAttribute('href') || ''))
+  .filter(Boolean).map(m => [m[1], m[2]]));
+async function checkWebFiles(now = false) {
+  if (!paired || dormant || Date.now() - webFilesCheckedAt < (now ? 2000 : 10 * 60e3)) return false;
+  webFilesCheckedAt = Date.now();
+  let html;
+  try {
+    const res = await fetch(url(`index.html?files=${Date.now()}`), { cache: 'no-store' });
+    if (!res.ok) return false;
+    html = await res.text();
+  } catch { return false; }
+  const mine = fileVersions(document);
+  const theirs = fileVersions(new DOMParser().parseFromString(html, 'text/html'));
+  if (![...theirs].some(([file, v]) => mine.has(file) && mine.get(file) !== v)) return false;
+  markUpdateReady(`files:${[...theirs.values()].sort().join('').slice(0, 64)}`);
+  return true;
+}
+
 // ---------------------------------------------------------------- notifications (browser mode only; the Windows app notifies natively)
 
 // (Beam for Linux 1.1) A browser Beam took for a computer's Beam for Linux (Beam's window from its menu, say): the app

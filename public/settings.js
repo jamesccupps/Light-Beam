@@ -296,18 +296,45 @@ async function setHostSettings(fields, input) {
   else if (input) input.checked = !input.checked;
 }
 
+const appUpdateText = u => ({
+  none: 'Beam is up to date.', available: `Version ${u.version || ''} is available.`, downloading: `Downloading version ${u.version || ''}…`,
+  waiting: `Version ${u.version || ''} installs when the transfers finish.`, ready: `Version ${u.version || ''} is ready to install.`, failed: `The update failed: ${u.error || 'unknown error'}`,
+}[u.state] || '');
+
 function appUpdatesCard(s) {
   const u = hostState.update || {};
-  const updateText = {
-    none: 'Beam is up to date.', available: `Version ${u.version || ''} is available.`, downloading: `Downloading version ${u.version || ''}…`,
-    waiting: `Version ${u.version || ''} installs when the transfers finish.`, ready: `Version ${u.version || ''} is ready to install.`, failed: `The update failed: ${u.error || 'unknown error'}`,
-  }[u.state] || '';
   return card('Beam app',
-    cardInfo(`Beam app ${u.current || s.app?.version || hostState.version || ''}${s.app && s.app.installed === false ? ' (running from outside its install folder)' : ''}. ${updateText}`),
+    cardInfo(`Beam app ${u.current || s.app?.version || hostState.version || ''}${s.app && s.app.installed === false ? ' (running from outside its install folder)' : ''}. ${appUpdateText(u)}`),
     switchRow('Install updates automatically', s.autoUpdate, (v, box) => setHostSettings({ autoUpdate: v }, box)),
-    buttonRow(smallBtn('Check now', async () => { const r = await hostDo('checkForUpdates'); if (r?.update) { hostState.update = r.update; renderSettings(); } }),
+    buttonRow(smallBtn(updateChecking ? 'Checking…' : 'Check now', checkAppUpdates, { disabled: updateChecking }),
       u.state === 'ready' && smallBtn('Install now', () => hostDo('installUpdate'), { kind: 'primary' }),
       smallBtn('Open logs folder', () => hostDo('openFolder', { which: 'logs' }), { kind: 'ghost' })));
+}
+
+// Check now: the app asks the server for a newer Beam app, and this window looks for a newer web app (Settings and the
+// rest come from the server: a deploy of them alone needs no new app). It says what it found (the user, 2026-10-15:
+// "when you press check now, it doesnt seem to do anything": the page redrew the same "up to date").
+let updateChecking = false;
+async function checkAppUpdates() {
+  if (updateChecking) return;
+  updateChecking = true;
+  renderSettings();
+  const [r, web] = await Promise.all([hostDo('checkForUpdates'), checkWebFiles(true)]);
+  updateChecking = false;
+  if (r?.update) hostState.update = r.update;
+  if ($('#settingsDlg').open) renderSettings();
+  if (web) {
+    if ([...uploads.values()].some(x => !['failed', 'done'].includes(x.state))) {
+      toast('A newer version of this window is ready: it loads once what’s being sent here is done.');
+      return;
+    }
+    toast('A newer version of this window is ready: loading it…');
+    setTimeout(() => location.reload(), 1200);
+    return;
+  }
+  if (!r) return; // (hostDo said why)
+  const u = hostState.update || {};
+  toast(r.message || (u.state === 'none' ? `Beam app ${u.current || hostState.version || ''} is up to date.` : appUpdateText(u)), { error: u.state === 'failed' });
 }
 
 // A folder of this PC's: where it is, Change… and Open.
