@@ -24,6 +24,7 @@ namespace Beam
         public string RevokeKey;               // ...and the old one, until the server has revoked it (DPAPI-protected too)
         public string ServerId;
         public bool AutoUpdate = true;
+        public string LookTheme, LookAccent;    // (1.19) the page's look: "light"/"dark" (null: like Windows), "#rrggbb" or null
         public int RediscoverSec = 600;
         public string DeviceId;
         public string DeviceName;
@@ -201,6 +202,8 @@ namespace Beam
                 if (!string.IsNullOrEmpty(sealedOld)) c.RevokeKey = Dpapi.Unprotect(sealedOld, Dpapi.ConfigKey);
                 c.ServerId = Json.Str(d, "serverId");
                 c.AutoUpdate = Json.Bool(d, "autoUpdate", true);
+                c.LookTheme = Json.Str(d, "lookTheme");
+                c.LookAccent = Json.Str(d, "lookAccent");
                 c.RediscoverSec = (int)Math.Max(10, Json.Long(d, "rediscoverSec", 600));
                 c.DeviceId = Json.Str(d, "deviceId");
                 c.DeviceName = Json.Str(d, "deviceName");
@@ -381,6 +384,8 @@ namespace Beam
                 if (sealedOld != null) d["revokeKeyProtected"] = sealedOld;
                 d["serverId"] = ServerId;
                 d["autoUpdate"] = AutoUpdate;
+                if (LookTheme != null) d["lookTheme"] = LookTheme; else d.Remove("lookTheme");
+                if (LookAccent != null) d["lookAccent"] = LookAccent; else d.Remove("lookAccent");
                 if (RediscoverSec != 600) d["rediscoverSec"] = RediscoverSec;
                 d["deviceId"] = DeviceId;
                 d["deviceName"] = DeviceName;

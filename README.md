@@ -180,6 +180,10 @@ address, so the browser becomes part of that device instead of a separate entry.
   Read-only: nothing on the PC can be changed or deleted from elsewhere, and nothing else is visible: no hidden files,
   nothing starting with ".", no shortcuts or links to other folders. A whole drive, your user folder itself, AppData,
   Windows and Program Files can't be shared. It takes a trusted sign-in.
+- **Appearance** (Beam 1.27, the Windows app 1.19, Beam Family): Settings → Appearance: light, dark or like the device,
+  and an accent colour (nine to pick from, or any colour of your own). For all your devices, or just this one (its own
+  wins). In the Windows app its own windows, title bar and tray icon follow too, also on a PC whose Beam window stays
+  closed. Beam Family: the family's look (admins set it) or your own, on every device you use it on.
 - **Setup check** (Settings → Server → Setup): Beam looks at its own setup every 6 hours and alerts when something is
   wrong: the servers start when Windows does, Tailscale runs unattended, devices come in over https, backups are
   recent, there's room on the disk, every PC runs the latest Beam and starts it with Windows, no Tailscale sign-in runs

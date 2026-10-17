@@ -5,11 +5,12 @@
   --border: #dde1e8;
   --text: #14161b;
   --muted: #555c68;
-  --accent: #5a4bf0;
-  --accent-ink: #ffffff;
-  --accent-soft: #ebe9ff;
-  --mine: #5a4bf0;
-  --mine-ink: #ffffff;
+  /* (1.27) a chosen accent: theme.js sets --u-*; Beam's own without them */
+  --accent: var(--u-accent, #5a4bf0);
+  --accent-ink: var(--u-accent-ink, #ffffff);
+  --accent-soft: var(--u-accent-soft, #ebe9ff);
+  --mine: var(--u-mine, #5a4bf0);
+  --mine-ink: var(--u-mine-ink, #ffffff);
   --danger: #c42b2b;
   --ok: #157f3d;
   --warn: #8f5a0a;
@@ -22,19 +23,20 @@
   color-scheme: light dark;
 }
 
+/* (1.27) Dark: like the device unless the look says light, or always when it says dark (theme.js: data-theme). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0e1014;
     --surface: #171a20;
     --surface-2: #232730;
     --border: #2d323d;
     --text: #e8eaee;
     --muted: #a3abb8;
-    --accent: #8d80ff;
-    --accent-ink: #0e1014;
-    --accent-soft: #262150;
-    --mine: #4b3fd6;
-    --mine-ink: #ffffff;
+    --accent: var(--u-accent-d, #8d80ff);
+    --accent-ink: var(--u-accent-ink-d, #0e1014);
+    --accent-soft: var(--u-accent-soft-d, #262150);
+    --mine: var(--u-mine-d, #4b3fd6);
+    --mine-ink: var(--u-mine-ink-d, #ffffff);
     --danger: #ff7b7b;
     --ok: #4ade80;
     --warn: #f3b654;
@@ -43,6 +45,27 @@
     --menu-shadow: 0 10px 30px rgba(0, 0, 0, .55);
   }
 }
+:root[data-theme="dark"] {
+    --bg: #0e1014;
+    --surface: #171a20;
+    --surface-2: #232730;
+    --border: #2d323d;
+    --text: #e8eaee;
+    --muted: #a3abb8;
+    --accent: var(--u-accent-d, #8d80ff);
+    --accent-ink: var(--u-accent-ink-d, #0e1014);
+    --accent-soft: var(--u-accent-soft-d, #262150);
+    --mine: var(--u-mine-d, #4b3fd6);
+    --mine-ink: var(--u-mine-ink-d, #ffffff);
+    --danger: #ff7b7b;
+    --ok: #4ade80;
+    --warn: #f3b654;
+    --mark: #6b5a12;
+    --shadow: none;
+    --menu-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+    color-scheme: dark;
+}
+:root[data-theme="light"] { color-scheme: light; }
 
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; height: 100%; }
@@ -709,7 +732,7 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .rc { display: none; }
 html.remote-mode #app, html.remote-mode #lock, html.remote-mode #hostWait { display: none !important; }
 /* The app's dark palette, whatever the theme: menus, toasts and dialogs over the picture match it. */
-html.remote-mode {
+:root.remote-mode, :root.remote-mode[data-theme] {
   --bg: #0b0c0f; --surface: #171a20; --surface-2: #232730; --border: #2d323d; --text: #e8eaee; --muted: #a3abb8;
   --accent: #8d80ff; --accent-ink: #0e1014; --accent-soft: #262150; --danger: #ff7b7b; --shadow: none; --menu-shadow: 0 10px 30px rgba(0, 0, 0, .55);
   color-scheme: dark;
@@ -908,3 +931,17 @@ html.remote-mode .rc {
 .quick-emoji { flex: 1; min-width: 34px; min-height: 36px; padding: 2px; border: 0; border-radius: 8px; background: transparent; font-size: 20px; line-height: 1; cursor: pointer; }
 .quick-emoji:hover, .quick-emoji:focus-visible { background: var(--surface-2); }
 .quick-emoji.on { background: var(--accent-soft); }
+
+/* (1.27) Settings → Appearance: the theme as three buttons, the accent as swatches */
+.seg-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.seg { flex: 1 1 120px; min-height: 38px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
+.seg:hover { background: var(--surface-2); }
+.seg.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.swatches { display: flex; flex-wrap: wrap; gap: 12px; }
+.swatch { position: relative; display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; color: #fff; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12); }
+.swatch .i { width: 18px; height: 18px; }
+.swatch[aria-pressed="true"], .swatch.custom.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text); }
+.swatch.custom { background: conic-gradient(#e5484d, #f5a524, #46a758, #0ea5e9, #6e56cf, #d6409f, #e5484d); }
+.swatch.custom input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; padding: 0; }
+.swatch:focus-visible, .swatch.custom:focus-within { outline: 2px solid var(--accent); outline-offset: 3px; }
+.look-where { margin: 0; }

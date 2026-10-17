@@ -131,6 +131,35 @@ const DROPPER = `(() => {
 const GETS = `window.__dcs.filter(x => x.label.includes('"op":"get"'))`;
 
 export default function register(test) {
+  test('family: Settings → Appearance (1.27): the owner sets the family’s look, which the others see unless they have their own; my own look wins; a reload starts in it', async ctx => {
+    const srv = await familyServer(ctx);
+    const page = await tailscalePage(ctx, OWNER, 'Robin');
+    await page.goto(`${srv.base}/`);
+    await page.waitFor(`document.querySelector('.composer textarea') !== null`, 10000, 'the owner in #general');
+    await page.evaluate(`history.pushState({}, '', '/settings'); dispatchEvent(new PopStateEvent('popstate')); true`);
+    await page.waitFor(`document.querySelectorAll('.swatch').length === 10`, 5000, 'Appearance: the swatches (an admin edits the family’s look)');
+    const theme = () => page.evaluate(`document.documentElement.dataset.theme || ''`);
+    const boot = () => page.evaluate(`fetch('/api/bootstrap').then(r => r.json()).then(b => [b.spaces[0].appearance, b.me.appearance])`);
+    await page.evaluate(`[...document.querySelectorAll('.seg')].find(b => b.textContent === 'Dark').click()`);
+    await page.waitFor(`document.documentElement.dataset.theme === 'dark'`, 5000, 'dark');
+    await page.evaluate(`document.querySelectorAll('.swatch')[2].click()`); // Teal
+    await page.waitFor(`getComputedStyle(document.documentElement).getPropertyValue('--u-accent').trim() !== ''`, 5000, 'teal');
+    await page.waitFor(`fetch('/api/bootstrap').then(r => r.json()).then(b => b.spaces[0].appearance?.accent === '#0e7c86')`, 5000, 'saved as the family’s');
+    eq(await boot(), [{ theme: 'dark', accent: '#0e7c86' }, null], 'the family’s look, not the owner’s own');
+    // My own: light
+    await page.evaluate(`document.querySelectorAll('.look-where input')[1].click()`);
+    await page.waitFor(`fetch('/api/bootstrap').then(r => r.json()).then(b => Boolean(b.me.appearance))`, 5000, 'my own (a copy of the family’s to start)');
+    await page.waitFor(`/Your look/.test(document.body.textContent)`, 5000, 'editing my own');
+    await page.evaluate(`[...document.querySelectorAll('.seg')].find(b => b.textContent === 'Light').click()`);
+    await page.waitFor(`fetch('/api/bootstrap').then(r => r.json()).then(b => b.me.appearance?.theme === 'light')`, 5000, 'mine: light');
+    eq(await theme(), 'light', 'mine wins');
+    eq((await boot())[0], { theme: 'dark', accent: '#0e7c86' }, 'the family’s stays');
+    // A reload starts in it (look.js), before the bootstrap
+    await page.goto(`${srv.base}/`);
+    eq(await theme(), 'light', 'at once after a reload');
+    eq(page.errors, [], 'no page errors');
+  }, { timeout: 60000 });
+
   test('family: in the Beam app’s Family window (beamHost.window = "family") the page offers no notifications: no banner, Settings says they come through the browser (Windows app 1.10)', async ctx => {
     const srv = await familyServer(ctx);
     const inApp = await tailscalePage(ctx, OWNER, 'Robin', { init: [`window.beamHost = Object.freeze({ app: 'windows', window: 'family', version: '1.10.0' })`] });

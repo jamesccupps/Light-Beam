@@ -3003,6 +3003,55 @@ async function fakeGithub() {
   return gh;
 }
 
+test('1.27 appearance: the look for all devices (checked, in the hello, at once to background streams) and a device’s own (set only by itself, listed, kept)', async () => {
+  let s = await startServer('look127', 8795);
+  try {
+    const K = s.key;
+    const pc = app(K, 'lookpc00127', 'Robin PC', 'windows', { 'X-Beam-App-Version': '1.19.0', ...from('100.64.27.2') });
+    const phone = app(K, 'lookph00127', 'Robin Phone', 'android', from('100.64.27.3'));
+    for (const h of [pc, phone]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    assert.ok((await s.req('GET', '/api/info', { headers: pc })).json.features.includes('appearance'));
+    const patch = body => s.req('PATCH', '/api/settings', { headers: json(phone), body: JSON.stringify(body) });
+    for (const bad of [{ theme: 'sepia' }, { accent: 'red' }, { accent: '#12345' }, { theme: 'dark', extra: 1 }, 'dark', []]) {
+      assert.equal((await patch({ appearance: bad })).status, 400, `refused: ${JSON.stringify(bad)}`);
+    }
+    // The look for all devices: any signed-in device; a background stream (an app not on screen) hears it at once
+    const st = await openEvents(s.port, pc, '/api/events?mode=background');
+    const hello = await st.wait('hello');
+    assert.equal(hello.data.appearance, null, 'none yet');
+    const at = st.events.length;
+    const r = await patch({ appearance: { theme: 'dark', accent: '#0E7C86' } });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json.appearance, { theme: 'dark', accent: '#0e7c86' }, 'kept in lower case');
+    const ev = await waitFor(() => st.events.slice(at).find(e => e.event === 'settings'), 3000);
+    assert.deepEqual(ev.data.appearance, { theme: 'dark', accent: '#0e7c86' }, 'at once on a background stream');
+    st.close();
+    const st2 = await openEvents(s.port, phone);
+    assert.deepEqual((await st2.wait('hello')).data.appearance, { theme: 'dark', accent: '#0e7c86' }, 'in the next hello');
+    st2.close();
+    // A device's own: only that device sets it; listed with it; null drops it
+    const put = (h, id, body) => s.req('PUT', `/api/devices/${id}/settings`, { headers: json(h), body: JSON.stringify(body) });
+    assert.equal((await put(phone, 'lookpc00127', { appearance: { theme: 'light', accent: null } })).status, 403, 'not another device’s');
+    assert.equal((await put(pc, 'me', { appearance: { accent: '#b45309' } })).status, 204);
+    const own = async id => (await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(d => d.id === id).settings;
+    assert.deepEqual(await own('lookpc00127'), { phoneNotifications: false, appearance: { theme: 'auto', accent: '#b45309' } });
+    assert.deepEqual(await own('lookph00127'), { phoneNotifications: false }, 'the others have none');
+    assert.equal((await put(pc, 'me', {})).status, 400, 'nothing to set');
+    assert.equal((await put(pc, 'me', { appearance: { theme: 'dusk' } })).status, 400);
+    assert.equal((await put(pc, 'me', { appearance: null })).status, 204);
+    assert.deepEqual(await own('lookpc00127'), { phoneNotifications: false }, 'dropped');
+    assert.equal((await put(pc, 'me', { appearance: { theme: 'light', accent: '#d12b2b' } })).status, 204);
+    // Kept across a restart (both)
+    await sleep(1500); // (saves are merged within a second)
+    await s.stop();
+    s = await startServer('look127', 8795, { keep: true });
+    assert.deepEqual((await own('lookpc00127')).appearance, { theme: 'light', accent: '#d12b2b' }, 'its own, kept');
+    assert.deepEqual((await s.req('GET', '/api/settings', { headers: pc })).json.appearance, { theme: 'dark', accent: '#0e7c86' }, 'all devices’, kept');
+    assert.equal((await patch({ appearance: null })).status, 200);
+    assert.equal((await s.req('GET', '/api/settings', { headers: pc })).json.appearance, null, 'and cleared');
+  } finally { await s.stop(); }
+});
+
 test('1.21 apps on every PC: from GitHub (checked against its release’s checksum), a file or winget; the PCs asked (offline ones when they connect), their reports, a new version, uninstall, remove', async () => {
   const sha = b => crypto.createHash('sha256').update(b).digest('hex');
   const gh = await fakeGithub();

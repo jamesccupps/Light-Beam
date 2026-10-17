@@ -57,6 +57,9 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   by Beam, shown with noVNC; turned on only at the computer.
 - **Shared folders** (Beam 1.26, the Windows app 1.18): a PC shares the folders you choose there with the devices you
   tick; those devices browse them and copy files from them, and nothing there is ever changed or deleted.
+- **Settings remade and themes** (Beam 1.27, the Windows app 1.19): Settings one page at a time, grouped, with a search;
+  Appearance: light, dark or like the device and an accent colour, for all your devices or just one (the Windows app's
+  own windows follow too); Beam Family: the family's look or each person's own.
 
 ## Next
 - **Remote control, further:** what's left of the delay is the network and the PC's capture inside Edge (a capture of

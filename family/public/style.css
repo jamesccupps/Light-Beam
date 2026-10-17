@@ -9,9 +9,10 @@
   --text: #1b1716;
   --muted: #6b625d;
   --faint: #978d87;
-  --accent: #6d4cff;
-  --accent-ink: #ffffff;
-  --accent-soft: #ece7ff;
+  /* (1.27) a chosen accent: look.js sets --u-*; Family's own without them */
+  --accent: var(--u-accent, #6d4cff);
+  --accent-ink: var(--u-accent-ink, #ffffff);
+  --accent-soft: var(--u-accent-soft, #ece7ff);
   --mention: #fff4d6;
   --mention-bar: #e0a400;
   --danger: #c42b2b;
@@ -29,15 +30,15 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #141216; --side: #1b181d; --surface: #1f1c22; --surface-2: #2a2630; --hover: rgba(255, 255, 255, .05);
-    --border: #332e38; --text: #ece8ef; --muted: #aaa1b0; --faint: #81788a; --accent: #9b85ff; --accent-ink: #141216;
-    --accent-soft: #2c2448; --mention: #3a3014; --mention-bar: #f2c14e; --danger: #ff7b7b; --ok: #4ade80; --unread: #ff6b5c;
+    --border: #332e38; --text: #ece8ef; --muted: #aaa1b0; --faint: #81788a; --accent: var(--u-accent-d, #9b85ff); --accent-ink: var(--u-accent-ink-d, #141216);
+    --accent-soft: var(--u-accent-soft-d, #2c2448); --mention: #3a3014; --mention-bar: #f2c14e; --danger: #ff7b7b; --ok: #4ade80; --unread: #ff6b5c;
     --shadow: none; --menu-shadow: 0 12px 32px rgba(0, 0, 0, .6);
   }
 }
 :root[data-theme="dark"] {
   --bg: #141216; --side: #1b181d; --surface: #1f1c22; --surface-2: #2a2630; --hover: rgba(255, 255, 255, .05);
-  --border: #332e38; --text: #ece8ef; --muted: #aaa1b0; --faint: #81788a; --accent: #9b85ff; --accent-ink: #141216;
-  --accent-soft: #2c2448; --mention: #3a3014; --mention-bar: #f2c14e; --danger: #ff7b7b; --ok: #4ade80; --unread: #ff6b5c;
+  --border: #332e38; --text: #ece8ef; --muted: #aaa1b0; --faint: #81788a; --accent: var(--u-accent-d, #9b85ff); --accent-ink: var(--u-accent-ink-d, #141216);
+  --accent-soft: var(--u-accent-soft-d, #2c2448); --mention: #3a3014; --mention-bar: #f2c14e; --danger: #ff7b7b; --ok: #4ade80; --unread: #ff6b5c;
   --shadow: none; --menu-shadow: 0 12px 32px rgba(0, 0, 0, .6);
 }
 
@@ -471,3 +472,18 @@ body.link-page { overflow: auto; display: grid; place-items: start center; paddi
 .link-progress .track { display: block; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
 .link-progress .fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s; }
 .link-progress .status { margin: 8px 0 0; }
+
+/* (1.27) a forced theme also sets the browser's own colours (form controls, scrollbars) */
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+/* (1.27) Settings → Appearance: the theme as three buttons, the accent as swatches */
+.seg-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 12px; }
+.seg { flex: 1 1 110px; min-height: 38px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 14px; }
+.seg:hover { background: var(--surface-2); }
+.seg.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.swatches { display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 0 12px; }
+.swatch { position: relative; display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; color: #fff; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12); }
+.swatch[aria-pressed="true"], .swatch.custom.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text); }
+.swatch.custom { background: conic-gradient(#e5484d, #f5a524, #46a758, #0ea5e9, #6e56cf, #d6409f, #e5484d); }
+.swatch.custom input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: 0; padding: 0; cursor: pointer; }
+.look-where { display: flex; gap: 10px; align-items: flex-start; margin: 8px 0; cursor: pointer; }

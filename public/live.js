@@ -386,6 +386,7 @@ function applyDevices(list) {
   if (renamed) for (const key of view.nodes.keys()) if (key.startsWith('m:')) { const it = itemMap.get(key.slice(2)); if (it) patchMsg(it); }
   markDevicesKnown(); // open pickers catch up (every caller re-renders the sidebar next)
   phoneAudienceChanged(); // shown here (or not any more)?
+  lookChanged(); // (1.27) this device's own look, set or dropped
   refreshDeviceInfo();
   if (HOST && !$('#settingsDlg').open) return;
   if ($('#settingsDlg').open && settingsShowsDevices()) renderSettings();
@@ -532,6 +533,7 @@ function onEventSettings(data) {
   const s = data?.settings || data;
   if (s && Number.isFinite(s.maxItems)) server.maxItems = s.maxItems;
   if (s && serverSettings) serverSettings = { ...serverSettings, ...s }; // changed from another device
+  if (s && 'appearance' in s) { serverLook = s.appearance || null; serverLookKnown = true; lookChanged(); } // (1.27)
   if ($('#settingsDlg').open) renderSettings();
   refreshDeviceInfo();
 }
@@ -588,6 +590,7 @@ function onHello(h) {
   }
   if (h.api) server.api = Number(h.api) || server.api;
   if (h.version) server.version = h.version;
+  if ('appearance' in h) { serverLook = h.appearance || null; serverLookKnown = true; lookChanged(); } // (1.27) the look for all devices
   if (h.web) {
     if (!webSeen) {
       webSeen = h.web;

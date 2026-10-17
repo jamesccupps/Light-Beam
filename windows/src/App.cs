@@ -134,6 +134,8 @@ namespace Beam
             ClipPayload.IsolatedDir = cfg.CustomPath ? cfg.Dir : null;
             marshal = new Control();
             marshal.CreateControl();
+            Theme.ForcedTheme = Cfg.LookTheme; // (1.19) the look the page had last time
+            Theme.AccentHex = Cfg.LookAccent;
             Theme.Load();
             Theme.Watch(marshal);
             Ui.Init();
@@ -655,6 +657,7 @@ namespace Beam
                     bool phoneBefore = PhoneNotificationsOn == true;
                     Devices = Device.ListFrom(Json.Get(d, "devices"));
                     devicesLoaded = true;
+                    OwnLookSeen(Json.Get(d, "devices")); // (1.19) this PC's own look, if it has one
                     PhoneSettingSeen(phoneBefore);
                     Rc.DevicesChanged();
                     if (menu.Visible) RefreshMenuPresence();
@@ -680,6 +683,7 @@ namespace Beam
                     OnMoved(Json.Str(d, "movedTo"));
                     break;
                 case "settings":
+                    if (d.ContainsKey("appearance")) ServerLookSeen(Json.Get(d, "appearance")); // (1.19)
                     FetchServerInfo();
                     break;
                 case "hello": // v3: the first event on every stream
@@ -688,6 +692,7 @@ namespace Beam
                     ServerApi = (int)Json.Long(d, "api", ServerApi);
                     serverFeatures.Clear();
                     foreach (var f in Json.StrList(d, "features")) serverFeatures.Add(f);
+                    if (d.ContainsKey("appearance")) ServerLookSeen(Json.Get(d, "appearance")); // (1.19; an older server says nothing)
                     Kvm.Apply("Beam's stream"); // (1.12: on with a server that knows kvm sessions)
                     if (events != null) events.SetStream(Json.Str(d, "stream"), (int)Json.Long(d, "ping", 0));
                     modeSent = Json.Str(d, "mode") ?? "foreground"; // a new stream: the mode it was opened in
@@ -2633,6 +2638,59 @@ namespace Beam
         }
 
         // The folders as SharedFoldersForm saved them (one that can't be shared is left out), kept and logged.
+        // (1.19) The look as this app's own stream tells it: the server's for all devices (the hello, `settings`) and this
+        // PC's own (its entry in `devices`), which wins. Nothing until the server has said (an older one never does).
+        bool serverLookKnown, ownLook;
+        string serverLookTheme, serverLookAccent, ownLookTheme, ownLookAccent;
+
+        void ServerLookSeen(object look)
+        {
+            var o = look as Dictionary<string, object>;
+            serverLookTheme = o == null ? null : Json.Str(o, "theme");
+            serverLookAccent = o == null ? null : Json.Str(o, "accent");
+            serverLookKnown = true;
+            ApplyStreamLook();
+        }
+
+        void OwnLookSeen(object list)
+        {
+            var items = list as System.Collections.IEnumerable;
+            if (items == null) return;
+            foreach (object x in items)
+            {
+                var dev = x as Dictionary<string, object>;
+                if (dev == null || Json.Str(dev, "id") != Me) continue;
+                var look = Json.Get(Json.Obj(Json.Get(dev, "settings")), "appearance") as Dictionary<string, object>;
+                ownLook = look != null;
+                ownLookTheme = look == null ? null : Json.Str(look, "theme");
+                ownLookAccent = look == null ? null : Json.Str(look, "accent");
+                ApplyStreamLook();
+                return;
+            }
+        }
+
+        void ApplyStreamLook()
+        {
+            if (ownLook) SetLook(ownLookTheme, ownLookAccent);
+            else if (serverLookKnown) SetLook(serverLookTheme, serverLookAccent);
+        }
+
+        // (1.19) The page's look (Settings → Appearance, bridge `look`): this app's own windows, title bars and tray icon
+        // follow it, and it's kept for the next start.
+        public void SetLook(string theme, string accent)
+        {
+            string t = theme == "light" || theme == "dark" ? theme : null;
+            string a = accent != null && System.Text.RegularExpressions.Regex.IsMatch(accent, "^#[0-9a-fA-F]{6}$") ? accent.ToLowerInvariant() : null;
+            if (t == Cfg.LookTheme && a == Cfg.LookAccent) return;
+            Cfg.LookTheme = t;
+            Cfg.LookAccent = a;
+            Cfg.Save();
+            Theme.ForcedTheme = t;
+            Theme.AccentHex = a;
+            Theme.Reload();
+            Log.Write("Look: " + (t ?? "like Windows") + (a != null ? ", accent " + a : ", Beam's accent"));
+        }
+
         public void SetSharedFolders(List<SharedFolder> list, string from)
         {
             if (RcBlocks("changing shared folders")) return;

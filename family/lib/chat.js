@@ -5,6 +5,7 @@
 const { newId, isId } = require('./ids');
 const { httpError, send, readJson } = require('./http');
 const auth = require('./auth');
+const { cleanLook, lookOf } = require('./look');
 
 const now = () => Date.now();
 const MAX_BODY = 4000;
@@ -196,7 +197,7 @@ function createChat(ctx) {
       me: people().personJson(user, user),
       people: db.all('SELECT * FROM users ORDER BY created_at').map(u => people().personJson(u, user)),
       spaces: db.all('SELECT s.* FROM spaces s JOIN space_members sm ON sm.space_id = s.id AND sm.user_id = ? ORDER BY s.created_at', user.id)
-        .map(s => ({ id: s.id, name: s.name, members: db.all('SELECT user_id FROM space_members WHERE space_id = ? ORDER BY joined_at', s.id).map(r => r.user_id) })),
+        .map(s => ({ id: s.id, name: s.name, appearance: lookOf(s.appearance), members: db.all('SELECT user_id FROM space_members WHERE space_id = ? ORDER BY joined_at', s.id).map(r => r.user_id) })),
       channels: channels.map(c => {
         const j = channelJson(c);
         const last = reads.get(c.id) || '';
@@ -255,17 +256,23 @@ function createChat(ctx) {
     send(res, 201, { channel: channelJson(row) });
   }
 
-  // PATCH /api/spaces/:id { name } (admins)
+  // PATCH /api/spaces/:id { name?, appearance? } (admins). (1.27) appearance: the family's look (null: Family's own).
   async function updateSpace(req, res, { id }) {
     const admin = people().requireAdmin(req);
     const space = isId(id) && db.get('SELECT * FROM spaces WHERE id = ?', id);
     if (!space) throw httpError(404, 'No such space');
     const body = await readJson(req);
-    const name = cleanChannelName(body.name);
-    db.run('UPDATE spaces SET name = ? WHERE id = ?', name, id);
-    people().audit(admin.id, 'space', `${id} ${name}`);
-    hub.emit(db.all('SELECT user_id FROM space_members WHERE space_id = ?', id).map(r => r.user_id), 'space', { space: { id, name } });
-    send(res, 200, { space: { id, name } });
+    if (body.name === undefined && body.appearance === undefined) throw httpError(400, 'Expected {"name": …} or {"appearance": …}');
+    const name = body.name === undefined ? space.name : cleanChannelName(body.name);
+    const look = body.appearance === undefined ? lookOf(space.appearance) : cleanLook(body.appearance);
+    db.run('UPDATE spaces SET name = ?, appearance = ? WHERE id = ?', name, look ? JSON.stringify(look) : null, id);
+    if (body.name !== undefined) people().audit(admin.id, 'space', `${id} ${name}`);
+    if (body.appearance !== undefined) {
+      people().audit(admin.id, 'space-look', `${id} ${look ? `${look.theme} ${look.accent || 'own accent'}` : 'default'}`);
+      log.info(`${admin.name} set the family's look: ${look ? `${look.theme}, ${look.accent || 'Family’s accent'}` : 'Family’s own'}`);
+    }
+    hub.emit(db.all('SELECT user_id FROM space_members WHERE space_id = ?', id).map(r => r.user_id), 'space', { space: { id, name, appearance: look } });
+    send(res, 200, { space: { id, name, appearance: look } });
   }
 
   // PATCH /api/channels/:id { name?, topic?, position?, archived? }: admins for channels; members for a group's name.
