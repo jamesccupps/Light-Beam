@@ -485,7 +485,7 @@ function validateDevices(obj) {
       user: typeof d.user === 'string' ? d.user : 'owner',
     };
     delete out[id].ip;
-    if (d.settings !== undefined) out[id].settings = { phoneNotifications: d.settings?.phoneNotifications === true };
+    if (d.settings !== undefined) out[id].settings = { phoneNotifications: d.settings?.phoneNotifications === true, ...(appearanceOf(d.settings?.appearance) && { appearance: appearanceOf(d.settings.appearance) }) };
     delete out[id].rcDisable;
     if (isPlainObject(d.rcDisable)) out[id].rcDisable = { at: Number(d.rcDisable.at) || 0, from: typeof d.rcDisable.from === 'string' ? d.rcDisable.from : null };
     delete out[id].keyHash;
@@ -680,6 +680,24 @@ function markInitialized() {
   persistSettings();
 }
 
+// (1.27, the user's themes: "customizable theme and colors, maybe per device or for all devices"; their pick: all
+// devices, and a device's own choice wins) A look: light, dark or like the device ("auto"), and an accent colour
+// (null: Beam's own). null clears it. The page works out the rest of the colours from the accent.
+const THEMES = ['auto', 'light', 'dark'];
+function cleanAppearance(v, name = 'appearance') {
+  if (v === null) return null;
+  if (!isPlainObject(v)) throw httpError(400, `${name} must be {"theme": "auto"|"light"|"dark", "accent": "#rrggbb"|null} or null`);
+  const unknown = Object.keys(v).filter(k => k !== 'theme' && k !== 'accent');
+  if (unknown.length) throw httpError(400, `Unknown ${name} field: ${unknown.join(', ')}`);
+  const theme = v.theme ?? 'auto';
+  if (!THEMES.includes(theme)) throw httpError(400, `${name}.theme must be auto, light or dark`);
+  const accent = v.accent ?? null;
+  if (accent !== null && !(typeof accent === 'string' && /^#[0-9a-f]{6}$/i.test(accent))) throw httpError(400, `${name}.accent must be a colour like #2563eb, or null`);
+  return { theme, accent: accent && accent.toLowerCase() };
+}
+// What's kept, read back safely (a hand-edited file can't break a page).
+const appearanceOf = v => { try { return v == null ? null : cleanAppearance(v); } catch { return null; } };
+
 function publicSettings() {
   return {
     movedTo: setting('movedTo') || null,
@@ -697,6 +715,7 @@ function publicSettings() {
     alerts: alertSettings(),
     stagedUpdates: stagedOn(), // (1.19) a Windows build goes to one PC first
     rollout: rolloutInfo(),
+    appearance: appearanceOf(settings.appearance), // (1.27) the look for every device without its own
     locked: Object.keys(ENV_SETTINGS).filter(k => ENV_SETTINGS[k] !== undefined),
   };
 }
@@ -1614,6 +1633,9 @@ function mergeDevice(fromId, toId, reason) {
   if (devices[toId] && devices[fromId]?.settings?.phoneNotifications && !devices[toId].settings?.phoneNotifications) {
     devices[toId].settings = { ...devices[toId].settings, phoneNotifications: true };
   }
+  if (devices[toId] && devices[fromId]?.settings?.appearance && !devices[toId].settings?.appearance) { // (1.27)
+    devices[toId].settings = { ...devices[toId].settings, appearance: devices[fromId].settings.appearance };
+  }
   // (1.8.1) The old install's settings backups go along: a reinstalled app offers to restore them.
   if (devices[toId] && devices[fromId]?.backups?.length) devices[toId].backups = mergedBackups(devices[toId].backups, devices[fromId].backups);
   dropPhoneNotes(fromId);
@@ -1680,7 +1702,7 @@ function deviceList() {
         ...(d.status && { status: publicStatus(d.status) }),
         ...(ts && { tailscale: { ...ts, ...tsStateOf(ts.ip) } }), // (1.17: + online, lastSeen, keyExpiry, expired)
         can: capabilitiesOf(d, ts),
-        settings: { phoneNotifications: d.settings?.phoneNotifications === true },
+        settings: { phoneNotifications: d.settings?.phoneNotifications === true, ...(appearanceOf(d.settings?.appearance) && { appearance: appearanceOf(d.settings.appearance) }) },
         // (1.8.1) when its app last backed up its settings (only that: the settings are at /backups)
         ...(d.backups?.length && { backup: { at: d.backups[0].at, app: d.backups[0].app } }),
       };
@@ -3831,13 +3853,30 @@ async function answerPhoneRequest(req, res, [id], url) {
 }
 
 // PUT /api/devices/{id|me}/settings { phoneNotifications }: any signed-in device may set it for any device; (1.25) on,
-// only a trusted one.
+// only a trusted one. (1.27) { appearance }: a device's own look (null: like all the devices), set by that device only.
 async function putDeviceSettings(req, res, [id], url) {
   const target = id ? targetDevice(id) : devices[deviceIdOf(req, url)];
   if (!target) throw httpError(400, 'X-Beam-Device-Id is required');
   const body = await readJson(req);
-  const unknown = Object.keys(body).filter(k => k !== 'phoneNotifications');
+  const unknown = Object.keys(body).filter(k => k !== 'phoneNotifications' && k !== 'appearance');
   if (unknown.length) throw httpError(400, `Unknown device setting: ${unknown.join(', ')}`);
+  if (!('phoneNotifications' in body) && !('appearance' in body)) throw httpError(400, 'Expected {"phoneNotifications": true|false} or {"appearance": {…}|null}');
+  if ('appearance' in body) {
+    const look = cleanAppearance(body.appearance);
+    if (target.id !== resolveAlias(deviceIdOf(req, url) || '')) throw httpError(403, 'A device’s own look is chosen on that device');
+    if (JSON.stringify(appearanceOf(target.settings?.appearance)) !== JSON.stringify(look)) {
+      const next = { ...(target.settings || {}) };
+      if (look) next.appearance = look; else delete next.appearance;
+      target.settings = next;
+      persistDevices();
+      // Its own app at once (its own windows and tray follow), as for phone notifications below.
+      const own = new Set([target.id]);
+      for (const c of clients) if (own.has(c.deviceId)) c.held = c.held.filter(h => h.key !== 'devices');
+      sendTo(own, 'devices', { devices: deviceList() });
+      broadcastDevices();
+    }
+    if (!('phoneNotifications' in body)) return send(res, 204);
+  }
   if (typeof body.phoneNotifications !== 'boolean') throw httpError(400, 'Expected {"phoneNotifications": true|false}');
   if (body.phoneNotifications && !isTrusted(authOf(req))) throw notTrusted('turn on phone notifications');
   if (showsNotes(target.id) !== body.phoneNotifications) {
@@ -6521,7 +6560,7 @@ function events(req, res, _m, url) {
   };
   setStreamTimers(client);
   clients.add(client);
-  writeTo(client, `retry: 3000\n\nevent: hello\ndata: ${JSON.stringify({ serverId: SERVER_ID, instance: INSTANCE_ID, version: VERSION, api: API_VERSION, web: webVersion(), features: FEATURES, stream: client.id, mode, ping })}\n\n`);
+  writeTo(client, `retry: 3000\n\nevent: hello\ndata: ${JSON.stringify({ serverId: SERVER_ID, instance: INSTANCE_ID, version: VERSION, api: API_VERSION, web: webVersion(), features: FEATURES, stream: client.id, mode, ping, appearance: appearanceOf(settings.appearance) })}\n\n`);
   if (deviceId) {
     const p = presenceOf(deviceId);
     if (p.web + p.app === 0) {
@@ -6588,7 +6627,7 @@ const FEATURES = [
   'logs', 'text-files', 'thumbnails', 'sessions', 'upload-progress', 'proof',
   'device-status', 'ring', 'wake', 'remote-desktop', 'alerts',
   'stream-modes', 'items-since', 'gzip', 'live-download', 'big-chunks', 'clear-cache',
-  'phone-notifications', 'remote-control', 'backups',
+  'phone-notifications', 'remote-control', 'backups', 'appearance',
   ...(FAMILY_URL ? ['fast-links'] : []), // (1.13.0: Beam Family on this machine makes fast links of Beam's files)
   'replies', 'reactions', 'edit', // (1.14.0)
   'kvm', // (1.16.0: a remote control session of kind kvm, a PC's keyboard and mouse shared with another)
@@ -6687,6 +6726,7 @@ const SETTING_RULES = {
   retentionDays: v => { if (!Number.isInteger(v) || v < 0 || v > 3650) throw httpError(400, 'retentionDays must be 0 (keep forever) to 3650'); return v; },
   maxItems: v => { if (!Number.isInteger(v) || v < 0 || v > 100_000) throw httpError(400, 'maxItems must be 0 (no limit) to 100000'); return v; },
   stagedUpdates: v => { if (typeof v !== 'boolean') throw httpError(400, 'stagedUpdates must be true or false'); return v; }, // (1.19)
+  appearance: v => cleanAppearance(v), // (1.27)
   // Partial: only the given kinds change. offline is the full list of watched device ids.
   alerts: v => {
     if (!isPlainObject(v)) throw httpError(400, 'alerts must be an object like {"battery": true, "offline": ["<device id>"]}');
@@ -6772,7 +6812,8 @@ async function patchSettings(req, res) {
   if (Object.keys(changes).length) log.info(`Settings changed by ${by}: ${Object.keys(changes).join(', ')}`);
   if ('retentionDays' in changes || 'maxItems' in changes) setImmediate(sweep);
   if (changes.stagedUpdates === false && activeRollout()) await releaseRollout('one PC first was turned off'); // (1.19)
-  broadcast('settings', publicSettings());
+  // (1.27) A new look goes out at once, background streams too: every PC's own windows and tray follow it.
+  broadcast('settings', publicSettings(), 'appearance' in changes ? () => true : null);
   send(res, 200, publicSettings());
 }
 

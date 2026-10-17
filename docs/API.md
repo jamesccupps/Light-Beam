@@ -19,7 +19,7 @@ is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keybo
 alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
 device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
 `device-logs` (shipped with 1.19's in Beam 1.20.0), 1.21 `apps`, 1.22 `linux` (Beam for Linux) and 1.23 `vnc` (control
-of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials), and 1.26 `shared-folders` (a PC's folders shared with some devices). Use each one only when its flag is there; everything older keeps working.
+of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials), and 1.26 `shared-folders` (a PC's folders shared with some devices), and 1.27 `appearance` (the look: see Appearance). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -312,6 +312,13 @@ Apps update themselves from the Beam server.
   offers a build still on its pilot to every PC (not one stopped there), so it takes a trusted sign-in (1.25.4).
   `GET /api/settings` → `rollout`: `{ "version", "pilot", "pilotName", "since", "installedAt",
   "releaseAt", "released", "halted": { "at", "problem" } | null, "running", "pcs" }`, or `null`.
+- **Appearance (1.27, feature `appearance`).** The look: `{ "theme": "auto"|"light"|"dark", "accent": "#rrggbb"|null }` (`theme` defaults to `auto`, like the device; `accent`
+  null is Beam's own; colours come back in lower case). The look for all devices is the setting `appearance` (`PATCH
+  /api/settings { "appearance": {…}|null }`, any signed-in device; in `GET /api/settings` and the `hello`; its
+  `settings` event goes out at once, background streams too). A device's own, which wins, is its `settings.appearance`
+  (`PUT /api/devices/me/settings { "appearance": {…}|null }`: only that device itself, else `403`; null drops it; the
+  device gets the new list at once). `400` for an unknown theme, a colour that isn't `#rrggbb`, or another field.
+  Clients work out their colours from the accent (readable on their light and dark surfaces).
 
 ## Every request
 
@@ -443,6 +450,7 @@ can't pass for it.
 - **MAC addresses are never sent to clients.** Devices report them, but only the server uses them, to wake the device.
 - `settings` (1.5): the device's own settings, which any signed-in device may change (`PUT /api/devices/{id}/settings`):
   - `phoneNotifications`: it shows phone notifications (see Phone notifications). Always present, `false` by default.
+  - `appearance` **(1.27)**: its own look, when it has one (see Appearance).
 - `user`: reserved.
 
 **Item**
@@ -513,7 +521,7 @@ an **All devices** conversation for broadcasts.
 | `PUT /api/devices/{id}/trust` | **(1.25, feature `trust`)** `{ "trusted": true\|false }`, from a trusted sign-in signed in for good → `200 { "device", "trusted" }`; event `devices`. True: that device's own sign-ins (its app's, or a browser's own; not a browser merged into an app on its machine) become trusted; `409` when it has none. False: all its sign-ins stop being trusted, and the remote control sessions they started end (`revoked`) |
 | `PUT /api/devices/me/status` | **(1.3)** the calling device reports its status (see below) → `204`; event `devices` |
 | `PUT /api/devices/me/name` | **(1.23.2)** `{ "name" }`: a Beam for Linux computer renamed from its window (see Beam for Linux) → `200 { "name" }`; event `devices`, and `rename` to its app |
-| `PUT /api/devices/{id}/settings`, `PUT /api/devices/me/settings` | **(1.5)** `{ "phoneNotifications": true\|false }` → `204`; event `devices`. When the value changes, the device itself gets the new list at once (see Phone notifications); switched off, also `notification-removed { "all": true }`. Any signed-in device may change any device's settings; **(1.25)** turning `phoneNotifications` on takes a trusted sign-in (`403 reason "trusted"`). `400` for unknown keys or a non-boolean, `404` unknown device |
+| `PUT /api/devices/{id}/settings`, `PUT /api/devices/me/settings` | **(1.5)** `{ "phoneNotifications": true\|false }` and/or **(1.27)** `{ "appearance": {…}\|null }` (only the device itself) → `204`; event `devices`. When the value changes, the device itself gets the new list at once (see Phone notifications); switched off, also `notification-removed { "all": true }`. Any signed-in device may change any device's settings; **(1.25)** turning `phoneNotifications` on takes a trusted sign-in (`403 reason "trusted"`). `400` for unknown keys or a non-boolean, `404` unknown device |
 | `PUT /api/devices/me/backup` | **(1.8.1, feature `backups`)** an app keeps a copy of its own settings here: `{ "install": "<its id, 8–64 of A–Z a–z 0–9 _ ->", "app": "windows"\|"android", "version", "settings": {…} }` → `204`; event `devices`. Never a sign-in or a key. One per install (the same install replaces its own), the newest three per device; when a reinstall's new device is linked to the old one, they go along. `settings` is an object of at most 32 KB (`413` above). `403` for a session-only sign-in. What the apps keep: Windows (1.8.1) its Settings, hotkeys and remote control's devices; Android (1.8.2) `deviceName`, `stayConnected`, `autoCopy`, `autoDownload`, `wifiOnlyDownloads`, `maxDownloadMb`, `tileTarget` (`""` = ask), `mutedDevices`, `autoCopyDevices`, `shareNotifications`, `sharedApps` (package names), sent only when they changed. A reinstalled phone comes back with the same device id (from ANDROID_ID), so it finds its earlier install's here |
 | `GET /api/devices/{id}/backups`, `GET /api/devices/me/backups` | **(1.8.1)** `{ "device", "name", "backups": [{ "install", "app", "version", "at", "settings" }] }`, newest first: for an app to offer them back after a reinstall, or to set up a new PC like another. Any of the owner's devices signed in for good (`403` for a session-only sign-in). The device list says only when: `backup: { "at", "app" }` |
 | `POST /api/devices/{id}/ring` | **(1.3)** body `{ "stop"?: true }` → `202 { "online" }`; event `ring`. `404` unknown device, `409` a device that can't ring (`can.ring` is false) |
@@ -930,7 +938,7 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 
 | event | data |
 |---|---|
-| `hello` | **(v3)** always first: `{ "serverId", "version", "api", "web" }`. `web` is a short hash of the web app's files: a page can reload when it changes. **(1.4)** Also `"features"` (as in `GET /api/info`), `"stream"` (this stream's id, for poke), `"mode"` and `"ping"` (the effective heartbeat in seconds). **(1.5)** Also `"instance"`: a new value means the server restarted (as in `GET /api/hello`) |
+| `hello` | **(v3)** always first: `{ "serverId", "version", "api", "web" }`. `web` is a short hash of the web app's files: a page can reload when it changes. **(1.4)** Also `"features"` (as in `GET /api/info`), `"stream"` (this stream's id, for poke), `"mode"` and `"ping"` (the effective heartbeat in seconds). **(1.5)** Also `"instance"`: a new value means the server restarted (as in `GET /api/hello`). **(1.27)** Also `"appearance"`: the look for all devices, or `null` |
 | `ping` | **(v3)** `{}` after 25 s without other data (it was a `: ping` comment). **(1.4)** After `ping` seconds; `{ "poke": true }` answers a poke |
 | `item` | an Item (new item) |
 | `delete` | `{ "id" }` |

@@ -1689,6 +1689,49 @@ test('F-AB (1.25.2, the security review I-2): signed in by Tailscale (anything o
   } finally { await s.stop(); }
 });
 
+test('F-AC (1.27, themes): a person’s own look (only they see it; their other browsers hear it) and the family’s (admins set it; everyone hears it); bad looks refused; database v6', async () => {
+  const s = await start('look', 8847);
+  try {
+    const { owner, space } = await family(s);
+    const bob = await join(s, owner, 'Bob');
+    const boot = async who => (await call(s, 'GET', '/api/bootstrap', who)).json;
+    let b = await boot(bob.who);
+    assert.equal(b.me.appearance, null, 'no own look yet');
+    assert.equal(b.spaces[0].appearance, null, 'nor the family’s');
+    for (const bad of [{ theme: 'sepia' }, { accent: 'teal' }, { theme: 'dark', more: 1 }, 'dark']) {
+      assert.equal((await call(s, 'PATCH', '/api/me', bob.who, { appearance: bad })).status, 400, `refused: ${JSON.stringify(bad)}`);
+    }
+    // Bob's own: his other browsers hear it; nobody else sees it
+    const ev = await openEvents(s.port, as(bob.who));
+    const r = await call(s, 'PATCH', '/api/me', bob.who, { appearance: { theme: 'dark', accent: '#0E7C86' } });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json.me.appearance, { theme: 'dark', accent: '#0e7c86' });
+    assert.deepEqual((await ev.wait('look')).data.appearance, { theme: 'dark', accent: '#0e7c86' }, 'his other browsers');
+    assert.equal((await boot(owner)).people.find(p => p.id === bob.id).appearance, undefined, 'not shown to others');
+    assert.deepEqual((await boot(bob.who)).me.appearance, { theme: 'dark', accent: '#0e7c86' });
+    // The family's: admins only; everyone hears it
+    assert.equal((await call(s, 'PATCH', `/api/spaces/${space}`, bob.who, { appearance: { theme: 'light', accent: null } })).status, 403, 'a member can’t');
+    assert.equal((await call(s, 'PATCH', `/api/spaces/${space}`, owner, {})).status, 400, 'nothing to change');
+    const f = await call(s, 'PATCH', `/api/spaces/${space}`, owner, { appearance: { theme: 'light', accent: '#b45309' } });
+    assert.equal(f.status, 200, f.body);
+    assert.deepEqual((await ev.wait('space', d => d.space.appearance)).data.space, { id: space, name: (await boot(owner)).spaces[0].name, appearance: { theme: 'light', accent: '#b45309' } });
+    assert.deepEqual((await boot(bob.who)).spaces[0].appearance, { theme: 'light', accent: '#b45309' });
+    assert.match(s.out, /set the family's look: light, #b45309/);
+    // Back to the family's (his own null), and the family back to Family's own; the name stays
+    assert.equal((await call(s, 'PATCH', '/api/me', bob.who, { appearance: null })).status, 200);
+    assert.equal((await boot(bob.who)).me.appearance, null);
+    const name = (await boot(owner)).spaces[0].name;
+    assert.equal((await call(s, 'PATCH', `/api/spaces/${space}`, owner, { appearance: null })).status, 200);
+    assert.deepEqual((await boot(owner)).spaces[0], { ...(await boot(owner)).spaces[0], name, appearance: null });
+    ev.close();
+    // Database v6
+    await s.stop();
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(path.join(s.data, 'family.db'));
+    try { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 6); } finally { db.close(); }
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

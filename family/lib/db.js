@@ -213,6 +213,11 @@ const MIGRATIONS = [
   ALTER TABLE attachments ADD COLUMN clean TEXT;
   ALTER TABLE attachments ADD COLUMN clean_size INTEGER;
   `,
+  // v6 (1.27): the look (lib/look.js): a person's own, and the family's (its space's), as JSON; null: the default.
+  `
+  ALTER TABLE users ADD COLUMN appearance TEXT;
+  ALTER TABLE spaces ADD COLUMN appearance TEXT;
+  `,
 ];
 
 function openDb(file) {

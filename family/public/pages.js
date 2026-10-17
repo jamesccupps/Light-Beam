@@ -3,7 +3,7 @@
 
 import { h, fill, icon, iconBtn, avatar, menu, dialog, confirmDialog, field, toast, copyText, whenShort, fullTime } from './ui.js';
 import { api } from './api.js';
-import { state, on, person, channel, title, isAdmin } from './store.js';
+import { state, on, person, channel, title, isAdmin, lookNow } from './store.js';
 import { renderBody } from './text.js';
 import { pushState, enablePush, disablePush, isIos } from './notify.js';
 import { nav } from './nav.js';
@@ -145,10 +145,7 @@ export function settingsView() {
       unsupported: [h('p', {}, 'This browser can’t show notifications from Beam Family.')],
       app: [h('p', {}, 'The Beam app’s Family window can’t show notifications: they come through your browser instead. Open Beam Family there to turn them on.')],
     }[push];
-    let theme = 'system';
-    try { theme = localStorage.getItem('family.theme') || 'system'; } catch {}
-    const themeSel = h('select', { class: 'input', 'aria-label': 'Appearance', onchange: () => setTheme(themeSel.value) },
-      [['system', 'Like the device'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => h('option', { value: v, selected: v === theme }, l)));
+    const looks = lookSection(render);
     let sessions = [];
     try { sessions = (await api('/api/me/sessions')).sessions; } catch {}
     const viaTailscale = Boolean(me.tailscale);
@@ -171,7 +168,7 @@ export function settingsView() {
           h('div', { class: 'grow' }, h('strong', {}, browserName(s.agent)), h('div', { class: 'muted small' }, `${s.current ? 'This browser · ' : ''}last used ${whenShort(s.seen)}${s.ip ? ` · ${s.ip}` : ''}`)),
           s.current ? null : h('button', { class: 'btn ghost', type: 'button', onclick: () => api(`/api/me/sessions/${s.id}`, { method: 'DELETE' }).then(render) }, 'Sign out'))),
         sessions.length > 1 ? h('button', { class: 'btn', type: 'button', style: { marginTop: '10px' }, onclick: () => api('/api/me/sessions/others', { method: 'DELETE' }).then(render) }, 'Sign out all the others') : null)) : null,
-      h('section', {}, h('h2', {}, 'Appearance'), h('div', { class: 'box' }, themeSel)),
+      h('section', {}, h('h2', {}, 'Appearance'), h('div', { class: 'box' }, looks)),
       h('section', {}, h('div', { class: 'row' },
         isAdmin() ? h('button', { class: 'btn', type: 'button', onclick: () => nav.go('/admin') }, icon('users'), 'People & channels') : null,
         sessions.some(s => s.current) ? h('button', { class: 'btn danger', type: 'button', onclick: signOut }, icon('logout'), 'Sign out') : null),
@@ -234,10 +231,64 @@ export function settingsView() {
   return { el: view, destroy() { for (const off of offs) off(); } };
 }
 
-export function setTheme(theme) {
-  try { theme === 'system' ? localStorage.removeItem('family.theme') : localStorage.setItem('family.theme', theme); } catch {}
-  if (theme === 'system') delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
+// (1.27) Settings → Appearance (the user: "customizable theme and colors … same with the family chat"; their pick: each
+// person's own, and a family default). "The family's look" or "My own"; admins change the family's look here too.
+function lookSection(render) {
+  const space = state.spaces[0];
+  const own = Boolean(state.me?.appearance);
+  const familyLook = space?.appearance || null;
+  const look = (own ? state.me.appearance : familyLook) || { theme: 'auto', accent: null };
+  const canEdit = own || (isAdmin() && space);
+  const saveFamily = async next => {
+    try {
+      const r = await api(`/api/spaces/${space.id}`, { method: 'PATCH', body: { appearance: next } });
+      space.appearance = r.space.appearance;
+    } catch (err) { toast(err.message, { error: true }); }
+    lookNow();
+    render();
+  };
+  const saveMine = async next => {
+    try {
+      const r = await api('/api/me', { method: 'PATCH', body: { appearance: next } });
+      state.me = { ...state.me, appearance: r.me.appearance ?? null };
+    } catch (err) { toast(err.message, { error: true }); }
+    lookNow();
+    render();
+  };
+  // Built on the look as it is at the click, kept at once (two quick clicks, Dark then a colour, lost the Dark).
+  const save = change => {
+    const next = { ...((own ? state.me.appearance : space.appearance) || { theme: 'auto', accent: null }), ...change };
+    if (own) state.me = { ...state.me, appearance: next }; else space.appearance = next;
+    lookNow();
+    return own ? saveMine(next) : saveFamily(next);
+  };
+  const seg = (value, label) => h('button', { type: 'button', class: `seg${look.theme === value ? ' on' : ''}`, 'aria-pressed': String(look.theme === value), onclick: () => save({ theme: value }) }, label);
+  const preset = window.FAMILY_ACCENTS.some(([, hex]) => hex === look.accent);
+  const swatch = (name, hex) => {
+    const b = h('button', { type: 'button', class: 'swatch', title: name, 'aria-label': name, 'aria-pressed': String(look.accent === hex), onclick: () => save({ accent: hex }) },
+      look.accent === hex ? icon('check') : null);
+    b.style.background = hex || '#6d4cff'; // (Family's own: its light-theme colour)
+    return b;
+  };
+  const picker = h('input', { type: 'color', value: look.accent || '#6d4cff', 'aria-label': 'Your own colour' });
+  picker.addEventListener('input', () => window.familyApplyLook?.({ ...look, accent: picker.value }));
+  picker.addEventListener('change', () => save({ accent: picker.value }));
+  const custom = h('label', { class: `swatch custom${look.accent && !preset ? ' on' : ''}`, title: 'Your own colour' }, picker);
+  if (look.accent && !preset) custom.style.background = look.accent;
+  const where = (value, label, hint) => {
+    const input = h('input', { type: 'radio', name: 'look-where', checked: own === value });
+    input.addEventListener('change', () => { if (input.checked) (value ? saveMine({ ...look }) : saveMine(null)); });
+    return h('label', { class: 'look-where' }, input, h('span', {}, h('strong', {}, label), h('div', { class: 'muted small' }, hint)));
+  };
+  const named = l => (l ? `${{ auto: 'like the device', light: 'light', dark: 'dark' }[l.theme]}, ${l.accent ? 'its own colour' : 'Family’s colour'}` : 'Family’s own (like the device)');
+  return [
+    where(false, 'The family’s look', `Everyone who hasn’t their own sees it: ${named(familyLook)}.${isAdmin() ? ' As an admin you change it here.' : ''}`),
+    where(true, 'My own look', 'On every device you use Beam Family on.'),
+    canEdit ? h('div', {},
+      h('div', { class: 'muted small' }, own ? 'Your look' : 'The family’s look'),
+      h('div', { class: 'seg-row', role: 'group', 'aria-label': 'Theme' }, seg('auto', 'Like the device'), seg('light', 'Light'), seg('dark', 'Dark')),
+      h('div', { class: 'swatches', role: 'group', 'aria-label': 'Accent colour' }, ...window.FAMILY_ACCENTS.map(([name, hex]) => swatch(name, hex)), custom)) : null,
+  ];
 }
 
 function browserName(agent = '') {

@@ -16,6 +16,9 @@ namespace Beam
         public static Color Bg, Sidebar, Surface, Surface2, Hover, Selected, Border, Text, Text2, Text3;
         public static Color Accent, AccentHover, AccentText, Mine, Theirs, Online, Offline, Danger, Warning, Scroll;
         public static event EventHandler Changed;
+        // (1.19) Beam's own look, from its page (Settings → Appearance): light or dark whatever Windows says (null: like
+        // Windows), and an accent colour (null: Beam's own). BEAM_THEME still wins (tests).
+        public static string ForcedTheme, AccentHex;
 
         public static void Load()
         {
@@ -29,7 +32,7 @@ namespace Beam
                 }
             }
             catch { }
-            string forced = Environment.GetEnvironmentVariable("BEAM_THEME");
+            string forced = Environment.GetEnvironmentVariable("BEAM_THEME") ?? ForcedTheme;
             if (forced == "dark") dark = true;
             if (forced == "light") dark = false;
             Dark = dark;
@@ -53,6 +56,46 @@ namespace Beam
                 Online = Hex(0x1FAF5E); Offline = Hex(0xB5BAC3); Danger = Hex(0xD93036); Warning = Hex(0xB7791F);
                 Scroll = Hex(0xC4C8CF);
             }
+            if (AccentHex != null) UseAccent(AccentHex);
+        }
+
+        // An accent of the user's: readable on this theme's surfaces (as the page's theme.js does it).
+        static void UseAccent(string hex)
+        {
+            int rgb;
+            if (hex.Length != 7 || hex[0] != '#' || !int.TryParse(hex.Substring(1), System.Globalization.NumberStyles.HexNumber, null, out rgb)) return;
+            Color c = Hex(rgb), toward = Dark ? Color.White : Color.Black;
+            for (int i = 0; i < 30 && Contrast(c, Surface) < 4.5; i++) c = Blend(c, toward, 0.07);
+            Accent = c;
+            AccentHover = Blend(c, toward, 0.12);
+            AccentText = Contrast(c, Color.White) >= 4.5 ? Color.White : Hex(0x0E1014);
+            Selected = Blend(c, Surface, Dark ? 0.78 : 0.86);
+            Mine = Blend(c, Surface, Dark ? 0.72 : 0.86);
+        }
+
+        static double Luminance(Color c)
+        {
+            double r = Channel(c.R), g = Channel(c.G), b = Channel(c.B);
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        }
+
+        static double Channel(int v)
+        {
+            double x = v / 255.0;
+            return x <= 0.03928 ? x / 12.92 : Math.Pow((x + 0.055) / 1.055, 2.4);
+        }
+
+        public static double Contrast(Color a, Color b)
+        {
+            double x = Luminance(a), y = Luminance(b);
+            return (Math.Max(x, y) + 0.05) / (Math.Min(x, y) + 0.05);
+        }
+
+        // Reloads the palette and tells every window (a new look from the page).
+        public static void Reload()
+        {
+            Load();
+            if (Changed != null) Changed(null, EventArgs.Empty);
         }
 
         static Color Hex(int rgb)

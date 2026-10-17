@@ -252,11 +252,11 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
 - Invites: `GET|POST /api/invites/:code` (see / join, or use a reset link), `POST /api/invites {role, uses, days}`,
   `GET /api/invites`, `DELETE /api/invites/:id`; `POST /api/people/:id/reset`.
 - `GET /api/bootstrap`: me, people, spaces, channels with unread/mention counts and notification levels.
-- Me: `PATCH /api/me {name, color, password, current}`, `PUT|DELETE /api/me/avatar`, `GET /api/me/sessions`,
+- Me: `PATCH /api/me {name, color, password, current, appearance}` (1.27: `appearance` `{ "theme": "auto"|"light"|"dark", "accent": "#rrggbb"|null }` or null, the person's own look; only they see it, their other browsers get `look`), `PUT|DELETE /api/me/avatar`, `GET /api/me/sessions`,
   `DELETE /api/me/sessions/:id|others`, (1.25.2) `POST /api/me/confirm {password}`. Admins: `PATCH /api/people/:id
   {role, disabled}`. From a Tailscale sign-in, invites, reset links and those changes answer `403 { reason: "confirm" }`
   until the password is confirmed, or `"password-needed"` without one (errors may carry a `reason`).
-- Spaces and channels: `PATCH /api/spaces/:id`, `POST /api/spaces/:id/channels`, `PATCH /api/channels/:id`,
+- Spaces and channels: `PATCH /api/spaces/:id` (`{name?, appearance?}`; 1.27: `appearance` is the family's look, admins only; in the bootstrap's `spaces` and the `space` event), `POST /api/spaces/:id/channels`, `PATCH /api/channels/:id`,
   `POST /api/dms {people, name}`, `DELETE /api/channels/:id/members/me`.
 - Messages: `GET /api/channels/:id/messages?before|after|around`, `POST /api/channels/:id/messages {body, reply,
   files, nonce}` (mentions as `<@id>`, `@everyone`), `PATCH|DELETE /api/messages/:id`,

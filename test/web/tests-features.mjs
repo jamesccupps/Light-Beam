@@ -293,6 +293,50 @@ export default function register(test) {
     await page.waitFor(`!$('#settingsDlg').open`, 3000, 'closed by a click outside');
   });
 
+  test('appearance (1.27): Settings → Appearance sets the look for all devices (another page follows at once) or this device’s own (it wins; the others keep theirs); a reload starts in it', async ctx => {
+    const server = await ctx.startServer(8823); // (its own server: the look for all devices would follow other tests)
+    ctx.defer(() => server.stop());
+    const page = await ctx.signedIn({ server });
+    const other = await ctx.signedIn({ server });
+    const look = p => p.evaluate(`[document.documentElement.dataset.theme || '', getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()]`);
+    eq(await look(page), ['', '#5a4bf0'], 'Beam’s own to start with (light, like the device here)');
+    await page.evaluate(`openSettings('look')`);
+    await page.waitFor(`$('#set-look') !== null && $$('#set-look .swatch').length === 10`, 5000, 'Appearance: the swatches');
+    // All devices: dark, teal
+    // Dark, then Teal at once (the second click builds on the first even before the server answers)
+    await page.evaluate(`[...$$('#set-look .seg')].find(b => b.textContent === 'Dark').click(); $$('#set-look .swatch')[2].click(); true`);
+    await page.waitFor(`fetch('api/settings').then(r => r.json()).then(s => s.appearance?.theme === 'dark' && s.appearance?.accent === '#0e7c86')`, 5000, 'dark and teal, saved for all devices');
+    eq(await look(page), ['dark', await page.evaluate(`accentVars('#0e7c86')['--u-accent-d']`)], 'drawn: dark, teal readable on dark');
+    await other.waitFor(`document.documentElement.dataset.theme === 'dark' && getComputedStyle(document.documentElement).getPropertyValue('--u-accent').trim() !== ''`, 8000, 'the other page follows at once');
+    eq(await other.evaluate(`JSON.parse(localStorage.getItem('beam.look'))`), { theme: 'dark', accent: '#0e7c86' }, 'and keeps it for its next start');
+    // This device only: light; the other page keeps the look for all devices
+    await page.evaluate(`[...$$('#set-look input[type=radio]')][1].click()`);
+    await page.waitFor(`Boolean(ownLook())`, 5000, 'its own look (a copy of the shared one to start)');
+    await page.evaluate(`[...$$('#set-look .seg')].find(b => b.textContent === 'Light').click()`);
+    await page.waitFor(`document.documentElement.dataset.theme === 'light' && ownLook()?.theme === 'light'`, 5000, 'light, here only');
+    await ctx.sleep(800);
+    eq((await look(other))[0], 'dark', 'the other page keeps dark');
+    eq(await page.evaluate(`/has a look of its own/.test($('#set-look').textContent)`), true, 'the page says so');
+    // A reload starts in its look, before the server answers (theme.js)
+    await page.goto('about:blank');
+    await page.goto(`${server.base}/`);
+    eq(await page.evaluate(`document.documentElement.dataset.theme`), 'light', 'at once after a reload');
+    await page.waitFor(`typeof paired !== 'undefined' && paired && net.state === 'online'`, 10000, 'signed in again');
+    // Back to all devices: its own is dropped, the shared look comes back
+    await page.evaluate(`openSettings('look')`);
+    await page.waitFor(`$$('#set-look input[type=radio]').length === 2`, 5000);
+    await page.evaluate(`[...$$('#set-look input[type=radio]')][0].click()`);
+    await page.waitFor(`!ownLook() && document.documentElement.dataset.theme === 'dark'`, 5000, 'back to all devices: dark');
+    // Like the device and Beam's own accent: nothing left over
+    await page.evaluate(`[...$$('#set-look .seg')].find(b => b.textContent === 'Like the device').click()`);
+    await page.waitFor(`serverLook?.theme === 'auto'`, 5000);
+    await page.evaluate(`$$('#set-look .swatch')[0].click()`);
+    await page.waitFor(`serverLook?.accent === null`, 5000);
+    eq(await look(page), ['', '#5a4bf0'], 'Beam’s own again');
+    await other.waitFor(`!document.documentElement.dataset.theme && getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() === '#5a4bf0'`, 8000, 'on the other page too');
+    eq([...page.errors, ...other.errors], [], 'no page errors');
+  });
+
   test('settings, remade (2026-10-15): one page at a time by group; the search finds rows on every page and Esc clears it; old section names open the right page; a phone shows the list first and ‹ goes back', async ctx => {
     const page = await ctx.signedIn();
     await dev(ctx, 'Pixel').me();

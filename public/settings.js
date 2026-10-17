@@ -10,6 +10,7 @@ let settingsList = false;        // a phone showing the list of pages rather tha
 let serverSettings = null; // API v3 GET /api/settings
 const SETTINGS_PAGES = [
   { id: 'general', title: 'General', icon: 'gear', group: 'here' },
+  { id: 'look', title: 'Appearance', icon: 'eye', group: 'here', when: () => serverHas('appearance') }, // (1.27)
   { id: 'receiving', title: 'Receiving', icon: 'arrow-down', group: 'here', when: () => Boolean(HOST) },
   { id: 'sending', title: 'Sending', icon: 'send', group: 'here', when: () => Boolean(HOST) },
   { id: 'notifications', title: 'Notifications', icon: 'bell', group: 'here' },
@@ -147,7 +148,7 @@ function renderSettingsNav(pages, searching) {
 
 // (Looked up when a page is drawn: apps.js and devices.js load after this script.)
 const PAGE_BUILDERS = {
-  general: () => pageGeneral(), receiving: () => pageReceiving(), sending: () => pageSending(), notifications: () => pageNotifications(),
+  general: () => pageGeneral(), look: () => pageLook(), receiving: () => pageReceiving(), sending: () => pageSending(), notifications: () => pageNotifications(),
   control: () => pageControl(), help: () => pageHelp(), devices: () => pageDevices(), apps: () => sectionApps(), alerts: () => sectionAlerts(),
   connections: () => sectionConnections(), security: () => sectionSecurity(), server: () => sectionServer(),
 };
@@ -287,6 +288,95 @@ async function renameThisDevice(value) {
   api('api/me').catch(() => {}); // any request with the new name renames the device
   connect();
   toast('Saved');
+}
+
+// ---------------------------------------------------------------- Appearance (1.27)
+// The user: "customizable theme and colors, maybe per device or for all devices"; their pick: one look for all the
+// devices (kept on the server), and a device may have its own, which wins. theme.js draws it.
+
+let serverLook = null;     // the look for all devices (the hello, the settings event)
+let serverLookKnown = false; // (until the hello: theme.js's kept look stays, no flash of Beam's own colours)
+let lookShown = undefined; // the look last drawn (JSON), so an event that changes nothing redraws nothing
+const ownLook = () => deviceById(me.id)?.settings?.appearance || null;
+const currentLook = () => ownLook() || serverLook || { theme: 'auto', accent: null };
+
+// Draws the look this device should have, keeps it for the next start (theme.js), and tells the Windows app (its
+// own windows and title bar follow: bridge `look`, Beam for Windows 1.19).
+function lookChanged() {
+  if (!serverLookKnown && !ownLook()) return;
+  const look = ownLook() || serverLook || null;
+  const json = JSON.stringify(look);
+  if (json === lookShown) return;
+  lookShown = json;
+  applyLook(look);
+  try { localStorage.setItem(LOOK_KEY, json); } catch {}
+  if (HOST && hostHas('look')) hostCall('look', { theme: look?.theme || 'auto', accent: look?.accent || null }).catch(() => {});
+}
+
+// Saves a look: for all devices (the server's default), or this device's own. Kept and shown at once, so the next
+// click builds on it even before the server answers (two quick clicks, Dark then a colour, lost the Dark); put back if
+// the server refuses.
+async function saveLook(look, own) {
+  const d = deviceById(me.id);
+  const before = own ? ownLook() : serverLook;
+  const keep = value => {
+    if (own) { if (d) d.settings = { ...(d.settings || {}), appearance: value }; } else { serverLook = value; serverLookKnown = true; }
+    lookShown = undefined;
+    lookChanged();
+    if ($('#settingsDlg').open) renderSettings();
+  };
+  keep(look);
+  try {
+    if (own) await api('api/devices/me/settings', jsonBody({ appearance: look }, 'PUT'));
+    else { const res = await apiJson('api/settings', jsonBody({ appearance: look }, 'PATCH')); serverSettings = res.settings || res; }
+  } catch (err) {
+    toast(friendlyError(err), { error: true });
+    keep(before);
+  }
+}
+
+// Only this device (its own look, starting as the shared one), or back to all devices' (its own forgotten).
+async function setLookOwn(own) {
+  if (own) return saveLook({ ...currentLook() }, true);
+  try {
+    await api('api/devices/me/settings', jsonBody({ appearance: null }, 'PUT'));
+    const d = deviceById(me.id);
+    if (d?.settings) delete d.settings.appearance;
+  } catch (err) { toast(friendlyError(err), { error: true }); }
+  lookChanged();
+  if ($('#settingsDlg').open) renderSettings();
+}
+
+function pageLook() {
+  const own = Boolean(ownLook());
+  const look = currentLook();
+  const save = change => saveLook({ ...currentLook(), ...change }, own); // (the look as it is at the click)
+  const seg = (value, label) => el('button', { type: 'button', class: `seg${look.theme === value ? ' on' : ''}`, 'aria-pressed': String(look.theme === value), onclick: () => save({ theme: value }) }, label);
+  const preset = ACCENTS.some(([, hex]) => hex === look.accent);
+  const swatch = (name, hex) => {
+    const b = el('button', { type: 'button', class: 'swatch', title: name, 'aria-label': name, 'aria-pressed': String(look.accent === hex), onclick: () => save({ accent: hex }) },
+      look.accent === hex ? icon('check') : '');
+    b.style.background = hex || '#5a4bf0'; // (Beam's own: its light-theme colour)
+    return b;
+  };
+  const picker = el('input', { type: 'color', value: look.accent || '#5a4bf0', 'aria-label': 'Your own colour' });
+  picker.addEventListener('input', () => applyLook({ ...look, accent: picker.value })); // (a preview while picking)
+  picker.addEventListener('change', () => save({ accent: picker.value }));
+  const custom = el('label', { class: `swatch custom${look.accent && !preset ? ' on' : ''}`, title: 'Your own colour' }, picker, look.accent && !preset ? icon('check') : icon('edit'));
+  if (look.accent && !preset) custom.style.background = look.accent;
+  const where = (value, label, hint) => {
+    const input = el('input', { type: 'radio', name: 'look-where', checked: own === value });
+    input.addEventListener('change', () => { if (input.checked) setLookOwn(value); });
+    return el('label', { class: 'check set-row look-where' }, input, el('span', {}, label, el('small', { class: 'muted block' }, hint)));
+  };
+  return [
+    intro(own ? 'This device has a look of its own. Your other devices keep theirs.' : 'This look is for all your devices, unless one has its own.'),
+    card('Theme', el('div', { class: 'set-row seg-row', role: 'group', 'aria-label': 'Theme' }, seg('auto', 'Like the device'), seg('light', 'Light'), seg('dark', 'Dark'))),
+    card('Accent colour', el('div', { class: 'set-row swatches', role: 'group', 'aria-label': 'Accent colour' }, ...ACCENTS.map(([name, hex]) => swatch(name, hex)), custom)),
+    card('Use this look on',
+      where(false, 'All my devices', 'The same look everywhere: a change here changes it on every device that hasn’t its own.'),
+      where(true, HOST ? 'Only this PC' : 'Only this device', 'Your other devices keep their look.')),
+  ];
 }
 
 // The Windows app's own settings (HOST-BRIDGE.md §6/§7): a switch that didn't take flips back.

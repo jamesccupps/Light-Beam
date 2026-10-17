@@ -6,6 +6,7 @@ const QRCode = require('qrcode');
 const { newId, isId } = require('./ids');
 const { httpError, send, readJson, cookie, parseCookies } = require('./http');
 const auth = require('./auth');
+const { cleanLook, lookOf } = require('./look');
 
 const now = () => Date.now();
 const COLORS = 8; // avatar colours the app knows
@@ -73,6 +74,7 @@ function createPeople(ctx) {
       out.tailscale = u.login || null;
       out.password = Boolean(u.pass_hash);
     }
+    if (viewer && viewer.id === u.id) out.appearance = lookOf(u.appearance); // (1.27) their own look: only theirs
     return out;
   }
 
@@ -414,6 +416,10 @@ function createPeople(ctx) {
       }
       changes.name = name;
     }
+    if (body.appearance !== undefined) { // (1.27) null: the family's look
+      const look = cleanLook(body.appearance);
+      changes.appearance = look ? JSON.stringify(look) : null;
+    }
     if (body.color !== undefined) {
       const color = Number(body.color);
       if (!Number.isInteger(color) || color < 0 || color >= COLORS) throw httpError(400, 'Unknown colour');
@@ -458,6 +464,7 @@ function createPeople(ctx) {
     }
     const updated = getUser(user.id);
     hub.emit(null, 'people', { person: personJson(updated) });
+    if (changes.appearance !== undefined) hub.emit([user.id], 'look', { appearance: lookOf(updated.appearance) }); // (their other browsers)
     send(res, 200, { me: personJson(updated, updated) });
   }
 

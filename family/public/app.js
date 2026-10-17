@@ -6,20 +6,20 @@ import { api, onConfirmNeeded } from './api.js';
 import { state, on, applyBootstrap, applyEvent, channel, totals, sortedChannels, title } from './store.js';
 import { sidebarView } from './sidebar.js';
 import { conversationView } from './chat.js';
-import { signInPage, joinPage, settingsView, adminView, panelView, openViewer, newConversation, setTheme } from './pages.js';
+import { signInPage, joinPage, settingsView, adminView, panelView, openViewer, newConversation } from './pages.js';
 import { refreshPush } from './notify.js';
 import { busy } from './uploads.js';
 import { nav } from './nav.js';
 
 const app = document.getElementById('app');
-const EVENTS = ['msg', 'msg-edit', 'msg-del', 'react', 'read', 'typing', 'presence', 'people', 'channel', 'channel-gone', 'space', 'notify'];
+const EVENTS = ['msg', 'msg-edit', 'msg-del', 'react', 'read', 'typing', 'presence', 'people', 'channel', 'channel-gone', 'space', 'notify', 'look'];
 let shell = null;
 let mainView = null;
 let panel = null;
 let events = null;
 let offlineTimer = null;
 
-try { const t = localStorage.getItem('family.theme'); if (t) setTheme(t); } catch {}
+// (1.27: look.js draws the kept look before this module runs)
 
 // (1.25.2) Signed in by Tailscale, the changes that could let someone in take the password (then not again for 15
 // minutes in this browser).

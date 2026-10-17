@@ -6,7 +6,7 @@ const SHELL_CACHE = 'beam-shell-v6'; // (v6, 1.12.2: without remote.js)
 const SHARE_CACHE = 'beam-share';
 const SCOPE = self.registration.scope;
 const ROOT = new URL('./', SCOPE).href;
-const SHELL = ['./', 'style.css', 'core.js', 'cache.js', 'model.js', 'host.js', 'thread.js', 'send.js', 'live.js', 'signin.js',
+const SHELL = ['./', 'style.css', 'theme.js', 'core.js', 'cache.js', 'model.js', 'host.js', 'thread.js', 'send.js', 'live.js', 'signin.js',
   'settings.js', 'devices.js', 'files.js', 'apps.js', 'phone.js', 'extras.js', 'gallery.js', 'app.js', 'icon.svg', 'icon-180.png', 'icon-192.png', 'manifest.webmanifest'].map(p => new URL(p, SCOPE).href);
 const EXTRA = ['icon-192.png'].map(p => new URL(p, SCOPE).href); // not named by the page, but needed offline (notifications)
 const TIMEOUT_MS = 3000;

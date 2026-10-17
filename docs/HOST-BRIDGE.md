@@ -529,3 +529,12 @@ notifications, which WebView2 can't get (it has no push service); they stay with
   own (the Downloads folder). Pasting and saving several files are allowed; other permissions are refused.
 - An update reopens it (without the focus) when it was open; signing out of Beam, or the sign-in revoked, closes it and
   deletes its profile (the Family sign-in made in it).
+
+## The look (Beam for Windows 1.19, feature `look`)
+
+`{ "type": "look", "id", "theme": "auto"|"light"|"dark", "accent": "#rrggbb"|null }` → reply `null`. The page sends the look
+it shows (Settings → Appearance: its device's own, else the one for all devices) whenever that changes; the app's own
+windows, title bars and tray icon follow it (`light`/`dark` whatever Windows says; `auto`: like Windows), and it's kept
+in config.json (`lookTheme`, `lookAccent`) for the next start. Anything else counts as `auto` / Beam's accent. The app
+also reads the look from its own event stream (the `hello`, `settings`, its entry in `devices`), so it follows even
+with no window open.

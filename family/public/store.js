@@ -47,10 +47,18 @@ export function applyBootstrap(b) {
   state.pageVersion ??= b.version; // (the app this page loaded, 1.8.5)
   // Messages loaded before are kept only for conversations still there (a resync may have changed anything).
   for (const id of [...state.messages.keys()]) if (!state.channels.has(id)) state.messages.delete(id);
+  lookNow();
   emit('people');
   emit('channels');
   emit('me');
   emit('unread');
+}
+
+// (1.27) The look this person sees: their own, else the family's (its space's); kept for the next start (look.js).
+export function lookNow() {
+  const look = state.me?.appearance || state.spaces?.[0]?.appearance || null;
+  window.familyApplyLook?.(look);
+  try { localStorage.setItem('family.look', JSON.stringify(look)); localStorage.removeItem('family.theme'); } catch {}
 }
 
 // The name a conversation is shown by: #channel, the other person, or a group's name (else its people).
@@ -258,8 +266,16 @@ export function applyEvent(type, d) {
     }
     case 'space': {
       const s = state.spaces.find(x => x.id === d.space.id);
-      if (s) s.name = d.space.name;
+      if (s) {
+        s.name = d.space.name;
+        if ('appearance' in d.space) { s.appearance = d.space.appearance; lookNow(); emit('me'); } // (1.27) the family's look
+      }
       return emit('channels');
+    }
+    case 'look': { // (1.27) this person's own look, changed in another of their browsers
+      state.me = { ...state.me, appearance: d.appearance };
+      lookNow();
+      return emit('me');
     }
     case 'notify': {
       const c = state.channels.get(d.channel);
