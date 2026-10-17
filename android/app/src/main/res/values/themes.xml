@@ -1,15 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
     <style name="Theme.Beam" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="colorPrimary">@color/accent</item>
-        <item name="colorOnPrimary">@color/on_accent</item>
-        <item name="colorPrimaryContainer">@color/accent_soft</item>
+        <!-- (1.14) Beam's own accent; another look puts a ThemeOverlay.Beam.Look.* over these. -->
+        <item name="beamAccent">@color/accent</item>
+        <item name="beamOnAccent">@color/on_accent</item>
+        <item name="beamAccentSoft">@color/accent_soft</item>
+        <item name="beamMine">@color/mine</item>
+        <item name="beamMineInk">@color/mine_ink</item>
+        <item name="beamMineMuted">@color/mine_muted</item>
+        <item name="beamScrim">@color/drop_scrim</item>
+        <item name="beamPick">@color/pick_tint</item>
+        <item name="colorPrimary">?attr/beamAccent</item>
+        <item name="colorOnPrimary">?attr/beamOnAccent</item>
+        <item name="colorPrimaryContainer">?attr/beamAccentSoft</item>
         <item name="colorOnPrimaryContainer">@color/text</item>
-        <item name="colorSecondary">@color/accent</item>
-        <item name="colorOnSecondary">@color/on_accent</item>
-        <item name="colorSecondaryContainer">@color/accent_soft</item>
+        <item name="colorSecondary">?attr/beamAccent</item>
+        <item name="colorOnSecondary">?attr/beamOnAccent</item>
+        <item name="colorSecondaryContainer">?attr/beamAccentSoft</item>
         <item name="colorOnSecondaryContainer">@color/text</item>
-        <item name="colorTertiary">@color/accent</item>
+        <item name="colorTertiary">?attr/beamAccent</item>
         <item name="android:colorBackground">@color/bg</item>
         <item name="colorOnBackground">@color/text</item>
         <item name="colorSurface">@color/bg</item>
@@ -53,7 +62,7 @@
     </style>
 
     <style name="TextAppearance.Beam.Badge" parent="TextAppearance.Material3.LabelSmall">
-        <item name="android:textColor">@color/on_accent</item>
+        <item name="android:textColor">?attr/beamOnAccent</item>
         <item name="android:textStyle">bold</item>
     </style>
 

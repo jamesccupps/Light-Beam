@@ -23,11 +23,17 @@ import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.color.MaterialColors
 import app.beam.android.BeamApp
 import app.beam.android.R
 import app.beam.android.core.Conversations
+import app.beam.android.core.Look
 import app.beam.android.core.Pairing
+import app.beam.android.data.Looks
 import app.beam.android.data.Outbox
 import app.beam.android.data.Repository
 import app.beam.android.service.TransferService
@@ -38,13 +44,31 @@ import kotlinx.coroutines.withContext
 abstract class BaseActivity : AppCompatActivity() {
     val app: BeamApp get() = BeamApp.from(this)
 
+    /** (1.14) The accent this screen was drawn in ([Look.shownAccent]; null: Beam's own). */
+    private var accent: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        // (1.14) The look's accent goes on before anything is drawn; light or dark is AppCompat's night mode (Looks).
+        accent = app.looks.look.value.shownAccent
+        val overlay = Looks.overlay(accent)
+        if (overlay != 0) theme.applyStyle(overlay, true)
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // Again: when AppCompat puts light or dark in place on the screen itself (rather than in the context it makes
+        // for it), it applies the manifest's theme once more, over the accent. Before any view is made.
+        if (overlay != 0) theme.applyStyle(overlay, true)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.looks.look.collect { if (it.shownAccent != accent) recreate() }
+            }
+        }
     }
 
     fun toast(text: CharSequence) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
 }
+
+/** (1.14) A colour of the screen's theme (the look's: `R.attr.beamAccent` …), for colours set in code. */
+fun Context.themeColor(attr: Int): Int = MaterialColors.getColor(this, attr, 0)
 
 object Clip {
     fun copy(ctx: Context, text: String): Boolean = try {

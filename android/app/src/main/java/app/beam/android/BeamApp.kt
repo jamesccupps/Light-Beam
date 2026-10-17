@@ -16,6 +16,7 @@ import app.beam.android.data.Alerts
 import app.beam.android.data.AppUpdater
 import app.beam.android.data.Connection
 import app.beam.android.data.Inbox
+import app.beam.android.data.Looks
 import app.beam.android.data.NetworkMonitor
 import app.beam.android.data.Outbox
 import app.beam.android.data.Prefs
@@ -87,6 +88,8 @@ class BeamApp : Application() {
         private set
     lateinit var backups: SettingsBackups
         private set
+    lateinit var looks: Looks
+        private set
 
     /** Lives as long as the process. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -118,6 +121,7 @@ class BeamApp : Application() {
             StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder().detectLeakedClosableObjects().detectLeakedRegistrationObjects().penaltyLog().build())
         }
         prefs = Prefs(this)
+        looks = Looks(this).also { it.applyNightMode() } // (1.14) before any screen: it starts in its look
         Notifier.createChannels(this)
         network = NetworkMonitor(this).also { it.start() }
         moves = ServerMoves(this)

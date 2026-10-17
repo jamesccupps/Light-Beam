@@ -60,6 +60,24 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- (1.14) Only when the server has the look (1.27). -->
+            <LinearLayout
+                android:id="@+id/rowAppearance"
+                style="@style/SettingsRow"
+                android:visibility="gone">
+
+                <LinearLayout style="@style/SettingsTexts">
+
+                    <TextView
+                        style="@style/SettingsTitle"
+                        android:text="@string/look_title" />
+
+                    <TextView
+                        android:id="@+id/appearanceValue"
+                        style="@style/SettingsSummary" />
+                </LinearLayout>
+            </LinearLayout>
+
             <LinearLayout
                 android:id="@+id/rowPhoneNotifications"
                 style="@style/SettingsRow">

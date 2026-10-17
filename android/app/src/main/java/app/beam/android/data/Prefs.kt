@@ -234,6 +234,18 @@ class Prefs(context: Context, private val box: SecretBox = KeystoreBox()) {
         get() = sp.getString("tileTarget", null)
         set(v) = sp.edit { putString("tileTarget", v) }
 
+    // ---------------------------------------------------------------- the look (server 1.27 `appearance`)
+
+    /** The look for all devices, as the server last said (JSON), so the app starts in it. Not backed up: the server's. */
+    var lookServer: String?
+        get() = sp.getString("lookServer", null)
+        set(v) = sp.edit { if (v == null) remove("lookServer") else putString("lookServer", v) }
+
+    /** This phone's own look (its `settings.appearance` on the server), or null. */
+    var lookOwn: String?
+        get() = sp.getString("lookOwn", null)
+        set(v) = sp.edit { if (v == null) remove("lookOwn") else putString("lookOwn", v) }
+
     // ---------------------------------------------------------------- notifications on your PCs (server 1.5)
 
     /** The master switch: notifications of the apps in [sharedApps] go to the PCs set to show them. Off by default. */

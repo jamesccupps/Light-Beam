@@ -550,4 +550,24 @@
         <item quantity="one">%d message</item>
         <item quantity="other">%d messages</item>
     </plurals>
+
+    <!-- (1.14) Settings → Appearance (server 1.27 `appearance`), as the web's page. -->
+    <string name="look_title">Appearance</string>
+    <string name="look_theme">Theme</string>
+    <string name="look_theme_auto">Like the phone</string>
+    <string name="look_theme_light">Light</string>
+    <string name="look_theme_dark">Dark</string>
+    <string name="look_accent">Accent colour</string>
+    <string name="look_custom">Your own colour</string>
+    <string name="look_custom_note">Your own colour (%1$s) shows on this phone as the nearest of these: %2$s. Pick it on the web to change it.</string>
+    <string name="look_where">Use this look on</string>
+    <string name="look_where_all">All my devices</string>
+    <string name="look_where_own">Only this phone</string>
+    <string name="look_where_all_note">The same look everywhere: a change here changes it on every device that hasn\'t its own.</string>
+    <string name="look_where_own_note">Your other devices keep their look.</string>
+    <string name="look_intro_all">This look is for all your devices, unless one has its own.</string>
+    <string name="look_intro_own">This phone has a look of its own. Your other devices keep theirs.</string>
+    <string name="look_summary">%1$s · %2$s</string>
+    <string name="look_summary_own">%1$s · %2$s · only this phone</string>
+    <string name="look_selected">Chosen</string>
 </resources>

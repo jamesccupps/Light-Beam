@@ -155,6 +155,12 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
 
     private fun color(id: Int) = ctx.getColor(id)
 
+    // (1.14) The look's colours (the screen is made again when they change).
+    private val accent by lazy { ctx.themeColor(R.attr.beamAccent) }
+    private val accentSoft by lazy { ctx.themeColor(R.attr.beamAccentSoft) }
+    private val mineInk by lazy { ctx.themeColor(R.attr.beamMineInk) }
+    private val mineMuted by lazy { ctx.themeColor(R.attr.beamMineMuted) }
+
     override fun getItemViewType(position: Int) = if (getItem(position) is Row.Day) 0 else 1
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
@@ -636,9 +642,8 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         }
         b.bubble.alpha = if (pending) 0.72f else 1f
         val onAccent = mine && !failed && !imageOnly
-        val ink = color(if (onAccent) R.color.mine_ink else R.color.text)
-        val muted = color(if (onAccent) R.color.mine_muted else R.color.muted)
-        val accent = color(R.color.accent)
+        val ink = if (onAccent) mineInk else color(R.color.text)
+        val muted = if (onAccent) mineMuted else color(R.color.muted)
         b.text.setTextColor(ink)
         b.text.setLinkTextColor(if (onAccent) ink else accent)
         // The selection must show on my (accent-coloured) bubbles too.
@@ -652,7 +657,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         b.fileIcon.imageTintList = ColorStateList.valueOf(if (onAccent) ink else accent)
         for (button in listOf(b.actRetry, b.actCancel, b.showAll)) button.setTextColor(if (onAccent) ink else accent)
         b.progress.setIndicatorColor(if (onAccent) ink else accent)
-        b.progress.trackColor = if (onAccent) 0x40FFFFFF else color(R.color.accent_soft)
+        b.progress.trackColor = if (onAccent) 0x40FFFFFF else accentSoft
     }
 
     companion object {

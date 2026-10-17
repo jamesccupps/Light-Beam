@@ -27,6 +27,8 @@ data class Device(
      * purpose, or approved since. Null from an older server.
      */
     val trusted: Boolean? = null,
+    /** (server 1.27 `appearance`) Its own look (`settings.appearance`), or null: the look for all devices. */
+    val look: Look? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("platform", platform)
         .put("online", online).put("lastSeen", lastSeen)
@@ -55,6 +57,7 @@ data class Device(
             phoneNotifications = o.optJSONObject("settings")?.optBoolean("phoneNotifications") == true,
             backupAt = o.optJSONObject("backup")?.optLong("at")?.takeIf { it > 0 },
             trusted = o.optBool("trusted"),
+            look = Look.parse(o.optJSONObject("settings")?.optJSONObject("appearance")),
         )
 
         fun parseList(a: JSONArray?): List<Device> =

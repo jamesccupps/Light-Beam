@@ -99,7 +99,7 @@ class MainActivity : BaseActivity() {
         adapter = ConversationAdapter(this, { startActivity(ThreadActivity.intent(this, it.key)) }, ::conversationMenu)
         b.list.layoutManager = LinearLayoutManager(this)
         b.list.adapter = adapter
-        b.refresh.setColorSchemeColors(getColor(R.color.accent))
+        b.refresh.setColorSchemeColors(themeColor(R.attr.beamAccent))
         b.refresh.setOnRefreshListener { refresh() }
         b.emptyPair.setOnClickListener { PairQr.show(this) }
 

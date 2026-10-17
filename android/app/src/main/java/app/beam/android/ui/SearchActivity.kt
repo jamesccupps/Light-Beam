@@ -112,7 +112,7 @@ class SearchActivity : BaseActivity() {
             b.title.text = names(item)
             b.time.text = Format.relative(item.ts)
             b.icon.setImageResource(if (item.isText) R.drawable.ic_text_file else fileTypeIcon(item.mime, item.name))
-            b.snippet.text = highlight(snippet(item), query, b.root.context.getColor(R.color.accent_soft))
+            b.snippet.text = highlight(snippet(item), query, b.root.context.themeColor(R.attr.beamAccentSoft))
             b.row.setOnClickListener { onOpen(item) }
         }
 

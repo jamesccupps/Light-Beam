@@ -6,6 +6,7 @@ import app.beam.android.core.Conversations
 import app.beam.android.core.Device
 import app.beam.android.core.Item
 import app.beam.android.core.ItemsPage
+import app.beam.android.core.Look
 import app.beam.android.core.ServerInfo
 import app.beam.android.core.longs
 import app.beam.android.core.strings
@@ -186,6 +187,7 @@ class Repository(private val app: BeamApp) {
             }
         }
         if (gone.isNotEmpty()) Notifier.itemsDeleted(app, gone)
+        if (devicesEvents == seen) app.looks.onDevices(devices.devices, me)
         saveSoon()
     }
 
@@ -302,7 +304,10 @@ class Repository(private val app: BeamApp) {
                 // server sorts by last seen, so every report reorders the list: compare without the order.
                 fun names(l: List<Device>) = l.mapTo(HashSet()) { Triple(it.id, it.name, it.platform) }
                 if (names(list) != names(before)) saveSoon()
+                app.looks.onDevices(list, me) // (1.14) this phone's own look
             }
+            // (server 1.27) The settings changed: the look for all devices is one of them.
+            "settings" -> if (o.has("appearance")) app.looks.onServer(Look.parse(o.optJSONObject("appearance")))
             // Devices were linked (a browser merged into an app on the same machine): item senders and
             // targets were rewritten, so fetch everything again.
             // (Devices were merged: every sender may have changed, so the whole list, not a delta.)
