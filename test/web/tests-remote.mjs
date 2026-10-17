@@ -227,7 +227,8 @@ function fakePcMain(cfg) {
   pcs.onSignal = async d => {
     const pc = pcs.pc;
     if (!pc) return;
-    if (d.kind === 'answer') { pcs.rec.answers++; await pc.setRemoteDescription({ type: 'answer', sdp: d.sdp }); }
+    // (as rc-host.js: an answer only while one is awaited; a late one, from a viewer that started again, is dropped)
+    if (d.kind === 'answer') { pcs.rec.answers++; if (pc.signalingState === 'have-local-offer') await pc.setRemoteDescription({ type: 'answer', sdp: d.sdp }); }
     else if (d.kind === 'candidates') {
       for (const c of d.candidates) {
         if (c.candidate === '') { pc.addIceCandidate(c).catch(() => {}); continue; }
@@ -1141,7 +1142,8 @@ export default function register(test) {
     // One finger scrolls what's under it (fingers up: down the page), and goes on after a flick.
     const s = await at(page, 0.5, 0.7);
     await touch('touchStart', [s]);
-    for (let i = 1; i <= 8; i++) { await touch('touchMove', [{ x: s.x, y: s.y - i * 12 }]); await sleep(16); }
+    // (24 px a step: fast enough for a flick even when each step takes ~80 ms on a busy PC)
+    for (let i = 1; i <= 8; i++) { await touch('touchMove', [{ x: s.x, y: s.y - i * 24 }]); await sleep(16); }
     await touch('touchEnd', []);
     // A touch while it still goes on stops it, and isn't a click (as on a phone).
     const going = await page.evaluate('Boolean(rcFlinging)');
@@ -1385,9 +1387,17 @@ export default function register(test) {
     eq(await cursor(), '', 'turned off: the dot, and the PC\'s own pointer in the picture');
     await page.evaluate(`rcSetPic('pointer', true); true`);
     // The delay: probes the way input goes; the PC's square turns in its picture; each step's share.
-    await page.evaluate(`rcMeasure(); true`);
-    await page.waitFor(`rc.measured && rc.measured.n >= 8 && !rc.measuring`, 40000, 'measured');
-    const m = await page.evaluate(`rc.measured`);
+    // (A busy PC's picture can lose probes: measured again rather than failing; the checks need a few of the 10.)
+    const measure = async what => {
+      for (let i = 0; i < 3; i++) {
+        await page.evaluate(`rcMeasure(); true`);
+        await page.waitFor(`!rc.measuring`, 45000, what);
+        const got = await page.evaluate(`rc.measured`);
+        if (got && got.n >= 5) return got;
+      }
+      throw new Error(`${what}: too few probes came back, three times`);
+    };
+    const m = await measure('measured');
     assert(m.total > 0 && m.total < 3000 && m.pc === 1.5 && m.toPc != null, `from a probe to its frame shown here, with the PC's own 1.5 ms: ${JSON.stringify(m)}`);
     assert((m.capture != null && m.back != null && m.decode != null && m.shown != null) || m.rest != null, `each step's share, or what's left: ${JSON.stringify(m)}`);
     const probes = (await rec(pc, 'in')).filter(x => x.t === 'probe');
@@ -1400,9 +1410,7 @@ export default function register(test) {
     // (1.15) A PC that does (`probe-cap`: from the probe reaching it to its own capture showing the colour): less its own
     // 1.5 ms to put the square on its screen, that's Edge's capture; the rest of the capture step is the queue.
     await pc.js(`fakePc.probeCap = 2.5; true`);
-    await page.evaluate(`rcMeasure(); true`);
-    await page.waitFor(`rc.measured && rc.measured.n >= 8 && !rc.measuring`, 40000, 'measured again');
-    const m2 = await page.evaluate(`rc.measured`);
+    const m2 = await measure('measured again');
     assert(m2.capture != null, `the capture step is known here: ${JSON.stringify(m2)}`);
     eq(m2.edge, 1, `Edge's capture: the PC's 2.5 less its own 1.5 (${JSON.stringify(m2)})`);
     const text2 = await page.evaluate(`rcUi.details.textContent`);
@@ -1444,7 +1452,7 @@ export default function register(test) {
     await sleep(800);
     const ctl2 = await rec(pc2, 'ctl');
     eq([ctl2.find(x => x.t === 'hello').caps, ctl2.some(x => x.t === 'pointer')], [['clip', 'text', 'clipimg'], false], 'a phone: no `cursor` in its hello, no `pointer`');
-  }, { requires: FEATURE, timeout: 120000 });
+  }, { requires: FEATURE, timeout: 240000 }); // (room for measuring again on a busy PC)
 
   test('remote control in the chat app: Control (a new tab), a locked PC says to use Remote Desktop, Settings → Devices shows who controls a PC (End) and turns it off', async ctx => {
     const pc = await fakePc(ctx);

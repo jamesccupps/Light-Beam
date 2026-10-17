@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- (1.14) The accent colours of the look (Theme.Beam: Beam's own; ThemeOverlay.Beam.Look.*: the others). -->
+    <attr name="beamAccent" format="color" />
+    <attr name="beamOnAccent" format="color" />
+    <attr name="beamAccentSoft" format="color" />
+    <attr name="beamMine" format="color" />
+    <attr name="beamMineInk" format="color" />
+    <attr name="beamMineMuted" format="color" />
+    <attr name="beamScrim" format="color" />
+    <attr name="beamPick" format="color" />
+</resources>

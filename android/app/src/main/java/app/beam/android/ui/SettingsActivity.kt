@@ -30,6 +30,7 @@ import app.beam.android.core.BeamException
 import app.beam.android.core.Conversations
 import app.beam.android.core.Device
 import app.beam.android.core.Format
+import app.beam.android.core.Look
 import app.beam.android.core.Pairing
 import app.beam.android.core.ServerFinder
 import app.beam.android.core.ServerInfo
@@ -67,6 +68,7 @@ class SettingsActivity : BaseActivity() {
 
         val prefs = app.prefs
         b.rowName.setOnClickListener { editName() }
+        b.rowAppearance.setOnClickListener { startActivity(Intent(this, AppearanceActivity::class.java)) }
         b.rowStay.setOnClickListener {
             prefs.stayConnected = !prefs.stayConnected
             app.ensureBackgroundService()
@@ -131,9 +133,15 @@ class SettingsActivity : BaseActivity() {
                         },
                     )
                     bindInfo(info)
+                    b.rowAppearance.isVisible = info?.lists("appearance") == true // (1.14, server 1.27)
                     bindDevices(devices)
                     bindRestore()
                 }
+            }
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                combine(app.looks.look, app.looks.hasOwn) { look, _ -> look }.collect { bindLook(it) }
             }
         }
         // Server 1.6: who controls which PC, shown with the devices (and ended from their menu).
@@ -195,6 +203,19 @@ class SettingsActivity : BaseActivity() {
                 null -> R.string.settings_open_links_unknown
             },
         )
+    }
+
+    /** (1.14) "Dark · Blue", and "only this phone" when it has its own. */
+    private fun bindLook(look: Look) {
+        val theme = getString(
+            when (look.theme) {
+                Look.LIGHT -> R.string.look_theme_light
+                Look.DARK -> R.string.look_theme_dark
+                else -> R.string.look_theme_auto
+            },
+        )
+        val accent = Look.ACCENTS.firstOrNull { it.second == look.accent }?.first ?: getString(R.string.look_custom)
+        b.appearanceValue.text = getString(if (app.looks.own != null) R.string.look_summary_own else R.string.look_summary, theme, accent)
     }
 
     /** (1.8.2) "Kept on your Beam too (Oct 3, 08:23)", or what it needs. */

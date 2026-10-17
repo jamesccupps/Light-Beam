@@ -3,6 +3,7 @@ package app.beam.android.data
 import app.beam.android.BeamApp
 import app.beam.android.core.BeamException
 import app.beam.android.core.EventStream
+import app.beam.android.core.Look
 import app.beam.android.core.Pairing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -311,6 +312,8 @@ class Connection(private val app: BeamApp) {
         streamId = o.optString("stream").ifEmpty { null }
         // Server 1.5: a restarted server lost the shared notifications (memory only): they go again.
         app.phone.onServerInstance(o.optString("instance").ifEmpty { null })
+        // (1.14, server 1.27) The look for all devices; none from an older server.
+        app.looks.onServer(if (o.has("appearance")) Look.parse(o.optJSONObject("appearance")) else null)
         // The screen changed while the stream was opening.
         if (streamId != null && streamMode != desiredMode()) poke(liveness = false)
     }

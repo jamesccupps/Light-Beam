@@ -123,6 +123,11 @@
             android:windowSoftInputMode="adjustResize|stateHidden" />
 
         <activity
+            android:name=".ui.AppearanceActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.SettingsActivity" />
+
+        <activity
             android:name=".ui.PhoneNotificationsActivity"
             android:exported="false"
             android:parentActivityName=".ui.SettingsActivity"

@@ -22,7 +22,7 @@
         android:background="@drawable/file_icon_bg_theirs"
         android:importantForAccessibility="no"
         android:padding="8dp"
-        app:tint="@color/accent" />
+        app:tint="?attr/beamAccent" />
 
     <LinearLayout
         android:layout_width="0dp"

@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- (1.14) The accent colours on offer (as the web's ACCENTS), put over Theme.Beam by BaseActivity. -->
+    <style name="ThemeOverlay.Beam.Look.Blue" parent="">
+        <item name="beamAccent">@color/look_blue</item>
+        <item name="beamOnAccent">@color/look_blue_ink</item>
+        <item name="beamAccentSoft">@color/look_blue_soft</item>
+        <item name="beamMine">@color/look_blue_mine</item>
+        <item name="beamMineInk">@color/look_blue_mine_ink</item>
+        <item name="beamMineMuted">@color/look_blue_mine_muted</item>
+        <item name="beamScrim">@color/look_blue_scrim</item>
+        <item name="beamPick">@color/look_blue_pick</item>
+    </style>
+
+    <style name="ThemeOverlay.Beam.Look.Teal" parent="">
+        <item name="beamAccent">@color/look_teal</item>
+        <item name="beamOnAccent">@color/look_teal_ink</item>
+        <item name="beamAccentSoft">@color/look_teal_soft</item>
+        <item name="beamMine">@color/look_teal_mine</item>
+        <item name="beamMineInk">@color/look_teal_mine_ink</item>
+        <item name="beamMineMuted">@color/look_teal_mine_muted</item>
+        <item name="beamScrim">@color/look_teal_scrim</item>
+        <item name="beamPick">@color/look_teal_pick</item>
+    </style>
+
+    <style name="ThemeOverlay.Beam.Look.Green" parent="">
+        <item name="beamAccent">@color/look_green</item>
+        <item name="beamOnAccent">@color/look_green_ink</item>
+        <item name="beamAccentSoft">@color/look_green_soft</item>
+        <item name="beamMine">@color/look_green_mine</item>
+        <item name="beamMineInk">@color/look_green_mine_ink</item>
+        <item name="beamMineMuted">@color/look_green_mine_muted</item>
+        <item name="beamScrim">@color/look_green_scrim</item>
+        <item name="beamPick">@color/look_green_pick</item>
+    </style>
+
+    <style name="ThemeOverlay.Beam.Look.Amber" parent="">
+        <item name="beamAccent">@color/look_amber</item>
+        <item name="beamOnAccent">@color/look_amber_ink</item>
+        <item name="beamAccentSoft">@color/look_amber_soft</item>
+        <item name="beamMine">@color/look_amber_mine</item>
+        <item name="beamMineInk">@color/look_amber_mine_ink</item>
+        <item name="beamMineMuted">@color/look_amber_mine_muted</item>
+        <item name="beamScrim">@color/look_amber_scrim</item>
+        <item name="beamPick">@color/look_amber_pick</item>
+    </style>
+
+    <style name="ThemeOverlay.Beam.Look.Red" parent="">
+        <item name="beamAccent">@color/look_red</item>
+        <item name="beamOnAccent">@color/look_red_ink</item>
+        <item name="beamAccentSoft">@color/look_red_soft</item>
+        <item name="beamMine">@color/look_red_mine</item>
+        <item name="beamMineInk">@color/look_red_mine_ink</item>
+        <item name="beamMineMuted">@color/look_red_mine_muted</item>
+        <item name="beamScrim">@color/look_red_scrim</item>
+        <item name="beamPick">@color/look_red_pick</item>
+    </style>
+
+    <style name="ThemeOverlay.Beam.Look.Pink" parent="">
+        <item name="beamAccent">@color/look_pink</item>
+        <item name="beamOnAccent">@color/look_pink_ink</item>
+        <item name="beamAccentSoft">@color/look_pink_soft</item>
+        <item name="beamMine">@color/look_pink_mine</item>
+        <item name="beamMineInk">@color/look_pink_mine_ink</item>
+        <item name="beamMineMuted">@color/look_pink_mine_muted</item>
+        <item name="beamScrim">@color/look_pink_scrim</item>
+        <item name="beamPick">@color/look_pink_pick</item>
+    </style>
+
+    <style name="ThemeOverlay.Beam.Look.Purple" parent="">
+        <item name="beamAccent">@color/look_purple</item>
+        <item name="beamOnAccent">@color/look_purple_ink</item>
+        <item name="beamAccentSoft">@color/look_purple_soft</item>
+        <item name="beamMine">@color/look_purple_mine</item>
+        <item name="beamMineInk">@color/look_purple_mine_ink</item>
+        <item name="beamMineMuted">@color/look_purple_mine_muted</item>
+        <item name="beamScrim">@color/look_purple_scrim</item>
+        <item name="beamPick">@color/look_purple_pick</item>
+    </style>
+
+    <style name="ThemeOverlay.Beam.Look.Graphite" parent="">
+        <item name="beamAccent">@color/look_graphite</item>
+        <item name="beamOnAccent">@color/look_graphite_ink</item>
+        <item name="beamAccentSoft">@color/look_graphite_soft</item>
+        <item name="beamMine">@color/look_graphite_mine</item>
+        <item name="beamMineInk">@color/look_graphite_mine_ink</item>
+        <item name="beamMineMuted">@color/look_graphite_mine_muted</item>
+        <item name="beamScrim">@color/look_graphite_scrim</item>
+        <item name="beamPick">@color/look_graphite_pick</item>
+    </style>
+</resources>

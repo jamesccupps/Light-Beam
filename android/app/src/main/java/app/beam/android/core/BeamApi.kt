@@ -339,6 +339,12 @@ class BeamApi(
         execute(request(url("/api/devices/$deviceId/settings")).put(body).build()).close()
     }
 
+    /** (server 1.27 `appearance`) `PUT /api/devices/me/settings { appearance }`: this phone's own look, or null for none. */
+    fun setOwnLook(look: Look?) {
+        val body = JSONObject().put("appearance", look?.toJson() ?: JSONObject.NULL).toString().toRequestBody(JSON)
+        execute(request(url("/api/devices/me/settings")).put(body).build()).close()
+    }
+
     /**
      * (server 1.25 `trust`) `PUT /api/devices/{id}/trust { trusted }`: lets that device control PCs, install apps and see
      * the phone's notifications, or takes it back (its remote control sessions end). Only from a trusted sign-in.

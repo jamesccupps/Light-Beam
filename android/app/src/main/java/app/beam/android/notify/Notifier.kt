@@ -22,6 +22,7 @@ import androidx.core.app.RemoteInput
 import androidx.core.app.TaskStackBuilder
 import androidx.core.content.ContextCompat
 import androidx.core.content.LocusIdCompat
+import androidx.core.graphics.toColorInt
 import androidx.core.net.toUri
 import app.beam.android.BeamApp
 import app.beam.android.R
@@ -31,6 +32,7 @@ import app.beam.android.core.Conversations
 import app.beam.android.core.Format
 import app.beam.android.core.Item
 import app.beam.android.core.LoginRequest
+import app.beam.android.core.Look
 import app.beam.android.data.Files
 import app.beam.android.data.Repository
 import app.beam.android.service.ActionReceiver
@@ -142,7 +144,7 @@ object Notifier {
 
     private fun base(ctx: Context, channel: String) = NotificationCompat.Builder(ctx, channel)
         .setSmallIcon(R.drawable.ic_stat_beam)
-        .setColor(ctx.getColor(R.color.accent))
+        .setColor((BeamApp.from(ctx).looks.look.value.shownAccent ?: Look.BEAM_ACCENT).toColorInt())
 
     /** Opens a conversation, with the conversation list behind it. */
     fun conversationIntent(ctx: Context, key: String): PendingIntent =

@@ -130,6 +130,13 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     @Volatile var meTrusted: Boolean? = true
     val trustCalls = CopyOnWriteArrayList<Pair<String, Boolean>>()
 
+    /**
+     * (server 1.27, with "appearance") The look for all devices (in the `hello`; `PATCH /api/settings` changes it and
+     * sends `settings`), and each look change asked for: "all" or the device id, to the look (JSON, "null" for none).
+     */
+    @Volatile var appearance: JSONObject? = null
+    val lookCalls = CopyOnWriteArrayList<Pair<String, String>>()
+
     private class Stream(val id: String, @Volatile var mode: String, val queue: LinkedBlockingQueue<String>)
 
     private val streams = CopyOnWriteArrayList<Stream>()
@@ -258,13 +265,30 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
             }
             path.startsWith("/api/devices/") && path.endsWith("/settings") && method == "PUT" -> {
                 val id = path.removePrefix("/api/devices/").removeSuffix("/settings")
-                val on = JSONObject(ex.requestBody.readBytes().decodeToString()).optBoolean("phoneNotifications")
+                    .let { if (it == "me") ex.requestHeaders.getFirst("X-Beam-Device-Id").orEmpty() else it }
+                val body = JSONObject(ex.requestBody.readBytes().decodeToString())
                 for (i in 0 until devices.length()) {
                     val d = devices.getJSONObject(i)
-                    if (d.optString("id") == id) d.put("settings", JSONObject().put("phoneNotifications", on))
+                    if (d.optString("id") != id) continue
+                    val settings = d.optJSONObject("settings") ?: JSONObject()
+                    if (body.has("phoneNotifications")) settings.put("phoneNotifications", body.optBoolean("phoneNotifications"))
+                    // (1.27) a device's own look: only that device itself (the phone says "me")
+                    if (body.has("appearance")) {
+                        lookCalls += id to body.get("appearance").toString()
+                        if (body.isNull("appearance")) settings.remove("appearance") else settings.put("appearance", body.getJSONObject("appearance"))
+                    }
+                    d.put("settings", settings)
                 }
                 json(ex, 204, "")
                 send("devices", JSONObject().put("devices", devices))
+            }
+            path == "/api/settings" && method == "PATCH" && "appearance" in features -> {
+                val body = JSONObject(ex.requestBody.readBytes().decodeToString())
+                appearance = body.optJSONObject("appearance")
+                lookCalls += "all" to body.get("appearance").toString()
+                val settings = JSONObject().put("appearance", appearance ?: JSONObject.NULL)
+                json(ex, 200, JSONObject().put("settings", settings))
+                send("settings", settings)
             }
             path == "/api/events/poke" && method == "POST" -> {
                 if ("stream-modes" !in features) return json(ex, 404, JSONObject().put("error", "Not found"))
@@ -384,6 +408,7 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
         val hello = JSONObject().put("beam", true)
         if ("stream-modes" in features) hello.put("stream", s.id).put("mode", mode).put("ping", pingFor(mode))
         if ("phone-notifications" in features) hello.put("instance", instance)
+        if ("appearance" in features) hello.put("appearance", appearance ?: JSONObject.NULL)
         out.write("event: hello\ndata: $hello\n\n".toByteArray())
         out.flush()
         streamsOpened += System.currentTimeMillis()
