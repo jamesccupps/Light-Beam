@@ -346,12 +346,15 @@ class TestFiles : ContentProvider() {
     companion object {
         const val AUTHORITY = "app.beam.android.test.files"
         lateinit var file: File
+
+        /** (1.14.1) The size its query says, when not the file's own (Google Photos' share says 0). */
+        @Volatile var reportedSize: Long? = null
     }
 
     override fun onCreate() = true
     override fun getType(uri: Uri) = "application/octet-stream"
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, args: Array<out String>?, sort: String?): Cursor =
-        MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)).apply { addRow(arrayOf<Any>(uri.lastPathSegment!!, file.length())) }
+        MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)).apply { addRow(arrayOf<Any>(uri.lastPathSegment!!, reportedSize ?: file.length())) }
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, args: Array<out String>?) = 0

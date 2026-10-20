@@ -218,6 +218,31 @@ class BehaviourTest {
         cleanups += { from.items().filter { it.name == name }.forEach { from.deleteItem(it.id) } }
     }
 
+    /**
+     * (1.14.1) The user's photos shared from Google Photos arrived as 0 B: its share says a photo it streams is 0 bytes,
+     * and Beam sent exactly that. The whole file goes now.
+     */
+    @Test
+    fun aShareThatSaysZeroBytesSendsTheWholeFile() {
+        needServer()
+        val main = signIn()
+        val laptop = laptop()
+        deleteOnServer(laptop, "shared photo.bin")
+        val bytes = java.util.Random(14).let { r -> ByteArray(300 * 1024 + 7).also(r::nextBytes) }
+        TestFiles.file = File.createTempFile("share-zero", ".bin").apply { writeBytes(bytes); deleteOnExit() }
+        TestFiles.reportedSize = 0
+        cleanups += { TestFiles.reportedSize = null }
+        val since = System.currentTimeMillis() - 1000
+        val intent = Intent(app, TransferService::class.java).setAction(TransferService.ACTION_UPLOAD).putExtra("to", arrayOf(laptop.deviceId))
+        intent.clipData = ClipData.newRawUri("files", Uri.parse("content://${TestFiles.AUTHORITY}/shared%20photo.bin"))
+        val svc = Robolectric.buildService(TransferService::class.java, intent).create().startCommand(0, 1)
+        idleUntil("sent", 30_000) { laptop.items().any { it.name == "shared photo.bin" && it.ts >= since } }
+        assertEquals("the whole file, not the 0 bytes it was said to be", bytes.size.toLong(), laptop.items().first { it.name == "shared photo.bin" && it.ts >= since }.size)
+        idleUntil("row gone") { app.transfers.uploads.value.isEmpty() }
+        svc.destroy()
+        main.pause().stop().destroy()
+    }
+
     /** Android 15+'s time limit pauses transfers (nothing is thrown away); Resume finishes them. */
     @Test
     fun theTimeLimitPausesTransfersAndResumeFinishesThem() {
