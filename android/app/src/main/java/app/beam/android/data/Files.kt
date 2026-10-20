@@ -49,7 +49,10 @@ object Files {
 
     data class Meta(val name: String, val size: Long, val mime: String)
 
-    /** Name, size (-1 if unknown) and type of a content Uri the user picked or shared. */
+    /**
+     * Name, size (-1 if unknown) and type of a content Uri the user picked or shared. (1.14.1) A size of 0 counts as
+     * unknown: Google Photos' share says 0 for a photo it streams, and Beam sent exactly that (an empty file).
+     */
     fun meta(ctx: Context, uri: Uri): Meta {
         val resolver = ctx.contentResolver
         var name: String? = null
@@ -60,7 +63,7 @@ object Files {
                     val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     val si = c.getColumnIndex(OpenableColumns.SIZE)
                     if (ni >= 0 && !c.isNull(ni)) name = c.getString(ni)
-                    if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                    if (si >= 0 && !c.isNull(si)) size = c.getLong(si).takeIf { it > 0 } ?: -1
                 }
             }
         } catch (_: Exception) {

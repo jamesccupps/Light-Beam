@@ -262,8 +262,9 @@ class TransferManager(private val app: BeamApp) {
         var temp: File? = null
         try {
             var source: UploadSource = UriSource(app, up.uri, up.name, up.size, up.mime)
-            if (up.size < 0) {
-                // The app that shared this didn't say how big it is; resumable uploads need the size.
+            if (up.size <= 0) {
+                // The app that shared this didn't say how big it is (or said 0, which a stream also gets: an empty file
+                // costs nothing to read); resumable uploads need the size.
                 updateUpload(localId) { copy(status = Status.PREPARING) }
                 val copy = copyToCache(up)
                 temp = copy
