@@ -479,6 +479,42 @@ export default function register(test) {
     eq(host.errors, [], 'no page errors (This PC)');
   });
 
+  test('Settings → Security: this device’s own switches (the Windows app’s remote control and app installs, Beam for Linux’s remote control) (2026-10-21)', async ctx => {
+    // (the user: "it can be a per device setting in the app gui settings on that device, it should just be easy")
+    const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowApps', 'allowRemoteControl'];
+    const { page } = await hostPage(ctx, { features, settings: { allowRemoteControl: false, appsAllowed: false } });
+    await page.waitFor(`paired && hostState.ready`);
+    await page.evaluate(`openSettings('security'); true`);
+    const sw = label => `[...$('#set-security').querySelectorAll('label.switch')].find(l => l.textContent.startsWith(${JSON.stringify(label)}))?.querySelector('input')`;
+    await page.waitFor(`/This PC/.test($('#set-security').textContent) && Boolean(${sw('Allow remote control')}) && Boolean(${sw('Let Beam install apps')})`, 5000, 'This PC: two switches, first on Security');
+    // On: through the app's own question (allowRemoteControl, allowApps), never setSettings true from the page.
+    await page.evaluate(`${sw('Allow remote control')}.click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'allowRemoteControl')`, 3000, 'asked the app');
+    await page.evaluate(`${sw('Let Beam install apps')}.click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'allowApps')`, 3000, 'asked the app (apps)');
+    assert(!(await page.evaluate(`__host.log.some(m => m.type === 'setSettings' && (m.settings.allowRemoteControl === true || m.settings.appsAllowed === true))`)), 'never turned on by the page itself');
+    // The app said yes in its own window: the switch shows it; off goes straight through.
+    await page.evaluate(`__host.emit({ type: 'settings', settings: { ...hostState.settings, allowRemoteControl: true } }); true`);
+    await page.waitFor(`${sw('Allow remote control')}?.checked === true`, 3000, 'on');
+    await page.evaluate(`${sw('Allow remote control')}.click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings.allowRemoteControl === false)`, 3000, 'off');
+    eq(page.errors, [], 'no page errors');
+    // Beam for Linux's window (a page that is that computer's sign-in), played by this page's own device: why it can't
+    // be on shows under a switch that waits; with nothing in the way, the switch asks the server (which refuses here: the
+    // page isn't really a Linux computer, and the switch goes back).
+    const pi = await ctx.signedIn();
+    const piCard = problem => `(() => { const d = deviceById(me.id); d.platform = 'linux'; d.appVersion = '1.4.0'; d.status = { remoteControl: false, controlProblem: ${problem} }; renderSettings(); return true; })()`;
+    await pi.evaluate(`openSettings('security'); true`);
+    await pi.evaluate(piCard(JSON.stringify('x11vnc isn’t installed (this desktop runs on X11: sudo apt install x11vnc)')));
+    await pi.waitFor(`/This computer/.test($('#set-security').textContent) && /Can’t be on yet: x11vnc isn’t installed/.test($('#set-security').textContent) && ${sw('Allow remote control')}?.disabled === true`, 5000, 'This computer: what to install, the switch waits');
+    await pi.evaluate(piCard('undefined'));
+    await pi.waitFor(`${sw('Allow remote control')}?.disabled === false`, 5000, 'nothing in the way');
+    await pi.evaluate(`${sw('Allow remote control')}.click(); true`);
+    await pi.waitFor(`/Only a computer with Beam for Linux/.test($('#toastText')?.textContent || '')`, 5000, 'asked the server');
+    eq(await pi.evaluate(`${sw('Allow remote control')}.checked`), false, 'back off');
+    eq(pi.errors.filter(e => !/400/.test(e)), [], 'no page errors');
+  }, { timeout: 60000 });
+
   test('apps (1.21): Settings → Apps adds an app (winget, a file), installs it on all PCs (a PC asks first, then says it’s installed) and uninstalls it; This PC’s switch', async ctx => {
     const page = await ctx.signedIn();
     await recordToasts(page);

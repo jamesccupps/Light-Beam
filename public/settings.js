@@ -719,6 +719,41 @@ function sectionConnections() {
 
 // ---------------------------------------------------------------- Security
 
+// (2026-10-21, the user: "it can be a per device setting in the app gui settings on that device, it should just be easy
+// to change settings") This device's own switches, only in its own window: whether your other devices may control it,
+// and (a PC) install apps on it. Turning remote control on a PC still goes through Beam's own question there (which
+// devices may: all ticked); refused while it's being controlled. Elsewhere they're read-only (Device info).
+function thisDeviceCard() {
+  if (HOST) {
+    const s = hostState.settings || {};
+    const after = r => { if (r?.settings) hostState.settings = r.settings; renderSettings(); };
+    const rc = typeof s.allowRemoteControl === 'boolean' && switchRow('Allow remote control', s.allowRemoteControl, async on => {
+      if (!on) return after(await hostDo('setSettings', { settings: { allowRemoteControl: false } }));
+      if (!hostHas('allowRemoteControl')) { renderSettings(); return toast('Turn it on in Beam’s menu in the taskbar corner (Beam 1.19.1 for Windows switches it here)', { ms: 7000 }); }
+      after(await hostDo('allowRemoteControl'));
+    }, { hint: s.allowRemoteControl ? 'Your devices can see and control this PC; a banner shows while they do.' : 'Your devices could see and control this PC. Turning it on asks here which devices may.' });
+    const apps = typeof s.appsAllowed === 'boolean' && switchRow('Let Beam install apps', s.appsAllowed, async on => {
+      if (!on) return after(await hostDo('setSettings', { settings: { appsAllowed: false } }));
+      if (!hostHas('allowApps')) { renderSettings(); return; }
+      after(await hostDo('allowApps'));
+    }, { hint: 'Apps you install from Beam’s Apps page go onto this PC without asking each time.' });
+    return rc || apps ? card('This PC', rc, apps) : null;
+  }
+  // Beam for Linux's window (its page is that computer's sign-in): the agent does it, as `beam control on` would.
+  const d = deviceById(me.id);
+  if (d?.platform !== 'linux' || !serverHas('control-here')) return null;
+  const [major, minor] = String(d.appVersion || '').split('.').map(Number);
+  if (!(major > 1 || (major === 1 && minor >= 4))) return card('This computer', cardInfo('Its remote control is turned on with  beam control on  in a terminal here (Beam for Linux 1.4 has a switch here: it updates itself).'));
+  const problem = d.status?.controlProblem;
+  const on = d.status?.remoteControl === true;
+  return card('This computer', switchRow('Allow remote control', on, async (want, box) => {
+    try {
+      await api('api/devices/me/control', jsonBody({ on: want }, 'PUT'));
+      if (want) toast('Turning it on…');
+    } catch (err) { box.checked = !want; toast(friendlyError(err), { error: true }); }
+  }, { hint: problem ? `Can’t be on yet: ${problem}` : 'Your devices could see and control this computer’s screen.', disabled: Boolean(problem) && !on }));
+}
+
 function sectionSecurity() {
   const info = server.info || {};
   const pw = el('input', { type: 'password', placeholder: 'New password (8+ characters)', autocomplete: 'new-password', 'aria-label': 'New sign-in password' });
@@ -732,6 +767,7 @@ function sectionSecurity() {
   });
   pw.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } });
   const parts = [
+    thisDeviceCard(),
     card('Sign-in password',
       cardInfo(info.passwordSet ? 'A password is set: type it on any sign-in page to sign in there.' : 'Not set yet. With a password you can sign in on any browser by typing it.'),
       el('div', { class: 'set-row set-stack' }, current, row(pw, save)),

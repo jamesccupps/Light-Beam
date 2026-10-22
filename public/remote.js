@@ -97,6 +97,9 @@ const rc = {
   clipOut: [],         // (1.12.4) a picture's parts for the PC, sent as `clip` drains
   clipIn: null,        // (1.12.4) the PC's picture coming in: { n, of, size, bytes, at, got }
   pasteImg: 0,         // (1.12.4) the picture a held Ctrl+V waits for (its number)
+  pasteText: 0,        // (Windows 1.19.1) the text a held Ctrl+V waits for the PC to have (its `clip-ok`)
+  localText: null,     // (1.19.1) this device's clipboard text as last seen here (a paste, or the PC's written here)
+  pcKept: false,       // (1.19.1) the PC copied something it keeps to itself since then
   mvSeq: 0,            // the last `mv` sent (btn and wheel carry it as `n`)
   mvPending: null,
   mvFrame: 0,
@@ -423,6 +426,9 @@ function rcTeardown({ endSession = false, reason = 'stopped' } = {}) {
   rc.clipOut = [];
   rc.clipIn = null;
   rc.pasteImg = 0;
+  rc.pasteText = 0;
+  rc.localText = null;
+  rc.pcKept = false;
   rc.clip = false; // (per session: turned on again in the next one)
   rc.resolving = 0;
   rc.resolveSpent = 0;
@@ -1356,7 +1362,13 @@ function rcOnCtl(data) {
       rcHook();
       break;
     case 'clip':
-      if (rc.clip && typeof m.text === 'string' && rcUtf8Size(m.text) <= RC_CLIP_MAX) rcClipFromPc(m.text);
+      // (Windows 1.19.1) The PC copied something it keeps to itself (marked private, files…): nothing to copy here, but
+      // the next Ctrl+V leaves it unless this device's clipboard changed since.
+      if (rc.clip && m.kept === true) { rc.pcKept = true; rc.lastClip = ''; rc.lastClipImg = null; rc.clipPending = false; rcRenderBar(); }
+      else if (rc.clip && typeof m.text === 'string' && rcUtf8Size(m.text) <= RC_CLIP_MAX) rcClipFromPc(m.text);
+      break;
+    case 'clip-ok': // (Windows 1.19.1) the PC has the text a held Ctrl+V waits for
+      if (rc.pasteText && m.n === rc.pasteText) { rc.pasteText = 0; rcFlushHeld(); }
       break;
     case 'clip-img': // (1.12.4) the PC has the picture a held Ctrl+V waits for
       if (rc.pasteImg && m.n === rc.pasteImg) { rc.pasteImg = 0; rcFlushHeld(); }
@@ -1720,6 +1732,12 @@ function rcOnPaste(e) {
   if (!rcLive()) return;
   const text = e.clipboardData?.getData('text/plain') || '';
   if (rc.held) {
+    // (1.19.1) The PC copied something of its own since this device's clipboard was last seen, and it's still the same
+    // here: the PC's newer copy is what gets pasted (the user's copy buttons on the PC: this device's older text went
+    // over it).
+    const unchanged = rc.pcKept && rc.localText !== null && text === rc.localText;
+    if (text) rc.localText = text;
+    if (unchanged) return rcFlushHeld();
     // (1.12.7) What the PC itself put on our clipboard, unchanged: the keys go at once, and the PC's clipboard stays as
     // it was (its own formats). A picture used to go there and back first: seconds, and a paste that could miss.
     if (text && rc.clip && !rc.clipPending && text === rc.lastClip) return rcFlushHeld();
@@ -1730,8 +1748,12 @@ function rcOnPaste(e) {
       return;
     }
     if (text && rcUtf8Size(text) <= RC_CLIP_MAX && rc.clip) {
-      rcSend('ctl', { t: 'clip', n: ++rc.clipN, text });
-      rcTimer('paste', rcFlushHeld, 120); // (`ctl` and `in` aren't in order with each other: a moment for the PC)
+      rc.pcKept = false;
+      const n = ++rc.clipN;
+      rcSend('ctl', { t: 'clip', n, text });
+      // (`ctl` and `in` aren't in order with each other: the keys wait until the PC has it (`clip-ok`, Windows
+      // 1.19.1), else a moment for it)
+      if (rc.caps.includes('clipok')) { rc.pasteText = n; rcTimer('paste', rcFlushHeld, 2000); } else rcTimer('paste', rcFlushHeld, 120);
     } else if (img) rcSendClipImage(img); // (1.12.4)
     else rcFlushHeld();
     return;
@@ -1827,6 +1849,7 @@ const rcWriteImage = async img => { try { await navigator.clipboard.write([new C
 
 function rcFlushHeld() {
   rcClearTimer('paste');
+  rc.pasteText = 0;
   const held = rc.held || [];
   rc.held = null;
   for (const m of held) rcSend('in', m);
@@ -1847,7 +1870,7 @@ async function rcWriteClip() {
   if (rcClipWaiting() && document.hasFocus() && navigator.clipboard && window.isSecureContext) {
     const text = rc.lastClip, img = rc.lastClipImg;
     if (img) { if (await rcWriteImage(img) && rc.lastClipImg === img) rc.clipPending = false; }
-    else { try { await navigator.clipboard.writeText(text); if (rc.lastClip === text) rc.clipPending = false; } catch {} }
+    else { try { await navigator.clipboard.writeText(text); rc.localText = text; if (rc.lastClip === text) { rc.clipPending = false; rc.pcKept = false; } } catch {} }
   }
   rcRenderBar();
 }

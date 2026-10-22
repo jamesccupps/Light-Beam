@@ -19,7 +19,7 @@ is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keybo
 alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
 device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
 `device-logs` (shipped with 1.19's in Beam 1.20.0), 1.21 `apps`, 1.22 `linux` (Beam for Linux) and 1.23 `vnc` (control
-of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials), and 1.26 `shared-folders` (a PC's folders shared with some devices), and 1.27 `appearance` (the look: see Appearance). Use each one only when its flag is there; everything older keeps working.
+of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials), and 1.26 `shared-folders` (a PC's folders shared with some devices), and 1.27 `appearance` (the look: see Appearance), and 1.27.1 `control-here` (Beam for Linux's window switches its own remote control). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 
@@ -521,6 +521,7 @@ an **All devices** conversation for broadcasts.
 | `PUT /api/devices/{id}/trust` | **(1.25, feature `trust`)** `{ "trusted": true\|false }`, from a trusted sign-in signed in for good → `200 { "device", "trusted" }`; event `devices`. True: that device's own sign-ins (its app's, or a browser's own; not a browser merged into an app on its machine) become trusted; `409` when it has none. False: all its sign-ins stop being trusted, and the remote control sessions they started end (`revoked`) |
 | `PUT /api/devices/me/status` | **(1.3)** the calling device reports its status (see below) → `204`; event `devices` |
 | `PUT /api/devices/me/name` | **(1.23.2)** `{ "name" }`: a Beam for Linux computer renamed from its window (see Beam for Linux) → `200 { "name" }`; event `devices`, and `rename` to its app |
+| `PUT /api/devices/me/control` | **(1.27.1, feature `control-here`)** `{ "on": true\|false }`: a Beam for Linux computer's remote control switched from its own window (only its own sign-ins: the window, the app) → `202 { "on" }`, and `control-set { "on" }` to its app, which does what `beam control on\|off` does (Beam for Linux 1.4) and reports it in its status (`remoteControl`, or `controlProblem` when it can't). `400` for another kind of device or a body without `on`, `409` when its app isn't connected |
 | `PUT /api/devices/{id}/settings`, `PUT /api/devices/me/settings` | **(1.5)** `{ "phoneNotifications": true\|false }` and/or **(1.27)** `{ "appearance": {…}\|null }` (only the device itself) → `204`; event `devices`. When the value changes, the device itself gets the new list at once (see Phone notifications); switched off, also `notification-removed { "all": true }`. Any signed-in device may change any device's settings; **(1.25)** turning `phoneNotifications` on takes a trusted sign-in (`403 reason "trusted"`). `400` for unknown keys or a non-boolean, `404` unknown device |
 | `PUT /api/devices/me/backup` | **(1.8.1, feature `backups`)** an app keeps a copy of its own settings here: `{ "install": "<its id, 8–64 of A–Z a–z 0–9 _ ->", "app": "windows"\|"android", "version", "settings": {…} }` → `204`; event `devices`. Never a sign-in or a key. One per install (the same install replaces its own), the newest three per device; when a reinstall's new device is linked to the old one, they go along. `settings` is an object of at most 32 KB (`413` above). `403` for a session-only sign-in. What the apps keep: Windows (1.8.1) its Settings, hotkeys and remote control's devices; Android (1.8.2) `deviceName`, `stayConnected`, `autoCopy`, `autoDownload`, `wifiOnlyDownloads`, `maxDownloadMb`, `tileTarget` (`""` = ask), `mutedDevices`, `autoCopyDevices`, `shareNotifications`, `sharedApps` (package names), sent only when they changed. A reinstalled phone comes back with the same device id (from ANDROID_ID), so it finds its earlier install's here |
 | `GET /api/devices/{id}/backups`, `GET /api/devices/me/backups` | **(1.8.1)** `{ "device", "name", "backups": [{ "install", "app", "version", "at", "settings" }] }`, newest first: for an app to offer them back after a reinstall, or to set up a new PC like another. Any of the owner's devices signed in for good (`403` for a session-only sign-in). The device list says only when: `backup: { "at", "app" }` |
@@ -567,6 +568,9 @@ their last value, and `null` clears one. Unknown fields or bad values are `400`.
   - `throttled`: what a Raspberry Pi's firmware says (`vcgencmd get_throttled`): `{ "now": [...], "sinceBoot": [...] }`,
     each a list of `undervoltage` (its power supply is too weak), `capped` (its speed is capped), `throttled` (it's
     slowing itself down), `softLimit` (it's near its temperature limit).
+- **(1.27.1, Beam for Linux 1.4, feature `control-here`)** `controlProblem`: why its remote control can't be turned on
+  there, 1–200 characters ("x11vnc isn't installed (this desktop runs on X11: sudo apt install x11vnc)"); `null` when
+  nothing is in the way. Beam's window shows it under the switch.
 - Others see `status` (without the MACs), `tailscale` and `can` in the device list; the `devices` event goes out at
   most every 5 s for status changes. Low battery or storage, and (1.22) a hot or under-powered Pi can raise alerts
   (see Alerts).
@@ -763,7 +767,8 @@ computer's device, like any browser on the same machine as a Beam app. Such a pa
 which shows them itself (`notify-send`, else the desktop's notification service through `gdbus`). An entry taken out of
 the menu by hand isn't put back; `--uninstall` removes it.
 
-**(Beam for Linux 1.2)** Remote control of its screen, turned on only at the computer (`beam control on|off`; status
+**(Beam for Linux 1.2)** Remote control of its screen, turned on only at the computer (`beam control on|off`, or
+(1.27.1, Beam for Linux 1.4) the switch in Settings → Security of Beam's window there: `PUT /api/devices/me/control`; status
 `remoteControl` when the server lists `vnc`): see "Control for a Linux computer (1.23)".
 
 **(1.23.2, Beam for Linux 1.2.1) Renaming it from its window.** A page that's part of an app (the window, or any browser
@@ -1319,11 +1324,15 @@ viewer. Unlike a PC's, nothing goes directly between the two devices. Everything
   can open (`$XDG_RUNTIME_DIR/beam/vnc.sock`, the folder 0700; `-u <path>`, or `unix:<path>` for newer wayvnc;
   `--render-cursor`; the keyboard layout from `/etc/default/keyboard`), leases, opens the relay and joins the two;
   wayvnc stops a minute after the last session. A notification on the computer says who is controlling it. `rc-disable`
-  turns its switch off there too. It needs a Wayland desktop that's on (Raspberry Pi OS's labwc or Wayfire); otherwise
-  it ends the session `failed` with why.
+  turns its switch off there too. It needs a desktop that's on; otherwise it ends the session `failed` with why.
+  **(Beam for Linux 1.4) An X11 desktop** (Raspberry Pi OS before Bookworm): x11vnc instead, on the same socket
+  (`-display :0 -auth guess -unixsock <path> -rfbport 0 -forever -shared -nopw -quiet`: no network port, no password
+  since only its user can open the socket), stopped the same way; `beam control on` and `controlProblem` name the
+  package to install for that desktop.
 - **The viewer** is `index.html#vnc=<device id>` (`public/vnc.js`, with noVNC 1.7 in `public/novnc/`, unchanged,
   MPL-2.0): Fit (shrinks a screen bigger than the window, never enlarges one; 1.23.1) or 1:1 (scrolls), JPEG quality 9
-  (sharp text; 1.23.1), mouse, keyboard and touch through noVNC, "Paste there" (this device's clipboard to the
+  (sharp text; 1.23.1) or (2026-10-21) Fast (quality 5, more compression: far less data per change across the internet;
+  kept per computer in that browser), mouse, keyboard and touch through noVNC, "Paste there" (this device's clipboard to the
   computer's) and Copy (what was copied on the computer), full screen, Disconnect. `#remote=<id>` for a Linux computer
   moves to it.
 

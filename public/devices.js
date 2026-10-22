@@ -526,7 +526,12 @@ function rcPcCard(s) {
         const r = await hostDo('setSettings', { settings: { allowRemoteControl: false } });
         if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
       }, { kind: 'ghost', ic: 'power' }), 'It shows a banner while they do, with Stop (or press Ctrl+Alt+Shift+F12).')
-      : cardInfo('Off. To let your devices control this PC, turn on “Allow remote control” in Beam’s menu in the taskbar corner (it asks you to confirm).'),
+      : hostHas('allowRemoteControl')
+        ? inlineRow('Off: your devices can’t see or control this PC', smallBtn('Allow remote control…', async () => {
+          const r = await hostDo('allowRemoteControl'); // (1.19.1) Beam's own question: which devices may
+          if (r?.settings) { hostState.settings = r.settings; renderSettings(); }
+        }), 'Also in Settings → Security.')
+        : cardInfo('Off. To let your devices control this PC, turn on “Allow remote control” in Beam’s menu in the taskbar corner (it asks you to confirm).'),
     allowed && stackRow('Can be controlled from', el('p', { class: 'small rc-allowed' }, allowed.length ? allowed.map(x => cleanName(x.name) || nameOf(x.id)).join(', ') : 'No device yet'),
       el('small', { class: 'muted' }, 'Changed in Beam’s own settings on this PC: tray → Remote control devices…')),
     mine.length > 0 && el('div', { class: 'set-row' }, ...mine.map(x => el('p', { class: 'rc-line small' }, icon('screen', 'i tiny'), el('span', {}, rcLineText(x)), ' · ',

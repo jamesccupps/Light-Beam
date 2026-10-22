@@ -1969,7 +1969,7 @@ async function logStatus() {
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
 // (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
 const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted',
-  'model', 'bootedAt', 'temperature', 'throttled']);
+  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem']);
 // (1.22) What a Raspberry Pi's firmware says about its power and speed (vcgencmd get_throttled), now and since it started.
 const THROTTLE_FLAGS = new Set(['undervoltage', 'capped', 'throttled', 'softLimit']);
 const HOT_C = 80; // a Pi 4 or 5 slows itself down from 80 °C
@@ -2009,6 +2009,11 @@ function parseStatus(body) {
         throw bad('storage must be {"free": bytes, "total": bytes}');
       }
       out.storage = { free: value.free, total: value.total };
+    } else if (key === 'controlProblem') {
+      // (1.27.1) Beam for Linux: why its remote control can't be turned on here (no VNC server for its desktop…)
+      const text = statusText(value);
+      if (!text || [...text].length > 200) throw bad('controlProblem must be 1 to 200 characters');
+      out.controlProblem = text;
     } else if (key === 'os' || key === 'model') {
       const name = typeof value === 'string' ? value.toWellFormed().replace(/[\u0000-\u001f\u007f]/g, '').replace(BIDI, '').trim() : '';
       if (!name || [...name].length > 60) throw bad(`${key} must be a name of 1 to 60 characters`);
@@ -2049,12 +2054,13 @@ function parseStatus(body) {
 
 // What other devices see of a status report (no MAC addresses).
 function publicStatus(status) {
-  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, at } = status;
+  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, at } = status;
   return {
     ...(battery && { battery }), ...(storage && { storage }), ...(os && { os }),
     ...(remoteControl !== undefined && { remoteControl }), ...(locked !== undefined && { locked }), ...(update && { update }),
     ...(startsWithWindows !== undefined && { startsWithWindows }), ...(startWanted !== undefined && { startWanted }), // (1.20)
     ...(model && { model }), ...(bootedAt && { bootedAt }), ...(temperature !== undefined && { temperature }), ...(throttled && { throttled }), // (1.22)
+    ...(controlProblem && { controlProblem }), // (1.27.1) Beam for Linux: why its remote control can't be on
     at: at || 0,
   };
 }
@@ -2186,6 +2192,29 @@ async function putDeviceName(req, res, _m, url) {
   broadcastDevices();
   renameApp(device);
   send(res, 200, { name });
+}
+
+// (1.27.1) Beam for Linux's window switches its own computer's remote control (the user: "it can be a per device setting
+// in the app gui settings on that device"): only that computer's sign-in (its window is linked to it), never another
+// device's; its agent does what `beam control on|off` does (checks it can, keeps it, reports it in its status).
+async function putDeviceControl(req, res, _m, url) {
+  const id = deviceIdOf(req, url);
+  const device = id && devices[id];
+  if (!device) throw httpError(400, 'X-Beam-Device-Id is required');
+  if (device.platform !== 'linux') throw httpError(400, 'Only a computer with Beam for Linux is switched here (Beam for Windows has the switch in its own settings)');
+  const body = await readJson(req);
+  if (typeof body.on !== 'boolean') throw httpError(400, 'Expected {"on": true|false}');
+  const msg = `event: control-set\ndata: ${JSON.stringify({ on: body.on })}\n\n`;
+  let reached = 0;
+  for (const c of clients) {
+    if (c.kind !== 'app' || c.deviceId !== device.id || !streamOpen(c)) continue;
+    c.events++;
+    writeTo(c, msg);
+    reached++;
+  }
+  if (!reached) throw httpError(409, 'Beam for Linux isn\'t running on this computer just now');
+  log.info(`${device.name}'s own window turned its remote control ${body.on ? 'on' : 'off'}`);
+  send(res, 202, { on: body.on });
 }
 
 function renameApp(device, only = null) {
@@ -6643,6 +6672,7 @@ const FEATURES = [
   'wake-relay', // (1.24.0: a wake also goes to Beam for Linux 1.3+, the `wake-relay` event; the answer's `relays`)
   'trust', // (1.25.0: trusted sign-ins; devices' `trusted`, /api/me `auth.trusted`, PUT /api/devices/{id}/trust, 403 reason "trusted")
   'shared-folders', // (1.26.0: POST /api/devices/{id}/files[/copy], `files-request`/`files-copy`, POST /api/devices/me/files, `can.files`)
+  'control-here', // (1.27.1: PUT /api/devices/me/control from Beam for Linux's window → `control-set`; status `controlProblem`)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)
@@ -7995,6 +8025,7 @@ const routes = [
   ['GET', '/api/devices', getDevices],
   ['PUT', '/api/devices/me/status', putStatus],
   ['PUT', '/api/devices/me/name', putDeviceName], // (1.23.2) Beam for Linux's window
+  ['PUT', '/api/devices/me/control', putDeviceControl], // (1.27.1) Beam for Linux's window: its remote control switch
   ['PUT', '/api/devices/me/settings', putDeviceSettings],
   ['PUT', '/api/devices/me/backup', putDeviceBackup],
   ['GET', '/api/devices/me/backups', getDeviceBackups],

@@ -1,20 +1,24 @@
 // Remote control of a Linux computer (Beam 1.23): index.html#vnc=<device id>. The computer's own screen sharing (its
 // VNC server, which its Beam for Linux runs) relayed by Beam, shown with noVNC (public/novnc, MPL-2.0, unchanged).
 // A module, loaded only on this page (app.js loadVnc); it uses the chat app's helpers (core.js), whose scripts load
-// first. Like the PCs' viewer (remote.js) this page stores nothing: the identity is read, never written.
+// first. Like the PCs' viewer (remote.js) this page stores nothing but the picture choice per computer (2026-10-21):
+// the identity is read, never written.
 import RFB from './novnc/core/rfb.js';
 
 const vnc = {
   id: (/^#vnc=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '',
   name: '', session: '', rfb: null, events: null,
   state: 'connecting', step: '', end: null, fit: true, piClip: '', live: false,
+  fast: false, // (2026-10-21) Fast: less data per change (across the internet), Sharp: the best picture
 };
+const FAST_KEY = id => `beam.vnc.fast.${id}`;
+try { vnc.fast = localStorage.getItem(FAST_KEY(vnc.id)) === '1'; } catch {}
 const ui = {};
 
 // What a session's end says, by reason (the server's rc-end, or this page's own).
 const ENDED = {
   stopped: () => ['Disconnected', vnc.end?.by && vnc.end.from !== me.id ? `${vnc.end.by} ended it.` : ''],
-  declined: () => ['Remote control is off there', `Turn it on at ${vnc.name || 'that computer'}: beam control on`],
+  declined: () => ['Remote control is off there', `Turn it on at ${vnc.name || 'that computer'}: Settings → Security in its Beam window (or beam control on)`],
   'not-allowed': () => ['Remote control is off there', ''],
   busy: () => ['Someone else is controlling it', ''],
   revoked: () => ['Remote control was turned off', ''],
@@ -93,9 +97,9 @@ async function connect() {
     rfb.resizeSession = false;
     rfb.showDotCursor = true;
     rfb.focusOnClick = true;
-    // (1.23.1, the user: "the resolution isnt that high": the best JPEG quality, for sharp text; the link is the tailnet)
-    rfb.qualityLevel = 9;
-    rfb.compressionLevel = 2;
+    // (1.23.1, the user: "the resolution isnt that high": the best JPEG quality, for sharp text; the link is the tailnet.
+    // 2026-10-21: or Fast, across the internet)
+    applyPicture(rfb);
     rfb.background = '#0b0c0f';
     rfb.addEventListener('connect', () => { vnc.live = true; setState('live'); applyFit(); rfb.focus(); });
     rfb.addEventListener('disconnect', e => {
@@ -183,6 +187,22 @@ async function copyFromPi() {
   vnc.rfb?.focus();
 }
 
+// Sharp: JPEG quality 9, light compression (1.23.1). Fast: quality 5, more compression: a fraction of the data for a
+// window or a scroll, so a slower link (work ↔ home) keeps up; the text is softer. noVNC asks the server again at once.
+function applyPicture(rfb) {
+  if (!rfb) return;
+  rfb.qualityLevel = vnc.fast ? 5 : 9;
+  rfb.compressionLevel = vnc.fast ? 6 : 2;
+}
+
+function togglePicture() {
+  vnc.fast = !vnc.fast;
+  try { localStorage.setItem(FAST_KEY(vnc.id), vnc.fast ? '1' : '0'); } catch {}
+  applyPicture(vnc.rfb);
+  renderTools();
+  vnc.rfb?.focus();
+}
+
 function toggleFit() {
   vnc.fit = !vnc.fit;
   applyFit();
@@ -249,6 +269,7 @@ function renderTools() {
   const tools = [];
   if (live) {
     tools.push(btn(vnc.fit ? 'Fit' : '1:1', vnc.fit ? 'zoom-out' : 'zoom-in', toggleFit, { title: vnc.fit ? 'Fit to the window (click for 1:1)' : 'One to one (click to fit)' }));
+    tools.push(btn(vnc.fast ? 'Fast' : 'Sharp', 'gear', togglePicture, { title: vnc.fast ? 'Fast: less data per change, a softer picture (click for Sharp)' : 'Sharp: the best picture (click for Fast, with less data per change across the internet)' }));
     tools.push(btn('Paste there', 'clip', pasteToPi, { title: `Put what was copied here on ${vnc.name}’s clipboard` }));
     if (vnc.piClip) tools.push(btn('Copy', 'copy', copyFromPi, { cls: 'attn', title: `Copy what was copied on ${vnc.name}` }));
     if (document.fullscreenEnabled) tools.push(btn(document.fullscreenElement ? 'Exit full screen' : 'Full screen', document.fullscreenElement ? 'shrink' : 'expand', toggleFullscreen));

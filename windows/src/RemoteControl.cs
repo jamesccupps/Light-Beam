@@ -119,6 +119,7 @@ namespace Beam
         bool testClickOnShow;          // tests: the next banner gets a click on Stop the moment it appears
         string clipLast;               // the text this PC just took from the viewer (not sent back)
         uint clipSeen;
+        uint clipOwn; // (1.19.1) the clipboard as this app last set it from the viewer: not announced back
         readonly TailnetQuery tailnet;
         readonly Stopwatch clock = Stopwatch.StartNew();
         readonly RcDisplay display;
@@ -918,7 +919,7 @@ namespace Beam
             // Beam 1.8: what this PC does besides 1.6's (fit-scale: 1.11.4). A kvm session (1.12): input on any of its
             // screens (`mv`, `btn` and `wheel` say which in `m`), "kvm-back", and nothing about a picture.
             // (1.12.4: pictures; 1.12.6: `cursor`, the viewer may draw this PC's pointer itself, and `probe`, the delay)
-            hello["caps"] = s.Kvm ? new object[] { "kvm", "clipimg" } : new object[] { "fit", "fit-scale", "settings", "video", "clipimg", "cursor", "probe" };
+            hello["caps"] = s.Kvm ? new object[] { "kvm", "clipimg" } : new object[] { "fit", "fit-scale", "settings", "video", "clipimg", "cursor", "probe", "clipok", "clipkept" };
             if (!s.Kvm) hello["fitted"] = display.Fitted;
             // Where this PC's cursor is, when it's on the shared screen: a phone's trackpad pointer starts there (1.6.1).
             var cursor = CursorOn(layout, s.Screen);
@@ -1655,7 +1656,17 @@ namespace Beam
             string text = Json.Str(m, "text");
             if (string.IsNullOrEmpty(text) || Encoding.UTF8.GetByteCount(text) > 64 * 1024) return;
             clipLast = text.Replace("\r\n", "\n");
-            if (ClipPayload.SetRemoteText(text, app.Cfg.ClipboardHistory)) Log.Write("Remote control: the viewer's clipboard text is on this PC's clipboard (" + text.Length + " characters)");
+            if (ClipPayload.SetRemoteText(text, app.Cfg.ClipboardHistory))
+            {
+                clipOwn = ClipPayload.ShareSequence();
+                Log.Write("Remote control: the viewer's clipboard text is on this PC's clipboard (" + text.Length + " characters)");
+            }
+            // (1.19.1) The viewer holds its Ctrl+V until this says the text is here (it waited a fixed 120 ms before, and a
+            // busy clipboard could make the paste come first).
+            var ok = new Dictionary<string, object>();
+            ok["t"] = "clip-ok";
+            ok["n"] = Json.Long(m, "n", 0);
+            SendCtl(s, ok);
         }
 
         void ClipWatch(bool on)
@@ -1681,9 +1692,20 @@ namespace Beam
             if (text == null)
             {
                 // (1.12.4) No text: a picture, to a viewer that takes them (a screenshot, "Copy image").
-                if (!s.ClipImg) return;
-                var png = ClipPayload.ReadSharableImage(ClipImage.MaxBytes);
-                if (png != null) SendClipImage(s, png, seq);
+                var png = s.ClipImg ? ClipPayload.ReadSharableImage(ClipImage.MaxBytes) : null;
+                if (png != null) { SendClipImage(s, png, seq); return; }
+                // (1.19.1) Something this PC keeps to itself (marked private: a password manager, or an app's Copy button
+                // that marks it so; or files, nothing): not sent, but the viewer hears that this PC copied something, so
+                // its next Ctrl+V leaves it instead of putting the viewer's older clipboard over it (the user's "copy button"
+                // pastes that didn't come out). Not for this app's own setting of the viewer's text, nor the shared mouse
+                // (its clipboard follows the pointer from PC to PC; the laptop's side takes only text).
+                if (seq == clipOwn || s.Kvm) return;
+                var k = new Dictionary<string, object>();
+                k["t"] = "clip";
+                k["n"] = (long)seq;
+                k["kept"] = true;
+                SendCtl(s, k);
+                Log.Write("Remote control: this PC copied something it keeps here (not text it shares): the viewer was told");
                 return;
             }
             if (text.Replace("\r\n", "\n") == clipLast) return; // what the viewer just sent

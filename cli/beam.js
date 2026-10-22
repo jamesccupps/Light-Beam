@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.3.1';
+const VERSION = '1.4.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -72,7 +72,8 @@ Beam for Linux (a Raspberry Pi or another Linux computer, kept connected all day
                                                    drop files on it to send them, paste text; --sign-in: sign
                                                    that window in again
   beam control on|off                              let your other devices see and control this computer's screen
-                                                   (Control on its page in Beam; needs wayvnc and a desktop)
+                                                   (Control on its page in Beam; needs a desktop and its VNC
+                                                   server: wayvnc, or x11vnc on an X11 desktop)
   beam agent                                       what that service runs: listen (same options), plus the status
   beam version                                     Beam for Linux's version
 
@@ -1091,11 +1092,12 @@ function rootStorage() {
 
 // What PUT /api/devices/me/status gets. A Beam from before 1.22 knows only os and storage (it refuses other fields);
 // (Beam for Linux 1.2) one that takes vnc sessions hears whether remote control is on here.
-async function linuxStatus(full, vnc = false) {
+async function linuxStatus(full, vnc = false, here = false) {
   const status = { os: osName() };
   const storage = rootStorage();
   if (storage) status.storage = storage;
   if (vnc) status.remoteControl = controlAllowed();
+  if (here) status.controlProblem = controlUnavailable(); // (Beam for Linux 1.4, server 1.27.1: its window's switch says why)
   if (!full) return status;
   const model = hardwareModel();
   if (model) status.model = model;
@@ -1112,6 +1114,7 @@ function statusChanged(was, now) {
   if (!was) return true;
   if (was.bootedAt !== now.bootedAt || JSON.stringify(was.throttled) !== JSON.stringify(now.throttled)) return true;
   if (was.remoteControl !== now.remoteControl) return true; // (Beam for Linux 1.2: beam control on/off)
+  if (was.controlProblem !== now.controlProblem) return true; // (1.4: e.g. x11vnc installed since)
   const [a, b] = [was.temperature, now.temperature];
   if ((a === undefined) !== (b === undefined)) return true;
   return a !== undefined && (Math.abs(b - a) >= 5 || [70, 80].some(t => (a >= t) !== (b >= t)));
@@ -1304,9 +1307,18 @@ const controls = new Map(); // session id -> { id, by, link, vnc, lease, started
 let wayvnc = null; // { child, exited, err, stopTimer }
 let controlNotices = true; // (the agent's --no-notify turns these off too)
 
+// (Beam for Linux 1.4) An X11 desktop (Raspberry Pi OS before Bookworm, the user's older Pi): its screen is shared by
+// x11vnc rather than wayvnc (Wayland only, and not packaged there).
+function x11Desktop() {
+  const env = desktopEnv();
+  return Boolean(env) && !(env.WAYLAND_DISPLAY || process.env.WAYLAND_DISPLAY) && Boolean(env.DISPLAY || process.env.DISPLAY);
+}
+
 // Why this computer's screen can't be shared at all (null: it can).
 function controlUnavailable() {
-  if (!process.env.BEAM_TEST_WAYVNC && !findOnPath('wayvnc')) return 'wayvnc isn\'t installed (sudo apt install wayvnc)';
+  if (x11Desktop()) {
+    if (!process.env.BEAM_TEST_X11VNC && !findOnPath('x11vnc')) return 'x11vnc isn\'t installed (this desktop runs on X11: sudo apt install x11vnc)';
+  } else if (!process.env.BEAM_TEST_WAYVNC && !findOnPath('wayvnc')) return 'wayvnc isn\'t installed (sudo apt install wayvnc)';
   if (!hasDesktop()) return 'this computer has no desktop';
   return null;
 }
@@ -1342,7 +1354,7 @@ async function startWayvnc() {
   if (wayvnc && !wayvnc.exited) { clearTimeout(wayvnc.stopTimer); return; }
   const env = desktopEnv();
   if (!env) throw new Error('its desktop isn\'t on (nobody is signed in on its screen)');
-  if (!(env.WAYLAND_DISPLAY || process.env.WAYLAND_DISPLAY)) throw new Error('its desktop runs on X11, and Beam\'s remote control needs a Wayland one (Raspberry Pi OS: Raspberry Pi Configuration → Advanced)');
+  if (!(env.WAYLAND_DISPLAY || process.env.WAYLAND_DISPLAY)) return startX11vnc(env); // (1.4)
   // (tests: BEAM_TEST_WAYVNC, a Node.js script standing in for it)
   const [cmd, ...before] = process.env.BEAM_TEST_WAYVNC ? [process.execPath, process.env.BEAM_TEST_WAYVNC] : [findOnPath('wayvnc')];
   if (!cmd) throw new Error('wayvnc isn\'t installed (sudo apt install wayvnc)');
@@ -1354,7 +1366,7 @@ async function startWayvnc() {
   for (const listen of [['-u', VNC_SOCKET], [`unix:${VNC_SOCKET}`]]) {
     try { fs.rmSync(VNC_SOCKET, { force: true }); } catch {} // (an old one's socket; wayvnc says so if it's still in the way)
     const args = [...before, '--render-cursor', `--socket=${path.join(RUN_DIR, 'wayvncctl')}`, ...(layout ? [`--keyboard=${layout}`] : []), ...listen];
-    const state = { child: spawn(cmd, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] }), exited: false, err: '', stopTimer: null };
+    const state = { child: spawn(cmd, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] }), exited: false, err: '', stopTimer: null, name: 'wayvnc' };
     state.child.stderr.on('data', d => { state.err = (state.err + d).slice(-2000); });
     state.child.on('error', err => { state.exited = true; state.err ||= err.message; });
     state.child.on('exit', code => {
@@ -1378,6 +1390,41 @@ async function startWayvnc() {
   // (what the first way said, unless it didn't know -u: then the second's)
   const why = /unrecognized|invalid option|unknown option/i.test(said[0]) ? said[1] : said[0] || said[1];
   throw new Error(`wayvnc didn't start${why ? ` (${why})` : ''}`);
+}
+
+// (Beam for Linux 1.4) An X11 desktop: x11vnc on the same private socket, with no network port (-rfbport 0) and no
+// password (only this user can open the socket, and only the agent does), shared by the sessions, stopped a minute after
+// the last as wayvnc is. -auth guess finds the desktop's X authority (lightdm's ~/.Xauthority on Raspberry Pi OS).
+async function startX11vnc(env) {
+  const display = env.DISPLAY || process.env.DISPLAY || ':0';
+  // (tests: BEAM_TEST_X11VNC, a Node.js script standing in for it)
+  const [cmd, ...before] = process.env.BEAM_TEST_X11VNC ? [process.execPath, process.env.BEAM_TEST_X11VNC] : [findOnPath('x11vnc')];
+  if (!cmd) throw new Error('x11vnc isn\'t installed (this desktop runs on X11: sudo apt install x11vnc)');
+  fs.mkdirSync(RUN_DIR, { recursive: true, mode: 0o700 });
+  fs.chmodSync(RUN_DIR, 0o700);
+  try { fs.rmSync(VNC_SOCKET, { force: true }); } catch {}
+  const args = [...before, '-display', display, '-auth', 'guess', '-unixsock', VNC_SOCKET, '-rfbport', '0', '-forever', '-shared', '-nopw', '-quiet'];
+  const state = { child: spawn(cmd, args, { env: { ...process.env, ...env, DISPLAY: display }, stdio: ['ignore', 'ignore', 'pipe'] }), exited: false, err: '', stopTimer: null, name: 'x11vnc' };
+  state.child.stderr.on('data', d => { state.err = (state.err + d).slice(-2000); });
+  state.child.on('error', err => { state.exited = true; state.err ||= err.message; });
+  state.child.on('exit', code => {
+    state.exited = true;
+    if (wayvnc !== state) return;
+    wayvnc = null;
+    logLine(`x11vnc stopped${code ? ` (${oneLine(state.err, 200) || `code ${code}`})` : ''}`);
+    for (const id of [...controls.keys()]) stopControl(id);
+  });
+  // (looked at once each time, as for wayvnc; x11vnc takes a moment longer: it finds the X authority first)
+  let up = false;
+  for (let i = 0; i < 100 && !state.exited && !(up = fs.existsSync(VNC_SOCKET)); i++) await new Promise(r => setTimeout(r, 100));
+  if (!state.exited && up) {
+    wayvnc = state;
+    logLine(`Started x11vnc for remote control (an X11 desktop, ${display})`);
+    return;
+  }
+  state.child.kill();
+  const why = oneLine(state.err.replace(/^.*\bat .*$/gm, ''), 200);
+  throw new Error(`x11vnc didn't start${why ? ` (${why})` : ''}`);
 }
 
 // A WebSocket to Beam of our own (no npm packages here): https.request's upgrade, then frames, masked as a client's must
@@ -1520,7 +1567,7 @@ async function startControl(cfg, request) {
         vnc.once('drain', () => { session.heldLink = false; link.socket.resume(); });
       }
     });
-    vnc.on('close', () => { if (controls.get(id) === session) endControl(cfg, id, 'stopped', 'wayvnc closed the connection'); });
+    vnc.on('close', () => { if (controls.get(id) === session) endControl(cfg, id, 'stopped', `${wayvnc?.name || 'wayvnc'} closed the connection`); });
     link.closed(() => stopControl(id));
     session.started = true;
     logLine(`${by} is controlling this computer`);
@@ -1567,7 +1614,7 @@ function stopControl(id) {
   if (!controls.size && wayvnc && !wayvnc.exited) {
     clearTimeout(wayvnc.stopTimer);
     const was = wayvnc;
-    was.stopTimer = setTimeout(() => { if (wayvnc === was && !controls.size) { wayvnc = null; was.child.kill(); logLine('Stopped wayvnc (no one is controlling this computer)'); } }, Number(process.env.BEAM_TEST_WAYVNC_IDLE) || 60e3);
+    was.stopTimer = setTimeout(() => { if (wayvnc === was && !controls.size) { wayvnc = null; was.child.kill(); logLine(`Stopped ${was.name || 'wayvnc'} (no one is controlling this computer)`); } }, Number(process.env.BEAM_TEST_WAYVNC_IDLE) || 60e3);
     was.stopTimer.unref();
   }
 }
@@ -1644,12 +1691,13 @@ async function agent(cfg, opt) {
   }
   let full = false; // the server knows the 1.22 fields
   let vnc = false; // (Beam for Linux 1.2) and takes vnc sessions
+  let here = false; // (1.4) and switches remote control from this computer's own window (`control-here`)
   let sent = null;
   let reporting = null;
   let quiet = '';
   const report = force => {
     reporting ??= (async () => {
-      const status = await linuxStatus(full, vnc);
+      const status = await linuxStatus(full, vnc, here);
       if (!force && !statusChanged(sent, status)) return;
       await api(cfg, '/api/devices/me/status', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(status) });
       if (!sent) logLine(`Told Beam how this computer is: ${[status.os, status.model, status.temperature !== undefined && `${status.temperature} °C`, status.storage && `${formatSize(status.storage.free)} free`].filter(Boolean).join(', ')}`);
@@ -1667,6 +1715,7 @@ async function agent(cfg, opt) {
     onHello: hello => {
       full = Array.isArray(hello.features) && hello.features.includes('linux');
       vnc = Array.isArray(hello.features) && hello.features.includes('vnc');
+      here = Array.isArray(hello.features) && hello.features.includes('control-here');
       sent = null; // a new connection: tell it all again
       report(true);
       checkForUpdate(cfg);
@@ -1682,6 +1731,20 @@ async function agent(cfg, opt) {
         cfg.device = data.name;
         try { saveConfig({ device: data.name }); } catch (err) { logLine(`Couldn't keep the new name in ${CONFIG_FILE}: ${err.message}`); }
         logLine(`This computer is called ${oneLine(data.name, 60)} in Beam now`);
+        report(true);
+      }
+      else if (name === 'control-set' && typeof data.on === 'boolean') {
+        // (Beam for Linux 1.4) the switch in Beam's window on this computer (only its own sign-in reaches here): as
+        // `beam control on|off`; when it can't be on, the status says why (the window shows it)
+        const why = data.on ? controlUnavailable() : null;
+        if (why) logLine(`Remote control of this computer can't be turned on: ${why}`);
+        else if (data.on !== controlAllowed()) {
+          try {
+            saveConfig({ remoteControl: data.on });
+            logLine(`Remote control of this computer turned ${data.on ? 'on' : 'off'} in Beam's window here`);
+            if (!data.on) for (const id of [...controls.keys()]) stopControl(id);
+          } catch (err) { logLine(`Couldn't keep that in ${CONFIG_FILE}: ${err.message}`); }
+        }
         report(true);
       }
       else if (name === 'rc-disable' && controlAllowed()) {

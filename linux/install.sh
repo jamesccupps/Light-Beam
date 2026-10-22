@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-# (audit 2026-10-11) --help in its own words: under `curl … | bash` there is no file to read them from.
+# (audit 2026-10-11) --help in its own words: under `curl ... | bash` there is no file to read them from.
 usage() {
   cat <<'EOF'
 Beam for Linux: puts the Beam app on this computer, signs it in and runs it as a service that starts with the
@@ -48,13 +48,13 @@ main() {
       --no-service) service=0; shift ;; # (tests, and computers without systemd: run `beam agent` yourself)
       --own-node) own_node=1; shift ;;  # (tests: Beam's own Node.js even when this computer has one)
       -h|--help) usage; return 0 ;;
-      *) fail "I don't know the option $1 (there's --name \"…\" and --uninstall)" ;;
+      *) fail "I don't know the option $1 (there's --name \"...\" and --uninstall)" ;;
     esac
   done
 
-  [ "$(uname -s)" = Linux ] || fail "this installer is for Linux. Windows and Android have Beam apps of their own (Settings → Add a device)."
+  [ "$(uname -s)" = Linux ] || fail "this installer is for Linux. Windows and Android have Beam apps of their own (Settings > Add a device)."
   [ "$(id -u)" != 0 ] || fail "run it as yourself, not as root or with sudo: Beam for Linux lives in your home folder."
-  case "$beam_url" in http://*|https://*) ;; *) fail "this copy of the installer doesn't know your Beam's address: get it from your Beam (Settings → Add a device)." ;; esac
+  case "$beam_url" in http://*|https://*) ;; *) fail "this copy of the installer doesn't know your Beam's address: get it from your Beam (Settings > Add a device)." ;; esac
   # (audit 2026-10-11 S-9) never over plain http on a local network: https, or a Tailscale or loopback address
   case "$beam_url" in
     https://*|http://100.6[4-9].*|http://100.[7-9][0-9].*|http://100.1[01][0-9].*|http://100.12[0-7].*|http://\[fd7a:115c:a1e0:*|http://localhost:*|http://localhost|http://127.*) ;;
@@ -95,7 +95,7 @@ main() {
     node="$app_dir/node/bin/node"
   fi
 
-  say "Getting Beam for Linux from $beam_url…"
+  say "Getting Beam for Linux from ${beam_url}..."
   mkdir -p "$app_dir" "$bin_dir"
   # (a CommonJS script, whatever a package.json further up says; beam.new.js: Node.js checks only a file it can tell is
   # a script)
@@ -116,7 +116,7 @@ EOF
   if signed_in "$node" "$beam_url" && BEAM_APP=linux "$beam" status >/dev/null 2>&1 </dev/null; then
     say "Signed in already."
   else
-    say "Signing in to Beam…"
+    say "Signing in to Beam..."
     if [ -n "$name" ]; then
       BEAM_APP=linux "$beam" login "$beam_url" --name "$name" </dev/null || fail "it didn't sign in (run this again to try once more)"
     else
@@ -153,7 +153,7 @@ EOF
   # Start with the computer, before anyone signs in on it.
   if [ "$(loginctl show-user "$(id -un)" --property=Linger --value 2>/dev/null || true)" != yes ]; then
     loginctl --no-ask-password enable-linger "$(id -un)" >/dev/null 2>&1 \
-      || { say "Letting Beam start with the computer (sudo may ask for your password)…"; sudo loginctl enable-linger "$(id -un)" </dev/tty; } \
+      || { say "Letting Beam start with the computer (sudo may ask for your password)..."; sudo loginctl enable-linger "$(id -un)" </dev/tty; } \
       || say "Beam couldn't be set to start before you sign in (sudo loginctl enable-linger $(id -un)): it starts when you sign in."
   fi
   sleep 3
@@ -163,13 +163,13 @@ EOF
     say "  Files sent to it are saved in ~/Downloads/Beam. Send from here:  beam <file>   or   some-command | beam"
     say "  Its page in Beam shows how it's doing (Device info). Its log: ~/.local/state/beam/beam.log"
     if [ -f "$menu_entry" ]; then
-      say "  In the menu: Internet → Beam, a window to drop files on and paste text into (or run: beam window)"
+      say "  In the menu: Internet > Beam, a window to drop files on and paste text into (or run: beam window)"
       has wl-copy || has xclip || has xsel || say "  For text sent here to go on the clipboard:  sudo apt install wl-clipboard"
     fi
-    say "  Stop it: systemctl --user stop beam   ·   Take it away: curl -fsSL $beam_url/install/linux | bash -s -- --uninstall"
+    say "  Stop it: systemctl --user stop beam   -   Take it away: curl -fsSL $beam_url/install/linux | bash -s -- --uninstall"
     # (Raspberry Pi OS and Debian add ~/.local/bin to the PATH at sign-in, and only when it's there already: a new
     # terminal now still doesn't have it. 2026-10-09: the user's `beam control on` wasn't found.)
-    case ":$PATH:" in *":$bin_dir:"*) ;; *) say "  Until you next sign in to this computer (or restart it), the beam command is  ~/.local/bin/beam" ;; esac
+    case ":$PATH:" in *":$bin_dir:"*) ;; *) say "  The beam command works from your next sign-in; in this terminal, run  source ~/.profile  first (or type ~/.local/bin/beam)" ;; esac
   else
     say "The service didn't stay on. What it said:"
     tail -n 20 "${XDG_STATE_HOME:-$HOME/.local/state}/beam/beam.log" 2>/dev/null \
@@ -191,7 +191,7 @@ get_node() {
   [ "$arch" != armv7l ] || base='https://nodejs.org/dist/latest-v22.x'
   has tar || fail "tar is needed to unpack Node.js"
   has sha256sum || fail "sha256sum is needed to check Node.js"
-  say "Getting Node.js (Beam for Linux runs on it; this computer has none from version 20 on) from nodejs.org…"
+  say "Getting Node.js (Beam for Linux runs on it; this computer has none from version 20 on) from nodejs.org..."
   tmp="$(mktemp -d)"
   curl -fsSL --retry 2 "$base/SHASUMS256.txt" -o "$tmp/SHASUMS256.txt" || { rm -rf "$tmp"; fail "couldn't reach nodejs.org"; }
   file="$(grep -oE "node-v[0-9]+\.[0-9]+\.[0-9]+-linux-$arch\.tar\.gz" "$tmp/SHASUMS256.txt" | head -n 1 || true)"

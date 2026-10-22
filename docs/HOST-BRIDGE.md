@@ -199,7 +199,7 @@ every device.
 | `autoUpdate` | bool | Install updates automatically |
 | `phoneNotifications` | bool, or **null** | "Show phone notifications" on this PC (1.5.0): this device's server setting `settings.phoneNotifications`, which the app owns. Change it with `setSettings({ phoneNotifications })`; the app sends `PUT /api/devices/me/settings` and the result comes back as a `settings` event. `null`: the server doesn't have the `phone-notifications` feature (hide the switch, or say it needs Beam server 1.5). |
 | `phonePopupText` | bool | "Show message text in pop-ups" (1.5.0, default on, this PC only; show it with `phoneNotifications`): off, phone balloons say only "<app> · new notification" or "3 new from <app>". Windows keeps shown pop-ups in its Notification Center until they're cleared, so it's worth a short note next to it. |
-| `allowRemoteControl` | bool, or **null** | "Allow remote control" (1.6.0, default off). `null`: the server has no `remote-control`. **The page can only turn it off**: `setSettings({ allowRemoteControl: false })`. `true` gets `code: "native-only"`: it's turned on only at the PC, in the tray menu or the native Settings, always through a native confirmation that lists the devices. |
+| `allowRemoteControl` | bool, or **null** | "Allow remote control" (1.6.0, default off). `null`: the server has no `remote-control`. **The page can only turn it off**: `setSettings({ allowRemoteControl: false })`. `true` gets `code: "native-only"`: it's turned on only at the PC, in the tray menu or the native Settings, always through a native confirmation that lists the devices. **(1.19.1)** The page's `allowRemoteControl` (feature `allowRemoteControl`) brings up that confirmation (the devices all ticked; refused while the PC is being controlled) and answers `{ settings }`; the setting comes later as a `settings` event once confirmed. |
 | `remoteControlDevices` | **ro** `[{ id, name, machine }]` | The devices that may control this PC (1.6.0), chosen in that confirmation; `machine` is the Tailscale machine each one is pinned to (null until known). Changing the list from the page gets `code: "native-only"`. |
 | `appsAllowed` | bool, or **null** | "Let Beam install apps" (1.16, default off; `null`: the server has no `apps`): apps asked for from Beam's Apps page install here without asking (each shows a notice); off, the PC asks (Install / Always allow / Not now). **The page can only turn it off** (`setSettings({ appsAllowed: false })`; `true` gets `native-only`). The page's `allowApps` (feature `allowApps`) shows the app's own confirmation and answers `{ settings }`; so do the tray menu and the question's Always allow. |
 | `appAsks` | **ro** `[{ id, name, version, by, source }]`, or **null** | **(1.16.1)** Apps waiting for an answer at this PC, oldest first (`by`: the asking device's name, or null; `source`: where the app comes from, in words). The question opens by itself as a window near the clock, on top and without taking the keyboard (its buttons wake after a second), one at a time; the page shows a bar per app at the top of the window (`appAsk`). A `settings` event follows each change. `null`: the server has no `apps`. |
@@ -319,7 +319,8 @@ ends: the **PC** (native, plus a hidden capture page of its own) and, in a **vie
 ### 11.1 This PC (what the chat page needs to know)
 
 - **The switch and the list** are native (§6): the page shows `allowRemoteControl` and `remoteControlDevices`, offers
-  "Turn off" (`setSettings({ allowRemoteControl: false })`), and points to the tray menu to turn it on. Other devices
+  "Turn off" (`setSettings({ allowRemoteControl: false })`), and turns it on through `allowRemoteControl` (1.19.1:
+  Settings → Security's "This PC" switches, the native confirmation; older apps: the tray menu). Other devices
   turn it off with `POST /api/rc/disable`; the app hears `rc-disable`, switches off and reports it.
 - **Who:** the app checks every request itself, whatever the server said:
   - its switch is on, and it isn't locked;
@@ -455,6 +456,13 @@ and (Windows 1.12.4) `clip` (id 3, ordered: clipboard pictures; a side before it
   out of step drops it), sent as the channel drains (at most 1 MB waiting in it). The PC answers a whole one on `ctl`:
   `{ t: "clip-img", n, ok }`; the viewer's held Ctrl+V goes once it has (15 s at most). Pictures set from the other side
   are marked never to be sent back (and out of the cloud clipboard), as text is.
+- **Clipboard notices (Windows 1.19.1, web viewer too; caps `"clipok"` and `"clipkept"` in the PC's hello):** the PC
+  answers the viewer's text with `{ t: "clip-ok", n }` once it's on its clipboard, and the viewer's held Ctrl+V goes
+  then (2 s at most; before, 120 ms after the text, ready or not). A change on the PC's clipboard it doesn't send
+  (marked private, files, nothing) is still announced: `{ t: "clip", n, kept: true }` (no text; not for its own setting
+  of the viewer's text, nor a kvm session). The viewer's next Ctrl+V then sends its own clipboard only if that changed
+  since it last saw it, so the PC pastes its own newer copy (the user's Copy buttons on the PC: the viewer's older text
+  went over them).
 - **The PC's pointer drawn by the viewer (Windows 1.12.6, web viewer too; caps `"cursor"` in both hellos, a viewer
   with a mouse only):** Edge's capture always draws the PC's pointer into the picture (`cursor: 'never'` is ignored),
   so the viewer sends `{ t: "pointer", here }` (its Picture setting "Draw the pointer here", on by default) and the PC

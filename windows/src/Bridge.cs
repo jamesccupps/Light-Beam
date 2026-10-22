@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -213,6 +213,11 @@ namespace Beam
                     else if (err != null) Fail(id, "bad-request", err); else Reply(id, Obj("settings", app.SettingsObject()));
                     break;
                 }
+                case "allowRemoteControl": // (1.19.1) Settings' switch: on through the app's own confirmation (the devices that
+                                           // may, all ticked), as the tray menu does; refused while this PC is controlled
+                    if (!app.Cfg.AllowRemoteControl) app.ToggleRemoteControl("Settings on this PC");
+                    Reply(id, Obj("settings", app.SettingsObject()));
+                    break;
                 case "allowApps": // (1.16) "Let Beam install apps on this PC": on through the native confirmation, at this PC
                     if (!app.Cfg.AppsAllowed) app.Apps.Toggle("Settings on this PC");
                     Reply(id, Obj("settings", app.SettingsObject()));

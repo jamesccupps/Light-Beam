@@ -608,8 +608,8 @@ try {
   check(!!(await waitLog(/Remote control page: the first picture starts at 4000 kbps$/, from, 5000)), 'the first picture starts at 4 Mbps: nothing known about this viewer yet (1.17)');
   const hello = await waitCtl('hello', t0, 10000);
   check(!!hello && hello.role === 'host' && Array.isArray(hello.monitors) && hello.monitors.length > 0, `the viewer got the host's hello (${hello ? hello.monitors.length + ' screen(s)' : 'none'})`);
-  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video","clipimg","cursor","probe"]' && hello.fitted === false,
-    `...saying what 1.8 adds (and 1.11.4's fit-scale, 1.12.4's clipimg, 1.12.6's cursor and probe) (${hello ? JSON.stringify(hello.caps) : '-'})`);
+  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video","clipimg","cursor","probe","clipok","clipkept"]' && hello.fitted === false,
+    `...saying what 1.8 adds (and 1.11.4's fit-scale, 1.12.4's clipimg, 1.12.6's cursor and probe, 1.19.1's clipok and clipkept) (${hello ? JSON.stringify(hello.caps) : '-'})`);
   {
     // 1.6.1: where the cursor is, when it's on the shared screen (this machine's real cursor: wherever it happens to be).
     const hm = hello && (hello.monitors.find(m => m.id === hello.monitor) || hello.monitors[0]);
@@ -763,14 +763,19 @@ try {
   fs.writeFileSync(dir('cfg/clipboard-in.txt'), pcText);
   const next = await waitCtl('clip', t1, 4000);
   check(!!next && next.text === pcText, '...and each change after');
+  const tSent = Date.now();
   await send('ctl', { t: 'clip', n: 1, text: viewerText });
   const onPc = await waitFor(() => { try { const t = fs.readFileSync(dir('cfg/clipboard.txt'), 'utf8'); return t === viewerText ? t : null; } catch { return null; } }, 4000, 100);
   check(!!onPc, 'the viewer\'s text goes onto the PC\'s clipboard');
+  const okMsg = await waitCtl('clip-ok', tSent, 4000);
+  check(!!okMsg && okMsg.n === 1, '...and the PC says it has it (clip-ok: the viewer\'s Ctrl+V waits for it, 1.19.1)');
   fs.writeFileSync(dir('cfg/clipboard-in.secret'), '');
   t1 = Date.now();
   fs.writeFileSync(dir('cfg/clipboard-in.txt'), 'secret-' + pcText);
   await sleep(2500);
-  check(ctlSince('clip', t1).length === 0, 'secret-marked clipboard text isn\'t sent');
+  const keptMsgs = ctlSince('clip', t1);
+  check(keptMsgs.every(m => m.text === undefined) && keptMsgs.some(m => m.kept === true),
+    `secret-marked clipboard text isn't sent; the viewer hears only that the PC copied something it keeps (1.19.1) (${JSON.stringify(keptMsgs)})`);
   fs.rmSync(dir('cfg/clipboard-in.secret'), { force: true });
   await send('ctl', { t: 'clip', on: false });
   // Quality, Lock.
