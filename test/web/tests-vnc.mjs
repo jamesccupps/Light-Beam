@@ -81,7 +81,12 @@ function rfbServer(link, { width, height, color, got }) {
       if (stage === 'init') { if (buf.length < 1) return; take(1); link.send(serverInit()); stage = 'normal'; continue; }
       if (!buf.length) return;
       const type = buf[0];
-      if (type === 2) { if (buf.length < 4 || buf.length < 4 + 4 * buf.readUInt16BE(2)) return; take(4 + 4 * buf.readUInt16BE(2)); continue; }
+      if (type === 2) {
+        if (buf.length < 4 || buf.length < 4 + 4 * buf.readUInt16BE(2)) return;
+        const m = take(4 + 4 * buf.readUInt16BE(2));
+        got.encodings?.push(Array.from({ length: m.readUInt16BE(2) }, (_, i) => m.readInt32BE(4 + 4 * i))); // (2026-10-21: Sharp / Fast)
+        continue;
+      }
       if (type === 6) { if (buf.length < 8 || buf.length < 8 + buf.readInt32BE(4)) return; const n = buf.readInt32BE(4); take(8); got.cut.push(take(n).toString('latin1')); continue; }
       const len = { 0: 20, 3: 10, 4: 8, 5: 6 }[type];
       if (!len) { got.unknown.push(type); buf = Buffer.alloc(0); return; }
@@ -106,7 +111,7 @@ async function fakePi(ctx, { allow = true, width = 64, height = 48, color = [0, 
   await dev.me();
   eq((await dev.putStatus({ remoteControl: allow })).status, 204, 'the computer says whether it allows control');
   const stream = dev.stream();
-  const pi = { id, name: dev.name, dev, got: { pointer: [], keys: [], cut: [], unknown: [] }, links: [], servers: [], stream, served: new Set() };
+  const pi = { id, name: dev.name, dev, got: { pointer: [], keys: [], cut: [], unknown: [], encodings: [] }, links: [], servers: [], stream, served: new Set() };
   const port = Number(new URL(ctx.srv.base).port);
   const timer = setInterval(async () => {
     for (const e of stream.events) {
@@ -160,6 +165,17 @@ export default function register(test) {
     const t1 = Date.now();
     while (pi.got.keys.length < 2 && Date.now() - t1 < 5000) await sleep(50);
     eq(pi.got.keys.slice(0, 2), [{ down: true, keysym: 0x61 }, { down: false, keysym: 0x61 }], 'the key, down and up');
+    // (2026-10-21) Sharp / Fast: the picture's quality and compression (noVNC's pseudo-encodings: quality n = -32+n,
+    // compression n = -256+n), asked of the computer at once and kept for it in this browser.
+    const enc = () => pi.got.encodings.at(-1) || [];
+    assert(enc().includes(-23) && enc().includes(-254), `Sharp at first: quality 9, compression 2 (${enc()})`);
+    await page.evaluate(`document.querySelector('.rc-tool[data-tool="gear"]').click(); true`);
+    for (const t2 = Date.now(); !enc().includes(-27) && Date.now() - t2 < 5000;) await sleep(50);
+    assert(enc().includes(-27) && enc().includes(-250), `Fast: quality 5, compression 6 (${enc()})`);
+    eq(await page.evaluate(`[document.querySelector('.rc-tool[data-tool="gear"]').textContent, localStorage.getItem('beam.vnc.fast.${pi.id}')]`), ['Fast', '1'], 'Fast, kept for this computer');
+    await page.evaluate(`document.querySelector('.rc-tool[data-tool="gear"]').click(); true`);
+    for (const t2 = Date.now(); !enc().includes(-23) && Date.now() - t2 < 5000;) await sleep(50);
+    assert(enc().includes(-23), 'Sharp again');
     // What was copied on the computer: a Copy button here
     pi.servers[0].cut('copied on the Pi');
     await page.waitFor(`Boolean(document.querySelector('.rc-tool[data-tool="copy"]'))`, 5000, 'Copy appears');

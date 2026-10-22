@@ -258,8 +258,10 @@ function fakePcMain(cfg) {
     if (pcs.probeCap != null && !m.on) pcs.send('ctl', { t: 'probe-cap', n: m.n, ms: pcs.probeCap });
   };
 
+  pcs.holdClipOk = false; // (Windows 1.19.1) a test answers the viewer's text itself, later
   pcs.onCtl = m => {
     if (m.t === 'ping') pcs.send('ctl', { t: 'pong', n: m.n, at: m.at });
+    else if (m.t === 'clip' && typeof m.text === 'string' && cfg.caps?.includes('clipok') && !pcs.holdClipOk) pcs.send('ctl', { t: 'clip-ok', n: m.n });
     else if (m.t === 'quality') pcs.send('ctl', { t: 'quality', mode: m.mode, maxFps: m.mode === 'motion' ? 60 : 30, maxKbps: m.mode === 'motion' ? 16000 : 8000 });
     else if (m.t === 'settings') pcs.send('ctl', { t: 'quality', mode: m.mode === 'motion' ? 'motion' : 'text', profile: m.mode === 'auto' ? 'text' : m.mode, auto: m.mode === 'auto', maxFps: m.fps || 30, maxKbps: m.kbps || 15000 });
     else if (m.t === 'fit') {
@@ -1256,6 +1258,55 @@ export default function register(test) {
     await pc.page.waitFor(`fakePc.rec.order.slice(${order0}).filter(o => o.startsWith('key:')).length >= 4`, 5000, 'all the keys');
     const order = (await rec(pc, 'order')).slice(order0).filter(o => /^(clip|key:)/.test(o));
     eq(order, ['key:ControlLeft', 'clip', 'key:KeyV', 'key:KeyV', 'key:ControlLeft'], 'our clipboard reaches the PC before the V (and the Ctrl let go of after)');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: FEATURE, timeout: 60000 });
+
+  test('remote control (Windows 1.19.1): a copy the PC keeps to itself isn\'t pasted over by ours; our text goes when it\'s newer, and the keys wait for the PC to have it', async ctx => {
+    // (the user, 2026-10-21: a copy button on the PC (it marks its copy private) "wouldnt paste": our older clipboard
+    // went over it at Ctrl+V; and the keys used to go 120 ms after our text, ready or not)
+    const pc = await fakePc(ctx, { caps: ['clipimg', 'clipok', 'clipkept'] });
+    const page = await ctx.signedIn();
+    const b = await ctx.browser.browserConn();
+    await b.send('Browser.grantPermissions', { origin: ctx.srv.base, browserContextId: page.contextId, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+    await page.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await viewer(ctx, pc.id, { page });
+    await live(page, pc);
+    const ctrlV = async () => {
+      await page.send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'ControlLeft', key: 'Control', modifiers: 2 });
+      await page.send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'KeyV', key: 'v', modifiers: 2, commands: ['paste'] });
+      await page.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'KeyV', key: 'v', modifiers: 2 });
+      await page.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'ControlLeft', key: 'Control' });
+    };
+    const after = async from => (await rec(pc, 'order')).slice(from).filter(o => /^(clip|key:)/.test(o));
+    await page.evaluate(`document.querySelector('.rc-tool[data-tool="clip"]').click(); true`);
+    await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'clip' && m.on === true)`, 5000, 'on');
+    await pc.js(`fakePc.send('ctl', { t: 'clip', n: 2, text: 'shared from the PC' })`);
+    await page.waitFor(`navigator.clipboard.readText().then(t => t === 'shared from the PC')`, 5000, 'the PC’s text here');
+    // The PC copies something it keeps to itself: our next Ctrl+V sends nothing, and the PC pastes its own.
+    await pc.js(`fakePc.send('ctl', { t: 'clip', n: 3, kept: true }); true`);
+    await page.waitFor('rc.pcKept === true', 3000, 'told');
+    let from = (await rec(pc, 'order')).length;
+    await ctrlV();
+    await pc.page.waitFor(`fakePc.rec.order.slice(${from}).filter(o => o.startsWith('key:')).length >= 4`, 5000, 'the keys');
+    eq(await after(from), ['key:ControlLeft', 'key:KeyV', 'key:KeyV', 'key:ControlLeft'], 'just the keys: the PC’s newer copy is pasted');
+    eq(await page.evaluate('navigator.clipboard.readText()'), 'shared from the PC', 'and ours is as it was');
+    // Copied here afterwards: ours is newer, so it goes, and the V waits until the PC says it has it.
+    await page.evaluate(`navigator.clipboard.writeText('copied here later').then(() => true)`);
+    await pc.js('fakePc.holdClipOk = true; true');
+    from = (await rec(pc, 'order')).length;
+    await ctrlV();
+    await pc.page.waitFor(`fakePc.rec.ctl.some(m => m.t === 'clip' && m.text === 'copied here later')`, 5000, 'ours went');
+    await sleep(500);
+    eq(await after(from), ['key:ControlLeft', 'clip'], 'the V waits for the PC (well past the old 120 ms)');
+    const n = await pc.js(`fakePc.rec.ctl.filter(m => m.t === 'clip' && m.text === 'copied here later').at(-1).n`);
+    await pc.js(`fakePc.send('ctl', { t: 'clip-ok', n: ${n} }); true`);
+    await pc.page.waitFor(`fakePc.rec.order.slice(${from}).filter(o => o.startsWith('key:')).length >= 4`, 5000, 'then the keys');
+    eq(await after(from), ['key:ControlLeft', 'clip', 'key:KeyV', 'key:KeyV', 'key:ControlLeft'], 'ours, then the V once the PC has it');
+    // The same text again with nothing new on the PC: as before (sent, acknowledged at once).
+    await pc.js('fakePc.holdClipOk = false; true');
+    from = (await rec(pc, 'order')).length;
+    await ctrlV();
+    await pc.page.waitFor(`fakePc.rec.order.slice(${from}).filter(o => o.startsWith('key:')).length >= 4`, 5000, 'the keys again');
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 60000 });
 

@@ -3268,6 +3268,9 @@ test('1.22 Beam for Linux on the server: its status (model, start, temperature, 
     assert.match(r.headers['content-type'], /^text\/plain/);
     assert.ok(r.body.includes(`local beam_url='http://127.0.0.1:${s.port}'`), 'its own address in it');
     assert.ok(!r.body.includes('__BEAM_URL__'));
+    // (2026-10-21) Plain ASCII: on a Pi whose locale isn't UTF-8, bash read "$beam_url…" as a variable "beam_urlâ"
+    // and set -u stopped the install.
+    assert.ok(!/[^\x00-\x7f]/.test(r.body), `the installer is plain ASCII: ${(r.body.match(/.*[^\x00-\x7f].*/) || [''])[0].trim().slice(0, 80)}`);
     r = await s.req('GET', '/install/linux', { headers: { ...from('100.64.40.3'), 'X-Forwarded-Host': 'beam.example.ts.net', 'X-Forwarded-Proto': 'https' } });
     assert.ok(r.body.includes('local beam_url=\'https://beam.example.ts.net\''), 'the name tailscale serve was asked for');
     assert.equal((await s.req('GET', '/install/linux', { headers: { Host: 'evil.example:80:80' } })).status, 403, 'only a plain host name goes into a script');
@@ -3926,6 +3929,76 @@ else process.exit(1);
     assert.match(agent.out, /Robin Laptop turned remote control of this computer off/);
     r = await cli(['control'], { home, env });
     assert.match(r.out, /Remote control of this computer is off/);
+
+    // (Beam 1.27.1 + Beam for Linux 1.4, the user 2026-10-21: "it can be a per device setting in the app gui settings
+    // on that device") The switch in Beam's window on this computer: its page is this computer's sign-in, and the agent
+    // does what `beam control on` does. Another device's sign-in can't; the status says when it can't be on.
+    const { key } = cliConfig(home);
+    const windowPage = { Authorization: `Bearer ${key}`, 'X-Beam-Device-Id': id, 'X-Beam-Device': 'Chromium on deskpi', 'X-Beam-Platform': 'web' };
+    const flip = (on, headers = windowPage) => s.req('PUT', '/api/devices/me/control', { headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ on }) });
+    r = await flip(true, laptop);
+    assert.equal(r.status, 400, 'not from another device (Robin Laptop is a PC: its own switch is in its app)');
+    assert.equal((await dev()).status.controlProblem, undefined, 'the agent says nothing is in the way (wayvnc is there)');
+    r = await flip(true);
+    assert.deepEqual([r.status, r.json], [202, { on: true }]);
+    await waitFor(() => { try { return cliConfig(home).remoteControl === true; } catch { return false; } }, 5000);
+    await waitFor(async () => (await dev()).status.remoteControl === true, 5000);
+    assert.match(agent.out, /Remote control of this computer turned on in Beam's window here/);
+    r = await flip(false);
+    assert.equal(r.status, 202);
+    await waitFor(async () => (await dev()).status.remoteControl === false, 5000);
+
+    // (Beam for Linux 1.4, the user's older Pi: bullseye, X11, no wayvnc) An X11 desktop: x11vnc, on the same private
+    // socket with no network port; without it, the status says what to install, and the switch leaves it off.
+    agent.child.kill();
+    await agent.exited;
+    const x11Stub = path.join(TMP, 'vnc-x11vnc.js');
+    const x11Args = path.join(TMP, 'vnc-x11vnc-args.txt');
+    fs.rmSync(x11Args, { force: true });
+    fs.writeFileSync(x11Stub, `const fs = require('fs'); const net = require('net');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(x11Args)}, JSON.stringify(args) + '\\n');
+net.createServer(c => { c.on('error', () => {}); c.write('RFB 003.008\\n'); c.on('data', d => c.write(d)); }).listen(args[args.indexOf('-unixsock') + 1]);
+`);
+    const x11Env = { ...env, DISPLAY: ':0' };
+    delete x11Env.WAYLAND_DISPLAY;
+    const startAgent = async extra => {
+      const c = spawn(process.execPath, [installed, 'agent', '--no-copy', '--no-notify'], { env: cleanEnv({ HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), BEAM_TEST_TAILSCALE: tsStub, ...x11Env, ...extra }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      children.add(c);
+      const a = { child: c, out: '', exited: new Promise(resolve => c.on('exit', code => { children.delete(c); resolve(code); })) };
+      c.stdout.on('data', d => { a.out += d; });
+      c.stderr.on('data', d => { a.out += d; });
+      runs.push(a);
+      await waitFor(() => /\bConnected\b/.test(a.out), 15000);
+      return a;
+    };
+    let x11 = await startAgent({});
+    await waitFor(async () => /x11vnc isn't installed \(this desktop runs on X11: sudo apt install x11vnc\)/.test((await dev()).status.controlProblem || ''), 10000)
+      .catch(async () => { throw new Error(`no controlProblem: ${JSON.stringify((await dev()).status)} || the agent: ${x11.out.replace(/\n/g, ' | ')}`); });
+    assert.equal((await flip(true)).status, 202);
+    await waitFor(() => /Remote control of this computer can't be turned on: x11vnc isn't installed/.test(x11.out), 5000);
+    assert.equal(cliConfig(home).remoteControl, false, 'left off');
+    r = await cli(['control', 'on'], { home, env: x11Env });
+    assert.match(r.out, /not turned on: x11vnc isn't installed \(this desktop runs on X11: sudo apt install x11vnc\)/);
+    x11.child.kill();
+    await x11.exited;
+    x11 = await startAgent({ BEAM_TEST_X11VNC: x11Stub });
+    await waitFor(async () => (await dev()).status.controlProblem === undefined, 10000);
+    assert.equal((await flip(true)).status, 202);
+    await waitFor(async () => (await dev()).can.remoteControl === true, 10000);
+    r = await rc('POST', 'sessions', laptop, { device: id, kind: 'vnc' });
+    assert.equal(r.status, 201, r.body);
+    const x11Session = r.json.id;
+    const x11Viewer = await wsOpen(s.port, `/api/rc/sessions/${x11Session}/vnc`, laptop);
+    await waitFor(() => x11Viewer.data.toString() === 'RFB 003.008\n', 10000).catch(() => {
+      throw new Error(`no greeting; x11vnc's stand-in: ${(fs.existsSync(x11Args) ? fs.readFileSync(x11Args, 'utf8') : 'not started').replace(/\n/g, ' | ')} || the agent: ${x11.out.replace(/\n/g, ' | ')}`);
+    });
+    assert.deepEqual(JSON.parse(fs.readFileSync(x11Args, 'utf8').trim().split('\n')[0]),
+      ['-display', ':0', '-auth', 'guess', '-unixsock', pipe || path.join(runDir, 'beam', 'vnc.sock'), '-rfbport', '0', '-forever', '-shared', '-nopw', '-quiet'],
+      'x11vnc on the private socket, no network port');
+    assert.match(x11.out, /Started x11vnc for remote control \(an X11 desktop, :0\)/);
+    x11Viewer.close();
+    await waitFor(() => /Stopped x11vnc \(no one is controlling this computer\)/.test(x11.out), 5000);
   } finally {
     for (const run of runs) try { run.child.kill(); } catch {}
     await t.stop();

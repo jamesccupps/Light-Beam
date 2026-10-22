@@ -254,7 +254,8 @@ address, so the browser becomes part of that device instead of a separate entry.
   - Scrolling carries on after a flick. The zoom stays when the keyboard opens or the phone turns. The key strip
     (Esc, Tab, Ctrl, Alt, Shift, Win, arrows, Del) shows upright, and sideways while the keyboard is up. Back asks
     before it disconnects.
-- **Off on every PC until you switch it on at that PC:** tray menu → **Allow remote control**. You tick which of your
+- **Off on every PC until you switch it on at that PC:** Settings → Security → **Allow remote control** in its Beam
+  window (Windows app 1.19.1), or the tray menu. You tick which of your
   devices may control it. Only tick devices you trust: Beam in another Windows account on the same PC counts as a
   different device. A device added to Beam later needs ticking on that PC (tray → **Remote control devices…**).
 - **While someone is connected** the PC shows a red bar, "*device* (*machine* · *address*) is controlling this PC ·
@@ -321,7 +322,7 @@ address, so the browser becomes part of that device instead of a separate entry.
   there; an .msi or a setup program runs (with the switches you give it for a quiet install). Beam never installs as
   administrator: an installer that needs that shows Windows' own prompt on that PC.
 - **Each PC asks once:** until someone at the PC allows it, a request there asks **Install** (this once), **Always
-  allow** or **Not now**. Turn it on or off later with the tray menu's **Let Beam install apps** (or Settings → Control & sharing).
+  allow** or **Not now**. Turn it on or off later in its Settings → Security (**Let Beam install apps**), the tray menu, or Settings → Control & sharing.
 - **Where it is:** the Apps page shows each PC's state (installed and its version, waiting for someone at the PC,
   couldn't install and why), with **Uninstall** per PC, **Check for a new version** and **Remove**.
 
@@ -484,9 +485,10 @@ install takes the app from your server as it is; its updates after that are chec
   into (`beam window` from a terminal);
 - its page in Beam shows its system, disk, uptime, processor temperature and, on a Pi, its power supply and throttling,
   with alerts; **Beam log** on that page shows the end of its log;
-- **Control** it from your other devices: run `beam control on` there once (only there; `beam control off` turns it off
-  again). Its page then has **Control**: its screen in a window of Beam's, with its mouse and keyboard, through its
-  desktop's own VNC server (wayvnc; `sudo apt install wayvnc` if it isn't there) relayed by your Beam;
+- **Control** it from your other devices: turn it on there, in Settings → Security of Beam's window on it, or with
+  `beam control on` (only there; `beam control off` turns it off again). Its page then has **Control**: its screen in a
+  window of Beam's, with its mouse and keyboard, through its desktop's own VNC server (wayvnc on Wayland, x11vnc on
+  X11; `sudo apt install` it if it isn't there) relayed by your Beam (Sharp, or Fast across the internet);
 - **Wake** works for the PCs on its network (1.3): a wake from any of your devices is sent from there too, so a Pi at
   the office wakes the office's PCs while your Beam runs somewhere else;
 - it updates itself when a newer build lands in the server's `dist` (`node linux/build.mjs`, signed like the Windows
