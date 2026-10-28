@@ -1097,12 +1097,16 @@ async function thumbOf(source, w, h) {
 // Linux, or too big for its sender to make one) gets its thumbnail from this page, once: the other devices then show
 // that instead of downloading the original (up to 25 MB on a phone).
 const thumbsMade = new Set();
+const thumbsSentHere = new Set(); // (2026-10-28) the ones this page sent: live.js patches them in, no redraw
 async function backfillThumb(item, img) {
   if (item.thumb || thumbsMade.has(item.id) || thumbsUnsupported || typeof OffscreenCanvas === 'undefined' || !img.naturalWidth) return;
   thumbsMade.add(item.id);
   try {
     const t = await thumbOf(await createImageBitmap(img), img.naturalWidth, img.naturalHeight);
-    if (t && !itemMap.get(item.id)?.thumb) await api(`api/items/${item.id}/thumb?w=${t.w}&h=${t.h}`, { method: 'PUT', headers: { 'Content-Type': t.blob.type }, body: t.blob });
+    if (t && !itemMap.get(item.id)?.thumb) {
+      thumbsSentHere.add(item.id);
+      await api(`api/items/${item.id}/thumb?w=${t.w}&h=${t.h}`, { method: 'PUT', headers: { 'Content-Type': t.blob.type }, body: t.blob });
+    }
   } catch {} // (deleted meanwhile, or a server without thumbnails: nothing to do)
 }
 

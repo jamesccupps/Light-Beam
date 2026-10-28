@@ -1,8 +1,8 @@
 'use strict';
 // Beam Family's backups (Beam 1.8.1): every `hours` a family-backup-<UTC time>.tar.gz in the backups folder (the
 // newest `keep` kept; nothing else there is touched), holding:
-// - the database as a consistent snapshot, taken while the server runs (SQLite's VACUUM INTO: never a copy of the
-//   live file, which the write-ahead log keeps changing);
+// - the database as a consistent snapshot, taken while the server runs (SQLite's online backup, else VACUUM INTO:
+//   never a copy of the live file, which the write-ahead log keeps changing);
 // - control.key and vapid.json (the phones' push subscriptions are tied to that key), and the avatars;
 // - the files people sent and their thumbnails, as many as fit in `filesMB`, the smallest first (1.12.1: all or none
 //   before, so one big video left every photo out); one left out is still listed in the database, and Beam Family
@@ -14,6 +14,7 @@ const fsp = fs.promises;
 const path = require('node:path');
 const tar = require('../../lib/tar');
 const { makePrivate } = require('../../lib/private-dir');
+const sqlite = require('node:sqlite');
 
 const NAME = /^family-backup-\d{8}-\d{6}\.tar\.gz$/;
 const MANIFEST = 'family-backup.json';
@@ -62,7 +63,11 @@ function createBackups({ db, dataDir, backupDir, hours, keep, filesMB, version, 
         // (audit B-2) a backup holds the database and the control key: the folder only this account opens, once per run
         if (!madePrivate) { madePrivate = true; makePrivate(backupDir, { log, label: 'backups folder' }); }
         await fsp.rm(snapshot, { force: true });
-        db.raw.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
+        // (2026-10-28, audit 2026-10-11) SQLite's online backup where Node has it (22.16, 23.8 and later): it copies in
+        // steps and gives the event loop back between them, where VACUUM INTO held every request, stream and push for
+        // the whole copy. VACUUM INTO otherwise.
+        if (typeof sqlite.backup === 'function') await sqlite.backup(db.raw, snapshot, { rate: 256 });
+        else db.raw.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
         const [avatars, files, thumbs] = await Promise.all(['avatars', 'files', 'thumbs'].map(d => filesIn(path.join(dataDir, d))));
         // (the smallest first: previews and photos before the big videos)
         let room = filesMB * MB;

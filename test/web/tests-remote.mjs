@@ -1073,7 +1073,9 @@ export default function register(test) {
     await page.evaluate(`rcShowKeyboard(); true`);
     eq(await page.evaluate('document.activeElement === rcUi.sink'), true, 'the keyboard');
     await page.viewport(412, 520, true);
-    await sleep(300);
+    // (2026-10-28: a fixed 300 ms wasn't always enough on a busy PC; the assert below says what it saw)
+    await page.waitFor('rcV.kb', 3000, 'the keyboard noticed').catch(() => {});
+    await sleep(100);
     const kb = await page.evaluate('({ zoom: rc.zoom, s: rcV.s, kb: rcV.kb, pointerOnScreen: (q => q.y > rcUi.stage.getBoundingClientRect().top && q.y < rcUi.stage.getBoundingClientRect().bottom)(rcClient(rc.pointer)) })');
     assert(kb.kb && kb.pointerOnScreen, `the keyboard: the picture keeps its size and the pointer stays in view: ${JSON.stringify(kb)}`);
     // A tap on the picture leaves the keyboard up.

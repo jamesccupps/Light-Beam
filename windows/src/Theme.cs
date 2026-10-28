@@ -369,13 +369,33 @@ namespace Beam
             TabStop = true;
         }
 
+        string tipText;
         public string Tooltip
         {
             set
             {
                 if (tip == null) tip = new ToolTip();
                 tip.SetToolTip(this, value);
+                tipText = value;
             }
+        }
+
+        // (1.19.3, audit 2026-10-11) Painted by hand, so Windows' accessibility is told what it is: a push button named
+        // by its text, or by its tooltip when it shows only a glyph; Narrator can press it.
+        protected override AccessibleObject CreateAccessibilityInstance() { return new Accessible(this); }
+
+        class Accessible : ControlAccessibleObject
+        {
+            readonly FlatButton b;
+            public Accessible(FlatButton b) : base(b) { this.b = b; }
+            public override AccessibleRole Role { get { return AccessibleRole.PushButton; } }
+            public override string Name
+            {
+                get { return !string.IsNullOrEmpty(b.AccessibleName) ? b.AccessibleName : !string.IsNullOrEmpty(b.Text) ? b.Text : b.tipText; }
+                set { b.AccessibleName = value; }
+            }
+            public override string DefaultAction { get { return "Press"; } }
+            public override void DoDefaultAction() { if (b.Enabled) b.OnClick(EventArgs.Empty); }
         }
 
         public Size Preferred()
@@ -458,8 +478,28 @@ namespace Beam
                 if (check == value) return;
                 check = value;
                 Invalidate();
+                if (IsHandleCreated) AccessibilityNotifyClients(AccessibleEvents.StateChange, -1); // (1.19.3)
                 if (CheckedChanged != null) CheckedChanged(this, EventArgs.Empty);
             }
+        }
+
+        // (1.19.3, audit 2026-10-11) A check box to Windows' accessibility: its text, its note, whether it's ticked.
+        protected override AccessibleObject CreateAccessibilityInstance() { return new Accessible(this); }
+
+        class Accessible : ControlAccessibleObject
+        {
+            readonly FlatCheck c;
+            public Accessible(FlatCheck c) : base(c) { this.c = c; }
+            public override AccessibleRole Role { get { return AccessibleRole.CheckButton; } }
+            public override string Name
+            {
+                get { return !string.IsNullOrEmpty(c.AccessibleName) ? c.AccessibleName : c.Text; }
+                set { c.AccessibleName = value; }
+            }
+            public override string Description { get { return string.IsNullOrEmpty(c.Note) ? base.Description : c.Note; } }
+            public override AccessibleStates State { get { return base.State | (c.check ? AccessibleStates.Checked : AccessibleStates.None); } }
+            public override string DefaultAction { get { return c.check ? "Uncheck" : "Check"; } }
+            public override void DoDefaultAction() { if (c.Enabled) c.Checked = !c.Checked; }
         }
 
         protected override void OnClick(EventArgs e) { Checked = !Checked; Focus(); base.OnClick(e); }

@@ -212,6 +212,11 @@ async function sendFile(req, res, file, { type, headers = {}, size = null, etag 
   }
   let range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
   if (range && range[1] === '' && range[2] === '') range = null; // (audit B-11) "bytes=-" is no range: the whole file
+  // (2026-10-28, audit 2026-10-11) As Beam does: "5-2" is invalid, so the header is ignored (RFC 9110; it was a 416);
+  // If-Range resumes only when the client's copy is this very file, else the whole file.
+  if (range && range[1] !== '' && range[2] !== '' && Number(range[2]) < Number(range[1])) range = null;
+  const ifRange = req.headers['if-range'];
+  if (range && ifRange && !(/^(W\/)?"/.test(ifRange) ? ifRange === etag : Date.parse(ifRange) >= Math.floor(stat.mtimeMs / 1000) * 1000)) range = null;
   let start = 0;
   let end = total - 1;
   if (range && total > 0) {

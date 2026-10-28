@@ -418,7 +418,8 @@ function sectionAlerts() {
       typeof a.tailscaleKey === 'boolean' && switchRow('A Tailscale sign-in is running out', a.tailscaleKey, v => setAlerts({ tailscaleKey: v }), { hint: 'Two weeks and three days before, for your devices and this server.' }), // (1.17)
       typeof a.powerLoss === 'boolean' && switchRow('A PC lost power or crashed', a.powerLoss, v => setAlerts({ powerLoss: v }), { hint: 'When it’s back on after a power loss, a freeze, a blue screen or being forced off.' }), // (1.18)
       typeof a.setup === 'boolean' && switchRow('Something in Beam’s setup is wrong', a.setup, v => setAlerts({ setup: v }), { hint: 'The setup check (Settings → Server) looks every 6 hours: servers starting with Windows, Tailscale, backups, every PC up to date and starting with Windows.' }), // (1.20)
-      typeof a.hardware === 'boolean' && switchRow('A Raspberry Pi is too hot or short of power', a.hardware, v => setAlerts({ hardware: v }), { hint: 'Its processor at 80 °C or more, or a power supply too weak for it (Beam for Linux says).' })), // (1.22)
+      typeof a.hardware === 'boolean' && switchRow('A Raspberry Pi is too hot or short of power', a.hardware, v => setAlerts({ hardware: v }), { hint: 'Its processor at 80 °C or more, or a power supply too weak for it (Beam for Linux says).' }), // (1.22)
+      typeof a.down === 'boolean' && switchRow('The Beam server was down', a.down, v => setAlerts({ down: v }), { hint: 'Once it’s back: for how long, and why when it can tell (an update of Node.js, the computer restarting).' })), // (1.27.2)
     others.length > 0 && card('A device goes offline',
       cardInfo('After 10 minutes offline, and again when it’s back.'),
       ...others.map(d => offlineAlertToggle(d, d.name))),

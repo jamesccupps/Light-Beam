@@ -20,7 +20,9 @@
   This PC hosts Beam.
 .PARAMETER AtBoot
   With -Server: start the server at boot as a scheduled task (runs as you, without signing in; needs an elevated
-  PowerShell). For a Windows Server or a PC nobody signs in to. Replaces the Startup shortcut.
+  PowerShell), and again within 5 minutes if something closes it (a Node.js update does). For a Windows Server, a PC
+  nobody signs in to, or one that should keep Beam up. Replaces the Startup shortcut. node server.js stop then stops it
+  for at most 5 minutes; -RemoveServer takes the task away.
 .PARAMETER Name
   What this PC is called in Beam, for a first install (default: the name it already has, or the computer name).
 .PARAMETER NoLaunch
@@ -173,8 +175,11 @@ if ($Server) {
     # Runs as this user without a sign-in (S4U), restarts after a failure, no 3-day time limit. Without admin rights
     # (1.7.3): the server needs none (its port is above 1024, its data folder is this user's), so a bug in it can't do
     # what an administrator could.
+    # (1.27.2) Also every 5 minutes (nothing happens while it runs: IgnoreNew): a server something closed comes back. A
+    # Node.js update's installer closes every node.exe, and the server then ends without an error, so "restart after a
+    # failure" never fires (it took Beam down for 14 minutes on 2026-10-28).
     $action = New-ScheduledTaskAction -Execute $node -Argument "`"$serverJs`" --supervise" -WorkingDirectory $root
-    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $trigger = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)))
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
       -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
@@ -193,7 +198,7 @@ if ($Server) {
     try { $null = Invoke-WebRequest "http://127.0.0.1:$port/api/hello" -UseBasicParsing -TimeoutSec 2; $up = $true } catch {}
   }
   if (-not $up) { throw "The Beam server didn't start. Run  node `"$serverJs`"  to see the error, and look in $logDir." }
-  if ($AtBoot) { "Beam server is running on port $port and starts at boot (scheduled task '$taskName')." }
+  if ($AtBoot) { "Beam server is running on port $port and starts at boot, and again within 5 minutes if something closes it (scheduled task '$taskName')." }
   else { "Beam server is running in the background on port $port, and starts when you sign in." }
   "Server logs: $(Join-Path $logDir 'server.log') and $(Join-Path $logDir 'supervisor.log')."
 

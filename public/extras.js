@@ -198,9 +198,17 @@ function bindMenu() {
   const menu = $('#menu');
   menu.addEventListener('keydown', e => {
     const items = [...menu.querySelectorAll('.menu-item:not(:disabled)')];
+    // (2026-10-28, audit 2026-10-11) The quick reactions on top: ↑ from the first item, ← → along them, ↓ back.
+    const quick = [...menu.querySelectorAll('.quick-emoji')];
+    const q = quick.indexOf(document.activeElement);
+    if (q >= 0) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); quick[(q + (e.key === 'ArrowRight' ? 1 : -1) + quick.length) % quick.length].focus(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); items[0]?.focus(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); items.at(-1)?.focus(); return; }
+    }
     const i = items.indexOf(document.activeElement);
-    if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length]?.focus(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); (i === items.length - 1 && quick.length ? quick[0] : items[(i + 1) % items.length])?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); (i === 0 && quick.length ? quick[0] : items[(i - 1 + items.length) % items.length])?.focus(); }
     else if (e.key === 'Home') { e.preventDefault(); items[0]?.focus(); }
     else if (e.key === 'End') { e.preventDefault(); items.at(-1)?.focus(); }
     else if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); closeMenu(); }
@@ -239,7 +247,8 @@ function quickReactions(item) {
   if (!serverHas('reactions') || !itemMap.has(item.id)) return null;
   return el('div', { class: 'menu-quick', role: 'group', 'aria-label': 'React' }, ...QUICK_REACTIONS.map(emoji => {
     const on = (item.reactions?.[emoji] || []).includes(me.id);
-    const b = el('button', { class: `quick-emoji${on ? ' on' : ''}`, type: 'button', 'aria-pressed': String(on), title: on ? `Take back ${emoji}` : `React ${emoji}` }, emoji);
+    const label = on ? `Take back ${emoji}` : `React ${emoji}`;
+    const b = el('button', { class: `quick-emoji${on ? ' on' : ''}`, type: 'button', 'aria-pressed': String(on), title: label, 'aria-label': label }, emoji);
     b.addEventListener('click', () => { closeMenu(); toggleReaction(item, emoji); });
     return b;
   }));
@@ -955,7 +964,8 @@ const SHORTCUTS = [
   ['Ctrl+O', 'Send files'],
   ['Enter / Shift+Enter', 'Send / new line (Ctrl+Enter on touch screens)'],
   ['↑ in an empty message box', 'Go to the messages'],
-  ['↑ ↓ Home End', 'Move between messages'],
+  ['↑ ↓ Home End', 'Move between messages (Tab reaches the one you were on)'],
+  ['Enter', 'On a message: open its file, or its menu'],
   ['Ctrl+C', 'Copy the selected message (or the selection)'],
   ['Delete', 'Delete the selected message (with Undo)'],
   ['Ctrl+click / Shift+click', 'Pick several messages (then Ctrl+A, Ctrl+C or Delete)'],
@@ -1026,12 +1036,14 @@ function onKeydown(e) {
   const msg = focusedMsg();
   if (msg && !typing) {
     const item = itemMap.get(msg.dataset.id);
+    const onMsg = e.target === msg; // (2026-10-28: Enter or Delete on one of its buttons is that button's)
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); moveFocus(msg, e.key === 'ArrowUp' ? -1 : 1); return; }
     if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); moveFocus(msg, e.key === 'Home' ? 'home' : 'end'); return; }
     if (!item) return;
     if (mod && e.key.toLowerCase() === 'c' && getSelection().isCollapsed) { e.preventDefault(); item.kind === 'text' ? copyItem(item) : copyText(item.name); return; }
-    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); const next = msg.nextElementSibling || msg.previousElementSibling; deleteItems([item.id]); next?.focus?.(); return; }
-    if (e.key === 'Enter' && item.kind === 'file') { e.preventDefault(); if (PREVIEW_IMAGE.test(item.mime || '')) openLightbox(item); else if (HOST) hostDo('openFile', { itemId: item.id }); else downloadItem(item); return; }
+    if (onMsg && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); const next = msg.nextElementSibling || msg.previousElementSibling; deleteItems([item.id]); next?.focus?.(); return; }
+    if (onMsg && e.key === 'Enter' && item.kind === 'file') { e.preventDefault(); if (PREVIEW_IMAGE.test(item.mime || '')) openLightbox(item); else if (HOST) hostDo('openFile', { itemId: item.id }); else downloadItem(item); return; }
+    if (onMsg && e.key === 'Enter') { e.preventDefault(); openItemMenu(item, msg); return; }
     if ((e.shiftKey && e.key === 'F10') || e.key === 'ContextMenu') { e.preventDefault(); openItemMenu(item, msg); return; }
   }
   if (e.target === $('#text') && e.key === 'ArrowUp' && !$('#text').value) { e.preventDefault(); moveFocus(null, -1); }

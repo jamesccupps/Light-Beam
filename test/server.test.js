@@ -1030,6 +1030,51 @@ test('A20: --supervise restarts a crashed server and `stop` ends it cleanly', as
   } finally { await s.stop(); }
 });
 
+test('1.27.2: Beam says when it was down (a heartbeat; nothing after a clean stop or a short gap), and doesn’t start while an import writes its data folder', async () => {
+  const alive = s => path.join(s.data, 'alive.json');
+  const downAlerts = s => { try { return JSON.parse(fs.readFileSync(path.join(s.data, 'alerts.json'), 'utf8')).filter(a => a.kind === 'down'); } catch { return []; } };
+  const stopClean = async s => { const r = await runNode(['stop'], serverEnv(8791, s.dir)); assert.equal(r.code, 0, r.out); await s.exited; };
+  let s = await startServer('down', 8791);
+  try {
+    await waitFor(() => fs.existsSync(alive(s)));
+    const beat = JSON.parse(fs.readFileSync(alive(s), 'utf8'));
+    assert.ok(Number.isFinite(beat.at) && beat.node === process.version && !beat.stopped, JSON.stringify(beat));
+    await stopClean(s);
+    assert.equal(JSON.parse(fs.readFileSync(alive(s), 'utf8')).stopped, true, 'a clean stop marks it');
+    // Down 15 minutes while Node.js changed (as on 2026-10-28: ESET updated it and its installer closed Beam)
+    fs.writeFileSync(alive(s), JSON.stringify({ at: Date.now() - 15 * 60_000, version: '1.27.1', node: 'v24.0.0' }));
+    s = await startServer('down', 8791, { keep: true });
+    await waitFor(() => downAlerts(s).length === 1, 5000);
+    const [a] = downAlerts(s);
+    assert.equal(a.level, 'warn');
+    assert.match(a.text, /^Beam was down for 15 minutes \(from about .+ to .+\): Node\.js was updated meanwhile \(v24\.0\.0 → v\d/);
+    // A minute (a crash its supervisor restarted): nothing
+    await stopClean(s);
+    fs.writeFileSync(alive(s), JSON.stringify({ at: Date.now() - 60_000, version: '1.27.2', node: process.version }));
+    s = await startServer('down', 8791, { keep: true });
+    await sleep(1000);
+    assert.equal(downAlerts(s).length, 1, 'a minute: no alert');
+    // Ten minutes, the same Node.js: the computer restarted, or something closed it
+    await stopClean(s);
+    fs.writeFileSync(alive(s), JSON.stringify({ at: Date.now() - 10 * 60_000, version: '1.27.2', node: process.version }));
+    s = await startServer('down', 8791, { keep: true });
+    await waitFor(() => downAlerts(s).length === 2, 5000);
+    assert.match(downAlerts(s)[0].text, /^Beam was down for 10 minutes .*: (the computer restarted|something closed it)/);
+    // An import writing the data folder: Beam doesn't start (exit 0, so its supervisor and task just try later)
+    await stopClean(s);
+    fs.writeFileSync(path.join(s.data, 'importing'), JSON.stringify({ pid: process.pid, at: Date.now() }));
+    const held = await startServer('down', 8791, { keep: true, expectExit: true });
+    assert.equal(await Promise.race([held.exited, sleep(8000).then(() => 'still running')]), 0);
+    assert.match(fs.readFileSync(path.join(s.data, 'logs', 'server.log'), 'utf8'), /An import is writing .*: Beam starts once it's done/);
+    // A marker whose process is gone (an import that crashed) is removed, and Beam starts
+    const gone = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await new Promise(resolve => gone.once('exit', resolve));
+    fs.writeFileSync(path.join(s.data, 'importing'), JSON.stringify({ pid: gone.pid, at: Date.now() }));
+    s = await startServer('down', 8791, { keep: true });
+    assert.ok(!fs.existsSync(path.join(s.data, 'importing')), 'the stale marker is gone');
+  } finally { await s.stop(); }
+});
+
 test('A22: app builds: sidecars are read without side effects; a recreated dist/ is still watched', async () => {
   const s = await startServer('dist', 8791);
   try {
@@ -1953,6 +1998,48 @@ test('A21 CLI: login by approval and by password, approve, rm, get --no-copy, li
   } finally { await s.stop(); }
 });
 
+test('1.4.1 CLI (audit 2026-10-11): a typo isn’t sent as a file; get and pull by id; --json; logout', async () => {
+  const s = await startServer('cli141', 8791);
+  try {
+    const K = s.key;
+    const base = `http://127.0.0.1:${s.port}`;
+    const admin = app(K, 'cliadmin141', 'Admin');
+    const home = homeDir('cli141');
+    let r = await cli(['setup', `${base}/?key=${K}`, '--name', 'Pi'], { home });
+    assert.equal(r.code, 0, r.out);
+    await cli(['devices'], { home }); // (it takes its own token)
+    r = await cli(['stauts'], { home });
+    assert.equal(r.code, 2);
+    assert.match(r.out, /"stauts" isn't a command, or a file here\. Did you mean {2}beam status\?/);
+    const me = cliConfig(home).deviceId;
+    const first = await sendText(s, admin, 'the first text', [me]);
+    await sendText(s, admin, 'the second text', [me]);
+    r = await cli(['get', first.id.slice(0, 6), '--no-copy'], { home });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /the first text/);
+    assert.doesNotMatch(r.out, /the second text/);
+    const one = await upload(s, admin, 'one.txt', Buffer.from('one'), { to: [me] });
+    await upload(s, admin, 'two.txt', Buffer.from('two'), { to: [me] });
+    const into = path.join(home, 'pulled');
+    r = await cli(['pull', one.id.slice(0, 6), into], { home });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(fs.readFileSync(path.join(into, 'one.txt'), 'utf8'), 'one');
+    r = await cli(['ls', '--json'], { home });
+    const listed = JSON.parse(r.out);
+    assert.ok(listed.some(i => i.id === first.id && i.text === 'the first text') && listed.some(i => i.id === one.id && i.name === 'one.txt'), r.out);
+    r = await cli(['devices', '--json'], { home });
+    assert.ok(JSON.parse(r.out).some(d => d.id === me && d.thisComputer), r.out);
+    r = await cli(['status', '--json'], { home });
+    assert.equal(JSON.parse(r.out).signedInWith, 'token', r.out);
+    const token = cliConfig(home).key;
+    r = await cli(['logout'], { home });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /Signed out/);
+    assert.ok(!cliConfig(home).key && cliConfig(home).deviceId === me, 'the sign-in gone; the address and the id kept');
+    assert.equal((await s.req('GET', '/api/me', { headers: app(token, me, 'Pi', 'cli') })).status, 401, 'the server forgot it');
+  } finally { await s.stop(); }
+});
+
 test('A21 CLI: follows a move only when the new server proves it holds the key', async () => {
   const old = await startServer('cli-move-old', 8792);
   let neu;
@@ -2278,10 +2365,10 @@ test('QW-E: battery and storage alerts fire once and re-arm; settings; alerts.js
     assert.equal(JSON.parse(fs.readFileSync(path.join(s.data, 'alerts.json'), 'utf8')).length, 4);
     // settings
     let r = await s.req('GET', '/api/settings', { headers: desk });
-    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, offline: [] });
+    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, down: true, offline: [] });
     r = await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify({ alerts: { battery: false } }) });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, offline: [] }, 'partial changes keep the rest');
+    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, down: true, offline: [] }, 'partial changes keep the rest');
     for (const bad of [{ alerts: { battery: 'no' } }, { alerts: { nope: true } }, { alerts: { offline: 'phone' } }, { alerts: [] }]) {
       assert.equal((await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify(bad) })).status, 400, JSON.stringify(bad));
     }

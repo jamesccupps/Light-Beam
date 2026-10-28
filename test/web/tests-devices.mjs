@@ -634,6 +634,7 @@ export default function register(test) {
     await page.evaluate(`$('#pairDlg').close()`);
     await page.evaluate(`openSettings('alerts')`);
     await page.waitFor(`/A Raspberry Pi is too hot or short of power/.test($('#settingsDlg').textContent)`, 5000, 'the alert’s switch');
+    eq(await page.evaluate(`/The Beam server was down/.test($('#settingsDlg').textContent)`), true, 'and the one for Beam itself (1.27.2)');
     await page.evaluate(`$('#settingsDlg').close()`);
     eq(page.errors, [], 'no page errors');
   });
