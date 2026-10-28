@@ -129,7 +129,7 @@ namespace Beam
 
     class ScreenInfo
     {
-        public int Id;           // the order WebRTC lists screens in ("Screen <Id+1>"; a lone screen is "Entire screen")
+        public int Id;           // Windows' order (EnumDisplayDevices); the capture names them main screen first (SourceName)
         public string Device;    // \\.\DISPLAY1
         public int X, Y, W, H;   // physical pixels (Beam is Per-Monitor-V2), relative to the primary screen's corner
         public bool Primary;
@@ -156,10 +156,22 @@ namespace Beam
             }
         }
 
-        // The source name the capture host auto-selects for a screen.
+        // The source name the capture host auto-selects for a screen. Chromium numbers the main screen first, then the
+        // others in Windows' order (1.19.2; Robin Laptop docked: its main screen is Windows' second, and "Screen 2"
+        // captured the laptop's own panel, so a switch never left it).
         public string SourceName(int id)
         {
-            return Screens.Count <= 1 ? "Entire screen" : "Screen " + (id + 1).ToString(CultureInfo.InvariantCulture);
+            return Screens.Count <= 1 ? "Entire screen" : "Screen " + SourceRank(id).ToString(CultureInfo.InvariantCulture);
+        }
+
+        // 1 for the main screen, then the others in Windows' order.
+        public int SourceRank(int id)
+        {
+            var p = Primary;
+            if (p != null && p.Id == id) return 1;
+            int rank = p != null ? 2 : 1;
+            foreach (var s in Screens) if (s.Id < id && (p == null || s.Id != p.Id)) rank++;
+            return rank;
         }
 
         // Screens in EnumDisplayDevices order (as WebRTC numbers them), with their rectangles from EnumDisplayMonitors.
