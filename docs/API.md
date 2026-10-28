@@ -629,10 +629,15 @@ The server watches for trouble and tells every client:
 - **hardware (1.22):** from a device's status (Beam for Linux): its processor at 80 °C or more (once; again only after
   it was below 70 °C), and a power supply too weak for it (`throttled` has `undervoltage`, now or since it started: once
   per start, by `bootedAt`).
+- **down (1.27.2):** Beam itself was down. The server writes `data/alive.json` (`{ at, version, node }`) every minute
+  and marks it `stopped` when it stops on purpose (`node server.js stop`, a signal); a start more than 2 minutes after
+  an unmarked one alerts 45 s in (once the devices are back): for how long, and why when it can tell (Node.js's
+  version changed meanwhile, the computer started after Beam's last minute). `device` null. While `data/importing`
+  names a running process (`node server.js import`), the server doesn't start (exit 0).
 
 Each alert is the event `alert { "id", "kind", "device", "level": "warn" | "info", "text", "at" }`:
 - `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`, `tailscaleKey` (1.17), `powerLoss` (1.18), `update` (1.19: a Windows build that didn't work on the PC that tried it first; `device` null), `setup` (1.20: a setup
-  check that went wrong; `device` null), `hardware` (1.22);
+  check that went wrong; `device` null), `hardware` (1.22), `down` (1.27.2: Beam was down; `device` null);
 - `device` is the device it is about (`null` for `serverDisk` and the server's own `tailscaleKey`);
 - `text` is ready to show.
 
@@ -641,7 +646,7 @@ log and pushed through ntfy when that is configured. **Clients ignore alerts abo
 except `serverDisk`, `tailscaleKey` (the apps don't watch their own Tailscale key) and `powerLoss` (1.18: why this PC
 restarted).
 
-The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "setup": true (1.20), "hardware": true (1.22), "offline": ["<device id>", …] }`,
+The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "setup": true (1.20), "hardware": true (1.22), "down": true (1.27.2), "offline": ["<device id>", …] }`,
 changed with `PATCH /api/settings`; see Settings. Crossings are logged even when that kind of alert is turned off.
 
 ### Each PC's history (1.18)

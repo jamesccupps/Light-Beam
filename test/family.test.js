@@ -1368,6 +1368,17 @@ test('F-V (audit 2026-10-04): the storage cap counts the play copies; a push add
     // B-11: "bytes=-" asks for no range: the whole file, not a 206
     const whole = await s.req('GET', `/api/files/${id}`, { headers: { ...as(f.owner), Range: 'bytes=-' }, raw: true });
     assert.deepEqual([whole.status, whole.body.length], [200, data.length], 'bytes=- is the whole file');
+    // (2026-10-28, audit 2026-10-11) As Beam: an invalid "5-2" is ignored, If-Range resumes only the same file, a start
+    // past the end is still 416
+    const get = range => s.req('GET', `/api/files/${id}`, { headers: { ...as(f.owner), ...range }, raw: true });
+    let rr = await get({ Range: 'bytes=5-2' });
+    assert.deepEqual([rr.status, rr.body.length], [200, data.length], 'bytes=5-2: the whole file');
+    rr = await get({ Range: 'bytes=0-9', 'If-Range': '"not-this-file"' });
+    assert.deepEqual([rr.status, rr.body.length], [200, data.length], 'another copy (If-Range): the whole file');
+    rr = await get({ Range: 'bytes=0-9', 'If-Range': new Date(Date.now() + 60_000).toUTCString() });
+    assert.deepEqual([rr.status, rr.body.length], [206, 10], 'the same copy (If-Range): the part');
+    rr = await get({ Range: `bytes=${data.length + 10}-` });
+    assert.equal(rr.status, 416, 'past the end: 416');
     // S-7: Mary's push address isn't Bob's to take; once it has been failing it can move
     const endpoint = 'http://127.0.0.1:1/push/shared-tablet';
     const keys = browserKeys().keys;

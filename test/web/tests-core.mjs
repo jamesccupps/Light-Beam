@@ -93,7 +93,8 @@ export default function register(test) {
     await page.evaluate('sync()');
     await ctx.sleep(500);
     const same = await page.evaluate(`window.__nodes.every(n => n.isConnected) && [...document.querySelectorAll('#thread .msg[data-id], #thread img')].every((n, i) => n === window.__nodes[i])`);
-    assert(same, 'the same message and image nodes stay on screen');
+    const which = same ? '' : await page.evaluate(`JSON.stringify(window.__nodes.map((n, i) => [n.isConnected, n === [...document.querySelectorAll('#thread .msg[data-id], #thread img')][i], n.closest('.msg')?.dataset.key || n.tagName, n.tagName === 'IMG' ? (n.getAttribute('src') || '').replace(/[?].*/, '') : '']))`);
+    assert(same, `the same message and image nodes stay on screen ${which}`);
     assert(await page.evaluate(`!document.querySelector('#thread .text').classList.contains('clamp')`), '"Show more" stays open');
     eq(files.length, 0, 'no image re-downloads');
   });

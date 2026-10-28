@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -36,7 +36,8 @@ Getting connected:
                                                    a code on a signed-in device (--password to use the password)
   beam setup [pairing-link] [--name "My Laptop"]   sign in with a pairing link instead (without the link, beam
                                                     asks for it: it then stays out of your shell history)
-  beam status                                      server, sign-in and storage details
+  beam status [--json]                             server, sign-in and storage details
+  beam logout                                      sign this computer out (beam login signs it in again)
 
 Sending:
   beam <file> [file...]   or   beam send <file>    send files
@@ -47,8 +48,10 @@ Sending:
                                                    (names or ids; default: all devices)
 
 Receiving:
-  beam get [--no-copy]                             the latest text sent to you → clipboard (and printed)
-  beam pull [folder]                               download the latest file sent to you (default: Downloads/Beam)
+  beam get [id] [--no-copy]                        the latest text sent to you (or the one with that id, from
+                                                   beam ls) → clipboard (and printed)
+  beam pull [id] [folder]                          download the latest file sent to you, or the one with that id
+                                                   (default folder: Downloads/Beam)
   beam listen                                      stay connected and receive automatically:
       --no-copy        don't put incoming text on the clipboard
       --no-save        don't save incoming files
@@ -57,8 +60,8 @@ Receiving:
       --max-save <MB>  only auto-save files up to this size (default: 1024)
 
 Everything else:
-  beam devices                                     list your devices (● online)
-  beam ls [count]                                  list recent items (with their ids)
+  beam devices [--json]                            list your devices (● online)
+  beam ls [count] [--json]                         list recent items (with their ids)
   beam rm <id> [id...]                             delete items (ids or the start of them, from beam ls)
   beam approve <code> [--yes]                      let a new device in (the code it shows)
   beam open [--pair]                               open Beam in your browser (--pair: show "Add device")
@@ -770,10 +773,23 @@ async function whoAmI(cfg) {
   return me;
 }
 
-async function getLatestText(cfg, opt) {
+// An item by the start of its id (beam ls's first column): at least 4 characters, and only one may match.
+function itemByPrefix(items, prefix) {
+  const matches = items.filter(i => i.id.startsWith(prefix.toLowerCase()));
+  if (prefix.length < 4 || matches.length !== 1) throw new Error(matches.length > 1 ? `"${prefix}" matches several items; use more of the id` : `No item starts with "${prefix}"`);
+  return matches[0];
+}
+
+const looksLikeId = s => /^[0-9a-f]{4,}$/i.test(s || '');
+const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
+
+async function getLatestText(cfg, opt, id) {
   await whoAmI(cfg);
-  const item = (await listItems(cfg)).find(i => i.kind === 'text' && isFor(cfg, i));
+  const items = await listItems(cfg);
+  // (1.4.1, audit 2026-10-11) Or the one with that id
+  const item = id ? itemByPrefix(items, id) : items.find(i => i.kind === 'text' && isFor(cfg, i));
   if (!item) throw new Error('No text has been sent to this computer yet');
+  if (item.kind !== 'text') throw new Error(`That's a file (${item.name}): beam pull ${id}`);
   const text = await fullText(cfg, item);
   if (!opt['no-copy']) await writeClipboard(text);
   await ack(cfg, item);
@@ -782,9 +798,19 @@ async function getLatestText(cfg, opt) {
   return `Copied text from ${item.device}`;
 }
 
-async function pullLatestFile(cfg, dir) {
+async function pullLatestFile(cfg, args) {
   await whoAmI(cfg);
-  const item = (await listItems(cfg)).find(i => i.kind === 'file' && isFor(cfg, i));
+  const items = await listItems(cfg);
+  // (1.4.1, audit 2026-10-11) beam pull [id] [folder]: a first word that looks like an id and isn't a folder here is one
+  let [dir] = args;
+  let item = null;
+  if (looksLikeId(args[0]) && !isDir(args[0])) {
+    item = itemByPrefix(items, args[0]);
+    dir = args[1];
+    if (item.kind !== 'file') throw new Error('That\'s a text: beam get ' + args[0]);
+  } else {
+    item = items.find(i => i.kind === 'file' && isFor(cfg, i));
+  }
   if (!item) throw new Error('No files have been sent to this computer yet');
   const dest = await download(cfg, item, path.resolve(dir || DEFAULT_DIR));
   await ack(cfg, item);
@@ -792,11 +818,17 @@ async function pullLatestFile(cfg, dir) {
   return `Saved ${path.basename(dest)}`;
 }
 
-async function list(cfg, count = 10) {
+async function list(cfg, count = 10, opt = {}) {
   await whoAmI(cfg);
   const [items, { devices }] = await Promise.all([listItems(cfg), listDevices(cfg)]);
   const name = id => (id === cfg.deviceId ? 'you' : devices.find(d => d.id === id)?.name || '?');
   const shown = items.filter(i => isFor(cfg, i) || i.from === cfg.deviceId).slice(0, count);
+  if (opt.json) {
+    return console.log(JSON.stringify(shown.map(i => ({
+      id: i.id, ts: i.ts, from: i.from, device: i.device, to: i.to || [], kind: i.kind, pinned: Boolean(i.pinned),
+      ...(i.kind === 'text' ? { text: i.text } : { name: i.name, size: i.size, mime: i.mime }),
+    })), null, 2));
+  }
   if (!shown.length) return console.log('Nothing here yet.');
   for (const item of shown) {
     const route = `${item.from === cfg.deviceId ? 'you' : item.device} → ${item.to?.length ? item.to.map(name).join(', ') : 'all'}`;
@@ -808,11 +840,7 @@ async function list(cfg, count = 10) {
 async function remove(cfg, ids) {
   if (!ids.length) throw new Error('Usage: beam rm <id> [id...]   (the ids are the first column of beam ls)');
   const items = await listItems(cfg);
-  const full = ids.map(prefix => {
-    const matches = items.filter(i => i.id.startsWith(prefix.toLowerCase()));
-    if (prefix.length < 4 || matches.length !== 1) throw new Error(matches.length > 1 ? `"${prefix}" matches several items; use more of the id` : `No item starts with "${prefix}"`);
-    return matches[0].id;
-  });
+  const full = ids.map(prefix => itemByPrefix(items, prefix).id);
   const res = await api(cfg, '/api/items/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: full }) }).catch(async err => {
     if (err.status !== 404) throw err;
     for (const id of full) await api(cfg, `/api/items/${id}`, { method: 'DELETE' }); // an older server
@@ -838,10 +866,17 @@ async function approve(cfg, code, opt) {
   return `Approved "${request.name}"`;
 }
 
-async function status(cfg) {
+async function status(cfg, opt = {}) {
   const me = await whoAmI(cfg);
   const [info, { devices }] = await Promise.all([(await api(cfg, '/api/info')).json(), listDevices(cfg)]);
   const self = devices.find(d => d.id === me.you);
+  if (opt.json) {
+    return console.log(JSON.stringify({
+      server: cfg.url, version: info.version, api: info.api, device: { id: me.you || cfg.deviceId, name: self?.name || cfg.device },
+      signedInWith: me.auth?.via === 'token' ? 'token' : 'master key', devices: { online: devices.filter(d => d.online).length, total: devices.length },
+      storage: info.storage || null, retentionDays: info.retentionDays || null, maxItems: info.maxItems || null, address: info.publicUrl || null,
+    }, null, 2));
+  }
   const lines = [
     `Server:      ${cfg.url}  (Beam ${info.version}${info.api ? `, API ${info.api}` : ''})`,
     `This device: ${self?.name || cfg.device} (${me.you || cfg.deviceId}), signed in with ${me.auth?.via === 'token' ? 'its own token' : 'the master key'}`,
@@ -854,9 +889,12 @@ async function status(cfg) {
   console.log(lines.join('\n'));
 }
 
-async function showDevices(cfg) {
+async function showDevices(cfg, opt = {}) {
   const { devices, you } = await listDevices(cfg);
   if (you && you !== cfg.deviceId) { cfg.deviceId = you; saveConfig({ deviceId: you }); }
+  if (opt.json) {
+    return console.log(JSON.stringify(devices.map(d => ({ id: d.id, name: d.name, platform: d.platform, online: Boolean(d.online), lastSeen: d.lastSeen || null, thisComputer: d.id === cfg.deviceId })), null, 2));
+  }
   for (const d of devices) {
     const self = d.id === cfg.deviceId ? '  (this computer)' : '';
     console.log(`${d.online ? '●' : '○'} ${d.name.padEnd(24)} ${d.platform.padEnd(8)} ${d.online ? 'online' : `last seen ${timeAgo(d.lastSeen)}`}${self}`);
@@ -1760,7 +1798,36 @@ async function agent(cfg, opt) {
 
 // ---------------------------------------------------------------- main
 
-const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version', 'window', 'control']);
+const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version', 'window', 'control', 'logout']);
+
+// (1.4.1, audit 2026-10-11) The command a typo was probably meant to be: at most two letters off.
+function nearestCommand(word) {
+  const dist = (a, b) => {
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      const row = [i];
+      for (let j = 1; j <= b.length; j++) row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = row;
+    }
+    return prev[b.length];
+  };
+  const best = [...COMMANDS].map(c => [c, dist(word.toLowerCase(), c)]).sort((x, y) => x[1] - y[1])[0];
+  return best && best[1] <= 2 ? best[0] : null;
+}
+
+// (1.4.1) Signs this computer out: the server forgets its sign-in, and ~/.beam.json keeps the address and the device
+// id, so beam login signs it in again as the same device.
+async function logout(cfg) {
+  if (process.env.BEAM_KEY) throw new Error('This sign-in comes from BEAM_KEY in the environment: unset it instead');
+  let note = '';
+  await api(cfg, '/api/logout', { method: 'POST' }).catch(err => {
+    if (!err.network) throw err;
+    note = ` (Beam couldn't be reached: remove ${cfg.device} in Beam's Settings → Devices too)`;
+  });
+  const saved = readConfigFile();
+  if (saved) { delete saved.key; writeConfigFile(saved); }
+  return `Signed out${note}.${linuxApp(cfg) ? ' Beam for Linux stays offline until you sign in again:  beam login' : ''}`;
+}
 
 async function main() {
   let parsed;
@@ -1781,6 +1848,7 @@ async function main() {
         'sign-in': { type: 'boolean' },
         password: { type: 'boolean' },
         yes: { type: 'boolean', short: 'y' },
+        json: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -1795,7 +1863,18 @@ async function main() {
   let [cmd, ...args] = positionals;
   if (opt.help || cmd === 'help') return console.log(HELP);
   if (cmd === 'version') return console.log(VERSION);
-  if (cmd && !COMMANDS.has(cmd)) { args = positionals; cmd = 'send'; }
+  if (cmd && !COMMANDS.has(cmd)) {
+    // (1.4.1, audit 2026-10-11) A word that's neither a command nor a file here is a typo, not a file to send ("beam
+    // stauts" used to say "No such file: stauts").
+    if (/^[a-z][a-z-]*$/i.test(cmd) && !fs.existsSync(cmd)) {
+      const near = nearestCommand(cmd);
+      console.error(`beam: "${cmd}" isn't a command, or a file here.${near ? ` Did you mean  beam ${near}?` : ''}\nRun  beam --help  for the list of commands.`);
+      process.exitCode = 2;
+      return;
+    }
+    args = positionals;
+    cmd = 'send';
+  }
 
   let result;
   try {
@@ -1812,8 +1891,8 @@ async function main() {
     else {
       requireConfig(cfg);
       switch (cmd) {
-        case 'status': await status(cfg); break;
-        case 'devices': await showDevices(cfg); break;
+        case 'status': await status(cfg, opt); break;
+        case 'devices': await showDevices(cfg, opt); break;
         case 'send': result = await sendFiles(cfg, args, opt); break;
         case 'text': {
           const text = args.join(' ');
@@ -1823,9 +1902,9 @@ async function main() {
           break;
         }
         case 'clip': result = await sendClipboard(cfg, opt); break;
-        case 'get': result = await getLatestText(cfg, opt); break;
-        case 'pull': result = await pullLatestFile(cfg, args[0]); break;
-        case 'ls': case 'list': await list(cfg, Number(args[0]) || 10); break;
+        case 'get': result = await getLatestText(cfg, opt, args[0]); break;
+        case 'pull': result = await pullLatestFile(cfg, args); break;
+        case 'ls': case 'list': await list(cfg, Number(args[0]) || 10, opt); break;
         case 'rm': result = await remove(cfg, args); break;
         case 'approve': result = await approve(cfg, args[0], opt); break;
         case 'listen': await listen(cfg, opt); break;
@@ -1834,6 +1913,7 @@ async function main() {
         case 'window': await openWindow(cfg, opt); break;
         case 'control': result = await control(cfg, args); break;
         case 'pair': await pair(cfg); break;
+        case 'logout': result = await logout(cfg); break;
       }
     }
   } catch (err) {

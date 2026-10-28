@@ -83,6 +83,8 @@ const FILE = {
   alerts: path.join(DATA_DIR, 'alerts.json'),
   history: path.join(DATA_DIR, 'history.json'), // (1.18) each device's history
   apps: path.join(DATA_DIR, 'apps.json'), // (1.21) the user's apps, and where each is installed
+  alive: path.join(DATA_DIR, 'alive.json'), // (1.27.2) when Beam last ran, and whether it stopped on purpose
+  importing: path.join(DATA_DIR, 'importing'), // (1.27.2) an import writing the data folder: Beam doesn't start meanwhile
 };
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DIST_DIR = path.resolve(env.BEAM_DIST || path.join(__dirname, 'dist'));
@@ -2373,6 +2375,7 @@ function alertSettings() {
     powerLoss: a.powerLoss !== false, // (1.18) a PC came back from a power loss, a blue screen or a forced power-off
     setup: a.setup !== false, // (1.20) the setup check found something wrong
     hardware: a.hardware !== false, // (1.22) a Raspberry Pi or another Linux computer too hot, or short of power
+    down: a.down !== false, // (1.27.2) Beam itself was down (said once it's back)
     offline: Array.isArray(a.offline) ? a.offline.filter(id => typeof id === 'string') : [],
   };
 }
@@ -2387,6 +2390,50 @@ function raiseAlert(kind, deviceId, level, text) {
   (level === 'warn' ? log.warn : log.info)(`Alert: ${text}`);
   ntfyPost({ title: level === 'warn' ? 'Beam alert' : 'Beam', message: text, tags: [level === 'warn' ? 'warning' : 'information_source'], priority: level === 'warn' ? 4 : 3 });
   return alert;
+}
+
+// (1.27.2) Beam itself down (2026-10-28: ESET installed a Node.js update by itself, its installer closed every
+// node.exe, and nothing said so for 14 minutes): a heartbeat in data/alive.json every minute, marked when Beam stops on
+// purpose. A run that ended without the mark more than 2 minutes before this start raises a `down` alert once the
+// devices are back: how long, and why when Beam can tell (Node.js changed meanwhile, the computer restarted).
+const ALIVE_MS = FAST_TIMEOUTS ? 200 : 60_000;
+const DOWN_MIN_MS = 2 * 60_000;
+
+function writeAlive(stopped = false) {
+  try { fs.writeFileSync(FILE.alive, JSON.stringify({ at: now(), version: VERSION, node: process.version, ...(stopped && { stopped: true }) })); } catch {}
+}
+
+function lastRunDown() {
+  const prev = readJsonQuiet(FILE.alive);
+  if (!prev || !Number.isFinite(prev.at) || prev.stopped || now() - prev.at < DOWN_MIN_MS) return null;
+  const why = typeof prev.node === 'string' && prev.node !== process.version
+    ? `Node.js was updated meanwhile (${prev.node.slice(0, 20)} → ${process.version}), and its installer closes the programs that use it`
+    : now() - os.uptime() * 1000 > prev.at ? 'the computer restarted'
+      : 'something closed it (it didn’t stop on its own)';
+  return { from: prev.at, back: now(), why };
+}
+
+function spanText(ms) {
+  const min = Math.max(1, Math.round(ms / 60_000));
+  if (min < 120) return `${min} minute${min === 1 ? '' : 's'}`;
+  const h = Math.round(min / 60);
+  return h < 48 ? `about ${h} hours` : `about ${Math.round(h / 24)} days`;
+}
+
+function noteDown(d) {
+  const text = `Beam was down for ${spanText(d.back - d.from)} (from about ${clockText(d.from)} to ${clockText(d.back)}): ${d.why}.`;
+  if (alertSettings().down) raiseAlert('down', null, 'warn', text);
+  else log.warn(text);
+}
+
+// (1.27.2) An import writing the data folder (its pid in data/importing): Beam doesn't start until it's done (the
+// scheduled task of install-windows.ps1 -AtBoot starts Beam every 5 minutes). A marker whose process is gone is removed.
+function importRunning() {
+  let pid;
+  try { pid = Number(JSON.parse(fs.readFileSync(FILE.importing, 'utf8')).pid); } catch { return false; }
+  try { process.kill(pid, 0); return true; } catch {}
+  try { fs.rmSync(FILE.importing, { force: true }); } catch {}
+  return false;
 }
 
 // Battery: at or below 15 % and not charging alerts once; above 25 % or charging re-arms. Storage: free space under
@@ -6762,7 +6809,7 @@ const SETTING_RULES = {
     if (!isPlainObject(v)) throw httpError(400, 'alerts must be an object like {"battery": true, "offline": ["<device id>"]}');
     const next = alertSettings();
     for (const [key, value] of Object.entries(v)) {
-      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss', 'setup', 'hardware'].includes(key)) {
+      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss', 'setup', 'hardware', 'down'].includes(key)) {
         if (typeof value !== 'boolean') throw httpError(400, `alerts.${key} must be true or false`);
         next[key] = value;
       } else if (key === 'offline') {
@@ -8449,13 +8496,21 @@ async function shutdown(code = 0) {
   await Promise.race([checkpointUploads(), sleep(5000)]).catch(() => {});
   persistDevices(); // (1.23.4) the last-seen times since the last save (DEVICE_SEEN_SAVE_MS)
   await flushAll();
+  writeAlive(true); // (1.27.2) stopped on purpose: no `down` alert at the next start
   try { if (Number(fs.readFileSync(FILE.pid, 'utf8')) === process.pid) fs.rmSync(FILE.pid, { force: true }); } catch {}
   process.exit(code);
 }
 
 function serve() {
   log.setFile(path.join(DIR.logs, 'server.log'));
+  if (importRunning()) {
+    log.warn(`An import is writing ${DATA_DIR}: Beam starts once it's done.`);
+    process.exit(0);
+  }
   openData();
+  const down = lastRunDown(); // (1.27.2) before the first heartbeat of this run
+  writeAlive();
+  setInterval(() => writeAlive(), ALIVE_MS).unref();
   moveBigTextsOut();
   loadUploads();
   reconcileFiles();
@@ -8528,6 +8583,7 @@ function serve() {
     }).catch(() => {});
     setTimeout(() => logStatus().catch(() => {}), 60_000).unref();
     setInterval(() => logStatus().catch(() => {}), 3600e3).unref();
+    if (down) setTimeout(() => noteDown(down), FAST_TIMEOUTS ? 300 : 45_000).unref(); // (1.27.2: once the devices are back)
     scheduleBackups().catch(err => log.warn(`Backups couldn't be planned: ${err.message}`));
     // (1.18) This server's own PC's history from Windows: a power loss here is known before anyone signs in.
     if (OWN_HISTORY) setTimeout(() => readOwnHistory().catch(err => log.warn(`This server's PC's history couldn't be read from Windows: ${err.message}`)), FAST_TIMEOUTS ? 300 : 15_000).unref();
@@ -8653,9 +8709,14 @@ async function assertDataFolderFree(force) {
 async function commandImport(file, flags) {
   if (!file) throw new Error('Usage: node server.js import <beam-export.tar.gz> [--force]');
   await assertDataFolderFree(flags.has('--force'));
-  const result = await importArchive(fs.createReadStream(file));
-  tidyImportedSettings({ keepPublicUrl: flags.has('--keep-public-url') });
-  console.error(`Imported ${result.files} files (${formatSize(result.bytes)}) into ${DATA_DIR}: Beam ${result.manifest.serverId}, exported ${result.manifest.created}.`);
+  fs.writeFileSync(FILE.importing, JSON.stringify({ pid: process.pid, at: now() })); // (1.27.2) Beam doesn't start meanwhile
+  try {
+    const result = await importArchive(fs.createReadStream(file));
+    tidyImportedSettings({ keepPublicUrl: flags.has('--keep-public-url') });
+    console.error(`Imported ${result.files} files (${formatSize(result.bytes)}) into ${DATA_DIR}: Beam ${result.manifest.serverId}, exported ${result.manifest.created}.`);
+  } finally {
+    fs.rmSync(FILE.importing, { force: true });
+  }
 }
 
 async function postJsonTo(url, body, headers = {}) {
@@ -8793,7 +8854,8 @@ const HELP = `Beam server ${VERSION}
 
   node server.js                     run the server
   node server.js --supervise         run it and restart it if it crashes (used by the installers)
-  node server.js stop                stop a running server cleanly (and its supervisor)
+  node server.js stop                stop a running server cleanly (and its supervisor; install-windows.ps1
+                                     -AtBoot's scheduled task starts it again within 5 minutes)
   node server.js pair                print a one-time link + QR code to add a device
   node server.js export [file]       save everything to a .tar.gz (default beam-export-<date>.tar.gz; - = stdout)
   node server.js backup              a backup now, into ${BACKUP_DIR} (Beam makes one every ${BACKUP_HOURS || '(off)'} h itself)

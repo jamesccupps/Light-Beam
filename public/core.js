@@ -155,6 +155,9 @@ let toastAction = null;
 function toast(message, opts = {}) {
   if (typeof opts === 'number') opts = { ms: opts };
   const node = $('#toast');
+  // (2026-10-28, audit 2026-10-11) An error is announced at once, the rest when the screen reader is free.
+  node.setAttribute('role', opts.error ? 'alert' : 'status');
+  node.setAttribute('aria-live', opts.error ? 'assertive' : 'polite');
   $('#toastText').textContent = message;
   const btn = $('#toastAction');
   toastAction = opts.onAction || null;

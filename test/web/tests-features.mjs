@@ -134,6 +134,37 @@ export default function register(test) {
     eq(await page.evaluate(`document.activeElement.id`), 'text', 'Esc returns to the composer');
   });
 
+  test('keyboard and screen readers (2026-10-28, audit 2026-10-11): the thread is one Tab stop and a message’s buttons join it only while it has focus; Enter opens its menu, whose reactions keys reach; arrivals read out, not the whole thread; errors as alerts', async ctx => {
+    const { page, phone, meId } = await withPhone(ctx, ['older', 'newest']);
+    await page.evaluate(`openConv('${phone.id}')`);
+    eq(await page.evaluate(`[$('#thread').getAttribute('aria-live'), $('#arrivals').getAttribute('aria-live')]`), ['off', 'polite'], 'no live thread; a live region for arrivals');
+    const stops = `[...$('#thread').querySelectorAll('.msg[data-id]')].map(m => m.tabIndex)`;
+    eq(await page.evaluate(stops), [-1, 0], 'one message in the Tab order: the newest');
+    eq(await page.evaluate(`[...$('#thread').querySelectorAll('.msg[data-id] button, .msg[data-id] a[href]')].filter(b => b.tabIndex >= 0).length`), 0, 'no message’s buttons in it');
+    await page.evaluate(`$('#text').value = ''; $('#text').focus()`);
+    await key(page, 'ArrowUp');
+    await key(page, 'ArrowUp');
+    eq(await page.evaluate(stops), [0, -1], 'the one focused last is the Tab stop');
+    eq(await page.evaluate(`[...document.activeElement.querySelectorAll('button')].every(b => b.tabIndex === 0)`), true, 'with its buttons while it has focus');
+    await key(page, 'Enter');
+    await page.waitFor(`!$('#menu').hidden && document.activeElement.classList.contains('menu-item')`, 3000, 'Enter opens its menu');
+    eq(await page.evaluate(`$$('#menu .quick-emoji').length`), 6, 'with the quick reactions');
+    await key(page, 'ArrowUp');
+    eq(await page.evaluate(`document.activeElement.textContent`), '👍', '↑ from the first item: the reactions');
+    await key(page, 'ArrowRight');
+    eq(await page.evaluate(`document.activeElement.textContent`), '❤️', '→ along them');
+    await key(page, 'ArrowDown');
+    eq(await page.evaluate(`document.activeElement === $$('#menu .menu-item:not(:disabled)')[0]`), true, '↓ back to the first item');
+    await key(page, 'Escape');
+    await phone.text('Are you there?', [meId]);
+    await page.waitFor(`$('#arrivals').textContent.endsWith(': Are you there?')`, 5000, 'an arrival is read out');
+    await page.evaluate(`toast('That didn’t work', { error: true })`);
+    eq(await page.evaluate(`[$('#toast').getAttribute('role'), $('#toast').getAttribute('aria-live')]`), ['alert', 'assertive'], 'an error: an alert');
+    await page.evaluate(`toast('Saved')`);
+    eq(await page.evaluate(`$('#toast').getAttribute('role')`), 'status', 'the rest: a status');
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('drafts are kept per conversation; "new messages" pill when scrolled up', async ctx => {
     const texts = Array.from({ length: 40 }, (_, i) => `line ${i}\n`.repeat(3));
     const { page, phone, meId } = await withPhone(ctx, texts);

@@ -42,6 +42,20 @@ function bindUI() {
     if (a && HOST && !a.hasAttribute('download')) { e.preventDefault(); openLink(a.href); }
   });
   $('#newPill').addEventListener('click', () => { scrollToBottom(true); scheduleCheckRead(); });
+  // (2026-10-28, audit 2026-10-11) One Tab stop for the thread (thread.js syncRoving): the message focused last, whose
+  // own buttons and links join the Tab order while it has focus.
+  thread.addEventListener('focusin', e => {
+    const msg = e.target.closest('.msg[data-id]');
+    if (!msg) return;
+    if (view.roving !== msg.dataset.id) { view.roving = msg.dataset.id; syncRoving(); }
+    for (const c of msg.querySelectorAll(TAB_STOPS)) c.tabIndex = 0;
+  });
+  thread.addEventListener('focusout', e => {
+    const msg = e.target.closest('.msg[data-id]');
+    if (msg && !msg.contains(e.relatedTarget)) for (const c of msg.querySelectorAll(TAB_STOPS)) c.tabIndex = -1;
+  });
+  // (2026-10-28, audit 2026-10-11) The "New messages" pill and the toast stay above the composer, however tall it grows.
+  new ResizeObserver(() => document.documentElement.style.setProperty('--composer-h', `${$('#composer').offsetHeight}px`)).observe($('#composer'));
   document.addEventListener('paste', onPaste);
   document.addEventListener('copy', onCopy);
   document.addEventListener('keydown', onKeydown);

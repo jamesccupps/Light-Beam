@@ -456,11 +456,14 @@ beam clip --to Laptop                  # send what's on the clipboard
 beam get                               # latest text sent to this computer → clipboard (--no-copy: just print it)
 beam pull                              # latest file sent to this computer → Downloads/Beam
 beam ls                                # recent items to and from this computer, with their ids
+beam get 3fa9c1 / beam pull 3fa9c1     # that text or file instead of the latest
 beam rm 3fa9c1                         # delete an item (the start of its id is enough)
 beam approve K7QM-4R2X                 # let a new device in
 beam status                            # server, sign-in and storage details
+beam ls --json                         # (also devices and status) for scripts
 beam listen                            # stay connected: text → clipboard, files → Downloads/Beam
                                        # (catches up on what arrived while it wasn't running)
+beam logout                            # sign this computer out (beam login signs it in again)
 ```
 
 Leave out `--to` to send to all devices. When Beam moves, the `beam` command follows it by itself, once the new
@@ -527,7 +530,7 @@ inbound TCP 8765 on private networks.
 
 ```bash
 node server.js                 # run it (the installers use --supervise, which restarts it if it crashes)
-node server.js stop            # stop it cleanly
+node server.js stop            # stop it cleanly (an -AtBoot task starts it again within 5 minutes)
 node server.js pair            # a one-time link + QR code to add a device (the key itself is never printed)
 node server.js export          # save everything to beam-export-<date>.tar.gz (also: npm run backup)
 node server.js help            # all commands
@@ -651,7 +654,9 @@ On Windows Server, or any PC where nobody stays signed in:
 - Install Node.js and Tailscale.
 - In Tailscale, turn on **Run unattended** (tray menu → Preferences), or it disconnects when you sign out.
 - Then run `windows\build.cmd` and `scripts\install-windows.ps1 -Server -AtBoot`. It starts Beam at boot, with no one
-  signed in, as a scheduled task that restarts it if it stops. (Without `-AtBoot`, Beam starts when you sign in.)
+  signed in, as a scheduled task that restarts it if it stops, and starts it again within 5 minutes if something closes
+  it (a Node.js update's installer does). (Without `-AtBoot`, Beam starts when you sign in.) Once Beam is back after
+  being down, an alert says for how long and why (Settings → Alerts).
 - Keep the data folder out of `Program Files`: set `BEAM_DATA=C:\ProgramData\Beam` (or another drive) in `.env`.
 - Logs are in `data\logs\`.
 

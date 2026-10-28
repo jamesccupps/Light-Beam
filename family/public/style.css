@@ -8,7 +8,7 @@
   --border: #e2ddd8;
   --text: #1b1716;
   --muted: #6b625d;
-  --faint: #978d87;
+  --faint: #766c66; /* (2026-10-28, audit 2026-10-11: #978d87 was 3.0:1 on the page; 4.7:1 now) */
   /* (1.27) a chosen accent: look.js sets --u-*; Family's own without them */
   --accent: var(--u-accent, #6d4cff);
   --accent-ink: var(--u-accent-ink, #ffffff);
@@ -30,15 +30,15 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #141216; --side: #1b181d; --surface: #1f1c22; --surface-2: #2a2630; --hover: rgba(255, 255, 255, .05);
-    --border: #332e38; --text: #ece8ef; --muted: #aaa1b0; --faint: #81788a; --accent: var(--u-accent-d, #9b85ff); --accent-ink: var(--u-accent-ink-d, #141216);
-    --accent-soft: var(--u-accent-soft-d, #2c2448); --mention: #3a3014; --mention-bar: #f2c14e; --danger: #ff7b7b; --ok: #4ade80; --unread: #ff6b5c;
+    --border: #332e38; --text: #ece8ef; --muted: #aaa1b0; --faint: #8c8395; --accent: var(--u-accent-d, #9b85ff); --accent-ink: var(--u-accent-ink-d, #141216);
+    --accent-soft: var(--u-accent-soft-d, #2c2448); --mention: #3a3014; --mention-bar: #f2c14e; --danger: #ff7b7b; --ok: #4ade80; --unread: #ff6b5c; --unread-ink: #141216;
     --shadow: none; --menu-shadow: 0 12px 32px rgba(0, 0, 0, .6);
   }
 }
 :root[data-theme="dark"] {
   --bg: #141216; --side: #1b181d; --surface: #1f1c22; --surface-2: #2a2630; --hover: rgba(255, 255, 255, .05);
-  --border: #332e38; --text: #ece8ef; --muted: #aaa1b0; --faint: #81788a; --accent: var(--u-accent-d, #9b85ff); --accent-ink: var(--u-accent-ink-d, #141216);
-  --accent-soft: var(--u-accent-soft-d, #2c2448); --mention: #3a3014; --mention-bar: #f2c14e; --danger: #ff7b7b; --ok: #4ade80; --unread: #ff6b5c;
+  --border: #332e38; --text: #ece8ef; --muted: #aaa1b0; --faint: #8c8395; --accent: var(--u-accent-d, #9b85ff); --accent-ink: var(--u-accent-ink-d, #141216);
+  --accent-soft: var(--u-accent-soft-d, #2c2448); --mention: #3a3014; --mention-bar: #f2c14e; --danger: #ff7b7b; --ok: #4ade80; --unread: #ff6b5c; --unread-ink: #141216;
   --shadow: none; --menu-shadow: 0 12px 32px rgba(0, 0, 0, .6);
 }
 
@@ -131,7 +131,7 @@ a { color: var(--accent); }
 .chan .glyph { color: var(--faint); }
 .chan.muted-chan { opacity: .6; }
 .badge {
-  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--unread); color: #fff; font-size: 12px;
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--unread); color: var(--unread-ink, #fff); /* (2026-10-28: white on the dark red was 2.8:1) */ font-size: 12px;
   font-weight: 700; display: inline-grid; place-items: center;
 }
 .badge.soft { background: var(--surface-2); color: var(--muted); }

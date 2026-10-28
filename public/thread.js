@@ -25,6 +25,7 @@ const view = {
   newCount: 0,
   highlight: null,
   filled: false,        // has this thread shown any messages yet (until then it starts at the newest WINDOW)
+  roving: '',           // (2026-10-28) the message in the Tab order (the one focused last; else the newest)
 };
 const acked = new Set();
 const forcedPreviews = new Set(); // big photos the user asked to preview anyway
@@ -323,6 +324,7 @@ function renderThread({ scroll = 'keep' } = {}) {
   desired.push(...pending);
   if (!list.length && !pending.length) desired.push({ key: 'empty', make: makeEmpty });
   reconcile(box, desired);
+  syncRoving();
   const older = view.nodes.get('older');
   if (older) older.querySelector('span').textContent = `${plural(view.start, 'earlier message')}`;
   if (scroll === 'bottom' || (scroll === 'keep' && wasBottom)) scrollToBottom();
@@ -468,7 +470,33 @@ function buildMsg(item) {
   const meta = el('div', { class: 'meta' });
   fillMeta(meta, item);
   node.append(...[bubble, reactionsRow(item), meta].filter(Boolean));
+  tameTabs(node);
   return node;
+}
+
+// (2026-10-28, audit 2026-10-11: "hundreds of Tab stops between header and composer") The thread is one Tab stop: one
+// message is in the Tab order (the one focused last, else the newest), and a message's own buttons, links and players
+// only while it has focus (app.js); ↑ ↓ Home End move between messages (extras.js).
+const TAB_STOPS = 'a[href], button, video, audio';
+
+function tameTabs(root) {
+  const open = Boolean(root.closest?.('.msg')?.contains(document.activeElement));
+  for (const c of root.querySelectorAll(TAB_STOPS)) c.tabIndex = open ? 0 : -1;
+}
+
+function syncRoving() {
+  const msgs = $('#thread').querySelectorAll('.msg[data-id]');
+  if (!msgs.length) return;
+  const want = (view.roving && view.nodes.get(`m:${view.roving}`)) || msgs[msgs.length - 1];
+  for (const m of msgs) { const t = m === want ? 0 : -1; if (m.tabIndex !== t) m.tabIndex = t; }
+}
+
+// (2026-10-28, audit 2026-10-11) A message that arrives in the open conversation is read out (the thread itself isn't
+// a live region: it read the whole conversation when one opened).
+function announceArrival(item) {
+  const box = $('#arrivals');
+  box.textContent = '';
+  requestAnimationFrame(() => { box.textContent = `${senderName(item)}: ${preview(item)}`; });
 }
 
 // (1.14.0) A reply's quote of what it answers (as it was then); a tap goes there.
@@ -579,6 +607,7 @@ function fillMeta(meta, item) {
   if (mine) parts.push(item.sending ? el('span', { class: 'tick', title: 'Sending…' }, icon('clock')) : tick(item));
   if (!item.sending) parts.push(el('span', { class: 'actions' }, ...quickActions(item)));
   meta.replaceChildren(...parts);
+  tameTabs(meta);
 }
 
 function quickActions(item) {
@@ -658,6 +687,7 @@ function onItemAdded(item, { fromMe = false, quiet = false } = {}) {
       node.addEventListener('animationend', () => node.classList.remove('enter'), { once: true });
     }
     if (!fromMe && !bottom && isForMe(item)) showNewPill(1);
+    if (!fromMe && !quiet && isForMe(item)) announceArrival(item);
   }
   renderSidebar();
   if (item.pinned || convsOf(item).includes(current)) renderHeader();

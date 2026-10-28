@@ -406,7 +406,7 @@ function applyItem(raw, since) {
   const changed = moved || content || !sameJson(old.delivered, item.delivered) || old.pinned !== item.pinned || !sameJson(old.thumb, item.thumb)
     || old.truncated !== item.truncated;
   if (!changed) return item.id;
-  const thumbChanged = !sameJson(old.thumb, item.thumb);
+  const thumbChanged = !sameJson(old.thumb, item.thumb) && !(!old.thumb && thumbsSentHere.has(item.id)); // (2026-10-28: sent from here, made from what it shows)
   if (item.kind === 'text' && old.text !== item.text) view.fullText.delete(item.id);
   if (!item.reactions) delete old.reactions;
   Object.assign(old, item);
@@ -473,7 +473,7 @@ function onEventDelete(id) {
 function onEventUpdate(data) {
   const item = itemMap.get(data.id);
   if (!item) return;
-  const thumbChanged = 'thumb' in data && !sameJson(item.thumb, data.thumb);
+  const thumbChanged = 'thumb' in data && !sameJson(item.thumb, data.thumb) && !(!item.thumb && thumbsSentHere.has(item.id)); // (2026-10-28)
   const pinChanged = 'pinned' in data && item.pinned !== data.pinned;
   // (1.14.0) reactions and edits change the bubble itself
   const textChanged = 'text' in data && data.text !== item.text;
