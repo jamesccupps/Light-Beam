@@ -958,7 +958,7 @@ namespace Beam
         static object[] MonitorList(DesktopLayout layout)
         {
             var screens = new List<object>();
-            foreach (var x in layout.Screens)
+            foreach (var x in layout.Screens.OrderBy(sc => layout.SourceRank(sc.Id))) // (1.19.2: as they're named, the main one first)
             {
                 var o = new Dictionary<string, object>();
                 o["id"] = x.Id;

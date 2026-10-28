@@ -160,6 +160,17 @@ namespace Beam
             }
             Section("several monitors and mixed DPI: physical pixels on the shown screen, clamped to it", f0);
 
+            // ---------------------------------------------------------------- the capture's names for screens (1.19.2)
+            f0 = failures;
+            Check(Layout(Scr(0, 0, 0, 1920, 1080, true, 1.0)).SourceName(0) == "Entire screen", "one screen: Entire screen");
+            var docked = Layout(Scr(0, 0, 0, 2256, 1504, false, 1.5), Scr(1, 2256, 0, 2560, 1440, true, 1.0));
+            Check(docked.SourceName(1) == "Screen 1" && docked.SourceName(0) == "Screen 2", "the main screen is Windows' second (Robin Laptop docked): it is Screen 1, the panel Screen 2");
+            var deskTwo = Layout(Scr(0, 0, 0, 2560, 1440, true, 1.25), Scr(1, 2560, 0, 1920, 1080, false, 1.0));
+            Check(deskTwo.SourceName(0) == "Screen 1" && deskTwo.SourceName(1) == "Screen 2", "the main screen first in Windows' order: as before");
+            var threeMainLast = Layout(Scr(0, 0, 0, 1920, 1080, false, 1.0), Scr(1, 1920, 0, 1920, 1080, false, 1.0), Scr(2, 3840, 0, 1920, 1080, true, 1.0));
+            Check(threeMainLast.SourceName(2) == "Screen 1" && threeMainLast.SourceName(0) == "Screen 2" && threeMainLast.SourceName(1) == "Screen 3", "three, the main one last: it first, then the others in order");
+            Section("the capture's screen names: the main screen is Screen 1, as Chromium numbers them", f0);
+
             // ---------------------------------------------------------------- buttons, wheel, move order
             f0 = failures;
             {
