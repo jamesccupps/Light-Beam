@@ -1380,6 +1380,7 @@ function rcOnCtl(data) {
       if (Number.isFinite(m.at) && m.at <= Date.now()) rc.rtt = Date.now() - m.at;
       break;
     case 'bye':
+      if (rc.switching) break; // (the old screen's page, before the new one offers: the switch has its own timeout)
       // The session's end comes from the server (rc-end). Unless the server forgot it (a restart: the PC's lease got
       // 404): then nothing comes, and a new session finds out whether the PC is back.
       rcRelease();

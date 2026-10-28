@@ -82,6 +82,7 @@ function fakePcMain(cfg) {
     if (pcs.decline) { await api('POST', `/api/rc/sessions/${req.id}/end`, { reason: 'declined' }); return; }
     pcs.closePeer();
     pcs.session = { id: req.id, viewer: req.viewer, from: req.from };
+    pcs.monitor = (pcs.monitors.find(x => x.primary) || pcs.monitors[0]).id; // (as Beam's PC: a session starts on its main screen)
     await api('POST', `/api/rc/sessions/${req.id}/lease`);
     if (pcs.offer) await pcs.connect();
   };
@@ -269,7 +270,8 @@ function fakePcMain(cfg) {
       pcs.monitors = m.on ? cfg.monitors.map(x => (x.id === pcs.monitor ? { ...x, w: 1920, h: 1080, scale: 1.25 } : x)) : cfg.monitors;
       pcs.send('ctl', { t: 'display', monitors: pcs.monitors, monitor: pcs.monitor, fitted: m.on === true });
     }
-    else if (m.t === 'monitor' && pcs.monitors.some(x => x.id === m.id)) { pcs.monitor = m.id; pcs.connect(); }
+    // (as Beam's PC: the old screen's page says bye, then the new one starts in a browser of its own, ~6 s; 3 s here)
+    else if (m.t === 'monitor' && pcs.monitors.some(x => x.id === m.id)) { pcs.monitor = m.id; pcs.send('ctl', { t: 'bye', reason: 'monitor' }); setTimeout(() => pcs.connect(), 3000); }
     else if (m.t === 'lock') pcs.end('locked');
   };
 }
@@ -885,9 +887,11 @@ export default function register(test) {
     // Another screen: the PC starts over as a new connection (a new o= id); hello again with its monitor.
     const pcBefore = await page.evaluate('(window.__oldPc = rc.pc, true)');
     assert(pcBefore, 'kept');
+    const switchSession = await page.evaluate('rc.session.id');
     await page.evaluate(`rcSwitchMonitor(rc.monitors[1]); true`);
     eq(await page.evaluate(`[rc.switching?.name, document.querySelector('.rc-card').textContent.includes('Switching to Screen 2')]`), ['Screen 2', true], 'Switching to Screen 2…');
     await waitRc(page, pc, `rc.state === 'live' && !rc.switching && rc.monitor === 1 && rc.verified && rc.frames && Boolean(rc.hostHello)`, 20000, 'on Screen 2');
+    eq(await page.evaluate('rc.session.id'), switchSession, 'the same session (the old screen’s bye starts no new one)');
     eq(await page.evaluate(`[rc.pc !== window.__oldPc, window.__oldPc.connectionState, rc.origin !== ${JSON.stringify(origin)}]`), [true, 'closed', true], 'a fresh peer connection for the new o= id');
     const p = await at(page, 0.5, 0.5);
     const before = (await rec(pc, 'mv')).length;
