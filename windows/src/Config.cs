@@ -33,6 +33,7 @@ namespace Beam
         public bool OpenLinks = true;          // clicking a notification about a link opens the link
         public bool AutoOpenLinks;             // a link sent to this PC opens in the browser at once
         public bool PhonePopupText = true;     // phone notification balloons show the message (off: app and count only)
+        public bool NativeToasts = true;       // (1.21) Windows' own notifications with Reply, Copy, Open (off: balloons)
         public bool AllowRemoteControl;        // Beam 1.6 "Allow remote control": off by default, turned on only at this PC
         public string RcBannerSpot;            // Beam 1.7.4: where the remote-control banner was put ("screen|fx|fy", RcBannerPlace)
         public bool RcKvmBannerHidden;         // Beam 1.12: a kvm session's banner folded into the tray (chosen at this PC)
@@ -212,6 +213,7 @@ namespace Beam
                 c.OpenLinks = Json.Bool(d, "openLinks", true);
                 c.AutoOpenLinks = Json.Bool(d, "autoOpenLinks", false);
                 c.PhonePopupText = Json.Bool(d, "phonePopupText", true);
+                c.NativeToasts = Json.Bool(d, "nativeToasts", true);
                 c.AllowRemoteControl = Json.Bool(d, "allowRemoteControl", false);
                 c.RcBannerSpot = Json.Str(d, "rcBannerSpot");
                 c.RcKvmBannerHidden = Json.Bool(d, "rcKvmBannerHidden", false);
@@ -394,6 +396,7 @@ namespace Beam
                 d["openLinks"] = OpenLinks;
                 d["autoOpenLinks"] = AutoOpenLinks;
                 d["phonePopupText"] = PhonePopupText;
+                d["nativeToasts"] = NativeToasts;
                 d["allowRemoteControl"] = AllowRemoteControl;
                 if (!string.IsNullOrEmpty(RcBannerSpot)) d["rcBannerSpot"] = RcBannerSpot; else d.Remove("rcBannerSpot");
                 if (RcKvmBannerHidden) d["rcKvmBannerHidden"] = true; else d.Remove("rcKvmBannerHidden");

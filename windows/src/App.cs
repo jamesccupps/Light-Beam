@@ -154,6 +154,7 @@ namespace Beam
             tray.Visible = !cfg.Quiet;
             notifier = new Notifier(tray, () => ShowMain(null, null), cfg.Quiet);
             notifier.OpenItem = OpenItem;
+            Toasts.Start(this); // (1.21) Windows' own notifications, when Windows has them on for Beam
             phone = new PhoneNotices(this, notifier);
             phoneGrace = new Timer();
             phoneGrace.Interval = 10000;
@@ -1868,11 +1869,26 @@ namespace Beam
                 if (link && Cfg.OpenLinks) { string url = text.Trim(); click = () => FileUtil.OpenUrl(url); hint = "Click to open the link"; }
                 else if (!copied) { string full = text; click = () => { if (ClipPayload.SetText(full, Cfg.ClipboardHistory)) notifier.Show("Copied", Fmt.OneLine(full, 80), null, "copied"); }; hint = "Click to copy it"; }
                 else { click = () => OpenItem(id); hint = "Copied to the clipboard"; }
-                notifier.ShowItem((link ? "Link from " : "Text from ") + SenderName(it), body + "\n" + hint, click, "text item " + id, id);
+                // (1.21) Windows' own: Reply to the sender, Copy (unless it's copied already), Open link
+                var extras = ReplyExtras(it, copied ? body + "\nCopied to the clipboard" : body);
+                string all = text;
+                if (link) { string url = text.Trim(); extras.Buttons.Add(new ToastButton("Open link", () => FileUtil.OpenUrl(url))); }
+                if (!copied) extras.Buttons.Add(new ToastButton("Copy", () => { if (ClipPayload.SetText(all, Cfg.ClipboardHistory)) Log.Write("Notification: copied " + id); }));
+                notifier.ShowItem((link ? "Link from " : "Text from ") + SenderName(it), body + "\n" + hint, click, "text item " + id, id, extras);
             }
             St.MarkHandled(it.Id);
             receiving.Remove(it.Id);
             Ack(it);
+        }
+
+        // (1.21) A notification's Reply box goes to whoever sent the item (a device of this Beam's, not this PC), with `text`
+        // (the notification's lines without a balloon's "Click to …").
+        ToastExtras ReplyExtras(Item it, string text)
+        {
+            var x = new ToastExtras();
+            x.Text = text;
+            if (!string.IsNullOrEmpty(it.From) && it.From != Me && Config.ValidId(it.From)) { x.ReplyTo = it.From; x.ReplyName = SenderName(it); }
+            return x;
         }
 
         void ReceiveFile(Item it)
@@ -1885,7 +1901,13 @@ namespace Beam
             }
             string why = !Cfg.AutoSave ? "Click to save it." : "It's larger than " + Fmt.Size(Cfg.MaxSaveBytes) + ". Click to save it.";
             string id = it.Id;
-            if (!Watching(it)) notifier.ShowItem("File from " + from, it.Name + " (" + Fmt.Size(it.Size) + ")\n" + why, () => SaveItemById(id, "reveal", null), "file item " + id, id);
+            if (!Watching(it))
+            {
+                var extras = ReplyExtras(it, it.Name + " (" + Fmt.Size(it.Size) + ")");
+                extras.Buttons.Add(new ToastButton("Open", () => OpenItemFile(id, "open")));
+                extras.Buttons.Add(new ToastButton("Save", () => SaveItemById(id, "reveal", null)));
+                notifier.ShowItem("File from " + from, it.Name + " (" + Fmt.Size(it.Size) + ")\n" + why, () => SaveItemById(id, "reveal", null), "file item " + id, id, extras);
+            }
             St.MarkHandled(it.Id);
             receiving.Remove(it.Id);
             Ack(it);
@@ -1960,8 +1982,13 @@ namespace Beam
                     // other files show in their folder.
                     bool media = it.Mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase) || it.Mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
                     if (!Watching(it))
+                    {
+                        var extras = ReplyExtras(it, Fmt.Size(it.Size));
+                        extras.Buttons.Add(new ToastButton("Open", () => FileUtil.Open(path)));
+                        extras.Buttons.Add(new ToastButton("Show in folder", () => FileUtil.ShowInFolder(path)));
                         notifier.ShowItem("Saved " + it.Name + " from " + SenderName(it), Fmt.Size(it.Size) + (media ? " · Click to see it in Beam" : " · Click to show it in the folder"),
-                            media ? (Action)(() => OpenItem(itemId)) : () => FileUtil.ShowInFolder(path), "file item " + it.Id + " saved", it.Id);
+                            media ? (Action)(() => OpenItem(itemId)) : () => FileUtil.ShowInFolder(path), "file item " + it.Id + " saved", it.Id, extras);
+                    }
                     St.MarkHandled(it.Id);
                     Ack(it);
                 }
@@ -2429,6 +2456,7 @@ namespace Beam
             s["autoUpdate"] = Cfg.AutoUpdate;
             s["phoneNotifications"] = PhoneNotificationsOn; // null: the server doesn't have phone notifications (or no list yet)
             s["phonePopupText"] = Cfg.PhonePopupText;       // this PC only: balloons show the message, else app and count
+            s["nativeToasts"] = Cfg.NativeToasts;           // (1.21) Windows' own notifications with buttons
             // Beam 1.6 (null: the server has no remote control). The page can turn it off, never on; the list is read-only.
             s["allowRemoteControl"] = ServerHas("remote-control") ? (object)Cfg.AllowRemoteControl : null;
             // Beam 1.21 (null: the server has no apps). As for remote control: the page can turn it off, never on.
@@ -2552,6 +2580,7 @@ namespace Beam
             if (s.ContainsKey("openLinks")) Cfg.OpenLinks = Json.Bool(s, "openLinks", Cfg.OpenLinks);
             if (s.ContainsKey("autoOpenLinks")) Cfg.AutoOpenLinks = Json.Bool(s, "autoOpenLinks", Cfg.AutoOpenLinks);
             if (s.ContainsKey("phonePopupText")) Cfg.PhonePopupText = Json.Bool(s, "phonePopupText", Cfg.PhonePopupText);
+            if (s.ContainsKey("nativeToasts")) { bool v = Json.Bool(s, "nativeToasts", Cfg.NativeToasts); if (v != Cfg.NativeToasts) { Cfg.NativeToasts = v; Toasts.Start(this); } }
             if (s.ContainsKey("autoUpdate")) Cfg.AutoUpdate = Json.Bool(s, "autoUpdate", Cfg.AutoUpdate);
             if (s.ContainsKey("sendToMenu")) { bool v = Json.Bool(s, "sendToMenu", Cfg.SendToMenu); integrations |= v != Cfg.SendToMenu; Cfg.SendToMenu = v; }
             if (s.ContainsKey("outbox")) { bool v = Json.Bool(s, "outbox", Cfg.Outbox); integrations |= v != Cfg.Outbox; Cfg.Outbox = v; }
@@ -2643,6 +2672,29 @@ namespace Beam
         }
 
         // (tests, a custom --config only) The Shared folders window: open, shot:<png>, save, close.
+        // Tests (1.21): "on": notifications as Windows' own would be, described in beam.log; "click:<arguments>|<reply>": a click
+        // on one as Windows would report it.
+        void ToastsTest(string cmd)
+        {
+            if (cmd == "on") { Toasts.Simulate = true; Log.Write("Notifications (test): described, not shown"); return; }
+            if (!cmd.StartsWith("click:")) return;
+            string rest = cmd.Substring(6);
+            int bar = rest.IndexOf('|');
+            var input = new Dictionary<string, string>();
+            if (bar >= 0) input["reply"] = rest.Substring(bar + 1);
+            Toasts.Activated(bar >= 0 ? rest.Substring(0, bar) : rest, input);
+        }
+
+        // (1.21) A notification's Reply: the text to that device, as from the chat; a word here if it didn't go.
+        public async void ReplyFromNotification(string to, string text)
+        {
+            string err = await SendText(text, new List<string> { to });
+            Log.Write("Notification: a reply to " + NameOf(to) + (err == null ? " sent" : " not sent (" + err + ")"));
+            if (err != null) notifier.Show("Couldn't send the reply", err, () => ShowMain(to, null), "reply failed");
+        }
+
+        public void OpenItemById(string itemId) { OpenItem(itemId); }
+
         void SharesTest(string cmd)
         {
             if (cmd == "open") { ShowSharedFolders(null); Log.Write("Shared folders (test): " + (sharesForm != null ? "open, " + sharesForm.Describe() : "not opened")); return; }
@@ -2897,6 +2949,7 @@ namespace Beam
             if (o.TestFamily != null && Cfg.CustomPath) FamilyTest(o.TestFamily);
             if (o.TestApps != null && Cfg.CustomPath) Apps.TestCommand(o.TestApps);
             if (o.TestShares != null && Cfg.CustomPath) SharesTest(o.TestShares);
+            if (o.TestToasts != null && Cfg.CustomPath) ToastsTest(o.TestToasts);
             if (o.RemoveApp != null) Apps.RemoveFromWindows(o.RemoveApp); // (1.16: Windows' Installed apps → Uninstall)
         }
 
@@ -3403,6 +3456,7 @@ namespace Beam
             public long Newest;   // ...and how new its newest notification is (higher: newer)
             public ToolTipIcon Icon;
             public string ItemId; // about an item that came (1.7.1)
+            public ToastExtras Extras; // (1.21) its buttons and Reply box, for Windows' own notifications
         }
 
         // A phone notification's balloon. Merged with others due at the same time, a click still opens the Phone panel
@@ -3478,8 +3532,14 @@ namespace Beam
         // About an item that came: on its own it does onClick; merged with others, a click opens the newest such item.
         public void ShowItem(string title, string text, Action onClick, string logLine, string itemId)
         {
+            ShowItem(title, text, onClick, logLine, itemId, null);
+        }
+
+        public void ShowItem(string title, string text, Action onClick, string logLine, string itemId, ToastExtras extras)
+        {
             Show(title, text, onClick, logLine, false, ToolTipIcon.None);
             pending[pending.Count - 1].ItemId = itemId;
+            pending[pending.Count - 1].Extras = extras;
         }
 
         void Flush()
@@ -3488,12 +3548,16 @@ namespace Beam
             if (pending.Count == 0) return;
             string title, text;
             var tipIcon = ToolTipIcon.None;
+            ToastExtras extras = null;
+            string itemOf = null;
             if (pending.Count == 1)
             {
                 title = pending[0].Title;
                 text = pending[0].Text;
                 click = pending[0].Click;
                 tipIcon = pending[0].Icon;
+                extras = pending[0].Extras;
+                itemOf = pending[0].ItemId;
             }
             else if (pending.All(p => p.Phone))
             {
@@ -3512,8 +3576,17 @@ namespace Beam
                 else click = openMain;
             }
             Log.Write("Notification: " + string.Join(", ", pending.Select(p => p.LogLine)));
+            if (itemOf == null && pending.Count > 1) itemOf = pending.LastOrDefault(p => p.ItemId != null) != null ? pending.Last(p => p.ItemId != null).ItemId : null;
             pending.Clear();
             lastClick = click;
+            // (1.21) Windows' own notification when it's in use (its click remembered with it); else the balloon
+            if (Toasts.Simulate || (!quiet && Toasts.Available))
+            {
+                var a = click;
+                click = null;
+                if (Toasts.Show(title, text, a, extras, itemOf)) return;
+                click = a;
+            }
             if (quiet) { click = null; return; }
             if (title.Length > 63) title = title.Substring(0, 62) + "…";
             if (string.IsNullOrEmpty(text)) text = " ";

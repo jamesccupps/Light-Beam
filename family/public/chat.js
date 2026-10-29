@@ -95,7 +95,9 @@ export function conversationView(channelId, { jump = null } = {}) {
 
   // ---------------------------------------------------------------- the list
 
-  const list = h('div', { class: 'messages', role: 'log', 'aria-live': 'polite', 'aria-label': 'Messages', tabindex: '0' });
+  // (1.29) Not a live region (it read the whole conversation out when one opened): an arrival is read on its own.
+  const list = h('div', { class: 'messages', role: 'log', 'aria-live': 'off', 'aria-label': 'Messages', tabindex: '0' });
+  const arrivals = h('div', { class: 'sr-only', 'aria-live': 'polite', 'aria-atomic': 'true' });
   const jumpBtn = h('button', { class: 'jump', type: 'button', hidden: true, onclick: () => jumpToLatest() }, icon('arrow-down', 'i small'), h('span', {}, 'Latest messages'));
   const typingLine = h('div', { class: 'typing', 'aria-live': 'polite' });
   const els = new Map(); // message id -> element
@@ -113,37 +115,142 @@ export function conversationView(channelId, { jump = null } = {}) {
       h('p', { class: 'muted' }, ch.kind === 'text' ? `This is the start of #${ch.name}.${ch.topic ? ` ${ch.topic}` : ''}` : ch.kind === 'dm' ? `This is the beginning of your conversation with ${other?.name || 'them'}.` : 'This is the beginning of the group.'));
   }
 
+  // (1.29, the 2026-10-11 audit: "it redraws a whole conversation on each send") Keyed: a message that hasn't changed
+  // keeps its element (its place, a playing video, the focus), so a send, a deletion or a page of older messages only
+  // makes what's new or changed; the rest stays where it is in the page.
+  const keyed = new Map(); // message id -> { el, m, sig }: m is the store's own object (an edit changes it in place)
+  const dayEls = new Map(); // day -> its separator
+  const newLine = h('div', { class: 'new-line', id: 'new-line' }, 'New');
+  const sigOf = (m, prev) => [continues(m, prev), Boolean(m.pending), Boolean(m.failed), m.edited || 0, m.reply?.deleted ? 1 : 0, selecting?.has(m.id) ? 1 : 0].join('|');
+  const dayEl = m => {
+    const day = dayKey(m.created);
+    let el = dayEls.get(day);
+    if (!el) dayEls.set(day, (el = h('div', { class: 'day', role: 'separator' }, dayLabel(m.created))));
+    return el;
+  };
+
   function renderAll() {
-    els.clear();
     const nodes = [];
     if (!cache.more.before && cache.loaded) nodes.push(startEl());
     else if (cache.loaded) nodes.push(h('div', { class: 'loading-more' }, 'Loading earlier messages…'));
+    const seen = new Set();
     let prev = null;
     let lineShown = false;
+    let refocus = null;
+    els.clear();
     for (const m of cache.list) {
-      if (!prev || dayKey(prev.created) !== dayKey(m.created)) nodes.push(h('div', { class: 'day', role: 'separator' }, dayLabel(m.created)));
+      if (!prev || dayKey(prev.created) !== dayKey(m.created)) nodes.push(dayEl(m));
       if (readAtOpen && !lineShown && m.id > readAtOpen && m.author !== state.me.id && !m.pending) {
-        nodes.push(h('div', { class: 'new-line', id: 'new-line' }, 'New'));
+        nodes.push(newLine);
         lineShown = true;
       }
-      const el = msgEl(m, prev);
-      els.set(m.id, el);
-      nodes.push(el);
+      const sig = sigOf(m, prev);
+      let k = keyed.get(m.id);
+      if (!k || k.m !== m || k.sig !== sig) {
+        const el = msgEl(m, prev);
+        if (k?.el.contains(document.activeElement)) refocus = el;
+        keyed.set(m.id, (k = { el, m, sig }));
+      }
+      els.set(m.id, k.el);
+      seen.add(m.id);
+      nodes.push(k.el);
       prev = m;
     }
-    fill(list, ...nodes);
+    for (const id of [...keyed.keys()]) if (!seen.has(id)) keyed.delete(id);
+    const days = new Set(cache.list.map(m => dayKey(m.created)));
+    for (const d of [...dayEls.keys()]) if (!days.has(d)) dayEls.delete(d);
+    place(nodes);
+    syncRoving();
+    refocus?.focus({ preventScroll: true });
   }
 
-  // One message's element again (an edit, a reaction), keeping its place.
+  // The list's children made `nodes`, moving and removing as little as it can (a node kept is never taken out).
+  function place(nodes) {
+    const want = new Set(nodes);
+    let cur = list.firstChild;
+    for (const n of nodes) {
+      while (cur && cur !== n && !want.has(cur)) { const next = cur.nextSibling; cur.remove(); cur = next; }
+      if (cur === n) { cur = cur.nextSibling; continue; }
+      list.insertBefore(n, cur);
+    }
+    while (cur) { const next = cur.nextSibling; cur.remove(); cur = next; }
+  }
+
+  // One message's element again (an edit, a reaction), keeping its place, and the focus where it was in it.
   function refresh(id) {
     const old = els.get(id);
     const i = cache.list.findIndex(m => m.id === id);
     if (!old || i < 0) return renderAll();
-    const el = msgEl(cache.list[i], cache.list[i - 1]);
     if (editing?.id === id) return; // (the editor stays until saved or cancelled)
+    const el = msgEl(cache.list[i], cache.list[i - 1]);
+    const focused = old.contains(document.activeElement) ? document.activeElement : null;
+    const key = focused && focused !== old ? focused.dataset.key || focused.getAttribute('aria-label') : null;
     old.replaceWith(el);
     els.set(id, el);
+    keyed.set(id, { el, m: cache.list[i], sig: sigOf(cache.list[i], cache.list[i - 1]) });
+    syncRoving();
+    if (focused) {
+      const same = key && [...el.querySelectorAll('button, a')].find(x => (x.dataset.key || x.getAttribute('aria-label')) === key);
+      if (same) same.removeAttribute('tabindex');
+      (same || el).focus({ preventScroll: true });
+    }
   }
+
+  // ---------------------------------------------------------------- the keyboard (1.29, the 2026-10-11 audit)
+  // One Tab stop for the list: the message focused last (else the newest). ↑ ↓ Home End move between messages; Enter,
+  // the menu key or Shift+F10 opens a message's menu. A message's own buttons and links are in the Tab order only
+  // while it has the focus (else Tab would walk through every one of them), and its tools show while it has it.
+
+  let roving = null; // the message the Tab stop is on, once one was focused
+  function syncRoving() {
+    if (!roving || !keyed.has(roving)) roving = null;
+    const at = roving || cache.list.at(-1)?.id || null;
+    for (const [id, k] of keyed) k.el.tabIndex = id === at ? 0 : -1;
+    list.tabIndex = at && keyed.has(at) ? -1 : 0;
+  }
+  // A message's buttons and links out of (true) or back in (false) the Tab order.
+  function tame(el, out) {
+    for (const x of el.querySelectorAll('a, button, audio, video')) {
+      if (out) x.tabIndex = -1; else x.removeAttribute('tabindex');
+    }
+  }
+  list.addEventListener('focusin', e => {
+    const el = e.target.closest?.('.msg[data-id]');
+    if (!el || !list.contains(el)) return;
+    if (roving !== el.dataset.id) { roving = el.dataset.id; syncRoving(); }
+    tame(el, false);
+  });
+  list.addEventListener('focusout', e => {
+    const el = e.target.closest?.('.msg[data-id]');
+    if (el && !el.contains(e.relatedTarget)) tame(el, true);
+  });
+  list.addEventListener('keydown', e => {
+    const el = e.target.closest?.('.msg[data-id]');
+    if (!el || !list.contains(el) || e.target.closest('textarea, input')) return;
+    const all = [...list.querySelectorAll('.msg[data-id]')];
+    const i = all.indexOf(el);
+    const go = j => {
+      const to = all[Math.max(0, Math.min(all.length - 1, j))];
+      if (!to) return;
+      e.preventDefault();
+      to.focus();
+      to.scrollIntoView({ block: 'nearest' });
+    };
+    const self = e.target === el;
+    if (self && e.key === 'ArrowDown') go(i + 1);
+    else if (self && e.key === 'ArrowUp') go(i - 1);
+    else if (self && e.key === 'Home') go(0);
+    else if (self && e.key === 'End') go(all.length - 1);
+    else if ((self && e.key === 'Enter') || e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      const m = cache.byId.get(el.dataset.id);
+      if (!m || m.pending || isSystem(m)) return;
+      e.preventDefault();
+      messageMenu(m, el, el);
+    } else if (e.key === 'Escape' && !self) {
+      e.preventDefault();
+      el.focus();
+    }
+  });
 
   function msgEl(m, prev) {
     if (isSystem(m)) {
@@ -186,6 +293,7 @@ export function conversationView(channelId, { jump = null } = {}) {
         iconBtn('smile', 'Add a reaction', e => { e.stopPropagation(); reactWithPicker(m, e.currentTarget); }),
         iconBtn('reply', 'Reply', () => startReply(m)),
         iconBtn('more', 'More', e => { e.stopPropagation(); messageMenu(m, e.currentTarget, el); })));
+      el.setAttribute('aria-label', `${author.name}, ${fullTime(m.created)}`); // (1.29: what a screen reader says first)
       longPress(el, point => messageMenu(m, point, el));
       // (1.8.4) On a phone a tap opens it too: press and hold isn't something people find.
       el.addEventListener('click', e => {
@@ -199,6 +307,8 @@ export function conversationView(channelId, { jump = null } = {}) {
       });
       el.addEventListener('dblclick', e => { if (!selecting && !isTouch() && m.author === state.me.id && !e.target.closest('a, button, img, video')) startEdit(m); });
     }
+    tame(el, true);
+    el.tabIndex = -1;
     return el;
   }
 
@@ -272,10 +382,10 @@ export function conversationView(channelId, { jump = null } = {}) {
       const names = r.users.map(id => (id === state.me.id ? 'You' : person(id).name));
       box.append(h('button', {
         type: 'button', class: `react${mine ? ' mine' : ''}`, title: `${names.join(', ')} reacted with ${r.emoji}`, 'aria-pressed': String(mine),
-        onclick: () => toggleReaction(m, r.emoji, !mine),
+        dataset: { key: `react ${r.emoji}` }, onclick: () => toggleReaction(m, r.emoji, !mine),
       }, h('span', {}, r.emoji), h('span', { class: 'n' }, String(r.users.length))));
     }
-    box.append(h('button', { type: 'button', class: 'react', title: 'Add a reaction', 'aria-label': 'Add a reaction', onclick: e => reactWithPicker(m, e.currentTarget) }, icon('smile', 'i small')));
+    box.append(h('button', { type: 'button', class: 'react', title: 'Add a reaction', 'aria-label': 'Add a reaction', dataset: { key: 'react +' }, onclick: e => reactWithPicker(m, e.currentTarget) }, icon('smile', 'i small')));
     return box;
   }
 
@@ -560,10 +670,13 @@ export function conversationView(channelId, { jump = null } = {}) {
     if (change.op === 'add' && cache.list.at(-1)?.id === change.id && els.size) {
       const m = cache.list.at(-1);
       const prev = cache.list.at(-2);
-      if (!prev || dayKey(prev.created) !== dayKey(m.created)) list.append(h('div', { class: 'day', role: 'separator' }, dayLabel(m.created)));
+      if (!prev || dayKey(prev.created) !== dayKey(m.created)) list.append(dayEl(m));
       const el = msgEl(m, prev);
       els.set(m.id, el);
+      keyed.set(m.id, { el, m, sig: sigOf(m, prev) });
       list.append(el);
+      syncRoving();
+      if (m.author !== state.me.id && !isSystem(m)) arrivals.textContent = `${person(m.author).name}: ${snippet(m.body) || (m.files?.length ? 'sent a file' : '')}`;
       if (wasAtBottom || m.author === state.me.id) scrollToBottom();
     } else if (change.op === 'edit') {
       refresh(change.id);
@@ -854,7 +967,7 @@ export function conversationView(channelId, { jump = null } = {}) {
   }
 
   // Dropping files anywhere on the conversation.
-  const view = h('section', { class: 'main', 'aria-label': 'Conversation' }, head, h('div', { class: 'list-wrap' }, list, jumpBtn), typingLine, composer, selectBar);
+  const view = h('section', { class: 'main', 'aria-label': 'Conversation' }, head, h('div', { class: 'list-wrap' }, list, jumpBtn), typingLine, composer, selectBar, arrivals);
   list.addEventListener('click', e => {
     if (!selecting) return;
     const el = e.target.closest('.msg[data-pickable]');

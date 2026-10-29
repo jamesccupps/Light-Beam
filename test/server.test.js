@@ -2040,6 +2040,67 @@ test('1.4.1 CLI (audit 2026-10-11): a typo isn’t sent as a file; get and pull 
   } finally { await s.stop(); }
 });
 
+// (1.5.0) The entries of a .zip, read the plain way (its central directory; each one's data inflated and its CRC checked).
+function readZip(buf) {
+  const end = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  assert.ok(end >= 0, 'an end of central directory');
+  let at = buf.readUInt32LE(end + 16);
+  const out = [];
+  for (let i = 0; i < buf.readUInt16LE(end + 10); i++) {
+    assert.equal(buf.readUInt32LE(at), 0x02014b50, 'a central directory entry');
+    const method = buf.readUInt16LE(at + 10), crc = buf.readUInt32LE(at + 16), packed = buf.readUInt32LE(at + 20), size = buf.readUInt32LE(at + 24);
+    const nameLen = buf.readUInt16LE(at + 28), extraLen = buf.readUInt16LE(at + 30), commentLen = buf.readUInt16LE(at + 32), local = buf.readUInt32LE(at + 42);
+    const name = buf.toString('utf8', at + 46, at + 46 + nameLen);
+    assert.equal(buf.readUInt32LE(local), 0x04034b50, `${name}: its local header`);
+    assert.equal(buf.readUInt32LE(local + 14), crc, `${name}: the same CRC in its local header`);
+    const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+    const raw = buf.subarray(start, start + packed);
+    const data = method === 8 ? zlib.inflateRawSync(raw) : Buffer.from(raw);
+    assert.equal(data.length, size, `${name}: its size`);
+    assert.equal(zlib.crc32(data), crc, `${name}: its CRC`);
+    out.push({ name, method, data });
+    at += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+
+test('1.5.0 CLI (audit 2026-10-11): a folder is sent as a .zip of it (pictures stored, the rest deflated, empty folders kept, links left out, the .zip removed)', async () => {
+  const s = await startServer('cli150', 8791);
+  try {
+    const K = s.key;
+    const base = `http://127.0.0.1:${s.port}`;
+    const admin = app(K, 'cliadmin150', 'Admin');
+    const home = homeDir('cli150');
+    let r = await cli(['setup', `${base}/?key=${K}`, '--name', 'Pi'], { home });
+    assert.equal(r.code, 0, r.out);
+    const folder = path.join(home, 'Holiday');
+    const jpg = crypto.randomBytes(50_000), log = Buffer.from('a line of a log\n'.repeat(12_000));
+    fs.mkdirSync(path.join(folder, 'sub', 'deep'), { recursive: true });
+    fs.mkdirSync(path.join(folder, 'empty'));
+    fs.writeFileSync(path.join(folder, 'a.txt'), 'hello');
+    fs.writeFileSync(path.join(folder, 'sub', 'b.jpg'), jpg);
+    fs.writeFileSync(path.join(folder, 'sub', 'deep', 'c.log'), log);
+    if (process.platform !== 'win32') fs.symlinkSync('/etc', path.join(folder, 'outside'));
+    r = await cli(['send', folder], { home });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /Sent Holiday\.zip/);
+    if (process.platform !== 'win32') assert.match(r.out, /Left out of Holiday\.zip: 1 link/);
+    const item = (await s.req('GET', '/api/items', { headers: admin })).json.items.find(i => i.name === 'Holiday.zip');
+    assert.ok(item, 'it arrived');
+    const zip = (await s.req('GET', `/api/file/${item.id}`, { headers: admin, raw: true })).body;
+    const entries = readZip(zip);
+    assert.deepEqual(entries.map(e => e.name), ['Holiday/a.txt', 'Holiday/empty/', 'Holiday/sub/b.jpg', 'Holiday/sub/deep/c.log']);
+    const by = Object.fromEntries(entries.map(e => [e.name, e]));
+    assert.equal(by['Holiday/a.txt'].data.toString(), 'hello');
+    assert.deepEqual([by['Holiday/sub/b.jpg'].method, Buffer.compare(by['Holiday/sub/b.jpg'].data, jpg)], [0, 0], 'a picture stored as it is');
+    assert.equal(by['Holiday/sub/deep/c.log'].method, 8, 'the rest deflated');
+    assert.equal(Buffer.compare(by['Holiday/sub/deep/c.log'].data, log), 0);
+    assert.ok(zip.length < log.length / 4 + jpg.length + 4096, `deflated for real (${zip.length} bytes)`);
+    const made = process.platform === 'win32' ? path.join(os.tmpdir(), 'beam-outgoing') : path.join(home, '.cache', 'beam', 'outgoing');
+    assert.deepEqual(fs.existsSync(made) ? fs.readdirSync(made).filter(n => n.startsWith('Holiday-')) : [], [], 'the .zip made for it is gone');
+  } finally { await s.stop(); }
+});
+
 test('A21 CLI: follows a move only when the new server proves it holds the key', async () => {
   const old = await startServer('cli-move-old', 8792);
   let neu;

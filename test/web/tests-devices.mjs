@@ -619,6 +619,23 @@ export default function register(test) {
     await page.waitFor(`/Away PC is offline/.test($('#genBody')?.textContent || '') && $('#genDlg').open`, 10000, 'offline, said');
   });
 
+  test('Windows’ own notifications (Beam for Windows 1.21): This PC’s switch in Settings → Notifications, from the app and back to it', async ctx => {
+    const { page } = await hostPage(ctx, { features: ['transfers', 'localFiles', 'settings', 'openPanel'], settings: { nativeToasts: true } });
+    await page.waitFor(`paired && hostState.ready`);
+    await page.evaluate(`openSettings('notifications'); true`);
+    const box = `[...document.querySelectorAll('#set-notifications label.check')].find(l => /Notifications with Reply and Copy/.test(l.textContent))?.querySelector('input')`;
+    await page.waitFor(`${box}?.checked === true`, 5000, 'on, as the app says');
+    await page.evaluate(`${box}.click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings?.nativeToasts === false)`, 3000, 'off: asked the app');
+    eq(page.errors, [], 'no page errors');
+    // An app before 1.21 says nothing: no switch
+    const { page: older } = await hostPage(ctx, { features: ['transfers', 'localFiles', 'settings', 'openPanel'], settings: {} });
+    await older.waitFor(`paired && hostState.ready`);
+    await older.evaluate(`openSettings('notifications'); true`);
+    await ctx.sleep(300);
+    eq(await older.evaluate(`/Notifications with Reply and Copy/.test($('#set-notifications').textContent)`), false, 'no switch for an older app');
+  });
+
   test('Settings → Security: this device’s own switches (the Windows app’s remote control and app installs, Beam for Linux’s remote control) (2026-10-21)', async ctx => {
     // (the user: "it can be a per device setting in the app gui settings on that device, it should just be easy")
     const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowApps', 'allowRemoteControl'];

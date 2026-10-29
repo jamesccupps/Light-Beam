@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.4.1';
+const VERSION = '1.5.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -20,6 +20,7 @@ const { spawn, execFile } = require('node:child_process');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { parseArgs } = require('node:util');
+const zlib = require('node:zlib');
 
 const CONFIG_FILE = path.join(os.homedir(), '.beam.json');
 const IS_WIN = process.platform === 'win32';
@@ -40,7 +41,7 @@ Getting connected:
   beam logout                                      sign this computer out (beam login signs it in again)
 
 Sending:
-  beam <file> [file...]   or   beam send <file>    send files
+  beam <file> [file...]   or   beam send <file>    send files (a folder goes as a .zip of it)
   beam -t "some text"   or   beam text some text   send text
   some-command | beam                              send piped text
   beam clip                                        send what's on the clipboard (files, image or text)
@@ -245,7 +246,7 @@ const CHUNK_SECONDS = 4;
 async function sendFile(cfg, file, { name, quiet, to = [] } = {}) {
   const stat = await fsp.stat(file).catch(() => null);
   if (!stat) throw new Error(`No such file: ${file}`);
-  if (stat.isDirectory()) throw new Error(`${file} is a folder. Zip it first, then send the zip.`);
+  if (stat.isDirectory()) return sendFolder(cfg, file, { quiet, to }); // (1.5.0: as a .zip)
   name ||= path.basename(file);
   const showProgress = !quiet && process.stderr.isTTY && stat.size > 2 * 1024 * 1024;
   const upload = await (await api(cfg, '/api/uploads', {
@@ -730,11 +731,204 @@ async function sendFiles(cfg, files, opt) {
   const to = parseTargets(opt.to);
   const sent = [];
   for (const file of files) {
-    const item = await sendFile(cfg, file, { quiet: opt.toast, to });
+    const item = isDir(file) ? await sendFolder(cfg, file, { quiet: opt.toast, to }) : await sendFile(cfg, file, { quiet: opt.toast, to });
     sent.push(item);
     if (!opt.toast) console.log(`Sent ${item.name} (${formatSize(item.size)})`);
   }
   return sent.length === 1 ? `Sent ${sent[0].name}` : `Sent ${sent.length} files`;
+}
+
+// ---------------------------------------------------------------- folders (1.5.0)
+// A folder goes as "<its name>.zip", as Beam's Windows app sends one (the 2026-10-11 audit: "the CLI zipping
+// folders"): its files and empty folders under the folder's own name; links are left out (never followed out of it);
+// pictures, videos and archives stored as they are (deflating them only costs time), the rest deflated fast. Zip64
+// where a file or the .zip passes 4 GB. Made on disk next to Beam's settings (not /tmp, which may be memory), sent the
+// way any file is (resumable), then removed, also when the send fails or is stopped.
+const ZIP_STORED = /\.(jpe?g|png|gif|webp|heic|heif|avif|mp4|mov|m4v|mkv|webm|avi|wmv|mp3|m4a|aac|ogg|opus|flac|zip|7z|rar|gz|tgz|bz2|xz|zst|docx|xlsx|pptx|apk|deb)$/i;
+const ZIP64_AT = 0xffff0000; // (a file this big gets zip64 sizes: it may grow a little while it's read)
+const ZIP_FULL = 0xffffffff;
+let crcTable = null;
+// CRC-32 of the bytes, on from `crc` (Node 20.15+/22.2+ have it built in).
+function crc32(buf, crc = 0) {
+  if (zlib.crc32) return zlib.crc32(buf, crc);
+  if (!crcTable) crcTable = Int32Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c; });
+  let c = ~crc;
+  for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return ~c >>> 0;
+}
+
+// What's in the folder: [{ abs, rel (with /), dir?, size, mtime }], folders before what's in them; links counted apart.
+function walkFolder(root) {
+  const base = path.basename(path.resolve(root)) || 'Folder';
+  const list = [];
+  let links = 0;
+  const visit = (abs, rel) => {
+    const names = fs.readdirSync(abs).sort();
+    if (!names.length && rel !== base) list.push({ abs, rel: `${rel}/`, dir: true, size: 0, mtime: fs.statSync(abs).mtime });
+    for (const n of names) {
+      const a = path.join(abs, n);
+      const st = fs.lstatSync(a);
+      if (st.isSymbolicLink()) { links++; continue; }
+      if (st.isDirectory()) visit(a, `${rel}/${n}`);
+      else if (st.isFile()) list.push({ abs: a, rel: `${rel}/${n}`, size: st.size, mtime: st.mtime });
+    }
+  };
+  visit(root, base);
+  if (!list.length) list.push({ abs: root, rel: `${base}/`, dir: true, size: 0, mtime: fs.statSync(root).mtime });
+  return { base, list, links };
+}
+
+const dosTime = d => ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) & 0xffff;
+const dosDate = d => (Math.max(0, d.getFullYear() - 1980) << 9 | ((d.getMonth() + 1) << 5) | d.getDate()) & 0xffff;
+
+// Writes the .zip of `entries` to `dest`. → { files, bytes (in the .zip), left: [paths that couldn't be read] }.
+async function writeZip(entries, dest, onFile = () => {}) {
+  const fh = await fsp.open(dest, 'w');
+  const central = [];
+  const left = [];
+  let pos = 0;
+  const put = async b => { await fh.write(b, 0, b.length, pos); pos += b.length; };
+  try {
+    for (const e of entries) {
+      let src = null;
+      if (!e.dir) {
+        try { src = await fsp.open(e.abs, 'r'); } catch { left.push(e.rel); continue; }
+      }
+      const name = Buffer.from(e.rel, 'utf8');
+      const big = !e.dir && e.size >= ZIP64_AT;
+      const method = e.dir || ZIP_STORED.test(e.rel) ? 0 : 8;
+      const local = Buffer.alloc(30);
+      const extra = big ? Buffer.alloc(20) : Buffer.alloc(0);
+      local.writeUInt32LE(0x04034b50, 0);
+      local.writeUInt16LE(big ? 45 : 20, 4);
+      local.writeUInt16LE(0x0800, 6); // (names in UTF-8)
+      local.writeUInt16LE(method, 8);
+      local.writeUInt16LE(dosTime(e.mtime), 10);
+      local.writeUInt16LE(dosDate(e.mtime), 12);
+      local.writeUInt16LE(name.length, 26);
+      local.writeUInt16LE(extra.length, 28);
+      if (big) { extra.writeUInt16LE(0x0001, 0); extra.writeUInt16LE(16, 2); local.writeUInt32LE(ZIP_FULL, 18); local.writeUInt32LE(ZIP_FULL, 22); }
+      const at = pos;
+      await put(Buffer.concat([local, name, extra]));
+      let crc = 0, size = 0, packed = 0;
+      if (src) {
+        try {
+          async function* read() { for await (const b of src.createReadStream()) { crc = crc32(b, crc); size += b.length; yield b; } }
+          const write = async from => { for await (const chunk of from) { await put(chunk); packed += chunk.length; } };
+          if (method === 8) await pipeline(read(), zlib.createDeflateRaw({ level: 1 }), write);
+          else await write(read());
+        } finally { await src.close().catch(() => {}); }
+      }
+      // The sizes and CRC into its header, now that they're known
+      const fix = Buffer.alloc(12);
+      fix.writeUInt32LE(crc, 0);
+      if (big) {
+        fix.writeUInt32LE(ZIP_FULL, 4);
+        fix.writeUInt32LE(ZIP_FULL, 8);
+        const sizes = Buffer.alloc(16);
+        sizes.writeBigUInt64LE(BigInt(size), 0);
+        sizes.writeBigUInt64LE(BigInt(packed), 8);
+        await fh.write(sizes, 0, 16, at + 30 + name.length + 4);
+      } else {
+        if (size >= ZIP_FULL || packed >= ZIP_FULL) throw new Error(`${e.rel} grew past 4 GB while it was being zipped`);
+        fix.writeUInt32LE(packed, 4);
+        fix.writeUInt32LE(size, 8);
+      }
+      await fh.write(fix, 0, 12, at + 14);
+      central.push({ e, name, method, crc, size, packed, at, big });
+      if (!e.dir) onFile(e);
+    }
+    // The central directory, then its end (zip64 when it needs it)
+    const cdAt = pos;
+    for (const c of central) {
+      const off64 = c.at >= ZIP_FULL;
+      const z = [];
+      if (c.big) z.push(BigInt(c.size), BigInt(c.packed));
+      if (off64) z.push(BigInt(c.at));
+      const extra = Buffer.alloc(z.length ? 4 + 8 * z.length : 0);
+      if (z.length) { extra.writeUInt16LE(0x0001, 0); extra.writeUInt16LE(8 * z.length, 2); z.forEach((v, i) => extra.writeBigUInt64LE(v, 4 + 8 * i)); }
+      const h = Buffer.alloc(46);
+      h.writeUInt32LE(0x02014b50, 0);
+      h.writeUInt16LE(z.length ? 45 : 20, 4);
+      h.writeUInt16LE(z.length ? 45 : 20, 6);
+      h.writeUInt16LE(0x0800, 8);
+      h.writeUInt16LE(c.method, 10);
+      h.writeUInt16LE(dosTime(c.e.mtime), 12);
+      h.writeUInt16LE(dosDate(c.e.mtime), 14);
+      h.writeUInt32LE(c.crc, 16);
+      h.writeUInt32LE(c.big ? ZIP_FULL : c.packed, 20);
+      h.writeUInt32LE(c.big ? ZIP_FULL : c.size, 24);
+      h.writeUInt16LE(c.name.length, 28);
+      h.writeUInt16LE(extra.length, 30);
+      h.writeUInt32LE(c.e.dir ? 0x10 : 0, 38); // (a folder: the MS-DOS directory bit)
+      h.writeUInt32LE(off64 ? ZIP_FULL : c.at, 42);
+      await put(Buffer.concat([h, c.name, extra]));
+    }
+    const cdSize = pos - cdAt;
+    const zip64 = central.length > 0xffff || cdAt >= ZIP_FULL || cdSize >= ZIP_FULL;
+    if (zip64) {
+      const r = Buffer.alloc(56 + 20);
+      r.writeUInt32LE(0x06064b50, 0);
+      r.writeBigUInt64LE(44n, 4);
+      r.writeUInt16LE(45, 12);
+      r.writeUInt16LE(45, 14);
+      r.writeBigUInt64LE(BigInt(central.length), 24);
+      r.writeBigUInt64LE(BigInt(central.length), 32);
+      r.writeBigUInt64LE(BigInt(cdSize), 40);
+      r.writeBigUInt64LE(BigInt(cdAt), 48);
+      r.writeUInt32LE(0x07064b50, 56); // (the locator)
+      r.writeBigUInt64LE(BigInt(pos), 64);
+      r.writeUInt32LE(1, 72);
+      await put(r);
+    }
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(Math.min(central.length, 0xffff), 8);
+    end.writeUInt16LE(Math.min(central.length, 0xffff), 10);
+    end.writeUInt32LE(Math.min(cdSize, ZIP_FULL), 12);
+    end.writeUInt32LE(Math.min(cdAt, ZIP_FULL), 16);
+    await put(end);
+  } finally {
+    await fh.close();
+  }
+  return { files: central.filter(c => !c.e.dir).length, bytes: pos, left };
+}
+
+// Where a folder's .zip is made: on disk, next to Beam's own files (~/.cache/beam; Windows: its temp folder).
+function zipFolderDir() {
+  const dir = IS_WIN ? path.join(os.tmpdir(), 'beam-outgoing') : path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'beam', 'outgoing');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+async function sendFolder(cfg, folder, { quiet, to = [] } = {}) {
+  const { base, list, links } = walkFolder(folder);
+  const total = list.reduce((n, e) => n + e.size, 0);
+  const dir = zipFolderDir();
+  let free = Infinity;
+  try { const s = fs.statfsSync(dir); free = s.bavail * s.bsize; } catch {}
+  if (free < total + 64 * 1024 * 1024) throw new Error(`Not enough free space here to zip ${base} (${formatSize(total)}): free some, or send its files`);
+  const zip = path.join(dir, `${base.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')}-${crypto.randomBytes(4).toString('hex')}.zip`);
+  const gone = () => { try { fs.rmSync(zip, { force: true }); } catch {} };
+  const stop = () => { gone(); process.exit(130); };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  try {
+    const files = list.filter(e => !e.dir).length;
+    const tell = !quiet && process.stderr.isTTY;
+    let done = 0;
+    if (tell) process.stderr.write(`  Zipping ${base} (${files} file${files === 1 ? '' : 's'}, ${formatSize(total)})…`);
+    const made = await writeZip(list, zip, () => { if (tell && ++done % 50 === 0) process.stderr.write(`\r  Zipping ${base}: ${done} of ${files}…   `); });
+    if (tell) process.stderr.write('\r' + ' '.repeat(60) + '\r');
+    if (!quiet && (made.left.length || links)) {
+      console.error(`Left out of ${base}.zip: ${[made.left.length && `${made.left.length} file${made.left.length === 1 ? '' : 's'} that couldn't be read (${made.left.slice(0, 3).join(', ')}${made.left.length > 3 ? ', …' : ''})`, links && `${links} link${links === 1 ? '' : 's'}`].filter(Boolean).join(' and ')}`);
+    }
+    return await sendFile(cfg, zip, { name: `${base}.zip`, quiet, to });
+  } finally {
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+    gone();
+  }
 }
 
 async function sendClipboard(cfg, opt) {

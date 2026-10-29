@@ -242,6 +242,63 @@ Robin ${sent}`);
     eq(mary.errors, [], 'no errors for Mary');
   }, { timeout: 90000 });
 
+  test('family: keyed (1.29): a send or a deletion keeps the other messages’ elements; the keyboard: one Tab stop, ↑ ↓ between messages, Enter opens the menu (↑ ↓ in it, Escape back to the message); someone else’s message is read out, not the list', async ctx => {
+    const srv = await familyServer(ctx);
+    const robin = await tailscalePage(ctx, OWNER, 'Robin');
+    await robin.goto(`${srv.base}/`);
+    await robin.waitFor(`location.pathname.startsWith('/c/') && document.querySelector('.composer textarea') !== null`, 10000, 'in #general');
+    await robin.evaluate(`window.byText = t => [...document.querySelectorAll('.msg[data-id]')].find(m => m.querySelector('.msg-body')?.textContent.trim() === t); true`);
+    for (const text of ['one', 'two', 'three']) {
+      await send(robin, text);
+      await robin.waitFor(`byText(${JSON.stringify(text)}) && !byText(${JSON.stringify(text)}).classList.contains('pending')`, 5000, text);
+    }
+    // Keyed: sending one more and deleting one leave the other messages' elements as they were
+    await robin.evaluate(`['one', 'two', 'three'].forEach(t => { byText(t).__kept = true; }); true`);
+    await send(robin, 'four');
+    await robin.waitFor(`byText('four') && !byText('four').classList.contains('pending')`, 5000, 'four sent');
+    eq(await robin.evaluate(`['one', 'two', 'three', 'four'].map(t => byText(t).__kept === true)`), [true, true, true, false], 'a send: only the new one made');
+    await robin.evaluate(`byText('four').__kept = true; fetch('/api/messages/' + byText('two').dataset.id, { method: 'DELETE' }).then(() => true)`);
+    await robin.waitFor(`!byText('two')`, 5000, 'two deleted');
+    eq(await robin.evaluate(`['one', 'three', 'four'].map(t => byText(t).__kept === true)`), [true, true, true], 'a deletion: the others kept');
+    // The keyboard: one Tab stop (the newest), ↑ to the one before, Enter: its menu, ↓ in it, Escape: back to the message
+    eq(await robin.evaluate(`[document.querySelector('.messages').tabIndex, byText('four').tabIndex, byText('one').tabIndex, byText('one').querySelector('.tools button').tabIndex]`), [-1, 0, -1, -1], 'one Tab stop, its buttons out of the Tab order');
+    const key = (target, k, extra = {}) => robin.evaluate(`${target}.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true, ...${JSON.stringify(extra)} })); true`);
+    await robin.evaluate(`byText('four').focus(); true`);
+    await key(`byText('four')`, 'ArrowUp');
+    eq(await robin.evaluate(`[document.activeElement === byText('three'), byText('three').tabIndex, byText('four').tabIndex]`), [true, 0, -1], '↑: the one before, the Tab stop with it');
+    eq(await robin.evaluate(`byText('three').querySelector('.tools button').hasAttribute('tabindex')`), false, 'its buttons in the Tab order while it has the focus');
+    await key(`byText('three')`, 'Enter');
+    await robin.waitFor(`Boolean(document.querySelector('.menu[role=menu]')) && document.querySelector('.menu').contains(document.activeElement)`, 3000, 'its menu, the focus in it');
+    const first = await robin.evaluate(`document.activeElement.getAttribute('aria-label') || document.activeElement.textContent`);
+    await key('document.activeElement', 'ArrowDown');
+    assert(await robin.evaluate(`(document.activeElement.getAttribute('aria-label') || document.activeElement.textContent) !== ${JSON.stringify(first)}`), '↓ in the menu');
+    await key('document.activeElement', 'Escape');
+    await robin.waitFor(`!document.querySelector('.menu') && document.activeElement === byText('three')`, 3000, 'Escape: back to the message');
+    // Focus kept when its message changes (a reaction added from elsewhere)
+    await robin.evaluate(`fetch('/api/messages/' + byText('three').dataset.id + '/reactions/' + encodeURIComponent('👍'), { method: 'PUT' }).then(() => true)`);
+    await robin.waitFor(`byText('three').querySelector('.react') && document.activeElement === byText('three')`, 5000, 'the focus on the message after it was made again');
+    // Someone else's message is read out on its own; the list itself isn't a live region
+    await srv.ownerPassword();
+    await robin.evaluate(`history.pushState({}, '', '/admin'); dispatchEvent(new PopStateEvent('popstate')); true`);
+    await robin.waitFor(`[...document.querySelectorAll('button')].some(b => b.textContent.includes('Make an invite link'))`);
+    await robin.evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Make an invite link')).click(); true`);
+    await confirmInPage(robin);
+    await robin.waitFor(`Boolean(document.querySelector('.invite-link code')?.textContent)`, 5000, 'the invite link');
+    const link = await robin.evaluate(`document.querySelector('.invite-link code').textContent`);
+    const mary = await ctx.browser.newPage({});
+    await mary.goto(link);
+    await mary.waitFor(`document.querySelector('form [name=name]') !== null`, 10000, 'the join page');
+    await mary.evaluate(`(() => { const f = document.querySelector('form'); f.name.value = 'Mary'; f.password.value = 'a long family password'; f.password2.value = 'a long family password'; f.requestSubmit(); return true; })()`);
+    await mary.waitFor(`location.pathname.startsWith('/c/') && document.querySelector('.composer textarea') !== null`, 10000, 'Mary in #general');
+    await robin.evaluate(`[...document.querySelectorAll('.side-list .chan')].find(a => a.textContent.includes('general')).click(); true`);
+    await robin.waitFor(`/Mary joined/.test(document.querySelector('.messages')?.innerText || '')`, 5000, 'back in #general');
+    await send(mary, 'hello from Mary');
+    await robin.waitFor(`[...document.querySelectorAll('.sr-only[aria-live=polite]')].some(r => r.textContent === 'Mary: hello from Mary')`, 5000, 'read out');
+    eq(await robin.evaluate(`document.querySelector('.messages').getAttribute('aria-live')`), 'off', 'the list is no live region');
+    eq(robin.errors, [], 'no errors for Robin');
+    eq(mary.errors, [], 'no errors for Mary');
+  }, { timeout: 90000 });
+
   test('family: sign-in page (wrong password, then right), a stranger on Tailscale is told to ask for an invite, the owner turns someone off', async ctx => {
     const srv = await familyServer(ctx);
     await srv.call(owner, 'GET', '/api/session');
