@@ -3188,6 +3188,28 @@ async function fakeGithub() {
   return gh;
 }
 
+test('1.29 text size: the look holds a text size (checked; kept only when it isn’t normal), for all devices and a device’s own', async () => {
+  const s = await startServer('text129', 8795);
+  try {
+    const K = s.key;
+    const laptop = app(K, 'laptop00129', 'Robin Laptop', 'windows', { 'X-Beam-App-Version': '1.20.0', ...from('100.64.29.5') });
+    assert.equal((await s.req('GET', '/api/me', { headers: laptop })).status, 200);
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('text-size'));
+    const patchLook = look => s.req('PATCH', '/api/settings', { headers: json(laptop), body: JSON.stringify({ appearance: look }) });
+    let r = await patchLook({ theme: 'dark', accent: null, text: 'larger' });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual((await s.req('GET', '/api/settings', { headers: laptop })).json.appearance, { theme: 'dark', accent: null, text: 'larger' });
+    r = await patchLook({ theme: 'dark', accent: null, text: 'normal' });
+    assert.deepEqual((await s.req('GET', '/api/settings', { headers: laptop })).json.appearance, { theme: 'dark', accent: null }, 'normal is the default: not kept');
+    for (const text of ['huge', 3, '']) assert.equal((await patchLook({ theme: 'auto', text })).status, 400, `text ${JSON.stringify(text)}`);
+    // A device's own look, its text size with it
+    r = await s.req('PUT', '/api/devices/me/settings', { headers: json(laptop), body: JSON.stringify({ appearance: { theme: 'light', accent: '#2563EB', text: 'small' } }) });
+    assert.equal(r.status, 204, r.body);
+    const me = (await s.req('GET', '/api/devices', { headers: laptop })).json.devices.find(d => d.id === 'laptop00129');
+    assert.deepEqual(me.settings.appearance, { theme: 'light', accent: '#2563eb', text: 'small' });
+  } finally { await s.stop(); }
+});
+
 test('1.27 appearance: the look for all devices (checked, in the hello, at once to background streams) and a device’s own (set only by itself, listed, kept)', async () => {
   let s = await startServer('look127', 8795);
   try {

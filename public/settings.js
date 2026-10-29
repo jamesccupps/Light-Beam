@@ -373,6 +373,10 @@ function pageLook() {
     intro(own ? 'This device has a look of its own. Your other devices keep theirs.' : 'This look is for all your devices, unless one has its own.'),
     card('Theme', el('div', { class: 'set-row seg-row', role: 'group', 'aria-label': 'Theme' }, seg('auto', 'Like the device'), seg('light', 'Light'), seg('dark', 'Dark'))),
     card('Accent colour', el('div', { class: 'set-row swatches', role: 'group', 'aria-label': 'Accent colour' }, ...ACCENTS.map(([name, hex]) => swatch(name, hex)), custom)),
+    serverHas('text-size') && card('Text size', el('div', { class: 'set-row seg-row', role: 'group', 'aria-label': 'Text size' }, ...TEXT_SIZES.map(([value, label]) => {
+      const on = (look.text || 'normal') === value;
+      return el('button', { type: 'button', class: `seg${on ? ' on' : ''}`, 'aria-pressed': String(on), onclick: () => save({ text: value }) }, label);
+    })), cardInfo('Messages, names and menus everywhere in Beam’s window. Your browser’s own text size counts too.')),
     card('Use this look on',
       where(false, 'All my devices', 'The same look everywhere: a change here changes it on every device that hasn’t its own.'),
       where(true, HOST ? 'Only this PC' : 'Only this device', 'Your other devices keep their look.')),

@@ -189,6 +189,9 @@ address, so the browser becomes part of that device instead of a separate entry.
   wins). In the Windows app its own windows, title bar and tray icon follow too, also on a PC whose Beam window stays
   closed. The Android app (1.14) follows it too and has its own Settings → Appearance; a colour of your own shows there
   as the nearest of the nine. Beam Family: the family's look (admins set it) or your own, on every device you use it on.
+  **Text size** (Beam 1.29): Smaller, Normal, Larger or Largest, for Beam's page (the browser and the Windows app's
+  window), with the same "all my devices or just this one"; your browser's own text size counts too. The Android app
+  follows the phone's own font size.
 - **Setup check** (Settings → Server → Setup): Beam looks at its own setup every 6 hours and alerts when something is
   wrong: the servers start when Windows does, Tailscale runs unattended, devices come in over https, backups are
   recent, there's room on the disk, every PC runs the latest Beam and starts it with Windows, no Tailscale sign-in runs
