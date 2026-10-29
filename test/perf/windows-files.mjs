@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Beam for Windows 1.18 (server 1.26): shared folders. Another device looks in a PC's shared folders and copies files
-// from one, through the server; the PC decides what it shows and sends. Exits 1 if a check fails.
+// from one, through the server; the PC decides what it shows and sends. (1.20, server 1.28) Also the PC's icons,
+// Windows' thumbnails, a file's preview, a search in a folder and below, names inside folders and whole folders (a .zip
+// of what's shown) in a copy. Exits 1 if a check fails.
 //
 //   node test/perf/windows-files.mjs [--exe <Beam.exe>] [--keep]
 //
@@ -17,6 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
@@ -62,6 +65,25 @@ async function waitFor(fn, ms = 15000, step = 200) {
   for (const until = Date.now() + ms; Date.now() < until; await sleep(step)) { const v = await fn(); if (v) return v; }
   return null;
 }
+// (1.20) A PNG w × h, its top half red and its bottom half blue (so a thumbnail upside down shows).
+function pngOf(w, h) {
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(Buffer.concat([Buffer.from(type), data])));
+    return Buffer.concat([len, Buffer.from(type), data, crc]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const rows = [];
+  for (let y = 0; y < h; y++) { const row = Buffer.alloc(1 + w * 3); for (let x = 0; x < w; x++) row.set(y < h / 2 ? [220, 20, 20] : [20, 20, 220], 1 + x * 3); rows.push(row); }
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(Buffer.concat(rows))), chunk('IEND', Buffer.alloc(0))]);
+}
+// A picture's colour at its top and bottom middle, and a .zip's entries (Windows' own .NET, through PowerShell).
+function ps(script) {
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, encoding: 'utf8', timeout: 30000 });
+  return (r.stdout || '').trim();
+}
+const topAndBottom = file => ps(`Add-Type -AssemblyName System.Drawing; $b = New-Object System.Drawing.Bitmap '${file}'; $t = $b.GetPixel([int]($b.Width/2), 2); $u = $b.GetPixel([int]($b.Width/2), $b.Height-3); "$($t.R),$($t.B) $($u.R),$($u.B)"; $b.Dispose()`);
+const zipNames = file => ps(`Add-Type -AssemblyName System.IO.Compression.FileSystem; $z = [System.IO.Compression.ZipFile]::OpenRead('${file}'); ($z.Entries | ForEach-Object { $_.FullName }) -join '|'; $z.Dispose()`).split('|').filter(Boolean).sort();
 
 try {
   if (!EXE) throw new Error('No Beam.exe: build with windows\\build.cmd or pass --exe');
@@ -96,6 +118,14 @@ try {
   const outgoing = path.join(cfgDir, 'outgoing');
   put(path.join(outgoing, 'keep-me.txt'), 'in the outgoing folder');
   put(dir('outside-share/x.txt'), 'in %TEMP%, outside the instance\'s folder');
+  // (1.20) a real picture, a big text, a file of no kind, and what a .zip of Photos must leave out
+  const sunset = pngOf(64, 48), bigText = 'line of a big log\n'.repeat(20000), blob = Buffer.alloc(5000, 0);
+  put(path.join(dl, 'Photos', 'sunset.png'), sunset);
+  put(path.join(dl, 'big.log'), bigText);
+  put(path.join(dl, 'blob.bin'), blob);
+  put(path.join(dl, 'Photos', '.thumbs'), 'never in a zip');
+  put(path.join(dl, 'Photos', 'hidden2.txt'), 'hidden, never in a zip');
+  spawnSync('attrib', ['+h', path.join(dl, 'Photos', 'hidden2.txt')], { windowsHide: true });
 
   // The PC: signed in with its own token, the folders in its config
   const pcId = `filespc${crypto.randomBytes(6).toString('hex')}`;
@@ -119,7 +149,7 @@ try {
   // within a second; the first run's requests landed in that gap)
   await sleep(3000);
   online = online && await pcOnline();
-  check(!!online, 'the PC (Beam for Windows 1.18) is online and shares folders (can.files)');
+  check(!!online && online.can?.files2 === true, 'the PC (Beam for Windows 1.20) is online and shares folders (can.files, can.files2)');
   check(!!(await waitLog(/Shared folders: Temp \(.*outside-share\) isn't shared: Windows' and apps' own folders can't be shared$/, 1000)),
     'a folder outside its own folder, in %TEMP% (AppData), is refused when the config is read');
 
@@ -138,11 +168,12 @@ try {
   // What's in Downloads: never a name starting with ".", hidden or system files, or the junction
   r = await files(asker, { share: 'a1a1a1a1' });
   const names = (r.json?.entries || []).map(e => (e.dir ? `${e.n}/` : e.n));
-  check(r.status === 200 && JSON.stringify(names) === JSON.stringify(['Photos/', 'notes.txt', 'report.pdf']), `Downloads: folders first, and nothing hidden, starting with ".", or a link (${JSON.stringify(names)})`);
+  check(r.status === 200 && JSON.stringify(names) === JSON.stringify(['Photos/', 'big.log', 'blob.bin', 'notes.txt', 'report.pdf']), `Downloads: folders first, and nothing hidden, starting with ".", or a link (${JSON.stringify(names)})`);
   const rep = (r.json?.entries || []).find(e => e.n === 'report.pdf');
   check(!!rep && rep.s === report.length && Math.abs(rep.m - fs.statSync(path.join(dl, 'report.pdf')).mtimeMs) < 2000, `...with each file's size and time (${JSON.stringify(rep)})`);
+  check(!!rep && Math.abs(rep.c - fs.statSync(path.join(dl, 'report.pdf')).birthtimeMs) < 2000, `...and (1.20) when it was made (${rep && rep.c})`);
   r = await files(asker, { share: 'a1a1a1a1', path: 'photos' });
-  check(r.status === 200 && r.json?.path === 'Photos' && JSON.stringify((r.json?.entries || []).map(e => e.n)) === '["beach.jpg"]', `a subfolder (its name as on disk: ${r.json?.path})`);
+  check(r.status === 200 && r.json?.path === 'Photos' && JSON.stringify((r.json?.entries || []).map(e => e.n)) === '["beach.jpg","sunset.png"]', `a subfolder (its name as on disk: ${r.json?.path})`);
   for (const p of ['..', '../..', 'Photos/..', 'Photos/../..', '.secret', 'Linked', 'Linked/', 'report.pdf', 'C:\\Windows', 'C:/Windows', '\\\\?\\C:\\', 'Photos:x', 'nope', 'CON', 'Photos.', 'Photos ']) {
     r = await files(asker, { share: 'a1a1a1a1', path: p });
     check(r.status === 404 && r.json?.reason === 'not-found', `"${p}": not a folder to look in (${r.status} ${r.json?.reason || r.json?.error})`);
@@ -150,10 +181,10 @@ try {
   check(!lines().some(l => /outside\.txt|key\.pem|NEVER=seen/.test(l)), 'beam.log names nothing of what isn\'t shown');
 
   // A copy: the files it can send go to the asker; the rest is said
-  r = await call(asker, 'POST', `/api/devices/${pcId}/files/copy`, { share: 'a1a1a1a1', path: '', names: ['report.pdf', 'notes.txt', '.env', 'hidden.txt', 'system.dat', 'Photos', 'Linked', '../elsewhere/outside.txt', 'nope.txt'] });
+  r = await call(asker, 'POST', `/api/devices/${pcId}/files/copy`, { share: 'a1a1a1a1', path: '', names: ['report.pdf', 'notes.txt', '.env', 'hidden.txt', 'system.dat', 'Linked', '../elsewhere/outside.txt', 'nope.txt'] });
   const skipped = Object.fromEntries((r.json?.skipped || []).map(s => [s.n, s.why]));
   check(r.status === 200 && r.json?.sending === 2, `two of them are sent (${JSON.stringify(r.json)})`);
-  check(skipped.Photos === 'a folder: files only' && ['.env', 'hidden.txt', 'system.dat', 'Linked', '../elsewhere/outside.txt', 'nope.txt'].every(n => skipped[n] === 'not there'), `...and the rest left out, saying why (${JSON.stringify(skipped)})`);
+  check(['.env', 'hidden.txt', 'system.dat', 'Linked', '../elsewhere/outside.txt', 'nope.txt'].every(n => skipped[n] === 'not there'), `...and the rest left out, saying why (${JSON.stringify(skipped)})`);
   const arrived = await waitFor(async () => {
     const items = (await call(asker, 'GET', '/api/items')).json?.items || [];
     const got = items.filter(i => i.from === pcId && i.kind === 'file' && i.size > 0 && (i.name === 'report.pdf' || i.name === 'notes.txt'));
@@ -183,6 +214,74 @@ try {
   check(r.status === 404 && r.json?.reason === 'not-found', `nor through the junction (${r.status} ${r.json?.reason})`);
   r = await files(other, { share: 'b2b2b2b2' });
   check(r.status === 200 && JSON.stringify((r.json?.entries || []).map(e => e.n)) === '["other.txt"]', 'the other device sees its own folder');
+
+  // (1.20) The PC's icon for each file type (no file touched)
+  const more = (h, what, body, raw = false) => raw
+    ? fetch(`${base}/api/devices/${pcId}/files/${what}`, { method: 'POST', headers: { ...h, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    : call(h, 'POST', `/api/devices/${pcId}/files/${what}`, body);
+  const isPng = b64 => typeof b64 === 'string' && Buffer.from(b64, 'base64').subarray(0, 8).toString('hex') === '89504e470d0a1a0a';
+  r = await more(asker, 'icons', { exts: ['.txt', '/', '.pdf'] });
+  check(r.status === 200 && isPng(r.json?.icons?.['.txt']) && isPng(r.json?.icons?.['/']), `icons: a text file's and a folder's, as PNGs (${r.status} ${Object.keys(r.json?.icons || {})})`);
+  check(typeof r.json?.types?.['.txt'] === 'string' && r.json.types['.txt'].length > 2 && r.json.types['/'], `...with each type's name there (${JSON.stringify(r.json?.types)})`);
+  r = await more(stranger, 'icons', { exts: ['.txt'] });
+  check(r.status === 403 && r.json?.reason === 'not-shared', `...not for a device nothing is shared with (${r.status} ${r.json?.reason})`);
+  // Windows' thumbnails: a real picture's, the right way up; none for what isn't a picture, or isn't there
+  r = await more(asker, 'thumbs', { share: 'a1a1a1a1', path: 'Photos', names: ['sunset.png', 'beach.jpg', 'nope.png'], px: 64 });
+  const thumb = r.json?.thumbs?.['sunset.png'];
+  check(r.status === 200 && typeof thumb === 'string' && Buffer.from(thumb, 'base64').subarray(0, 2).toString('hex') === 'ffd8', `thumbnails: the picture's, a JPEG (${r.status} ${Object.keys(r.json?.thumbs || {})} / none ${JSON.stringify(r.json?.none)})`);
+  check(JSON.stringify(r.json?.none) === '["beach.jpg","nope.png"]', `...none for a .jpg that isn't a picture, nor for a name that isn't there (${JSON.stringify(r.json?.none)})`);
+  if (thumb) {
+    const f = dir('thumb.jpg'); fs.writeFileSync(f, Buffer.from(thumb, 'base64'));
+    const [top, bottom] = topAndBottom(f).split(' ').map(s => s.split(',').map(Number));
+    check(top && bottom && top[0] > 150 && top[1] < 90 && bottom[1] > 150 && bottom[0] < 90, `...the right way up: red at the top, blue at the bottom (${JSON.stringify([top, bottom])})`);
+  }
+  r = await more(asker, 'thumbs', { share: 'a1a1a1a1', path: 'Linked', names: ['outside.txt'] });
+  check(r.status === 404, `...nothing through the junction (${r.status})`);
+  // A preview: a text, a picture and a PDF as they are; part of a big text; nothing for a file of no kind
+  const preview = async (name, h = asker) => { const res = await more(h, 'preview', { share: 'a1a1a1a1', path: '', name }, true); return { status: res.status, type: res.headers.get('content-type'), kind: res.headers.get('x-beam-preview'), size: res.headers.get('x-beam-size'), cut: res.headers.get('x-beam-truncated'), body: Buffer.from(await res.arrayBuffer()) }; };
+  let pv = await preview('notes.txt');
+  check(pv.status === 200 && pv.kind === 'text' && pv.type === 'text/plain' && pv.body.toString() === notes && pv.size === String(notes.length) && !pv.cut, `preview: a text file (${pv.status} ${pv.kind} ${pv.type} ${pv.body.length} B)`);
+  pv = await preview('big.log');
+  check(pv.status === 200 && pv.kind === 'text' && pv.cut === '1' && pv.body.length === 256 * 1024 && pv.size === String(bigText.length), `...the start of a big one (${pv.status} ${pv.body.length} of ${pv.size}, cut ${pv.cut})`);
+  pv = await preview('Photos/sunset.png');
+  check(pv.status === 200 && pv.kind === 'picture' && pv.type === 'image/png' && pv.body.equals(sunset), `...a picture inside a folder, as it is (${pv.status} ${pv.kind} ${pv.type})`);
+  pv = await preview('report.pdf');
+  check(pv.status === 200 && pv.kind === 'pdf' && pv.type === 'application/pdf' && pv.body.equals(report), `...a PDF (${pv.status} ${pv.kind} ${pv.type})`);
+  pv = await preview('blob.bin');
+  check(pv.status === 415, `...no preview for a file of no kind Beam shows (${pv.status} ${pv.body.toString().slice(0, 120)})`);
+  for (const name of ['.env', 'hidden.txt', 'Linked/outside.txt', '.secret/key.pem', '../elsewhere/outside.txt']) {
+    pv = await preview(name);
+    check(pv.status === 404, `...nothing hidden, starting with ".", or through a link: ${name} (${pv.status})`);
+  }
+  pv = await preview('notes.txt', other);
+  check(pv.status === 403, `...not from a folder that isn't shared with the device (${pv.status})`);
+  check(!!(await waitLog(/Shared folders: Asker Phone previewed Downloads\\Photos\\sunset\.png \(picture, /, 3000)), 'beam.log says who previewed what');
+  // A search in a folder and its subfolders: never into what isn't shown
+  r = await more(asker, 'search', { share: 'a1a1a1a1', path: '', q: 'BEACH' });
+  check(r.status === 200 && JSON.stringify((r.json?.results || []).map(e => `${e.p}/${e.n}`)) === '["Photos/beach.jpg"]', `search: a name in a subfolder, case not counting (${JSON.stringify(r.json)})`);
+  r = await more(asker, 'search', { share: 'a1a1a1a1', path: '', q: 't' });
+  const found = (r.json?.results || []).map(e => `${e.p}/${e.n}`);
+  check(r.status === 200 && found.includes('/notes.txt') && found.includes('Photos/sunset.png') && !found.some(f => /outside|key\.pem|\.env|hidden|system|thumbs/.test(f)), `...nothing hidden, starting with ".", or through the junction (${JSON.stringify(found)})`);
+  check(!!(await waitLog(/Shared folders: Asker Phone searched Downloads for "t" \(/, 3000)), '...and beam.log says so');
+  // A copy of a name inside a folder (from a search), and of a folder: a .zip of what it shows
+  r = await call(asker, 'POST', `/api/devices/${pcId}/files/copy`, { share: 'a1a1a1a1', path: '', names: ['Photos/beach.jpg', 'Photos', 'Linked/outside.txt', '.secret/key.pem'] });
+  const left = Object.fromEntries((r.json?.skipped || []).map(s => [s.n, s.why]));
+  check(r.status === 200 && r.json?.sending === 2 && left['Linked/outside.txt'] === 'not there' && left['.secret/key.pem'] === 'not there', `copy: a file inside a folder and a folder are sent, nothing through a link or a "." folder (${JSON.stringify(r.json)})`);
+  const zipped = await waitFor(async () => {
+    const items = (await call(asker, 'GET', '/api/items')).json?.items || [];
+    const got = items.filter(i => i.from === pcId && !i.uploading && i.size > 0 && (i.name === 'Photos.zip' || (i.name === 'beach.jpg')));
+    return got.length === 2 ? got : null;
+  }, 30000, 500);
+  check(!!zipped, `...both arrive (${zipped ? zipped.map(i => i.name).join(', ') : 'not within 30 s'})`);
+  const zipItem = zipped && zipped.find(i => i.name === 'Photos.zip');
+  if (zipItem) {
+    const f = dir('Photos.zip');
+    fs.writeFileSync(f, Buffer.from(await (await fetch(`${base}/api/file/${zipItem.id}`, { headers: asker })).arrayBuffer()));
+    const inZip = zipNames(f);
+    check(JSON.stringify(inZip) === '["Photos/beach.jpg","Photos/sunset.png"]', `...the .zip holds what Photos shows, nothing hidden or starting with "." (${JSON.stringify(inZip)})`);
+  }
+  await sleep(1500);
+  check(!fs.readdirSync(outgoing).some(n => /^Photos.*\.zip/.test(n)) && fs.existsSync(path.join(dl, 'Photos', 'sunset.png')), `...the .zip made for it is gone once sent, the folder stays (${fs.readdirSync(outgoing)})`);
 
   // This PC's page (the chat window, host mode): the folders read-only; it can't change them; its button opens the window
   const forward = a => spawnSync(appExe, ['--config', cfgPath, ...a], { env, windowsHide: true, timeout: 20000 });

@@ -446,20 +446,21 @@ export default function register(test) {
     await page.waitFor(`[...$('#genFoot').querySelectorAll('button')].some(b => b.textContent.trim() === 'Shared folders')`, 5000, 'the button');
     await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent.trim() === 'Shared folders').click()`);
     // Its only folder opens at once: folders first, then files with their sizes; Copy is off until a file is ticked
-    await page.waitFor(`$('#genTitle')?.textContent === 'Files PC: Downloads' && $$('#genBody .shared-row').length === 3`, 8000, 'the folder');
-    const rows = await page.evaluate(`[...$$('#genBody .shared-row')].map(r => r.textContent)`);
-    assert(/^Photos/.test(rows[0]) && /^report\.pdf1\.0 MB/.test(rows[1]), JSON.stringify(rows));
+    await page.waitFor(`$('#genTitle')?.textContent === 'Files PC: Downloads' && $$('#genBody .shared-item').length === 3`, 8000, 'the folder');
+    const rows = await page.evaluate(`[...$$('#genBody .shared-item')].map(r => r.textContent)`);
+    assert(/^Photos/.test(rows[0]) && /^report\.pdf.*1\.0 MB/.test(rows[1]), JSON.stringify(rows));
+    assert(await page.evaluate(`!$('#genBody .shared-item input') || $$('#genBody .shared-item input').length === 2`), 'a 1.18 PC: only files tick');
     assert(await page.evaluate(`$('#genFoot .shared-copy').disabled`), 'nothing ticked: Copy is off');
     // Into Photos, and back up
-    await page.evaluate(`$$('#genBody .shared-row.dir')[0].click()`);
+    await page.evaluate(`$('#genBody .shared-item .shared-open').click()`);
     await page.waitFor(`$('#genTitle').textContent === 'Files PC: Photos' && /beach\\.jpg/.test($('#genBody .shared-list').textContent) && /Downloads/.test($('#genBody .shared-crumbs').textContent)`, 8000, 'the subfolder');
-    await page.evaluate(`$('#genBody .shared-row.up').click()`);
-    await page.waitFor(`$('#genTitle').textContent === 'Files PC: Downloads' && $$('#genBody .shared-row').length === 3`, 8000, 'back up');
+    await page.evaluate(`$('#genBody .shared-item.up .shared-open').click()`);
+    await page.waitFor(`$('#genTitle').textContent === 'Files PC: Downloads' && $$('#genBody .shared-item').length === 3`, 8000, 'back up');
     // The filter, then both files ticked and copied
     await page.evaluate(`(() => { const i = $('#genBody .shared-filter'); i.value = 'PDF'; i.dispatchEvent(new Event('input')); return true; })()`);
-    await page.waitFor(`$$('#genBody .shared-row').length === 1 && /report\\.pdf/.test($('#genBody .shared-row').textContent)`, 3000, 'filtered');
+    await page.waitFor(`$$('#genBody .shared-item').length === 1 && /report\\.pdf/.test($('#genBody .shared-item').textContent)`, 3000, 'filtered');
     await page.evaluate(`(() => { const i = $('#genBody .shared-filter'); i.value = ''; i.dispatchEvent(new Event('input')); return true; })()`);
-    await page.evaluate(`[...$$('#genBody .shared-row.file input')].forEach(b => b.click())`);
+    await page.evaluate(`[...$$('#genBody .shared-item input')].forEach(b => b.click())`);
     await page.waitFor(`!$('#genFoot .shared-copy').disabled && /Copy 2 files to this device/.test($('#genFoot .shared-copy').textContent)`, 3000, 'two ticked');
     await page.evaluate(`$('#genFoot .shared-copy').click()`);
     await page.waitFor(`__toasts.some(t => /Files PC is sending 2 files: they arrive in your conversation with it/.test(t))`, 8000, 'the toast');
@@ -477,6 +478,93 @@ export default function register(test) {
     await host.evaluate(`[...$('#set-control').querySelectorAll('button')].find(b => /Shared folders…/.test(b.textContent)).click()`);
     await host.waitFor(`__host.log.some(m => m.type === 'sharedFolders')`, 3000, 'the app’s own window');
     eq(host.errors, [], 'no page errors (This PC)');
+  });
+
+  test('shared folders like Explorer (1.28): the PC’s icons and type names, sorting, Select all, a grid of thumbnails, a file’s preview (text, picture), a search in subfolders, copying from it and a whole folder', async ctx => {
+    const page = await ctx.signedIn();
+    await recordToasts(page);
+    await page.evaluate(`store.remove('beam.sharedLook'); Object.assign(sharedLook, { view: 'list', sort: 'name', desc: false }); true`);
+    await page.waitFor(`serverHas('shared-folders-2')`, 8000, 'the server offers it');
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Explorer PC', 'windows', ctx.nextIp(), '1.20.0');
+    await pc.me();
+    const stream = pc.stream();
+    ctx.defer(() => stream.close());
+    await page.waitFor(`deviceById('${pc.id}')?.online === true && deviceById('${pc.id}')?.can?.files2 === true`, 8000, 'online, a 1.20 PC');
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const day = 86400e3, now = Date.now();
+    const entries = [{ n: 'Photos', dir: true, m: now - 5 * day }, { n: 'notes.txt', s: 300, m: now - 2 * day }, { n: 'report.pdf', s: 2e6, m: now - 9 * day }, { n: 'sunset.png', s: 40000, m: now - day }];
+    const asked = [];
+    let seen = 0;
+    const answer = async () => {
+      for (const e of stream.events.slice(seen)) {
+        seen++;
+        if (!/^files-/.test(e.event)) continue;
+        asked.push({ event: e.event, ...e.data });
+        const d = e.data;
+        const body = e.event === 'files-request' ? (!d.share ? { ok: true, shares: [{ id: 'a1b2c3d4', name: 'Downloads' }] } : { ok: true, share: 'a1b2c3d4', name: 'Downloads', path: '', entries })
+          : e.event === 'files-icons' ? { ok: true, icons: Object.fromEntries(d.exts.map(x => [x, png])), types: { '.txt': 'Text Document', '/': 'File folder' } }
+            : e.event === 'files-thumbs' ? { ok: true, thumbs: d.names.includes('sunset.png') ? { 'sunset.png': '/9j/4AAQSkZJRg==' } : {}, none: d.names.filter(n => n !== 'sunset.png') }
+              : e.event === 'files-preview' ? (d.name === 'notes.txt' ? { ok: true, kind: 'text', type: 'text/plain', size: 300, data: Buffer.from('first line\nsecond line\n').toString('base64') }
+                : d.name === 'sunset.png' ? { ok: true, kind: 'picture', type: 'image/png', size: 40000, data: png } : { ok: false, reason: 'no-preview', error: 'no' })
+                : e.event === 'files-search' ? { ok: true, results: [{ p: 'Photos/2026', n: 'beach.jpg', s: 5000, m: now }] }
+                  : { ok: true, sending: d.names.length, skipped: [] };
+        await pc.post('/api/devices/me/files', { id: d.id, ...body });
+      }
+    };
+    const pump = setInterval(() => answer().catch(() => {}), 100);
+    ctx.defer(() => clearInterval(pump));
+    await page.evaluate(`openSharedFolders(deviceById('${pc.id}')); true`);
+    await page.waitFor(`$('#genTitle')?.textContent === 'Explorer PC: Downloads' && $$('#genBody .shared-item').length === 4`, 8000, 'the folder');
+    // The PC's icons and type names, asked once for the types here
+    await page.waitFor(`$$('#genBody img.shared-ic').length === 4 && /Text Document/.test($('#genBody').textContent)`, 5000, 'icons and type names');
+    const icons = asked.filter(a => a.event === 'files-icons');
+    eq(icons.length, 1, 'asked once');
+    eq([...icons[0].exts].sort(), ['.pdf', '.png', '.txt', '/'], 'for each type in the folder');
+    const names = () => page.evaluate(`[...$$('#genBody .shared-item .shared-name')].map(n => n.textContent)`);
+    eq(await names(), ['Photos', 'notes.txt', 'report.pdf', 'sunset.png'], 'by name, folders first');
+    // Sorting: by size (smallest first), turned round; by date (newest first); remembered here
+    await page.evaluate(`(() => { const s = $('#genBody .shared-sort'); s.value = 'size'; s.onchange(); return true; })()`);
+    eq(await names(), ['Photos', 'notes.txt', 'sunset.png', 'report.pdf'], 'by size');
+    await page.evaluate(`$('#genBody .shared-bar .mini').click()`);
+    eq(await names(), ['Photos', 'report.pdf', 'sunset.png', 'notes.txt'], 'largest first');
+    await page.evaluate(`(() => { const s = $('#genBody .shared-sort'); s.value = 'date'; s.onchange(); return true; })()`);
+    eq(await names(), ['Photos', 'sunset.png', 'notes.txt', 'report.pdf'], 'newest first');
+    eq(await page.evaluate(`store.json('beam.sharedLook', {}).sort`), 'date', 'remembered');
+    // Select all: the folder too (a .zip); then nothing
+    await page.evaluate(`$('#genBody .shared-head input').click()`);
+    await page.waitFor(`/Copy 4 items to this device/.test($('#genFoot .shared-copy').textContent) && /1 folder as \\.zip files/.test($('#genBody .shared-head').textContent)`, 3000, 'all four');
+    await page.evaluate(`$('#genBody .shared-head input').click()`);
+    await page.waitFor(`$('#genFoot .shared-copy').disabled`, 3000, 'none');
+    // A text file's preview: its lines; → the next one (a picture, shown from the PC's bytes); Back to the list
+    await page.evaluate(`[...$$('#genBody .shared-item .shared-open')].find(b => /notes\\.txt/.test(b.textContent)).click()`);
+    await page.waitFor(`$('#genTitle').textContent === 'Explorer PC: notes.txt' && /second line/.test($('#genBody pre.file-preview')?.textContent || '')`, 8000, 'the text');
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.getAttribute('aria-label') === 'The one before').click()`);
+    await page.waitFor(`$('#genTitle').textContent === 'Explorer PC: sunset.png' && /^blob:/.test($('#genBody .shared-stage img')?.src || '')`, 8000, 'the picture before it (by date)');
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => /Back to the folder/.test(b.textContent)).click()`);
+    await page.waitFor(`$('#genTitle').textContent === 'Explorer PC: Downloads' && $$('#genBody .shared-item').length === 4`, 3000, 'back');
+    const previews = asked.filter(a => a.event === 'files-preview').map(a => a.name);
+    eq(previews, ['notes.txt', 'sunset.png'], 'each asked of the PC when looked at');
+    // As pictures: Windows' thumbnails for the tiles in sight (only for pictures, videos and PDFs)
+    await page.evaluate(`[...$$('#genBody .shared-bar .mini')].find(b => b.getAttribute('aria-label') === 'Show as pictures').click()`);
+    await page.waitFor(`$$('#genBody .shared-list.grid .shared-tile').length === 4 && Boolean($('#genBody .shared-tile img.thumb'))`, 8000, 'a grid with a thumbnail');
+    const thumbs = asked.filter(a => a.event === 'files-thumbs').flatMap(a => a.names).sort();
+    eq(thumbs, ['report.pdf', 'sunset.png'], 'thumbnails asked for the picture and the PDF only');
+    eq(await page.evaluate(`store.json('beam.sharedLook', {}).view`), 'grid', 'the grid remembered');
+    // A search in the folder and its subfolders; a result copied (its name inside its folder); back to the folder
+    await page.evaluate(`(() => { const i = $('#genBody .shared-filter'); i.value = 'beach'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); return true; })()`);
+    await page.waitFor(`/Names with “beach”, subfolders too/.test($('#genBody .shared-crumbs').textContent) && /in Photos \\/ 2026/.test($('#genBody .shared-list').textContent)`, 8000, 'the results');
+    eq(asked.filter(a => a.event === 'files-search').map(a => [a.path, a.q]), [['', 'beach']], 'asked of the PC');
+    await page.evaluate(`$('#genBody .shared-tile input').click(); $('#genFoot .shared-copy').click(); true`);
+    await page.waitFor(`__toasts.some(t => /Explorer PC is sending 1 file/.test(t))`, 8000, 'copied');
+    eq(asked.filter(a => a.event === 'files-copy').map(a => a.names), [['Photos/2026/beach.jpg']], 'by its name inside its folder');
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => /Back to the folder/.test(b.textContent)).click()`);
+    await page.waitFor(`$$('#genBody .shared-tile').length === 4 && !/Names with/.test($('#genBody .shared-crumbs').textContent)`, 3000, 'the folder again');
+    // A whole folder: ticked and copied (the PC sends a .zip)
+    await page.evaluate(`[...$$('#genBody .shared-tile')].find(t => /Photos/.test(t.textContent)).querySelector('input').click(); $('#genFoot .shared-copy').click(); true`);
+    await page.waitFor(`__toasts.some(t => /Folders come as \\.zip files/.test(t))`, 8000, 'a folder copied');
+    eq(asked.filter(a => a.event === 'files-copy').map(a => a.names)[1], ['Photos'], 'the folder by its name');
+    await page.evaluate(`$('#genDlg').close(); store.remove('beam.sharedLook'); true`);
+    eq(page.errors, [], 'no page errors');
   });
 
   test('Settings → Security: this device’s own switches (the Windows app’s remote control and app installs, Beam for Linux’s remote control) (2026-10-21)', async ctx => {

@@ -745,6 +745,18 @@ namespace Beam
                 case "files-copy": // ...and copies files from one: sent to it as anything is
                     Shares.OnCopy(this, d);
                     break;
+                case "files-icons": // Beam 1.28: this PC's icon for each file type (shared folders more like Explorer)
+                    Shares.OnIcons(this, d);
+                    break;
+                case "files-thumbs": // ...thumbnails, Windows' own
+                    Shares.OnThumbs(this, d);
+                    break;
+                case "files-preview": // ...one file to look at before copying it
+                    Shares.OnPreview(this, d);
+                    break;
+                case "files-search": // ...names in a folder and its subfolders
+                    Shares.OnSearch(this, d);
+                    break;
                 case "upload": // a file still arriving (Beam 1.4 servers can already serve what has arrived)
                     OnUploadProgress(d);
                     break;
@@ -2034,8 +2046,9 @@ namespace Beam
         }
 
         // Files are uploaded natively (resumable, surviving restarts). Folders are zipped first. (1.18) mayDelete false:
-        // never the outbox's delete-after-sending (a shared folder's copies: the original always stays).
-        public int SendFiles(IEnumerable<string> paths, List<string> to, bool notify, string origin, Action<UploadJob> finished, bool mayDelete = true)
+        // never the outbox's delete-after-sending (a shared folder's copies: the original always stays). (1.20) zipper: how a
+        // folder is zipped (a shared folder's: only what it shows), else Zip.Folder.
+        public int SendFiles(IEnumerable<string> paths, List<string> to, bool notify, string origin, Action<UploadJob> finished, bool mayDelete = true, Func<string, string, string> zipper = null)
         {
             int count = 0;
             foreach (var p in paths)
@@ -2055,6 +2068,7 @@ namespace Beam
                 if (isDir)
                 {
                     job.SourceFolder = p;
+                    job.Zipper = zipper;
                     job.Name = FileUtil.SafeName(Path.GetFileName(p.TrimEnd('\\'))) + ".zip";
                     job.State = JobState.Preparing;
                     job.Status = "Zipping the folder…";
@@ -2078,10 +2092,11 @@ namespace Beam
         void ZipAndSend(UploadJob job)
         {
             string folder = job.SourceFolder, outDir = Cfg.OutgoingFolder;
+            var zipper = job.Zipper ?? (Func<string, string, string>)Zip.Folder;
             Task.Run(() =>
             {
                 string zip = null, error = null;
-                try { zip = Zip.Folder(folder, outDir); }
+                try { zip = zipper(folder, outDir); }
                 catch (Exception ex) { error = ex.Message; Log.Error("Zipping a folder", ex); }
                 Post(() =>
                 {

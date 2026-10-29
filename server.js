@@ -29,6 +29,7 @@ const pcHistory = require('./lib/history');
 const winevents = require('./lib/winevents');
 const winsetup = require('./lib/winsetup');
 const appsLib = require('./lib/apps');
+const sharesLib = require('./lib/shares');
 const ws = require('./lib/websocket');
 const { version: VERSION } = require('./package.json');
 
@@ -2127,6 +2128,7 @@ function capabilitiesOf(device, ts = tailscaleOf(device)) {
     log: canSendLog(device), // (1.20) its Beam app sends its log when asked
     apps: canInstallApps(device), // (1.21) its Beam app installs Beam's apps (once allowed there)
     files: canShareFiles(device), // (1.26) its Beam app shares folders chosen there (shared folders)
+    files2: canShareMore(device), // (1.28) ...with icons, thumbnails, previews, search and whole folders
   };
 }
 
@@ -2997,113 +2999,134 @@ async function postDeviceLog(req, res, _m, url) {
 // for each the devices that may see it), read-only. The server only relays, for a trusted sign-in made to last, and says
 // who asks (`by`, the device as this server resolved it): the PC checks that against the folder's devices and answers.
 // A copy is an ordinary send from the PC to the device that asked. Nothing is kept here. (Beam-dev\plan\shared-folders.md)
-const FILES_APP_MIN = '1.18.0';
+// (1.28, the user: "we should add like windows type things to it like preview and sort and everything") Also the PC's
+// icon for each file type, thumbnails, one file's preview, a search in a folder and its subfolders, and whole folders in
+// a copy (Beam for Windows 1.20). What's asked and answered is checked in lib/shares.js.
 const FILES_ANSWER_MS = FAST_TIMEOUTS ? 4000 : 15_000;
+const FILES_PREVIEW_MS = FAST_TIMEOUTS ? 6000 : 45_000; // (a preview's bytes come over the PC's own connection)
 const FILES_MAX_BYTES = 1024 * 1024;
+const FILES_PREVIEW_BYTES = 16 * 1024 * 1024; // (an answer from a PC while a preview is waited for)
 const FILES_PENDING_MAX = 4; // (each asking device's requests to one PC still waiting)
-const FILES_REASONS = new Set(['not-shared', 'not-found', 'not-allowed', 'busy', 'error']);
-const SHARE_ID = /^[a-f0-9]{8}$/;
-const filesAsks = new Map(); // request id -> { target, by, done(answer) }
+const filesAsks = new Map(); // request id -> { target, by, event, done(answer) }
 
-const canShareFiles = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, FILES_APP_MIN);
-// A file's or folder's name as shown elsewhere: no control or bidi characters (a name can't pose as another).
-const fileNameText = (v, max = 255) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '').slice(0, max) : '');
+const canShareFiles = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, sharesLib.APP_MIN);
+const canShareMore = d => canShareFiles(d) && versionAtLeast(d.appVersion, sharesLib.APP_MORE);
 
-function shareOf(v, required) {
-  if ((v === undefined || v === null || v === '') && !required) return '';
-  if (typeof v !== 'string' || !SHARE_ID.test(v)) throw httpError(400, 'share must be a shared folder’s id (from its list)');
-  return v;
-}
-function sharePathOf(v) {
-  if (v === undefined || v === null) return '';
-  if (typeof v !== 'string' || v.length > 1024 || /[\u0000-\u001f]/.test(v)) throw httpError(400, 'path must be a folder inside the shared one, like "Photos/2026"');
-  return v;
-}
-
-// What a PC answered, the fields this API has only, names cleaned.
-function cleanFilesAnswer(b) {
-  if (b.ok !== true) return { ok: false, reason: FILES_REASONS.has(b.reason) ? b.reason : 'error', error: fileNameText(b.error, 300) };
-  const out = { ok: true };
-  if (Array.isArray(b.shares)) out.shares = b.shares.slice(0, 100).filter(s => s && SHARE_ID.test(s.id)).map(s => ({ id: s.id, name: fileNameText(s.name, 80) || 'Shared folder' }));
-  if (typeof b.share === 'string' && SHARE_ID.test(b.share)) out.share = b.share;
-  if (typeof b.name === 'string') out.name = fileNameText(b.name, 80);
-  if (typeof b.path === 'string') out.path = fileNameText(b.path, 1024);
-  if (Array.isArray(b.entries)) {
-    out.entries = b.entries.slice(0, 2000).filter(e => e && typeof e === 'object' && fileNameText(e.n)).map(e => ({
-      n: fileNameText(e.n), ...(e.dir === true && { dir: true }), s: Number.isFinite(e.s) && e.s >= 0 ? Math.floor(e.s) : 0, m: Number.isFinite(e.m) ? Math.floor(e.m) : 0,
-    }));
-  }
-  if (b.more === true) out.more = true;
-  if (Number.isInteger(b.sending) && b.sending >= 0) out.sending = Math.min(b.sending, 100);
-  if (Array.isArray(b.skipped)) out.skipped = b.skipped.slice(0, 100).map(s => ({ n: fileNameText(s?.n), why: fileNameText(s?.why, 120) })).filter(s => s.n);
-  return out;
-}
-
-// One request to the PC (`files-request` or `files-copy`) and its answer, or the error it gave.
-async function askFiles(req, url, id, event, fields) {
+// One request to the PC (`files-request`, `files-copy`, …) and its answer, or the error it gave. `more`: one of 1.28's.
+async function askFiles(req, url, id, event, fields, { more = false, wait = FILES_ANSWER_MS } = {}) {
   requireLasting(req, url, 'browse another device’s shared folders');
   if (!isTrusted(authOf(req))) throw notTrusted('browse another device’s shared folders');
   const target = targetDevice(id);
   const by = resolveAlias(deviceIdOf(req, url) || '');
   if (!devices[by]) throw httpError(400, 'X-Beam-Device-Id is required');
   if (by === target.id) throw httpError(409, 'These are this device’s own folders');
-  if (!canShareFiles(target)) throw httpError(409, `${target.name} can’t share folders (that needs Beam for Windows ${FILES_APP_MIN} or later)`);
+  if (!canShareFiles(target)) throw httpError(409, `${target.name} can’t share folders (that needs Beam for Windows ${sharesLib.APP_MIN} or later)`);
+  if (more && !canShareMore(target)) throw httpError(409, `${target.name} needs Beam for Windows ${sharesLib.APP_MORE} or later for that`, { reason: 'old-app' });
   if (!isOnline(target.id)) throw httpError(409, `${target.name} is offline`);
   if ([...filesAsks.values()].filter(a => a.target === target.id && a.by === by).length >= FILES_PENDING_MAX) {
     throw httpError(429, `${target.name} is still answering this device`);
   }
   const askId = crypto.randomBytes(8).toString('hex');
   const got = await new Promise(resolve => {
-    const timer = setTimeout(() => resolve(null), FILES_ANSWER_MS);
-    filesAsks.set(askId, { target: target.id, by, done: a => { clearTimeout(timer); resolve(a); } });
+    const timer = setTimeout(() => resolve(null), wait);
+    filesAsks.set(askId, { target: target.id, by, event, done: a => { clearTimeout(timer); resolve(a); } });
     sendTo(new Set([target.id]), event, { id: askId, by, byName: nameOf(by), ...fields });
   });
   filesAsks.delete(askId);
   if (!got) throw httpError(409, `${target.name} didn’t answer in time`);
   if (!got.ok) {
-    const status = got.reason === 'not-found' ? 404 : got.reason === 'busy' || got.reason === 'error' ? 409 : 403;
+    const status = got.reason === 'not-found' ? 404 : got.reason === 'no-preview' ? 415 : got.reason === 'busy' || got.reason === 'error' ? 409 : 403;
     throw httpError(status, got.error || `${target.name} said no`, { reason: got.reason });
   }
   return { target, by, got };
 }
 
-// POST /api/devices/{id}/files { share?, path? }: the folders the PC shares with this device ({ shares }), or what's in
-// one of them ({ share, name, path, entries: [{ n, dir?, s, m }], more? }: folders first, 2000 at most).
-async function askDeviceFiles(req, res, [id], url) {
-  const body = await readJson(req, { optional: true });
-  const unknown = Object.keys(body).filter(k => k !== 'share' && k !== 'path');
+// A request's JSON with these fields only.
+async function filesBody(req, fields, optional = false) {
+  const body = await readJson(req, { optional });
+  const unknown = Object.keys(body).filter(k => !fields.includes(k));
   if (unknown.length) throw httpError(400, `Can't use ${unknown.join(', ')} here`);
-  const share = shareOf(body.share, false), path = sharePathOf(body.path);
+  return body;
+}
+
+// POST /api/devices/{id}/files { share?, path? }: the folders the PC shares with this device ({ shares }), or what's in
+// one of them ({ share, name, path, entries: [{ n, dir?, s, m, c? }], more? }: folders first, 2000 at most).
+async function askDeviceFiles(req, res, [id], url) {
+  const body = await filesBody(req, ['share', 'path'], true);
+  const share = sharesLib.shareOf(body.share, false), path = sharesLib.pathOf(body.path);
   const { got } = await askFiles(req, url, id, 'files-request', { share, path });
   const answer = share ? { share: got.share || share, name: got.name || '', path: got.path ?? path, entries: got.entries || [], ...(got.more && { more: true }) } : { shares: got.shares || [] };
   send(res, 200, answer, { 'Cache-Control': 'no-store' });
 }
 
 // POST /api/devices/{id}/files/copy { share, path, names }: the PC sends those files to this device, the way it sends
-// anything (they arrive as items from it). → { sending, skipped: [{ n, why }] }.
+// anything (they arrive as items from it). (1.28) A name may be inside a folder ("2026/a.jpg", from a search) or a folder
+// (sent as a .zip of what's shown in it). → { sending, skipped: [{ n, why }] }.
 async function askDeviceFilesCopy(req, res, [id], url) {
-  const body = await readJson(req);
-  const unknown = Object.keys(body).filter(k => !['share', 'path', 'names'].includes(k));
-  if (unknown.length) throw httpError(400, `Can't use ${unknown.join(', ')} here`);
-  const share = shareOf(body.share, true), path = sharePathOf(body.path);
-  const names = body.names;
-  if (!Array.isArray(names) || !names.length || names.length > 100 || !names.every(n => typeof n === 'string' && n && n.length <= 255 && !/[\u0000-\u001f]/.test(n))) {
-    throw httpError(400, 'names must be 1 to 100 file names in that folder');
-  }
+  const body = await filesBody(req, ['share', 'path', 'names']);
+  const share = sharesLib.shareOf(body.share, true), path = sharesLib.pathOf(body.path);
+  const names = sharesLib.namesOf(body.names);
   const { target, by, got } = await askFiles(req, url, id, 'files-copy', { share, path, names });
   const sending = got.sending || 0;
   log.info(`${nameOf(by)} asked ${target.name} for ${sending} file${sending === 1 ? '' : 's'} from a shared folder`);
   send(res, 200, { sending, skipped: got.skipped || [] });
 }
 
-// POST /api/devices/me/files { id, ok, … }: a PC's answer to one of those (only the PC asked; 1 MB at most).
+// (1.28) POST /api/devices/{id}/files/icons { exts: [".pdf", "/"…] }: the PC's own icon for each file type ("/": a
+// folder), as PNGs in base64, and its name there. → { icons: { ".pdf": "…" }, types: { ".pdf": "PDF Document" } } (a type
+// without one is left out).
+async function askDeviceFileIcons(req, res, [id], url) {
+  const body = await filesBody(req, ['exts']);
+  const exts = sharesLib.extsOf(body.exts);
+  const { got } = await askFiles(req, url, id, 'files-icons', { exts }, { more: true });
+  send(res, 200, { icons: got.icons || {}, types: got.types || {} });
+}
+
+// (1.28) POST /api/devices/{id}/files/thumbs { share, path, names, px? }: the PC's thumbnails of those files (pictures,
+// videos, PDFs: what Windows makes them for), JPEGs in base64, the longer side at most px (160; 32 to 256).
+// → { thumbs: { name: "…" }, none: [names without one] } (a name in neither: not reached in time, ask again).
+async function askDeviceFileThumbs(req, res, [id], url) {
+  const body = await filesBody(req, ['share', 'path', 'names', 'px']);
+  const share = sharesLib.shareOf(body.share, true), path = sharesLib.pathOf(body.path);
+  const names = sharesLib.namesOf(body.names, sharesLib.MAX_THUMBS), px = sharesLib.pxOf(body.px);
+  const { got } = await askFiles(req, url, id, 'files-thumbs', { share, path, names, px }, { more: true });
+  send(res, 200, { thumbs: got.thumbs || {}, none: got.none || [] });
+}
+
+// (1.28) POST /api/devices/{id}/files/preview { share, path, name }: one file to look at before copying it, through the
+// PC: a picture (as it is, or a 2048 px JPEG), the start of a text file (256 KB), a PDF (10 MB at most) or a video's
+// frame. → its bytes (Content-Type one of a few: never html or svg), X-Beam-Preview: picture|text|pdf|video,
+// X-Beam-Size: the file's size, X-Beam-Truncated: 1 for part of a text. 415 (no-preview) for any other kind of file.
+async function askDeviceFilePreview(req, res, [id], url) {
+  const body = await filesBody(req, ['share', 'path', 'name']);
+  const share = sharesLib.shareOf(body.share, true), path = sharesLib.pathOf(body.path);
+  const [name] = sharesLib.namesOf(typeof body.name === 'string' ? [body.name] : null, 1);
+  const { got } = await askFiles(req, url, id, 'files-preview', { share, path, name }, { more: true, wait: FILES_PREVIEW_MS });
+  if (!got.data) throw httpError(409, 'The PC sent no preview');
+  send(res, 200, Buffer.from(got.data, 'base64'), {
+    'Content-Type': got.type, 'X-Beam-Preview': got.kind, 'X-Beam-Size': String(got.size || 0), ...(got.truncated && { 'X-Beam-Truncated': '1' }),
+  });
+}
+
+// (1.28) POST /api/devices/{id}/files/search { share, path, q }: names with q in them (case not counting) in that folder
+// and its subfolders. → { results: [{ p (the folder inside path), n, dir?, s, m }], more? } (300 at most).
+async function askDeviceFileSearch(req, res, [id], url) {
+  const body = await filesBody(req, ['share', 'path', 'q']);
+  const share = sharesLib.shareOf(body.share, true), path = sharesLib.pathOf(body.path), q = sharesLib.searchOf(body.q);
+  const { got } = await askFiles(req, url, id, 'files-search', { share, path, q }, { more: true });
+  send(res, 200, { results: got.results || [], ...(got.more && { more: true }) });
+}
+
+// POST /api/devices/me/files { id, ok, … }: a PC's answer to one of those (only the PC asked; 1 MB at most, 16 MB while
+// it has a preview to send).
 async function postDeviceFiles(req, res, _m, url) {
   const d = devices[deviceIdOf(req, url)];
   if (!d) throw httpError(400, 'X-Beam-Device-Id is required');
-  const body = await readJson(req, { limit: FILES_MAX_BYTES });
+  const previewing = [...filesAsks.values()].some(a => a.target === d.id && a.event === 'files-preview');
+  const body = await readJson(req, { limit: previewing ? FILES_PREVIEW_BYTES : FILES_MAX_BYTES });
   const ask = typeof body.id === 'string' ? filesAsks.get(body.id) : null;
   if (!ask || ask.target !== d.id) throw httpError(404, 'No such request (it may have timed out)');
-  ask.done(cleanFilesAnswer(body));
+  ask.done(sharesLib.cleanAnswer(body));
   send(res, 204);
 }
 
@@ -6720,6 +6743,7 @@ const FEATURES = [
   'trust', // (1.25.0: trusted sign-ins; devices' `trusted`, /api/me `auth.trusted`, PUT /api/devices/{id}/trust, 403 reason "trusted")
   'shared-folders', // (1.26.0: POST /api/devices/{id}/files[/copy], `files-request`/`files-copy`, POST /api/devices/me/files, `can.files`)
   'control-here', // (1.27.1: PUT /api/devices/me/control from Beam for Linux's window → `control-set`; status `controlProblem`)
+  'shared-folders-2', // (1.28.0: POST /api/devices/{id}/files/icons|thumbs|preview|search, sub-paths and folders in a copy, `can.files2`)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)
@@ -8084,6 +8108,10 @@ const routes = [
   ['POST', '/api/devices/me/files', postDeviceFiles], // (1.26) shared folders
   ['POST', `/api/devices/${DEV}/files`, askDeviceFiles],
   ['POST', `/api/devices/${DEV}/files/copy`, askDeviceFilesCopy],
+  ['POST', `/api/devices/${DEV}/files/icons`, askDeviceFileIcons], // (1.28)
+  ['POST', `/api/devices/${DEV}/files/thumbs`, askDeviceFileThumbs],
+  ['POST', `/api/devices/${DEV}/files/preview`, askDeviceFilePreview],
+  ['POST', `/api/devices/${DEV}/files/search`, askDeviceFileSearch],
   ['POST', '/api/devices/me/apps', reportApps], // (1.21) apps on every PC
   ['PUT', '/api/devices/me/apps', reportApps],
   ['GET', '/api/apps', listApps],

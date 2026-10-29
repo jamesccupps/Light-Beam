@@ -9,6 +9,7 @@
 // key, .ssh…); links and junctions (of reparse points only OneDrive's placeholders and Windows' compressed or deduplicated
 // files, which are a file's own data). A folder can't be a whole drive, the profile folder or above it, a network folder,
 // or inside AppData, Windows or Program Files. Every listing and copy goes in beam.log; a copy also shows a notice here.
+// (1.20) Icons, thumbnails, a preview, a search and whole folders: SharedFoldersMore.cs.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -60,7 +61,7 @@ namespace Beam
         }
     }
 
-    static class Shares
+    static partial class Shares
     {
         public const int MaxEntries = 2000, MaxNames = 100;
         static readonly string[] Reserved = { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" };
@@ -139,7 +140,7 @@ namespace Beam
         {
             public string Name;
             public bool Dir;
-            public long Size, Mtime;
+            public long Size, Mtime, Ctime;
             public uint Attributes, Tag;
         }
 
@@ -154,6 +155,8 @@ namespace Beam
             e.Size = ((long)d.SizeHigh << 32) | d.SizeLow;
             long ft = ((long)(uint)d.Written.dwHighDateTime << 32) | (uint)d.Written.dwLowDateTime;
             try { e.Mtime = (long)(DateTime.FromFileTimeUtc(ft) - Epoch).TotalMilliseconds; } catch { }
+            long ct = ((long)(uint)d.Created.dwHighDateTime << 32) | (uint)d.Created.dwLowDateTime;
+            try { e.Ctime = (long)(DateTime.FromFileTimeUtc(ct) - Epoch).TotalMilliseconds; } catch { }
             e.Tag = (d.Attributes & ReparsePoint) != 0 ? d.Reserved0 : 0; // (FindFirstFile gives the reparse tag here)
             return e;
         }
@@ -281,6 +284,7 @@ namespace Beam
                                 if (e.Dir) o["dir"] = true;
                                 o["s"] = e.Dir ? 0 : e.Size;
                                 o["m"] = e.Mtime;
+                                o["c"] = e.Ctime; // (1.20)
                                 return (object)o;
                             }).ToArray();
                             if (entries.Count > MaxEntries) answer["more"] = true;
@@ -293,7 +297,8 @@ namespace Beam
             await Answer(app, answer);
         }
 
-        // `files-copy`: those files sent to the asking device, the way this PC sends anything.
+        // `files-copy`: those files sent to the asking device, the way this PC sends anything. (1.20) A name may be inside a
+        // folder ("2026/a.jpg", from a search), and a folder goes as a .zip of what it shows (ZipShown).
         public static async void OnCopy(App app, Dictionary<string, object> d)
         {
             string id = Json.Str(d, "id"), by = Json.Str(d, "by"), byName = Json.Str(d, "byName") ?? "A device";
@@ -314,24 +319,32 @@ namespace Beam
                 {
                     string norm = "", dir = null;
                     var paths = new List<string>();
+                    var folders = new List<string>();
                     var skipped = new List<object>();
                     long total = 0;
+                    string outgoing = app.Cfg.OutgoingFolder;
                     await Task.Run(() =>
                     {
                         dir = Resolve(f, rel, out norm);
                         if (dir == null) return;
                         foreach (var n in names)
                         {
-                            var e = NameOk(n) ? One(dir + "\\" + n) : null;
-                            if (e == null || !Shown(e)) skipped.Add(Skip(n, "not there"));
-                            else if (e.Dir) skipped.Add(Skip(n, "a folder: files only"));
-                            else { paths.Add(dir + "\\" + e.Name); total += e.Size; }
+                            Entry e;
+                            string full = Inside(dir, n, out e);
+                            if (full == null) { skipped.Add(Skip(n, "not there")); continue; }
+                            if (!e.Dir) { paths.Add(full); total += e.Size; continue; }
+                            string why = ZipRefusal(full, outgoing);
+                            if (why != null) skipped.Add(Skip(n, why));
+                            else folders.Add(full);
                         }
                     });
                     if (dir == null) No(answer, "not-found", "That folder isn't there");
                     else
                     {
-                        int sending = paths.Count > 0 ? app.SendFiles(paths, new List<string> { by }, false, "shared folder", null, false) : 0;
+                        var to = new List<string> { by };
+                        int sending = paths.Count > 0 ? app.SendFiles(paths, to, false, "shared folder", null, false) : 0;
+                        if (folders.Count > 0) sending += app.SendFiles(folders, to, false, "shared folder", null, false, ZipShown);
+                        paths.AddRange(folders);
                         answer["ok"] = true;
                         answer["sending"] = sending;
                         answer["skipped"] = skipped.ToArray();
