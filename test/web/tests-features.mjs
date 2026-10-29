@@ -368,6 +368,49 @@ export default function register(test) {
     eq([...page.errors, ...other.errors], [], 'no page errors');
   });
 
+  test('text size (1.29): Settings → Appearance → Text size sizes every text (rem), for all devices or this one; another page follows; a reload starts in it; Normal leaves nothing', async ctx => {
+    const server = await ctx.startServer(8823); // (its own server: the look for all devices would follow other tests)
+    ctx.defer(() => server.stop());
+    const page = await ctx.signedIn({ server });
+    const other = await ctx.signedIn({ server });
+    // The sizes: the body's text, a dialog title's, and the root's (16 px: the browser's own)
+    const sizes = p => p.evaluate(`[getComputedStyle(document.body).fontSize, getComputedStyle(document.documentElement).fontSize, document.documentElement.dataset.text || '']`);
+    eq(await sizes(page), ['15px', '16px', ''], 'Normal to start with');
+    await page.evaluate(`openSettings('look')`);
+    await page.waitFor(`[...$$('#set-look .seg')].some(b => b.textContent === 'Largest')`, 5000, 'Appearance: Text size');
+    const pick = (p, label) => p.evaluate(`[...$$('#set-look .seg')].find(b => b.textContent === ${JSON.stringify(label)}).click(); true`);
+    await pick(page, 'Largest');
+    await page.waitFor(`document.documentElement.dataset.text === 'larger'`, 3000, 'at once here');
+    eq(await sizes(page), ['19.5px', '20.8px', 'larger'], 'every text 130 %');
+    await page.waitFor(`fetch('api/settings').then(r => r.json()).then(s => s.appearance?.text === 'larger')`, 5000, 'saved for all devices');
+    await other.waitFor(`document.documentElement.dataset.text === 'larger'`, 8000, 'the other page follows');
+    eq(await page.evaluate(`[...$$('#set-look .seg')].find(b => b.textContent === 'Largest').getAttribute('aria-pressed')`), 'true', 'shown as chosen');
+    // A field keeps 16 px at least (a phone zooms into a smaller one): at Smaller too
+    await pick(page, 'Smaller');
+    await page.waitFor(`document.documentElement.dataset.text === 'small'`, 3000);
+    eq(await page.evaluate(`[getComputedStyle(document.body).fontSize, getComputedStyle($('#text')).fontSize]`), ['13.5px', '16px'], 'Smaller: 90 %, the message box 16 px');
+    // This device only: Larger here, the other page keeps Smaller
+    await page.evaluate(`[...$$('#set-look input[type=radio]')][1].click()`);
+    await page.waitFor(`Boolean(ownLook())`, 5000, 'its own look');
+    await pick(page, 'Larger');
+    await page.waitFor(`document.documentElement.dataset.text === 'large' && ownLook()?.text === 'large'`, 5000, 'Larger, here only');
+    await ctx.sleep(800);
+    eq((await sizes(other))[2], 'small', 'the other page keeps Smaller');
+    // A reload starts in it (theme.js), before the server answers
+    await page.goto('about:blank');
+    await page.goto(`${server.base}/`);
+    eq(await page.evaluate(`document.documentElement.dataset.text`), 'large', 'at once after a reload');
+    await page.waitFor(`typeof paired !== 'undefined' && paired && net.state === 'online'`, 10000, 'signed in again');
+    // Normal: nothing left (the server keeps no text at all)
+    await page.evaluate(`openSettings('look')`);
+    await page.waitFor(`[...$$('#set-look .seg')].some(b => b.textContent === 'Normal')`, 5000);
+    await pick(page, 'Normal');
+    await page.waitFor(`!document.documentElement.dataset.text`, 3000, 'Normal here');
+    await page.waitFor(`fetch('api/devices').then(r => r.json()).then(r => { const a = r.devices.find(d => d.id === me.id)?.settings?.appearance; return a && !('text' in a); })`, 5000, 'nothing kept for Normal');
+    eq(await sizes(page), ['15px', '16px', ''], 'as it was');
+    eq([...page.errors, ...other.errors], [], 'no page errors');
+  });
+
   test('settings, remade (2026-10-15): one page at a time by group; the search finds rows on every page and Esc clears it; old section names open the right page; a phone shows the list first and ‹ goes back', async ctx => {
     const page = await ctx.signedIn();
     await dev(ctx, 'Pixel').me();

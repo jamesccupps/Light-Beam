@@ -313,11 +313,14 @@ Apps update themselves from the Beam server.
   `GET /api/settings` → `rollout`: `{ "version", "pilot", "pilotName", "since", "installedAt",
   "releaseAt", "released", "halted": { "at", "problem" } | null, "running", "pcs" }`, or `null`.
 - **Appearance (1.27, feature `appearance`).** The look: `{ "theme": "auto"|"light"|"dark", "accent": "#rrggbb"|null }` (`theme` defaults to `auto`, like the device; `accent`
+  **(1.29, feature `text-size`)** and `"text": "small"|"normal"|"large"|"larger"` (the web app's text size; `normal` when
+  left out, and left out when it's normal);
   null is Beam's own; colours come back in lower case). The look for all devices is the setting `appearance` (`PATCH
   /api/settings { "appearance": {…}|null }`, any signed-in device; in `GET /api/settings` and the `hello`; its
   `settings` event goes out at once, background streams too). A device's own, which wins, is its `settings.appearance`
   (`PUT /api/devices/me/settings { "appearance": {…}|null }`: only that device itself, else `403`; null drops it; the
-  device gets the new list at once). `400` for an unknown theme, a colour that isn't `#rrggbb`, or another field.
+  device gets the new list at once). `400` for an unknown theme, a colour that isn't `#rrggbb`, an unknown text size, or
+  another field.
   Clients work out their colours from the accent (readable on their light and dark surfaces).
 
 ## Every request

@@ -8,6 +8,8 @@ const LOOK_KEY = 'beam.look';
 const ACCENTS = [['Beam', null], ['Blue', '#2563eb'], ['Teal', '#0e7c86'], ['Green', '#16803c'], ['Amber', '#b45309'],
   ['Red', '#d12b2b'], ['Pink', '#c2185b'], ['Purple', '#8b3fd9'], ['Graphite', '#4b5563']];
 const LOOK_BG = { light: '#f5f6f8', dark: '#0e1014' }; // (the page's background: the phone browser's own bar)
+// (1.29) The text sizes offered: [value, name] (style.css sizes the page's root for each; normal is none).
+const TEXT_SIZES = [['small', 'Smaller'], ['normal', 'Normal'], ['large', 'Larger'], ['larger', 'Largest']];
 
 const hexRgb = hex => { const n = parseInt(hex.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
 const rgbHex = rgb => `#${rgb.map(v => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2, '0')).join('')}`;
@@ -40,11 +42,14 @@ function accentVars(hex) {
   };
 }
 
-// Shows a look ({ theme: auto|light|dark, accent: '#rrggbb'|null }, or null: Beam's own, like the device).
+// Shows a look ({ theme: auto|light|dark, accent: '#rrggbb'|null, text?: small|large|larger }, or null: Beam's own,
+// like the device).
 function applyLook(look) {
   const root = document.documentElement;
   const theme = look && (look.theme === 'light' || look.theme === 'dark') ? look.theme : '';
   if (theme) root.dataset.theme = theme; else delete root.dataset.theme;
+  const text = look && TEXT_SIZES.some(([v]) => v !== 'normal' && v === look.text) ? look.text : '';
+  if (text) root.dataset.text = text; else delete root.dataset.text;
   for (const name of [...root.style]) if (name.startsWith('--u-')) root.style.removeProperty(name);
   if (look && typeof look.accent === 'string' && /^#[0-9a-f]{6}$/i.test(look.accent)) {
     for (const [name, value] of Object.entries(accentVars(look.accent))) root.style.setProperty(name, value);

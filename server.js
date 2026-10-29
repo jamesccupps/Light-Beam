@@ -685,18 +685,22 @@ function markInitialized() {
 
 // (1.27, the user's themes: "customizable theme and colors, maybe per device or for all devices"; their pick: all
 // devices, and a device's own choice wins) A look: light, dark or like the device ("auto"), and an accent colour
-// (null: Beam's own). null clears it. The page works out the rest of the colours from the accent.
+// (null: Beam's own). null clears it. The page works out the rest of the colours from the accent. (1.29) And a text size
+// for the web app (`text`: small, normal, large or larger; kept only when it isn't normal).
 const THEMES = ['auto', 'light', 'dark'];
+const TEXT_SIZES = ['small', 'normal', 'large', 'larger'];
 function cleanAppearance(v, name = 'appearance') {
   if (v === null) return null;
-  if (!isPlainObject(v)) throw httpError(400, `${name} must be {"theme": "auto"|"light"|"dark", "accent": "#rrggbb"|null} or null`);
-  const unknown = Object.keys(v).filter(k => k !== 'theme' && k !== 'accent');
+  if (!isPlainObject(v)) throw httpError(400, `${name} must be {"theme": "auto"|"light"|"dark", "accent": "#rrggbb"|null, "text"?: "small"|"normal"|"large"|"larger"} or null`);
+  const unknown = Object.keys(v).filter(k => k !== 'theme' && k !== 'accent' && k !== 'text');
   if (unknown.length) throw httpError(400, `Unknown ${name} field: ${unknown.join(', ')}`);
   const theme = v.theme ?? 'auto';
   if (!THEMES.includes(theme)) throw httpError(400, `${name}.theme must be auto, light or dark`);
   const accent = v.accent ?? null;
   if (accent !== null && !(typeof accent === 'string' && /^#[0-9a-f]{6}$/i.test(accent))) throw httpError(400, `${name}.accent must be a colour like #2563eb, or null`);
-  return { theme, accent: accent && accent.toLowerCase() };
+  const text = v.text ?? 'normal';
+  if (!TEXT_SIZES.includes(text)) throw httpError(400, `${name}.text must be small, normal, large or larger`);
+  return { theme, accent: accent && accent.toLowerCase(), ...(text !== 'normal' && { text }) };
 }
 // What's kept, read back safely (a hand-edited file can't break a page).
 const appearanceOf = v => { try { return v == null ? null : cleanAppearance(v); } catch { return null; } };
@@ -6745,6 +6749,7 @@ const FEATURES = [
   'control-here', // (1.27.1: PUT /api/devices/me/control from Beam for Linux's window → `control-set`; status `controlProblem`)
   'shared-folders-2', // (1.28.0: POST /api/devices/{id}/files/icons|thumbs|preview|search, sub-paths and folders in a copy, `can.files2`)
   'shared-folders-page', // (1.28.1: index.html#files=<PC id>, a PC's shared folders alone: the Android app's Shared folders)
+  'text-size', // (1.29.0: appearance.text, the web app's text size: small, normal, large, larger)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)
