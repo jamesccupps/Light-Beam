@@ -254,7 +254,10 @@ a { color: var(--accent); }
   position: absolute; right: 16px; top: -14px; display: none; gap: 2px; padding: 2px; background: var(--surface); border: 1px solid var(--border);
   border-radius: 10px; box-shadow: var(--shadow); z-index: 2;
 }
-.msg:hover .tools, .msg.menu-open .tools { display: flex; }
+.msg:hover .tools, .msg.menu-open .tools, .msg:focus-within .tools { display: flex; }
+/* (1.29) the keyboard: the message with the focus, and what's read out without being shown */
+.msg:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .tools .icon-btn { width: 32px; height: 32px; }
 @media (hover: none) { .msg:hover .tools { display: none; } .msg:hover { background: transparent; } }
 

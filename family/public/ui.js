@@ -128,8 +128,9 @@ export function closeMenu() {
 export function menu(anchor, items, { quick = null, onQuick = null, onClose = null } = {}) {
   closeMenu();
   const phone = isPhone() || isTouch();
+  const opener = document.activeElement; // (1.29: the focus goes back there when the menu closes)
   const build = cls => items.filter(Boolean).map(it => (it === 'hr' ? h('hr') : h('button', {
-    type: 'button', class: `${cls}${it.danger ? ' danger' : ''}`,
+    type: 'button', class: `${cls}${it.danger ? ' danger' : ''}`, role: 'menuitem',
     onclick: e => { e.stopPropagation(); closeMenu(); it.onclick(); },
   }, it.icon ? icon(it.icon) : null, h('span', {}, it.label))));
   const quickRow = quick ? h('div', { class: 'quick' }, quick.map(e => h('button', { type: 'button', 'aria-label': `React with ${e}`, onclick: ev => { ev.stopPropagation(); closeMenu(); onQuick(e); } }, e))) : null;
@@ -154,7 +155,16 @@ export function menu(anchor, items, { quick = null, onQuick = null, onClose = nu
     if (top + hgt > window.innerHeight - 8) top = Math.max(8, r.top - hgt - 6);
     Object.assign(el.style, { left: `${Math.max(8, left)}px`, top: `${top}px` });
   }
-  const onKey = e => { if (e.key === 'Escape') closeMenu(); };
+  // Escape closes it; (1.29) ↑ ↓ Home End move between its buttons
+  const onKey = e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeMenu(); return; }
+    const buttons = [...el.querySelectorAll('button')];
+    const i = buttons.indexOf(document.activeElement);
+    if (i < 0 || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const j = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (i + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[j].focus();
+  };
   const onDown = e => { if (!el.contains(e.target)) closeMenu(); };
   document.addEventListener('keydown', onKey, true);
   setTimeout(() => document.addEventListener('pointerdown', onDown, true));
@@ -165,6 +175,7 @@ export function menu(anchor, items, { quick = null, onQuick = null, onClose = nu
       document.removeEventListener('keydown', onKey, true);
       document.removeEventListener('pointerdown', onDown, true);
       onClose?.();
+      if (opener?.isConnected && (!document.activeElement || document.activeElement === document.body || el.contains(document.activeElement))) opener.focus({ preventScroll: true });
     },
   };
   el.querySelector('button')?.focus({ preventScroll: true });

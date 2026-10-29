@@ -352,6 +352,10 @@ address, so the browser becomes part of that device instead of a separate entry.
     they're still arriving.
   - Clicking a notification opens a link or copies text. A picture or a video opens in its conversation; another file
     shows in its folder. A notification for several things at once opens their conversation at the newest.
+  - **Windows' own notifications** (Windows app 1.21): a text that comes has a **Reply** box (what you type goes back
+    to whoever sent it) and **Copy** or **Open link**; a file **Open** and **Show in folder** (or **Save**). They work
+    from the notification centre later too. Settings → Notifications → "Notifications with Reply and Copy" (off: the
+    plain pop-ups from before, which is also what you get if Windows has Beam's notifications turned off).
   - Programs are only ever shown in Explorer, never run.
 - **Links open themselves** (optional, Settings → Receiving → "Open links sent to this PC automatically"): a link you
   send to this PC by itself opens in the browser right away.
@@ -460,6 +464,7 @@ Then:
 ```bash
 beam devices                           # list devices (● = online)
 beam report.pdf --to "Pixel"           # send files to one device (names or ids, comma-separated)
+beam Photos/                           # a folder goes as Photos.zip (1.5.0)
 beam -t "hello" --to Laptop,Desktop    # send text
 git diff | beam --to Desktop           # send piped text
 beam clip --to Laptop                  # send what's on the clipboard

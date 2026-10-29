@@ -7,6 +7,10 @@ setlocal
 set "HERE=%~dp0"
 set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+rem (1.21) Windows' own notifications: WinRT's metadata (every Windows 10/11 has it) and .NET's bridges to it.
+for %%f in ("%CSC%") do set "NETFX=%%~dpf"
+set "NETFX=%NETFX:~0,-1%"
+set "WINMD=%WINDIR%\System32\WinMetadata"
 if not exist "%CSC%" (
   echo .NET Framework 4.x C# compiler not found.
   exit /b 1
@@ -56,6 +60,8 @@ if errorlevel 1 (
   /resource:"%HERE%rc\kvm-link.js",Beam.rc.kvm-link.js ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
   /r:System.Net.Http.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Security.dll ^
+  /r:"%WINMD%\Windows.Data.winmd" /r:"%WINMD%\Windows.UI.winmd" /r:"%WINMD%\Windows.Foundation.winmd" ^
+  /r:"%NETFX%\System.Runtime.dll" /r:"%NETFX%\System.Runtime.WindowsRuntime.dll" /r:"%NETFX%\System.Runtime.InteropServices.WindowsRuntime.dll" ^
   /r:"%WV%\Microsoft.Web.WebView2.Core.dll" /r:"%WV%\Microsoft.Web.WebView2.WinForms.dll" ^
   "%HERE%src\*.cs" "%HERE%obj\UpdateKey.cs"
 if errorlevel 1 (

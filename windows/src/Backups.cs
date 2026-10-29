@@ -29,7 +29,7 @@ namespace Beam
     {
         // What a backup holds besides the hotkeys and remote control: what ApplySettings takes.
         static readonly string[] Keys = { "deviceName", "autoCopy", "clipboardHistory", "autoSave", "maxSaveMB", "saveFolder", "openLinks", "autoOpenLinks",
-            "sendToMenu", "outbox", "outboxFolder", "autostart", "autoUpdate", "phonePopupText" };
+            "sendToMenu", "outbox", "outboxFolder", "autostart", "autoUpdate", "phonePopupText", "nativeToasts" };
         static readonly string[] HotkeyIds = { "picker", "lastTarget", "copyLatest", "screenshot" };
 
         readonly App app;

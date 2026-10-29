@@ -492,7 +492,10 @@ function pageNotifications() {
       // This PC's own (not a server setting); it can be turned off before the notifications go on.
       phone && typeof s.phonePopupText === 'boolean' && switchRow('Show message text in pop-ups', s.phonePopupText, (v, box) => setHostSettings({ phonePopupText: v }, box),
         { hint: 'Windows keeps pop-ups in its Notification Center. Off, they say only “WhatsApp · new notification”; the text stays in the Phone panel.' }),
-      switchRow('Clicking a notification about a link opens the link', s.openLinks, (v, box) => setHostSettings({ openLinks: v }, box))));
+      switchRow('Clicking a notification about a link opens the link', s.openLinks, (v, box) => setHostSettings({ openLinks: v }, box)),
+      // (Beam for Windows 1.21) Windows' own notifications, with buttons; off: the tray's pop-ups as before
+      typeof s.nativeToasts === 'boolean' && switchRow('Notifications with Reply and Copy', s.nativeToasts, (v, box) => setHostSettings({ nativeToasts: v }, box),
+        { hint: 'Windows’ own notifications: answer or copy a text from its notification, open or save a file. Off: the plain pop-ups from before.' })));
   } else {
     parts.push(card(appNotifiesHere() ? 'This computer' : 'This browser', browserNotificationRow(),
       phoneFeature() && switchRow('Show phone notifications here', phoneShownFor(deviceById(me.id)), (v, box) => setPhoneShown(me.id, v, box),
