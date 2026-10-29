@@ -2111,8 +2111,8 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     assert.equal(d.status.macs, undefined);
     // (1.17: + Tailscale's own view of the machine: the fake says nothing about Online or a key expiry)
     assert.deepEqual(d.tailscale, { name: 'gaming-pc', dns: 'gaming-pc.tail1234.ts.net', ip: '100.64.50.1', online: false, keyExpiry: null });
-    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false, files: false });
-    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false, files: false });
+    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false, files: false, files2: false });
+    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false, files: false, files2: false });
     // a partial report keeps the rest; null clears a field
     r = await put({ battery: null });
     assert.equal(r.status, 204);
