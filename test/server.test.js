@@ -3128,7 +3128,8 @@ test('1.28 shared folders like Explorer: icons, thumbnails, a preview, a search,
     asked = post(s, '/api/devices/shoppc00128/files/search', { share: 'a1b2c3d4', path: 'Photos', q: ' report ' }, laptop);
     ev = await nextAsk('files-search', at);
     assert.deepEqual(pick(ev.data, ['share', 'path', 'q']), { share: 'a1b2c3d4', path: 'Photos', q: 'report' });
-    assert.equal((await answer(ev, { ok: true, results: [], pad: text.toString('base64') })).status, 413);
+    const big = await answer(ev, { ok: true, results: [], pad: text.toString('base64') });
+    assert.ok(big.status === 413 || big.status === 'reset', `a 2.7 MB answer: ${big.status}`); // (cut while still sending, on Linux)
     // A search's results: each with its folder, names cleaned
     await answer(ev, { ok: true, more: true, results: [{ p: '2026/May', n: 'report.pdf', s: 10, m: 7 }, { p: '', n: 'Reports', dir: true, m: 3 }, { p: 'x', n: '' }] });
     r = await asked;
