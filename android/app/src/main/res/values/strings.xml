@@ -327,6 +327,12 @@
     <string name="remote_stopped">The PC\'s screen stopped here.</string>
     <string name="remote_retry">Try again</string>
     <string name="remote_close">Close</string>
+    <!-- (1.15) Shared folders: a PC's folders shared with this phone (the server's page) -->
+    <string name="device_shared_folders">Shared folders</string>
+    <string name="files_sign_in_failed">Couldn\'t open the shared folders: %1$s</string>
+    <string name="files_load_failed">Couldn\'t load the shared folders.</string>
+    <string name="files_stopped">The shared folders stopped here.</string>
+    <string name="files_remote_open">Close remote control first: it and Shared folders take turns.</string>
     <string name="remote_leave_title">Disconnect?</string>
     <string name="remote_leave_text">Remote control of this PC ends.</string>
     <string name="remote_disconnect">Disconnect</string>

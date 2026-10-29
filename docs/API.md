@@ -19,7 +19,7 @@ is set), 1.14 `replies`, `reactions` and `edit` (Beam's chat), 1.16 `kvm` (keybo
 alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `speed-test` (speed tests between a
 device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
 `device-logs` (shipped with 1.19's in Beam 1.20.0), 1.21 `apps`, 1.22 `linux` (Beam for Linux) and 1.23 `vnc` (control
-of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials), and 1.26 `shared-folders` (a PC's folders shared with some devices), and 1.27 `appearance` (the look: see Appearance), and 1.27.1 `control-here` (Beam for Linux's window switches its own remote control), and 1.28 `shared-folders-2` (shared folders like Explorer: icons, thumbnails, previews, search, whole folders). Use each one only when its flag is there; everything older keeps working.
+of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials), and 1.26 `shared-folders` (a PC's folders shared with some devices), and 1.27 `appearance` (the look: see Appearance), and 1.27.1 `control-here` (Beam for Linux's window switches its own remote control), and 1.28 `shared-folders-2` (shared folders like Explorer: icons, thumbnails, previews, search, whole folders), and 1.28.1 `shared-folders-page` (`index.html#files=<PC id>`: a PC's shared folders alone, for an app to show). Use each one only when its flag is there; everything older keeps working.
 
 ## Credentials
 

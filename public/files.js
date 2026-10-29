@@ -11,6 +11,8 @@
 
 const sharedView = {
   gen: 0, dlgGen: -1, device: null, share: null, name: '', path: '', entries: [], more: false, picked: new Map(), filter: '',
+  page: false,   // (1.28.1) this page is the folders alone (#files=): closing them leaves it
+  shares: 0,     // how many folders the PC shares with this device (Back from one goes to their list when there are more)
   search: null,  // (1.28) { q, results, more } while a search's results are shown (results: null while it runs)
   preview: null, // (1.28) the file looked at: { list, index, url }
   scroll: 0,     // the list's place, kept while a file is looked at
@@ -34,9 +36,10 @@ async function openSharedFolders(d) {
   const gen = ++sharedView.gen;
   toast(`Asking ${d.name} what it shares with this device…`, { ms: 3000 });
   let r;
-  try { r = await apiJson(sharedApi(d), jsonBody({})); } catch (err) { toast(friendlyError(err), { error: true }); return; }
+  try { r = await apiJson(sharedApi(d), jsonBody({})); } catch (err) { if (sharedView.page) sharedPageSays(d.name, friendlyError(err)); else toast(friendlyError(err), { error: true }); return; }
   if (gen !== sharedView.gen) return;
   const shares = r.shares || [];
+  sharedView.shares = shares.length;
   if (shares.length === 1) return openSharedFolder(shares[0].id, '');
   openDialog({
     title: `${d.name}: shared folders`,
@@ -46,7 +49,7 @@ async function openSharedFolders(d) {
         el('div', { class: 'shared-list', role: 'list' }, ...shares.map(s => el('button', { class: 'shared-row dir', type: 'button', onclick: () => openSharedFolder(s.id, '') },
           icon('folder'), el('span', { class: 'shared-name' }, s.name))))]
       : [note(`Nothing on ${d.name} is shared with this device. At ${d.name}: Settings → Control & sharing → Shared folders…, add a folder and tick ${me.name || 'this device'}.`)],
-    onClose: () => closeSharedPreview(),
+    onClose: sharedClosed,
   });
   sharedView.dlgGen = dialogGen;
 }
@@ -73,7 +76,7 @@ function showShared(title, body, buttons) {
     $('#genFoot').hidden = !buttons.length;
     $('#genDlg').classList.add('wide');
   } else {
-    openDialog({ title, className: 'shared-dlg', wide: true, body, buttons, onClose: () => closeSharedPreview() });
+    openDialog({ title, className: 'shared-dlg', wide: true, body, buttons, onClose: sharedClosed });
     v.dlgGen = dialogGen;
   }
 }
@@ -339,6 +342,74 @@ function closeSharedPreview() {
   const p = sharedView.preview;
   if (p?.url) URL.revokeObjectURL(p.url);
   sharedView.preview = null;
+}
+
+// The folders' dialog closed (× or Esc; not replaced by the next step): on the page of its own, the page goes too.
+function sharedClosed(how) {
+  closeSharedPreview();
+  if (sharedView.page && how !== 'replaced') leaveSharedPage();
+}
+
+// ---------------------------------------------------------------- the page of its own (1.28.1)
+// index.html#files=<PC id>: that PC's shared folders, full screen, and nothing of the chat app (the Android app's
+// Shared folders screen hosts this page, signed in as the phone, as its remote control hosts #remote=). Who this is
+// comes from the server (`you`, kept in memory only); closing the folders leaves the page (the app closes its screen).
+
+async function startSharedPage(id) {
+  document.documentElement.classList.add('files-mode');
+  sharedView.page = true;
+  const stored = store.get('beam.deviceId');
+  me.id = DEVICE_ID.test(stored || '') ? stored : randomId(12);
+  me.name = cleanName(store.get('beam.device')) || defaultName();
+  onUnauthorized = () => sharedPageSays('Shared folders', 'This page isn’t signed in any more: close it and open Shared folders again.');
+  onMoved = () => sharedPageSays('Shared folders', 'Beam has moved to another address: close this and open it again from the app.');
+  adoptIdentity = you => { if (DEVICE_ID.test(you || '')) me.id = you; return false; };
+  bindDialogs();
+  window.addEventListener('hashchange', () => location.reload());
+  let d;
+  try {
+    const [info, list, settings] = await Promise.all([apiJson('api/info'), apiJson('api/devices'), apiJson('api/settings').catch(() => null)]);
+    server.features = new Set(info.features || []);
+    server.api = info.api || 2;
+    if (DEVICE_ID.test(list.you || '')) me.id = list.you;
+    const mine = (list.devices || []).find(x => x.id === me.id);
+    if (typeof applyLook === 'function') applyLook(mine?.settings?.appearance || settings?.appearance || null); // (the look this device has)
+    d = (list.devices || []).find(x => x.id === id);
+  } catch (err) {
+    if (err.status !== 401) sharedPageSays('Shared folders', friendlyError(err));
+    return;
+  }
+  if (!d) return sharedPageSays('Shared folders', 'That PC isn’t one of this Beam’s devices any more.');
+  if (!canBrowseShared(d)) {
+    return sharedPageSays(d.name, !d.online ? `${d.name} is offline: its shared folders show when it’s back.`
+      : !d.can?.files ? `${d.name} doesn’t share folders (that needs Beam for Windows 1.18 or later, and folders chosen at ${d.name}).`
+        : 'This Beam can’t show shared folders.');
+  }
+  openSharedFolders(d);
+}
+
+// A word on the page of its own, and Close (which leaves it).
+function sharedPageSays(title, text) {
+  const close = el('button', { class: 'btn primary', type: 'button', onclick: () => $('#genDlg').close() }, 'Close');
+  openDialog({ title, body: [el('p', {}, text)], buttons: [close], className: 'shared-dlg', onClose: how => { if (how !== 'replaced') leaveSharedPage(); } });
+  sharedView.dlgGen = dialogGen;
+}
+
+// Leaves the page of its own: to Beam's own page (the app hosting it closes its screen as it goes).
+function leaveSharedPage() {
+  location.replace(BASE.pathname);
+}
+
+// Back (the Android app's back button, through the page): one step back inside — the file looked at to its folder, a
+// search to the folder, a folder to the one above, a shared folder to their list. False at the top: the app closes.
+function sharedBack() {
+  const v = sharedView;
+  if (!$('#genDlg').open || dialogGen !== v.dlgGen || !v.device) return false;
+  if (v.preview) { v.gen++; closeSharedPreview(); renderSharedFolder(); return true; }
+  if (v.search) { v.search = null; v.filter = ''; v.picked = new Map(); renderSharedFolder(); return true; }
+  if (v.share && v.path) { openSharedFolder(v.share, v.path.split('/').slice(0, -1).join('/')); return true; }
+  if (v.share && v.shares > 1) { openSharedFolders(v.device); return true; }
+  return false;
 }
 
 let sharedKeysBound = false;

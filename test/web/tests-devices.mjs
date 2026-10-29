@@ -567,6 +567,58 @@ export default function register(test) {
     eq(page.errors, [], 'no page errors');
   });
 
+  test('the shared folders page of its own (1.28.1, #files=, the Android app’s screen): only the folders, full screen; Back steps back inside; closing leaves the page; an offline PC says so', async ctx => {
+    const page = await ctx.signedIn({ width: 412, height: 860, mobile: true });
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Page PC', 'windows', ctx.nextIp(), '1.20.0');
+    const away = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Away PC', 'windows', ctx.nextIp(), '1.20.0');
+    await pc.me();
+    await away.me();
+    const stream = pc.stream();
+    ctx.defer(() => stream.close());
+    await page.waitFor(`deviceById('${pc.id}')?.online === true`, 8000, 'the PC online');
+    const now = Date.now();
+    let seen = 0;
+    const answer = async () => {
+      for (const e of stream.events.slice(seen)) {
+        seen++;
+        if (!/^files-/.test(e.event)) continue;
+        const d = e.data;
+        const body = e.event === 'files-request'
+          ? (!d.share ? { ok: true, shares: [{ id: 'a1b2c3d4', name: 'Downloads' }] }
+            : { ok: true, share: 'a1b2c3d4', name: 'Downloads', path: d.path, entries: d.path ? [{ n: 'beach.jpg', s: 9, m: now }] : [{ n: 'Photos', dir: true, m: now }, { n: 'notes.txt', s: 12, m: now }] })
+          : e.event === 'files-preview' ? { ok: true, kind: 'text', type: 'text/plain', size: 12, data: Buffer.from('hello there\n').toString('base64') }
+            : e.event === 'files-icons' ? { ok: true, icons: {}, types: {} } : { ok: true, thumbs: {}, none: d.names || [] };
+        await pc.post('/api/devices/me/files', { id: d.id, ...body });
+      }
+    };
+    const pump = setInterval(() => answer().catch(() => {}), 100);
+    ctx.defer(() => clearInterval(pump));
+    await page.goto('about:blank');
+    await page.goto(`${ctx.srv.base}/#files=${pc.id}`);
+    // Only the folders: its one shared folder straight away, the whole screen, nothing of the chat app
+    await page.waitFor(`document.documentElement.classList.contains('files-mode') && $('#genTitle')?.textContent === 'Page PC: Downloads' && $$('#genBody .shared-item').length === 2`, 10000, 'the folder');
+    const look = await page.evaluate(`(() => { const r = $('#genDlg').getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), iw: innerWidth, ih: innerHeight, app: getComputedStyle($('#app')).display, me: me.id }; })()`);
+    assert(look.w === look.iw && look.h === look.ih && look.app === 'none', JSON.stringify(look));
+    // Back steps back inside: a subfolder to its folder, a file looked at to its folder; at the top, nothing (the app closes)
+    await page.evaluate(`$('#genBody .shared-item .shared-open').click(); true`);
+    await page.waitFor(`$('#genTitle').textContent === 'Page PC: Photos'`, 8000, 'the subfolder');
+    eq(await page.evaluate(`sharedBack()`), true, 'back from the subfolder');
+    await page.waitFor(`$('#genTitle').textContent === 'Page PC: Downloads' && $$('#genBody .shared-item').length === 2`, 8000, 'its folder');
+    await page.evaluate(`[...$$('#genBody .shared-item .shared-open')].find(b => /notes/.test(b.textContent)).click(); true`);
+    await page.waitFor(`/hello there/.test($('#genBody pre.file-preview')?.textContent || '')`, 8000, 'the file looked at');
+    eq(await page.evaluate(`sharedBack()`), true, 'back from the file');
+    await page.waitFor(`$('#genTitle').textContent === 'Page PC: Downloads' && !sharedView.preview`, 3000, 'the folder again');
+    eq(await page.evaluate(`sharedBack()`), false, 'at the top: the app closes');
+    eq(page.errors, [], 'no page errors');
+    // Closing the folders leaves the page (for Beam's own: the Android app closes its screen as it goes)
+    await page.evaluate(`$('#genDlg .dlg-head [data-close]').click(); true`);
+    await page.waitFor(`location.hash === '' && !document.documentElement.classList.contains('files-mode')`, 8000, 'left');
+    // A PC that's offline: said on the page, with Close
+    await page.goto('about:blank');
+    await page.goto(`${ctx.srv.base}/#files=${away.id}`);
+    await page.waitFor(`/Away PC is offline/.test($('#genBody')?.textContent || '') && $('#genDlg').open`, 10000, 'offline, said');
+  });
+
   test('Settings → Security: this device’s own switches (the Windows app’s remote control and app installs, Beam for Linux’s remote control) (2026-10-21)', async ctx => {
     // (the user: "it can be a per device setting in the app gui settings on that device, it should just be easy")
     const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowApps', 'allowRemoteControl'];

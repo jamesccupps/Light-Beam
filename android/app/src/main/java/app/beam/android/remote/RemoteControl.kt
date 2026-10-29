@@ -40,6 +40,9 @@ import java.io.IOException
  *
  * Nothing here touches the WebView until the viewer is first used.
  *
+ * (1.15) The Shared folders page ([app.beam.android.ui.FilesActivity], `#files=<PC id>`) signs in the same way, as one
+ * more page of Beam's: one page at a time ([pageOpen]); it never opens over a viewer, and closes with [closing] (ticket).
+ *
  * **The kill switch.** Who controls which PC ([sessions]: `GET /api/rc/sessions`, kept up by `rc-sessions` events),
  * so any of them can be ended from the phone ([end]), and a PC's "Allow remote control" turned off ([turnOff]). There's
  * no way to turn it on from here: only at the PC itself.
@@ -116,6 +119,9 @@ class RemoteControl(private val app: BeamApp) {
     /** The viewer that got [ticket] is still open. */
     fun isOpen(ticket: Int): Boolean = synchronized(tokens) { openTicket == ticket }
 
+    /** (1.15) A page of Beam's is open (the viewer, or Shared folders: one at a time, sharing this sign-in). */
+    val pageOpen: Boolean get() = synchronized(tokens) { openTicket != null }
+
     /** Tickets handed out so far: what a closing viewer compares with later (a newer viewer's sessions aren't its own). */
     val ticketsSoFar: Int get() = synchronized(tokens) { tickets }
 
@@ -150,6 +156,19 @@ class RemoteControl(private val app: BeamApp) {
     fun closing() = synchronized(tokens) {
         openTicket = null
         liveToken = null
+    }
+
+    /**
+     * (1.15) The page that got [ticket] is closing (main thread): as [closing] when it's still the open one; else a
+     * newer page has taken over and its sign-in stays. True when it was the open one (its sign-in is then left to revoke).
+     */
+    fun closing(ticket: Int): Boolean = synchronized(tokens) {
+        (openTicket == ticket).also {
+            if (it) {
+                openTicket = null
+                liveToken = null
+            }
+        }
     }
 
     /**
@@ -233,6 +252,9 @@ class RemoteControl(private val app: BeamApp) {
 
         /** The viewer for [device] on the server at [base]. */
         fun pageUrl(base: HttpUrl, device: String): String = base.beamPath("/").newBuilder().fragment("remote=$device").build().toString()
+
+        /** (1.15) PC [device]'s shared folders on the server at [base] (server 1.28.1: the page of its own). */
+        fun filesUrl(base: HttpUrl, device: String): String = base.beamPath("/").newBuilder().fragment("files=$device").build().toString()
 
         /** On Beam's server at [base]: its scheme, host and port, and under its path (a server may share its host). */
         fun onBeam(base: HttpUrl, u: Uri): Boolean {

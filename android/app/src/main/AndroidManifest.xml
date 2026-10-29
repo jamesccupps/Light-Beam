@@ -122,6 +122,16 @@
             android:theme="@style/Theme.Beam.Remote"
             android:windowSoftInputMode="adjustResize|stateHidden" />
 
+        <!--
+            (1.15) Shared folders: the server's page of a PC's shared folders. Rotating keeps the page; one at a time.
+        -->
+        <activity
+            android:name=".ui.FilesActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize|stateHidden" />
+
         <activity
             android:name=".ui.AppearanceActivity"
             android:exported="false"
