@@ -381,6 +381,9 @@ address, so the browser becomes part of that device instead of a separate entry.
   - Launcher shortcuts.
   - Camera and photo picker in the composer.
   - Search.
+- **Shared folders** (Android app 1.15): long-press a PC's conversation (or Settings → Devices, that PC) → **Shared
+  folders**: the folders that PC shares with the phone, with everything the web page has (pictures, a look at a file,
+  search, sort, whole folders). Back steps back a folder; what you copy arrives in your conversation with that PC.
 - **Offline:** history, outbox and drafts work offline, and transfers survive network switches and restarts.
 - **Settings:** per-device mute and auto-copy, Wi-Fi-only downloads, server info, and battery exemption.
 - **Updates:** it updates itself from your server without asking, where Android allows.

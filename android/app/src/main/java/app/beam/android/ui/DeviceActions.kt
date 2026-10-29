@@ -51,6 +51,11 @@ object DeviceActions {
         remoteDesktopIntent(activity, d)?.let { intent ->
             list += ActionSheet.Entry(R.drawable.ic_desktop, activity.getString(R.string.device_remote_desktop)) { activity.startActivity(intent) }
         }
+        if (canBrowseFiles(app, d)) {
+            list += ActionSheet.Entry(R.drawable.ic_folder, activity.getString(R.string.device_shared_folders)) {
+                activity.startActivity(FilesActivity.intent(activity, d.id))
+            }
+        }
         if (app.remote.available && d.status?.remoteControl == true) {
             list += ActionSheet.Entry(R.drawable.ic_power, activity.getString(R.string.remote_turn_off)) { turnOffControl(activity, d, anchor) }
         }
@@ -84,6 +89,10 @@ object DeviceActions {
     }
 
     fun canWake(d: Device) = !d.online && d.can.wake
+
+    /** (1.15) Shared folders: a PC online that shares folders (Beam for Windows 1.18+), on a server with their page (1.28.1). */
+    fun canBrowseFiles(app: BeamApp, d: Device): Boolean =
+        d.can.files && d.online && d.id != app.repo.me && app.repo.state.value.info?.lists(FilesActivity.FEATURE) == true
 
     /** Rings [d] (or stops it). Shows the result as a snackbar on [anchor]. */
     fun ring(activity: AppCompatActivity, d: Device, stop: Boolean, anchor: View) {

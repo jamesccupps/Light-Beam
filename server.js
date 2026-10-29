@@ -6744,6 +6744,7 @@ const FEATURES = [
   'shared-folders', // (1.26.0: POST /api/devices/{id}/files[/copy], `files-request`/`files-copy`, POST /api/devices/me/files, `can.files`)
   'control-here', // (1.27.1: PUT /api/devices/me/control from Beam for Linux's window → `control-set`; status `controlProblem`)
   'shared-folders-2', // (1.28.0: POST /api/devices/{id}/files/icons|thumbs|preview|search, sub-paths and folders in a copy, `can.files2`)
+  'shared-folders-page', // (1.28.1: index.html#files=<PC id>, a PC's shared folders alone: the Android app's Shared folders)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)

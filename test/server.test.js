@@ -3065,6 +3065,7 @@ test('1.28 shared folders like Explorer: icons, thumbnails, a preview, a search,
     const old = app(K, 'oldpc000128', 'Old PC', 'windows', { 'X-Beam-App-Version': '1.19.3', ...from('100.64.28.3') });
     for (const h of [laptop, shop, old]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
     assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('shared-folders-2'));
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('shared-folders-page'), '1.28.1: the page of its own');
     const devs = (await s.req('GET', '/api/devices', { headers: laptop })).json.devices;
     assert.deepEqual(pick(devs.find(d => d.id === 'shoppc00128').can, ['files', 'files2']), { files: true, files2: true });
     assert.deepEqual(pick(devs.find(d => d.id === 'oldpc000128').can, ['files', 'files2']), { files: true, files2: false });
