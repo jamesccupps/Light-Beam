@@ -176,6 +176,7 @@ namespace Beam
         public string LocalId;
         public string Path;
         public string SourceFolder;       // a folder being zipped into Path
+        public Func<string, string, string> Zipper; // (1.20) how (folder, outgoing folder → the .zip); null: Zip.Folder
         public string Name;
         public string Mime;
         public string Origin;             // "send", "outbox", "clipboard", "page"… (for the log only)

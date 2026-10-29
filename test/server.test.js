@@ -3056,6 +3056,102 @@ test('1.26 shared folders: a PC\'s folders, browsed and copied from another devi
   } finally { await s.stop(); }
 });
 
+test('1.28 shared folders like Explorer: icons, thumbnails, a preview, a search, sub-paths in a copy (Beam for Windows 1.20; what the PC sends checked)', async () => {
+  const s = await startServer('files128', 8795);
+  try {
+    const K = s.key;
+    const laptop = app(K, 'laptop00128', 'Robin Laptop', 'windows', { 'X-Beam-App-Version': '1.20.0', ...from('100.64.28.5') });
+    const shop = app(K, 'shoppc00128', 'Shop Desktop', 'windows', { 'X-Beam-App-Version': '1.20.0', ...from('100.64.28.2') });
+    const old = app(K, 'oldpc000128', 'Old PC', 'windows', { 'X-Beam-App-Version': '1.19.3', ...from('100.64.28.3') });
+    for (const h of [laptop, shop, old]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('shared-folders-2'));
+    const devs = (await s.req('GET', '/api/devices', { headers: laptop })).json.devices;
+    assert.deepEqual(pick(devs.find(d => d.id === 'shoppc00128').can, ['files', 'files2']), { files: true, files2: true });
+    assert.deepEqual(pick(devs.find(d => d.id === 'oldpc000128').can, ['files', 'files2']), { files: true, files2: false });
+    const ost = await openEvents(s.port, old);
+    await ost.wait('hello');
+    let r = await post(s, '/api/devices/oldpc000128/files/icons', { exts: ['.pdf'] }, laptop);
+    assert.deepEqual([r.status, r.json.reason], [409, 'old-app']);
+    assert.match(r.json.error, /needs Beam for Windows 1\.20\.0 or later/);
+    ost.close();
+
+    const st = await openEvents(s.port, shop);
+    await st.wait('hello');
+    const answer = (ev, body) => post(s, '/api/devices/me/files', { id: ev.data.id, ...body }, shop);
+    const nextAsk = (name, at) => waitFor(() => st.events.slice(at).find(e => e.event === name), 5000);
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64');
+    // Icons: the types asked (each once), what comes back only as a type and base64
+    let at = st.events.length;
+    let asked = post(s, '/api/devices/shoppc00128/files/icons', { exts: ['.pdf', '/', '.pdf'] }, laptop);
+    let ev = await nextAsk('files-icons', at);
+    assert.deepEqual(pick(ev.data, ['by', 'exts']), { by: 'laptop00128', exts: ['.pdf', '/'] });
+    await answer(ev, { ok: true, icons: { '.pdf': png, '/': png, '<b>': png, '.txt': 'not base64!' }, types: { '.pdf': 'PDF ‮Document', '/': 'File folder', '<b>': 'x' } });
+    r = await asked;
+    assert.deepEqual(r.json, { icons: { '.pdf': png, '/': png }, types: { '.pdf': 'PDF Document', '/': 'File folder' } });
+    // Thumbnails: names and px passed on; a name the PC made up with a bidi character dropped
+    at = st.events.length;
+    asked = post(s, '/api/devices/shoppc00128/files/thumbs', { share: 'a1b2c3d4', path: 'Photos', names: ['a.jpg', 'b.mp4', 'c.txt'], px: 200 }, laptop);
+    ev = await nextAsk('files-thumbs', at);
+    assert.deepEqual(pick(ev.data, ['share', 'path', 'names', 'px']), { share: 'a1b2c3d4', path: 'Photos', names: ['a.jpg', 'b.mp4', 'c.txt'], px: 200 });
+    await answer(ev, { ok: true, thumbs: { 'a.jpg': png, 'b‮4pm.exe': png }, none: ['c.txt'] });
+    r = await asked;
+    assert.deepEqual(r.json, { thumbs: { 'a.jpg': png }, none: ['c.txt'] });
+    // A preview: the bytes as they are, the kind and size in headers
+    at = st.events.length;
+    asked = s.req('POST', '/api/devices/shoppc00128/files/preview', { headers: json(laptop), body: JSON.stringify({ share: 'a1b2c3d4', path: '', name: '2026/a.png' }), raw: true });
+    ev = await nextAsk('files-preview', at);
+    assert.equal(ev.data.name, '2026/a.png', 'a name inside a folder (from a search)');
+    await answer(ev, { ok: true, kind: 'picture', type: 'image/png', size: 12345, data: png });
+    r = await asked;
+    assert.equal(r.status, 200);
+    assert.equal(Buffer.compare(r.body, Buffer.from(png, 'base64')), 0);
+    assert.deepEqual([r.headers['content-type'], r.headers['x-beam-preview'], r.headers['x-beam-size'], r.headers['x-beam-truncated']], ['image/png', 'picture', '12345', undefined]);
+    // ...a big one (2 MB: more than other answers may be) and part of a text
+    at = st.events.length;
+    asked = s.req('POST', '/api/devices/shoppc00128/files/preview', { headers: json(laptop), body: JSON.stringify({ share: 'a1b2c3d4', name: 'log.txt' }), raw: true });
+    ev = await nextAsk('files-preview', at);
+    const text = Buffer.alloc(2 * 1024 * 1024, 'a');
+    assert.equal((await answer(ev, { ok: true, kind: 'text', type: 'text/plain', size: 9e6, truncated: true, data: text.toString('base64') })).status, 204);
+    r = await asked;
+    assert.deepEqual([r.status, r.body.length, r.headers['x-beam-truncated']], [200, text.length, '1']);
+    // ...never a type a page could run (html, svg), and the PC's "no preview" as 415
+    for (const [body, status, what] of [[{ ok: true, kind: 'picture', type: 'image/svg+xml', size: 1, data: png }, 409, 'svg'], [{ ok: true, kind: 'text', type: 'text/html', size: 1, data: png }, 409, 'html'], [{ ok: false, reason: 'no-preview', error: 'No preview for that' }, 415, 'no preview']]) {
+      at = st.events.length;
+      asked = post(s, '/api/devices/shoppc00128/files/preview', { share: 'a1b2c3d4', name: 'x' }, laptop);
+      ev = await nextAsk('files-preview', at);
+      await answer(ev, body);
+      r = await asked;
+      assert.equal(r.status, status, what);
+    }
+    // A big answer when no preview is waited for: refused
+    at = st.events.length;
+    asked = post(s, '/api/devices/shoppc00128/files/search', { share: 'a1b2c3d4', path: 'Photos', q: ' report ' }, laptop);
+    ev = await nextAsk('files-search', at);
+    assert.deepEqual(pick(ev.data, ['share', 'path', 'q']), { share: 'a1b2c3d4', path: 'Photos', q: 'report' });
+    assert.equal((await answer(ev, { ok: true, results: [], pad: text.toString('base64') })).status, 413);
+    // A search's results: each with its folder, names cleaned
+    await answer(ev, { ok: true, more: true, results: [{ p: '2026/May', n: 'report.pdf', s: 10, m: 7 }, { p: '', n: 'Reports', dir: true, m: 3 }, { p: 'x', n: '' }] });
+    r = await asked;
+    assert.deepEqual(r.json, { results: [{ p: '2026/May', n: 'report.pdf', s: 10, m: 7 }, { p: '', n: 'Reports', dir: true, s: 0, m: 3 }], more: true });
+    // A copy with names inside folders (from a search) and a folder (sent as a .zip)
+    at = st.events.length;
+    asked = post(s, '/api/devices/shoppc00128/files/copy', { share: 'a1b2c3d4', path: 'Photos', names: ['2026/May/report.pdf', 'Reports'] }, laptop);
+    ev = await nextAsk('files-copy', at);
+    assert.deepEqual(ev.data.names, ['2026/May/report.pdf', 'Reports']);
+    await answer(ev, { ok: true, sending: 2, skipped: [] });
+    assert.deepEqual((await asked).json, { sending: 2, skipped: [] });
+    // What the asker may send
+    for (const [route, body, what] of [
+      ['icons', { exts: [] }, 'no types'], ['icons', { exts: ['pdf'] }, 'a type without its dot'], ['icons', { exts: Array.from({ length: 65 }, (_, i) => `.e${i}`) }, '65 types'],
+      ['thumbs', { share: 'a1b2c3d4', names: Array(25).fill('a') }, '25 thumbnails'], ['thumbs', { share: 'a1b2c3d4', names: ['a'], px: 300 }, 'px too big'],
+      ['preview', { share: 'a1b2c3d4' }, 'no name'], ['preview', { share: 'a1b2c3d4', name: ['a'] }, 'a list for a name'],
+      ['search', { share: 'a1b2c3d4', q: '  ' }, 'an empty search'], ['search', { share: 'a1b2c3d4', q: 'a'.repeat(101) }, 'a long search'],
+      ['copy', { share: 'a1b2c3d4', names: ['a'.repeat(1025)] }, 'a name too long'],
+    ]) assert.equal((await post(s, `/api/devices/shoppc00128/files/${route}`, body, laptop)).status, 400, what);
+    st.close();
+  } finally { await s.stop(); }
+});
+
 // (1.21) A stand-in for GitHub: repos['owner/repo'] = { tag, files: { name: content }, away: { name: url } } answers
 // /repos/<o>/<r>/releases/latest; each file downloads through one redirect, as GitHub's do.
 async function fakeGithub() {

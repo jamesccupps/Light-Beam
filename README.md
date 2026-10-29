@@ -180,6 +180,10 @@ address, so the browser becomes part of that device instead of a separate entry.
   Read-only: nothing on the PC can be changed or deleted from elsewhere, and nothing else is visible: no hidden files,
   nothing starting with ".", no shortcuts or links to other folders. A whole drive, your user folder itself, AppData,
   Windows and Program Files can't be shared. It takes a trusted sign-in.
+  **Like Explorer (Beam 1.28, the Windows app 1.20):** sort by name, date, size or type (folders first), the PC's own
+  icons and type names, a grid of Windows' thumbnails (pictures, videos, PDFs), a look at a file before copying it
+  (pictures, the start of a text file, PDFs, a frame of a video), a search of the folder and every folder below it,
+  Select all, and whole folders (each sent as a .zip of what it shows).
 - **Appearance** (Beam 1.27, the Windows app 1.19, Beam Family): Settings → Appearance: light, dark or like the device,
   and an accent colour (nine to pick from, or any colour of your own). For all your devices, or just this one (its own
   wins). In the Windows app its own windows, title bar and tray icon follow too, also on a PC whose Beam window stays
