@@ -110,7 +110,11 @@ namespace Beam
                 if (parked != null || open.Count > 0) return; // (kept, or a session has one: one at a time)
                 var h = new RcHost(cfg, source, devTools, () => false);
                 h.ending = true; // (a parked host: nothing from its page counts, and its gate stays shut)
-                await h.StartHere();
+                // (1.21.3) One that can't start (the previous version's browser process still holding the profile after an
+                // update on a slow PC: "The requested resource is in use", Office Desktop 2026-10-29) is closed, not left
+                // in `open` keeping every later one away; RemoteControl.WarmHost tries once more.
+                try { await h.StartHere(); }
+                catch { var ignored = h.CloseHere(false); throw; }
                 if (h.closed || h.core == null || parked != null || open.Count > 1) { var ignored = h.CloseHere(false); return; }
                 await h.Prime();
                 if (h.closed || h.core == null || parked != null || open.Count > 1) { var ignored = h.CloseHere(false); return; }

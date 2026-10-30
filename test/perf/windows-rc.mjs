@@ -260,6 +260,29 @@ async function stopServer() {
 }
 
 // ---------------------------------------------------------------- the viewer's WebRTC end: headless Edge
+// (2026-10-30) Edge gone for good: the msedge.exe spawned is only a launcher, so killing it left the browser running
+// (68 processes, 3.9 GB after three runs), and 6b's new one handed its command line to that old browser (no fake
+// camera) and quit. The browser is asked to close (as test/web/cdp.mjs does), then whatever has this profile is ended.
+async function stopEdge() {
+  try { if (cdp) cdp.close(); } catch {}
+  try {
+    const v = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(2000) })).json();
+    const ws = new WebSocket(v.webSocketDebuggerUrl);
+    await new Promise((r, j) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', j, { once: true }); });
+    ws.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
+  } catch {}
+  try { edge.kill(); } catch {}
+  let gone = false;
+  for (let i = 0; i < 50 && !gone; i++) {
+    try { await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(500) }); await sleep(200); } catch { gone = true; }
+  }
+  const profile = dir('edge').replace(/'/g, "''");
+  spawnSync('powershell.exe', ['-NoProfile', '-Command',
+    `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${profile}') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`],
+    { windowsHide: true, timeout: 20000 });
+  await sleep(500);
+}
+
 async function startEdge(extra = []) {
   edge = spawn(EDGE, [...extra, '--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--remote-debugging-address=127.0.0.1', `--user-data-dir=${dir('edge')}`,
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync', '--disable-background-networking',
@@ -552,15 +575,14 @@ try {
   // (2026-10-12: the user's phone hung up on every try over IPv6). (Edge with media allowed: a socket and a candidate
   // on each address, the IPv6 one among them; then Edge as it was, for the rest.)
   if (ip6) {
-    cdp.close();
-    try { edge.kill(); } catch {}
-    await sleep(1500);
+    await stopEdge();
     await startEdge(['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']);
     // (a page of the scratch server's, a secure origin: about:blank gets no camera, and so no socket on each address)
     await cdp.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/api/hello` });
     await sleep(1500);
     await evalIn(VIEWER_SCRIPT);
-    check(await evalIn('navigator.mediaDevices.getUserMedia({ video: true }).then(m => { window.__media = m; return true; }, () => false)'), '...(the viewer has a fake camera: Chrome then uses each of its addresses)');
+    const cam = await evalIn('navigator.mediaDevices.getUserMedia({ video: true }).then(m => { window.__media = m; return "ok"; }, e => e.name + ": " + e.message)');
+    check(cam === 'ok', `...(the viewer has a fake camera: Chrome then uses each of its addresses)${cam === 'ok' ? '' : ` (${cam})`}`);
     from = logLines().length;
     candFilter = c => !c.candidate || /^fd7a:115c:a1e0:/i.test(c.candidate.split(' ')[4] || '');
     r = await startSession();
@@ -576,9 +598,7 @@ try {
     await waitLog(/Test Phone stopped controlling this PC after \d+ s/, from, 8000);
     await waitLog(/capture stopped|capture host closed$|capture host kept warm for the next session/, from, 12000);
     await endViewer();
-    cdp.close();
-    try { edge.kill(); } catch {}
-    await sleep(1500);
+    await stopEdge();
     await startEdge();
   }
 
@@ -973,8 +993,9 @@ try {
   await sleep(1500); // the offer and candidates are out: only leases meet the restarted server
   await stopServer();
   await startServer();
-  const leaseEnd = await waitLog(/the server ended it \(lease answered 404\)/, from, 25000);
-  check(!!leaseEnd, 'after a server restart the next lease gets 404: the PC ends the session');
+  // (2026-10-30) Or the page's next signal (1.17's bandwidth floor goes out ~4 s in) meets the restarted server first.
+  const leaseEnd = await waitLog(/the server ended it \((lease|signal) answered 404\)/, from, 25000);
+  check(!!leaseEnd, `after a server restart the next lease (or signal) gets 404: the PC ends the session${leaseEnd ? ` (${leaseEnd.replace(/.*\((lease|signal) answered.*/, '$1')})` : ''}`);
   check(!!(await waitLog(/capture stopped|capture host closed$|capture host kept warm for the next session/, from, 12000)), '...and stops capturing');
   live = null;
   viewerEvents.close();
@@ -1093,8 +1114,7 @@ try {
   failures.push(e.message);
   console.log('FAIL ' + (e.stack || e.message));
 } finally {
-  try { if (cdp) cdp.close(); } catch {}
-  if (edge) { try { edge.kill(); } catch {} }
+  if (edge) await stopEdge();
   await quitLaptop();
   if (laptop && laptopExit === undefined) { try { laptop.kill(); } catch {} }
   await quitApp();

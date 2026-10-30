@@ -541,6 +541,9 @@ namespace Beam
                 string since = wanted == fullDone && itemsCursor != null && ServerHas("items-since") ? itemsCursor : null;
                 var devTask = api.Devices();
                 var itemsTask = api.ItemsSince(since);
+                // (1.21.3) Both finish before either's failure is thrown: one awaited alone left the other's unobserved
+                // (a "Task:" error in the log half a minute later, Office Desktop 2026-10-13).
+                try { await Task.WhenAll(devTask, itemsTask); } catch { }
                 var devices = await devTask;
                 var page = await itemsTask;
                 if (api != Api || mine != session) return;
@@ -1835,6 +1838,29 @@ namespace Beam
             return main != null && main.IsShowing(ConvsOf(it));
         }
 
+        string unlockCopy, unlockCopyId; // (1.21.3) the newest text that came while this PC was locked
+        int unlockCopySession;
+
+        // (1.21.3) This PC was unlocked (RemoteControl.LockChanged): the text that came meanwhile goes on the clipboard, once
+        // more 2 s later if Windows wasn't ready for it yet.
+        public void Unlocked()
+        {
+            string text = unlockCopy, id = unlockCopyId;
+            unlockCopy = unlockCopyId = null;
+            if (text == null || !Cfg.AutoCopy || unlockCopySession != session) return;
+            if (ClipPayload.SetText(text, Cfg.ClipboardHistory)) { Log.Write("Copied text " + id + " (it came while this PC was locked)"); return; }
+            int mine = session;
+            var again = new Timer();
+            again.Interval = 2000;
+            again.Tick += (s, e) =>
+            {
+                again.Stop();
+                again.Dispose();
+                if (mine == session && !Rc.Locked && ClipPayload.SetText(text, Cfg.ClipboardHistory)) Log.Write("Copied text " + id + " (it came while this PC was locked)");
+            };
+            again.Start();
+        }
+
         async void ReceiveText(Item it)
         {
             string text = it.Text;
@@ -1845,8 +1871,16 @@ namespace Beam
                 catch (Exception ex) { Log.Error("Fetching full text", ex); }
                 if (mine != session) return; // signed out meanwhile
             }
-            bool copied = Cfg.AutoCopy && ClipPayload.SetText(text, Cfg.ClipboardHistory);
-            Log.Write("Received text " + it.Id + " from " + it.DeviceName + (copied ? " (copied)" : ""));
+            // (1.21.3) Windows refuses the clipboard while this PC is locked (every text that came then, in the PCs' logs of
+            // October): the newest one is copied when it's unlocked (Unlocked).
+            bool copied = false, kept = false;
+            if (Cfg.AutoCopy)
+            {
+                if (!Rc.SessionLocked) copied = ClipPayload.SetText(text, Cfg.ClipboardHistory);
+                kept = !copied && Rc.Locked;
+                if (kept) { unlockCopy = text; unlockCopyId = it.Id; unlockCopySession = session; }
+            }
+            Log.Write("Received text " + it.Id + " from " + it.DeviceName + (copied ? " (copied)" : kept ? " (copied once this PC is unlocked)" : ""));
             // "Open links sent to this PC automatically": only a link sent to this PC itself (not to all devices), and
             // only while it's fresh (not a week-old link found when the PC wakes up).
             if (Cfg.AutoOpenLinks && Fmt.IsLink(text) && it.To.Contains(Me) && it.From != Me && Math.Abs(Fmt.NowMs() - it.Ts) < 10 * 60 * 1000)

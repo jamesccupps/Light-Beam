@@ -193,6 +193,7 @@ namespace Beam
 
         public bool Allowed { get { return app.Cfg.AllowRemoteControl; } }
         public bool Locked { get { return testLock || lockFlag || !onConsole; } }
+        public bool SessionLocked { get { return testLock || lockFlag; } } // (1.21.3) the screen is locked (not a Remote Desktop session)
         public bool Active { get { return current != null; } }
 
         // For the tray: "Robin Laptop is controlling this PC", or null.
@@ -581,13 +582,28 @@ namespace Beam
 
         // (1.12.4) The capture host a session here would take (the main screen's), started and parked (RcHost.Warm): the next
         // session starts without a browser process to start first. (1.17) On every PC that allows remote control.
-        void WarmHost(string why)
+        // (1.21.3) One that doesn't start tries once more 30 s later (its error was unobserved before, and nothing warmed again
+        // until a session).
+        void WarmHost(string why, bool again = false)
         {
             if (!app.Cfg.AllowRemoteControl || current != null || closing) return;
             var layout = DesktopLayout.Current();
             var primary = layout.Primary;
-            var ignored = RcHost.Warm(app.Cfg, layout.SourceName(primary != null ? primary.Id : 0), app.DevTools);
+            var warming = RcHost.Warm(app.Cfg, layout.SourceName(primary != null ? primary.Id : 0), app.DevTools);
             Log.Write("Remote control: keeping a capture host warm (" + why + ")");
+            warming.ContinueWith(t =>
+            {
+                string err = t.Exception.GetBaseException().Message;
+                app.Post(() =>
+                {
+                    Log.Write("Remote control: the warm capture host didn't start (" + err + ")" + (again ? "" : "; trying again in 30 s"));
+                    if (again) return;
+                    var retry = new Timer();
+                    retry.Interval = 30000;
+                    retry.Tick += (s, e) => { retry.Stop(); retry.Dispose(); WarmHost("its first start failed", true); };
+                    retry.Start();
+                });
+            }, TaskContinuationOptions.OnlyOnFaulted);
         }
 
         // The gate behind ScreenCaptureStarting: this session's capture host, the session going on, its banner up.
@@ -1578,6 +1594,7 @@ namespace Beam
             Log.Write("Remote control: this PC is " + (Locked ? "locked" : "unlocked") + (Allowed ? "" : " (remote control is off)"));
             if (Locked && current != null) End(current, "locked", "this PC was locked");
             if (Allowed) app.StatusNow(Locked ? "locked" : "unlocked");
+            if (!Locked) app.Unlocked(); // (1.21.3) a text that came meanwhile goes on the clipboard
         }
 
         public void OnDisplayChange()
