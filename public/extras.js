@@ -549,7 +549,6 @@ function togglePinnedView() {
 
 // ---------------------------------------------------------------- search (all conversations, in the sidebar)
 
-let searchQuery = '';
 function openSearch() {
   $('#sideSearch').hidden = false;
   if (NARROW.matches) showList();
@@ -559,14 +558,12 @@ function openSearch() {
 function closeSearch() {
   $('#sideSearch').hidden = true;
   $('#searchInput').value = '';
-  searchQuery = '';
   $('#searchResults').hidden = true;
   $('#convList').hidden = false;
 }
 
 const runSearch = debounce(() => {
   const q = $('#searchInput').value.trim().toLowerCase();
-  searchQuery = q;
   const box = $('#searchResults');
   if (!q) { box.hidden = true; $('#convList').hidden = false; return; }
   const hits = [];
@@ -582,7 +579,8 @@ const runSearch = debounce(() => {
   box.replaceChildren(
     el('p', { class: 'muted small search-count', role: 'status' }, hits.length ? `${plural(hits.length, 'result')}${hits.length === 200 ? '+' : ''}` : 'No results'),
     ...hits.map(item => searchResult(item, q)),
-    truncated && el('button', { class: 'btn ghost small-btn', type: 'button', onclick: loadFullTextsForSearch }, 'Also search inside long messages'));
+    // (the audit of 2026-10-29: a bare `false` here showed as the word "false" under the results)
+    ...(truncated ? [el('button', { class: 'btn ghost small-btn', type: 'button', onclick: loadFullTextsForSearch }, 'Also search inside long messages')] : []));
   box.hidden = false;
   $('#convList').hidden = true;
 }, 150);
@@ -590,12 +588,18 @@ const runSearch = debounce(() => {
 function searchResult(item, q) {
   const conv = convsOf(item).find(c => c !== 'all') || 'all';
   const text = item.kind === 'text' ? (view.fullText.get(item.id) || item.text).replace(/\s+/g, ' ') : `📄 ${item.name}`;
-  const at = Math.max(0, text.toLowerCase().indexOf(q));
-  const start = Math.max(0, at - 30);
-  const snippet = el('span', { class: 'conv-preview' }, start > 0 ? '…' : '', text.slice(start, at), el('mark', {}, text.slice(at, at + q.length)), text.slice(at + q.length, at + q.length + 80));
+  // (the audit of 2026-10-29) Found by its sender's name only: that name is marked, the text starts as it is (the first
+  // letters of the text were marked)
+  const marked = (s, at, before = 30, after = 80) => {
+    const start = Math.max(0, at - before);
+    return [start > 0 ? '…' : '', s.slice(start, at), el('mark', {}, s.slice(at, at + q.length)), s.slice(at + q.length, at + q.length + after)];
+  };
+  const at = text.toLowerCase().indexOf(q);
+  const snippet = el('span', { class: 'conv-preview' }, ...(at >= 0 ? marked(text, at) : [text.slice(0, 110)]));
+  const name = convName(conv), nameAt = at < 0 ? name.toLowerCase().indexOf(q) : -1;
   const btn = el('button', { class: 'conv search-hit', type: 'button' },
     avatar(conv),
-    el('span', { class: 'conv-body' }, el('span', { class: 'conv-top' }, el('span', { class: 'conv-name' }, convName(conv)), el('span', { class: 'conv-time' }, shortWhen(item.ts))), el('span', { class: 'conv-bottom' }, snippet)));
+    el('span', { class: 'conv-body' }, el('span', { class: 'conv-top' }, el('span', { class: 'conv-name' }, ...(nameAt >= 0 ? marked(name, nameAt, 200, 200) : [name])), el('span', { class: 'conv-time' }, shortWhen(item.ts))), el('span', { class: 'conv-bottom' }, snippet)));
   btn.addEventListener('click', () => { openConv(conv); revealItem(item.id); });
   return btn;
 }

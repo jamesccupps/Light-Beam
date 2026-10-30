@@ -183,8 +183,11 @@ namespace Beam
                 catch (Exception ex)
                 {
                     if (stopped) return;
-                    // Right after an update the previous version may hold the name for a moment: wait quietly.
-                    if (++failures <= 3 || failures % 60 == 0) Log.Error("Pipe", ex);
+                    // Right after an update the previous version may hold the name for a moment: wait quietly. (1.21.2, the
+                    // audit of 2026-10-29: "All pipe instances are busy" was in the log after every update; only a wait
+                    // past 10 s is worth a line now.)
+                    failures++;
+                    if ((failures > 20 && failures <= 23) || failures % 120 == 0) Log.Error("Pipe", ex);
                     Thread.Sleep(500);
                     continue;
                 }

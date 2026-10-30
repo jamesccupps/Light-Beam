@@ -54,6 +54,10 @@ namespace Beam
         static App app;
         static bool comRegistered;
         static int next;
+        // (1.21.2, the audit of 2026-10-29) This run's own mark in each notification's arguments (`r=`): numbers start
+        // at 1 again in every run, so a click on an earlier run's notification n acted as this run's n (its Reply went
+        // to that one's device, Copy copied its text). Also its group, so this run's n doesn't replace that one.
+        static readonly string run = Guid.NewGuid().ToString("N").Substring(0, 8);
         static readonly Dictionary<int, Shown> shown = new Dictionary<int, Shown>();
 
         class Shown
@@ -158,15 +162,16 @@ namespace Beam
             doc.LoadXml(xml);
             var toast = new ToastNotification(doc);
             toast.Tag = "n" + id;
-            toast.Group = "beam";
+            toast.Group = "beam-" + run;
             ToastNotificationManager.CreateToastNotifier(Aumid).Show(toast);
         }
 
         // The notification: its title and text, a Reply box with Send, its buttons. Each click's arguments say which
-        // notification (t), which item (i) and device (d), and what (a: "" the notification, "b0"… a button, "reply").
+        // notification (t, of run r), which item (i) and device (d), and what (a: "" the notification, "b0"… a button,
+        // "reply").
         public static string Xml(int id, string title, string text, ToastExtras extras, string itemId)
         {
-            var args = new StringBuilder("t=" + id);
+            var args = new StringBuilder("t=" + id + ";r=" + run);
             if (!string.IsNullOrEmpty(itemId)) args.Append(";i=" + itemId);
             if (extras != null && !string.IsNullOrEmpty(extras.ReplyTo)) args.Append(";d=" + extras.ReplyTo);
             string a = args.ToString();
@@ -206,14 +211,15 @@ namespace Beam
                 int eq = p.IndexOf('=');
                 if (eq > 0) parts[p.Substring(0, eq)] = p.Substring(eq + 1);
             }
-            string t, item, device, what, text = null;
+            string t, r, item, device, what, text = null;
             parts.TryGetValue("t", out t);
+            parts.TryGetValue("r", out r);
             parts.TryGetValue("i", out item);
             parts.TryGetValue("d", out device);
             parts.TryGetValue("a", out what);
             if (input != null) input.TryGetValue("reply", out text);
             int id;
-            int.TryParse(t, out id);
+            if (r != run || !int.TryParse(t, out id)) id = 0; // (an earlier run's, also 1.21.0/1.21.1's without r: by its i and d)
             var a = app;
             if (a == null) return;
             a.Post(() => Do(a, id, item, device, what ?? "", text));
@@ -221,8 +227,8 @@ namespace Beam
 
         static void Do(App a, int id, string item, string device, string what, string text)
         {
-            Shown s;
-            shown.TryGetValue(id, out s);
+            Shown s = null;
+            if (id > 0) shown.TryGetValue(id, out s);
             if (item != null && !Config.ValidId(item)) item = null; // (only ids: the arguments came from outside)
             if (device != null && !Config.ValidId(device)) device = null;
             Log.Write("Notification clicked" + (what.Length > 0 ? " (" + what + ")" : "") + (s == null ? ", from an earlier run" : ""));

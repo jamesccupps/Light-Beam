@@ -21,6 +21,12 @@ export default function register(test) {
     const { page, phone } = await withPhone(ctx, ['the invoice number is 4471', 'something else', 'invoice sent again']);
     await page.evaluate(`openSearch(); $('#searchInput').value = 'invoice'; runSearch.flush()`);
     eq(await page.evaluate(`$$('#searchResults .search-hit').length`), 2, 'two results in the sidebar');
+    eq(await page.evaluate(`[...$$('#searchResults .search-hit mark')].map(m => m.textContent)`), ['invoice', 'invoice'], 'the word marked in each text');
+    eq(await page.evaluate(`[...$('#searchResults').childNodes].filter(n => n.nodeType === 3).map(n => n.textContent)`), [], 'no stray text (it said "false")');
+    // (the audit, 2026-10-29) Found by the sender's name: the name is marked, not the text's first letters
+    await page.evaluate(`$('#searchInput').value = 'pixel'; runSearch.flush()`);
+    eq(await page.evaluate(`[...$$('#searchResults .search-hit')].map(h => [h.querySelector('.conv-name mark')?.textContent, h.querySelector('.conv-preview mark')?.textContent || null])[0]`), ['Pixel', null], 'the sender’s name marked');
+    await page.evaluate(`$('#searchInput').value = 'invoice'; runSearch.flush()`);
     await page.evaluate(`$('#searchResults .search-hit').click()`);
     await page.waitFor(`current === '${phone.id}'`);
     await page.evaluate(`openThreadSearch(); $('#threadSearchInput').value = 'invoice'; runFind.flush()`);

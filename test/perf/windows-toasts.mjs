@@ -42,7 +42,7 @@ async function startServer() {
   for (let i = 0; i < 150; i++) { try { if ((await fetch(`${base}/api/hello`)).ok) break; } catch {} await sleep(200); }
 }
 
-const as = (id, name) => ({ Authorization: `Bearer ${key}`, 'X-Beam-Device-Id': id, 'X-Beam-Device': encodeURIComponent(name), 'X-Beam-Platform': 'android', 'X-Forwarded-For': '100.64.21.10' });
+const as = (id, name, ip = '100.64.21.10') => ({ Authorization: `Bearer ${key}`, 'X-Beam-Device-Id': id, 'X-Beam-Device': encodeURIComponent(name), 'X-Beam-Platform': 'android', 'X-Forwarded-For': ip });
 async function call(h, method, p, body, raw = false) {
   const r = await fetch(base + p, { method, headers: { ...h, ...(body !== undefined && { 'Content-Type': raw ? 'application/octet-stream' : 'application/json' }) }, ...(body !== undefined && { body: raw ? body : JSON.stringify(body) }) });
   let json = null;
@@ -73,6 +73,9 @@ try {
   const phone = as(`phone${crypto.randomBytes(5).toString('hex')}`, 'Robin Phone');
   await call(phone, 'GET', '/api/me');
   const phoneId = phone['X-Beam-Device-Id'];
+  const tablet = as(`tablet${crypto.randomBytes(5).toString('hex')}`, 'Robin Tablet', '100.64.21.11');
+  await call(tablet, 'GET', '/api/me');
+  const tabletId = tablet['X-Beam-Device-Id'];
   const pcId = `toastpc${crypto.randomBytes(6).toString('hex')}`;
   const made = await (await fetch(`${base}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Beam-Platform': 'windows' },
     body: JSON.stringify({ secret: key, client: 'app', platform: 'windows', deviceId: pcId }) })).json();
@@ -95,7 +98,8 @@ try {
   const text = (await call(phone, 'POST', '/api/text', { text: 'Are you at the desk?', to: [pcId] })).json;
   let xml = await toastAfter(at);
   const launch = unesc(attr(xml, /<toast launch="([^"]*)"/));
-  check(launch === `t=${launch.match(/t=(\d+)/)?.[1]};i=${text?.id};d=${phoneId}`, `a text: the click's arguments name the notification, the item and the sender (${launch})`);
+  const tNum = launch.match(/t=(\d+)/)?.[1], run = launch.match(/;r=([0-9a-f]{8});/)?.[1];
+  check(!!run && launch === `t=${tNum};r=${run};i=${text?.id};d=${phoneId}`, `a text: the click's arguments name the notification (and this run), the item and the sender (${launch})`);
   check(/<text>Text from Robin Phone<\/text><text>Are you at the desk\?<\/text>/.test(xml) && !/Click to/.test(xml), 'its title and text, without a balloon\'s "Click to…"');
   check(/<input id="reply" type="text" placeHolderContent="Reply to Robin Phone"\/>/.test(xml) && new RegExp(`<action content="Send" hint-inputId="reply" activationType="background" arguments="${launch.replace(/[;.]/g, m => `\\${m}`)};a=reply"/>`).test(xml), 'a Reply box with Send');
   check(new RegExp(`<action content="Copy" activationType="background" arguments="[^"]*;a=b0"/>`).test(xml), 'Copy');
@@ -110,6 +114,15 @@ try {
   at = lines().length;
   forward(['--test-toasts', `click:t=99999;i=${text.id};d=${phoneId};a=reply|From an earlier one`]);
   check(!!(await waitLog(/Notification clicked \(reply\), from an earlier run/, 15000, at)) && !!(await waitFor(async () => (await items()).find(i => i.text === 'From an earlier one'), 10000)), 'Reply from an earlier run\'s notification: sent by its arguments');
+  // (1.21.2) This run's number from another run (1.21.1's had no r): never this run's notification, by its own i and d
+  at = lines().length;
+  forward(['--test-toasts', `click:t=${tNum};i=${text.id};d=${tabletId};a=reply|To the tablet`]);
+  check(!!(await waitLog(/Notification clicked \(reply\), from an earlier run/, 15000, at)), 'this run\'s number without its mark: from an earlier run');
+  const toTablet = await waitFor(async () => (await items()).find(i => i.text === 'To the tablet'), 10000) || await waitFor(async () => ((await call(tablet, 'GET', '/api/items')).json?.items || []).find(i => i.text === 'To the tablet'), 5000);
+  check(!!toTablet && JSON.stringify(toTablet.to) === JSON.stringify([tabletId]), `...its reply goes to the device its arguments name, not this run's notification's (${toTablet && toTablet.to})`);
+  at = lines().length;
+  forward(['--test-toasts', `click:t=${tNum};r=0badc0de;i=${text.id};d=${tabletId};a=reply|Another run`]);
+  check(!!(await waitLog(/Notification clicked \(reply\), from an earlier run/, 15000, at)), 'another run\'s mark: from an earlier run');
   // Arguments from outside name ids only: a made-up device gets nothing
   at = lines().length;
   forward(['--test-toasts', `click:t=99998;d=..\\..\\x;a=reply|Never`]);

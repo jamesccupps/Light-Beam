@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -813,9 +813,10 @@ async function writeZip(entries, dest, onFile = () => {}) {
       let crc = 0, size = 0, packed = 0;
       if (src) {
         try {
-          async function* read() { for await (const b of src.createReadStream()) { crc = crc32(b, crc); size += b.length; yield b; } }
+          // (1 MB reads: the default 64 KB made 16 times the reads and writes on a big folder; the audit of 2026-10-29)
+          async function* read() { for await (const b of src.createReadStream({ highWaterMark: 1 << 20 })) { crc = crc32(b, crc); size += b.length; yield b; } }
           const write = async from => { for await (const chunk of from) { await put(chunk); packed += chunk.length; } };
-          if (method === 8) await pipeline(read(), zlib.createDeflateRaw({ level: 1 }), write);
+          if (method === 8) await pipeline(read(), zlib.createDeflateRaw({ level: 1, chunkSize: 256 * 1024 }), write);
           else await write(read());
         } finally { await src.close().catch(() => {}); }
       }

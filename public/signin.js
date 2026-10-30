@@ -77,9 +77,10 @@ function layoutLock() {
   $('#lock').classList.toggle('phone', phone);
   $('#loginQrWrap').hidden = phone && !showQrOnPhone;
   $('#showQrBtn').hidden = !phone || showQrOnPhone;
+  $('#lockHint').hidden = phone; // (the message says where to type it there; it said it twice: the audit of 2026-10-29)
   setLockMessage(phone
     ? 'On a device that’s signed in, open Beam → Add device and type this code. Or approve it when it asks.'
-    : 'Scan the QR code with your phone (camera or the Beam app), or type the code on a signed-in device.');
+    : 'Scan the QR code with your phone (its camera or the Beam app).');
 }
 let showQrOnPhone = false;
 
