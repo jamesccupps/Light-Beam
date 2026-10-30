@@ -67,10 +67,14 @@ namespace Beam
                 var body = new Dictionary<string, object>();
                 body["events"] = records.ToArray();
                 var r = Json.Obj(await app.Api.Call(HttpMethod.Post, "/api/devices/me/history", body, 30, CancellationToken.None));
+                bool first = lastSent == DateTime.MinValue;
                 lastSent = DateTime.UtcNow;
                 long added = Json.Long(r, "added", 0);
-                Log.Write("History: " + (added > 0 ? "sent " + added + " new record(s) of Windows' restarts, sign-ins and crashes" : "nothing new in Windows' records")
-                    + " (" + records.Count + " read" + (fake != null ? ", from the test file" : "") + ")");
+                // (1.21.3) "Nothing new" only for the first look of a run (or one asked for): every 90 minutes it was 15% of
+                // each PC's log (the 512 KB that Device info → Beam log shows).
+                if (added > 0 || first || force)
+                    Log.Write("History: " + (added > 0 ? "sent " + added + " new record(s) of Windows' restarts, sign-ins and crashes" : "nothing new in Windows' records")
+                        + " (" + records.Count + " read" + (fake != null ? ", from the test file" : "") + ")");
             }
             catch (Exception ex) { Log.Write("History: not sent (" + Api.Describe(ex) + ")"); }
             finally { busy = false; }

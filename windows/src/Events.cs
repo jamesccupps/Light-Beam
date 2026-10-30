@@ -22,6 +22,7 @@ namespace Beam
 
         CancellationTokenSource stop;
         HttpResponseMessage current;
+        HttpResponseMessage droppedHere;      // (1.21.3) closed by Beam itself (a reconnect it logged): no "dropped: …" for it
         readonly Stopwatch sinceActivity = new Stopwatch();
         Timer watchdog;
         readonly SemaphoreSlim wake = new SemaphoreSlim(0);
@@ -73,7 +74,7 @@ namespace Beam
         void DropConnection()
         {
             HttpResponseMessage resp;
-            lock (sync) { resp = current; current = null; }
+            lock (sync) { resp = current; current = null; droppedHere = resp; }
             if (resp != null)
             {
                 try { resp.Dispose(); } catch { }
@@ -137,7 +138,9 @@ namespace Beam
                 {
                     reason = Api.Describe(ex);
                     if (!opened) Unreachable = Api.IsUnreachable(ex);
-                    if (!token.IsCancellationRequested) Log.Write("Events: " + (opened ? "dropped: " : "connect failed: ") + reason);
+                    bool ours;
+                    lock (sync) ours = resp != null && droppedHere == resp;
+                    if (!token.IsCancellationRequested && !ours) Log.Write("Events: " + (opened ? "dropped: " : "connect failed: ") + reason);
                 }
                 finally
                 {
