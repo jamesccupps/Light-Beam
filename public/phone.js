@@ -459,6 +459,9 @@ function patchPhoneRow() {
 // A per-device server setting; any signed-in device can set it for any device. The Windows app owns its own PC's
 // (its tray, and Settings → Notifications through the bridge); everything else goes straight to the server.
 function phoneShownFor(d) { return Boolean(d?.settings?.phoneNotifications); }
+// (the audit of 2026-10-29) Where the switch makes sense: not on a phone (they come from it) or the command line (it
+// shows none); one already on stays switchable, so it can be turned off.
+const phoneShowable = d => Boolean(d) && (!['android', 'ios', 'cli', 'other'].includes(d.platform) || phoneShownFor(d));
 
 async function setPhoneShown(id, on, input) {
   try {

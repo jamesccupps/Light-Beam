@@ -8562,6 +8562,9 @@ function serve() {
     applyRequestTimeout(req, res);
     handle(req, res).catch(err => {
       if (err.code === 'ENOSPC') err = diskFull();
+      // (the audit of 2026-10-29) A client that went away mid-request (its body cut off: "aborted") isn't the server's
+      // error: no stack in the log for it (nobody is there to answer either)
+      if (!err.status && (err.code === 'ECONNRESET' || err.message === 'aborted') && (req.aborted || req.destroyed || res.destroyed)) return;
       if (!err.status) log.error('Request failed:', req.method, req.url.split('?')[0], err);
       if (res.headersSent || res.beamSent) return res.headersSent ? res.destroy() : undefined;
       send(res, err.status || 500, { error: err.status ? err.message : 'Server error', ...err.extra }, { ...(err.status === 413 && { Connection: 'close' }), ...err.headers });

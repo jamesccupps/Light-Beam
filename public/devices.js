@@ -249,7 +249,7 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   const rc = rcDeviceRows(d);
   const body = [facts,
     card(null, trustToggle(d), alertsSupported() && offlineAlertToggle(d),
-      other && phoneFeature() && switchRow('Show phone notifications', phoneShownFor(d), (v, box) => setPhoneShown(d.id, v, box))),
+      other && phoneFeature() && phoneShowable(d) && switchRow('Show phone notifications', phoneShownFor(d), (v, box) => setPhoneShown(d.id, v, box))),
     rc.length > 0 && el('div', { class: 'dev-rc' }, ...rc),
     historySection(d),
     other && el('div', { class: 'dev-end' }, el('button', { class: 'btn small-btn ghost danger', type: 'button', onclick: () => removeDevice(d) }, serverHas('tokens') ? 'Sign out…' : 'Forget…'))].filter(Boolean);

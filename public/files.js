@@ -126,6 +126,7 @@ function renderSharedFolder() {
   const copyBtn = el('button', { class: 'btn primary shared-copy', type: 'button', onclick: copySharedPicked }, icon('download'), copyLabel);
   // Each entry with its name inside the folder looked in (`rel`: "2026/a.jpg" from a search)
   const all = (v.search ? (v.search.results || []) : v.entries).map(e => ({ ...e, rel: v.search ? sharedJoin(e.p, e.n) : e.n }));
+  const sizes = new Map(all.map(e => [e.rel, e.s || 0])); // (the audit of 2026-10-29: a find per ticked file made Select all O(n³))
   let shown = [];
   const count = () => {
     const n = v.picked.size, dirs = [...v.picked.values()].filter(Boolean).length;
@@ -135,7 +136,8 @@ function renderSharedFolder() {
     allBox.checked = pickable.length > 0 && pickable.every(e => v.picked.has(e.rel));
     allBox.indeterminate = !allBox.checked && pickable.some(e => v.picked.has(e.rel));
     allBox.disabled = !pickable.length;
-    const bytes = [...v.picked.keys()].reduce((t, rel) => t + (all.find(e => e.rel === rel)?.s || 0), 0);
+    let bytes = 0;
+    for (const rel of v.picked.keys()) bytes += sizes.get(rel) || 0;
     allLabel.textContent = n ? `${plural(n, 'selected', 'selected')} (${dirs ? `${plural(dirs, 'folder')} as .zip files` : formatSize(bytes)})` : 'Select all';
   };
   const pick = (e, on, node) => { if (on) v.picked.set(e.rel, Boolean(e.dir)); else v.picked.delete(e.rel); node?.classList.toggle('picked', on); count(); };
@@ -158,7 +160,11 @@ function renderSharedFolder() {
     count();
     if (grid) requestAnimationFrame(() => watchSharedThumbs(d, list)); // (once the list is on the page)
   };
-  allBox.onchange = () => { const on = allBox.checked; for (const e of shown) if (more || !e.dir) pick(e, on); drawList(); };
+  allBox.onchange = () => { // (ticked or cleared together, then drawn once)
+    const on = allBox.checked;
+    for (const e of shown) if (more || !e.dir) { if (on) v.picked.set(e.rel, Boolean(e.dir)); else v.picked.delete(e.rel); }
+    drawList();
+  };
   filter.oninput = () => { v.filter = filter.value; drawList(); };
   filter.onkeydown = ev => { if (ev.key === 'Enter' && more && filter.value.trim()) { ev.preventDefault(); searchShared(filter.value); } };
   drawList();
@@ -430,15 +436,28 @@ function copySharedPicked() {
   return copyShared([...v.picked.keys()], [...v.picked.values()].some(Boolean));
 }
 
+// (the audit of 2026-10-29) A PC takes 100 names per copy (Select all in a bigger folder was refused): 100 at a time.
+const SHARED_COPY_MAX = 100;
 async function copyShared(names, folders) {
-  const v = sharedView, d = v.device;
+  const v = sharedView, d = v.device, { share, path } = v;
   if (!names.length) return;
-  let r;
-  try { r = await apiJson(sharedApi(d, 'copy'), jsonBody({ share: v.share, path: v.path, names })); } catch (err) { toast(friendlyError(err), { error: true }); return; }
-  const n = r.sending || 0, skipped = r.skipped || [];
-  const left = skipped.length ? `${n ? ' (' : ': '}left out: ${skipped.map(s => `${s.n} (${s.why})`).join(', ')}${n ? ')' : ''}` : '';
+  let n = 0, failed = null;
+  const skipped = [];
+  for (let i = 0; i < names.length; i += SHARED_COPY_MAX) {
+    let r;
+    try { r = await apiJson(sharedApi(d, 'copy'), jsonBody({ share, path, names: names.slice(i, i + SHARED_COPY_MAX) })); } catch (err) {
+      if (!n && !skipped.length) { toast(friendlyError(err), { error: true }); return; }
+      failed = { err, left: names.length - i };
+      break;
+    }
+    n += r.sending || 0;
+    skipped.push(...(r.skipped || []));
+  }
+  const some = skipped.slice(0, 5).map(s => `${s.n} (${s.why})`).join(', ') + (skipped.length > 5 ? `, and ${skipped.length - 5} more` : '');
+  const left = skipped.length ? `${n ? ' (' : ': '}left out: ${some}${n ? ')' : ''}` : '';
   const zipped = folders && n ? ' Folders come as .zip files, once the PC has made them.' : '';
-  toast(n ? `${d.name} is sending ${plural(n, 'file')}: they arrive in your conversation with it${left}.${zipped}` : `${d.name} sent nothing${left}.`, { ms: 6000, error: !n });
+  const rest = failed ? ` ${plural(failed.left, 'other one')} didn’t go: ${friendlyError(failed.err)}` : '';
+  toast((n ? `${d.name} is sending ${plural(n, 'file')}: they arrive in your conversation with it${left}.${zipped}` : `${d.name} sent nothing${left}.`) + rest, { ms: 6000, error: !n || Boolean(failed) });
   if (v.preview) return;
   v.picked.clear();
   v.scroll = $('#genBody .shared-list')?.scrollTop || 0;

@@ -720,8 +720,9 @@ async function staticFiles() {
   const accept = { 'Accept-Encoding': 'gzip, deflate, br' };
   const index = await request(s.port, 'GET', '/', { headers: accept });
   const html = (index.headers['content-encoding'] === 'br' ? zlib.brotliDecompressSync(index.body) : index.headers['content-encoding'] === 'gzip' ? zlib.gunzipSync(index.body) : index.body).toString('utf8');
-  // (not what's inside a <template>: inert, nothing of it loads; 1.12.2 names the viewer's remote.js there)
-  const loaded = html.replace(/<template[\s\S]*?<\/template>/g, '');
+  // (not what's inside a <template>: inert, nothing of it loads; 1.12.2 names the viewer's remote.js there. Nor the
+  // apple-touch-icon: only an iPhone's "Add to Home Screen" fetches it, never a page's open; the audit of 2026-10-29)
+  const loaded = html.replace(/<template[\s\S]*?<\/template>/g, '').replace(/<link rel="apple-touch-icon"[^>]*>/g, '');
   const refs = [...loaded.matchAll(/(?:src|href)="([^"#]+)"/g)].map(m => m[1]).filter(u => !/^(https?:|data:|mailto:|download\/)/.test(u));
   const urls = ['/', ...new Set(refs.map(u => new URL(u, 'http://x/').pathname + new URL(u, 'http://x/').search))];
   let raw = 0;
@@ -798,8 +799,9 @@ const BUDGETS = [
   ['loop', 'GET /api/me p99 while lists of 5000 are served (ms)', r => row(r.loop, 'load', 'GET /api/items (5000) ×20')?.['p99 ms'], '<=', 80],
   ['static', 'warm open: requests', r => r.static?.['warm open: requests'], '<=', 1],
   // 1.5 phone.js and 1.6 remote.js grew the first open from ~114 to ~151 KB, 1.8–1.12 to 174–180; 1.12.2 loads remote.js
-  // only for #remote= (its own page): 140 KB.
-  ['static', 'first open: compressed KB', r => r.static?.['sent KB (compressed)'], '<=', 150],
+  // only for #remote= (its own page): 140 KB. 1.21–1.29 (apps, the Settings remake, shared folders like Explorer, the
+  // text size) to ~157 without the apple-touch-icon (the audit of 2026-10-29, which left it out: no page loads it).
+  ['static', 'first open: compressed KB', r => r.static?.['sent KB (compressed)'], '<=', 170],
   ['keepalive', 'connection reused after 30 s idle', r => (row(r.keepalive, 'idle before request', '30 s')?.['connection reused'] === 'yes' ? 1 : row(r.keepalive, 'idle before request', '30 s') ? 0 : undefined), '>=', 1],
 ];
 

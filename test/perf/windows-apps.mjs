@@ -106,6 +106,7 @@ function runApp(cfgDir, cfgPath) {
   const logPath = path.join(cfgDir, 'beam.log');
   const lines = () => { try { return fs.readFileSync(logPath, 'utf8').split(/\r?\n/); } catch { return []; } };
   return {
+    pid: app.pid,
     lines,
     mark: () => lines().length,
     async waitLog(re, from = 0, ms = 30000) {
@@ -216,12 +217,16 @@ try {
   check(!!s && /would go outside its folder/.test(s.error || ''), `a .zip escaping its folder is refused (${s?.error})`);
   check(!fs.existsSync(path.join(pc.cfgDir, 'Programs', 'evil.txt')), '...and nothing was written outside');
 
-  // 5. A new version of the tool: the PC that has it gets it (in place of the old one).
+  // 5. A new version of the tool: the PC that has it gets it (in place of the old one). (1.21.2) The name the old copy
+  // is renamed to is taken (an earlier update's copy still running: here a folder of that name): another one is used.
   from = pc.mark();
+  const taken = `${toolExe}.beam-old-${pc.pid}`;
+  fs.mkdirSync(taken, { recursive: true });
   await putFile({ name: 'BeamTestTool.exe', app: tool.id, version: '2.0' }, whoami);
   for (const until = Date.now() + 30000; Date.now() < until; await sleep(150)) if (fs.existsSync(toolExe) && sha(fs.readFileSync(toolExe)) === sha(whoami)) break;
-  check(sha(fs.readFileSync(toolExe)) === sha(whoami), 'a new version goes to the PC that has it, in place of the old');
+  check(sha(fs.readFileSync(toolExe)) === sha(whoami), 'a new version goes to the PC that has it, in place of the old (the usual aside name taken)');
   check(!!(await waitState(tool.id, pc.id, 'installed')), '...and it says it\'s installed');
+  fs.rmSync(taken, { recursive: true, force: true });
 
   // 6. Uninstall from the server; and from Windows' Installed apps (Beam.exe --remove-app).
   from = pc.mark();

@@ -502,7 +502,7 @@ function pageNotifications() {
         { hint: 'From the apps picked on your phone (Beam there: Settings → Notifications on your PCs). Reply, act on or dismiss them from here. Kept in memory only.' })));
   }
   // (1.5) the phone's notifications on the other devices: any device may switch it for any
-  const others = phoneFeature() ? devices.filter(d => d.id !== me.id).sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name)) : [];
+  const others = phoneFeature() ? devices.filter(d => d.id !== me.id && phoneShowable(d)).sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name)) : [];
   if (others.length) {
     parts.push(card('Phone notifications on your other devices',
       ...others.map(d => switchRow(d.name, phoneShownFor(d), (v, box) => setPhoneShown(d.id, v, box)))));

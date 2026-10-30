@@ -5,7 +5,14 @@ import { assert, eq, Scratch } from './harness.mjs';
 import { dev } from './tests-core.mjs';
 
 const serverItems = async server => (await (await fetch(`${server.base}/api/items`, { headers: { Authorization: `Bearer ${server.key}` } })).json()).items;
-const swReady = page => page.waitFor(`navigator.serviceWorker.controller !== null`, 15000, 'service worker in control');
+// The worker in control of the page. (The audit of 2026-10-29: about half the runs timed out with the worker active and
+// no controller: it activated while the page was reloading, and its clients.claim() came before that page existed, so
+// only the next load is its. A real user's next open is; the test loads once more.)
+const swReady = async page => {
+  await page.waitFor(`Promise.race([navigator.serviceWorker.ready.then(() => true), new Promise(r => setTimeout(() => r(false), 1000))])`, 15000, 'service worker active');
+  if (!(await page.evaluate(`navigator.serviceWorker.controller !== null`))) await page.reload();
+  await page.waitFor(`navigator.serviceWorker.controller !== null`, 15000, 'service worker in control');
+};
 
 export default function register(test) {
   test('offline: history opens from the cache without a connection, and search works', async ctx => {

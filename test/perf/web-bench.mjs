@@ -463,7 +463,7 @@ async function main() {
     for (const [label, p] of watched) await p.waitFor(`live.es?.readyState === 1 && net.state === 'online' && !syncing && !firstSync`, 15000, `${label}: back online`);
     // First let the browser finish acknowledging the history it was away for (a one-off catch-up, not idle). The
     // Windows app window sends none: the app does.
-    for (const [label, p] of watched) await p.waitFor(`acksInFlight === 0 && (HOST || itemsIn(current).every(i => !isForMe(i) || i.delivered[me.id] || acked.has(i.id)))`, 60000, `${label}: receipts sent`);
+    for (const [label, p] of watched) await p.waitFor(`!ackBusy && (HOST || itemsIn(current).every(i => !isForMe(i) || i.delivered[me.id] || acked.has(i.id)))`, 60000, `${label}: receipts sent`);
     await sleep(5000);
     for (const [, p] of watched) await p.evaluate(`${RESET_COUNTERS}; __perf.observers = {}; true`);
     const m0 = await Promise.all(watched.map(([, p]) => metrics(p)));

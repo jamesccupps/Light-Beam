@@ -567,6 +567,44 @@ export default function register(test) {
     eq(page.errors, [], 'no page errors');
   });
 
+  test('shared folders: Select all in a folder of 2,000 files is quick, and copying them goes 100 at a time (the audit, 2026-10-29)', async ctx => {
+    const page = await ctx.signedIn();
+    await recordToasts(page);
+    await page.evaluate(`store.remove('beam.sharedLook'); Object.assign(sharedLook, { view: 'list', sort: 'name', desc: false }); true`);
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Big PC', 'windows', ctx.nextIp(), '1.20.0');
+    await pc.me();
+    const stream = pc.stream();
+    ctx.defer(() => stream.close());
+    await page.waitFor(`deviceById('${pc.id}')?.online === true && deviceById('${pc.id}')?.can?.files2 === true`, 8000, 'online, a 1.20 PC');
+    const entries = Array.from({ length: 2000 }, (_, i) => ({ n: `IMG_${String(i).padStart(4, '0')}.jpg`, s: 1000 + i, m: Date.now() - i * 1000 }));
+    const copies = [];
+    let seen = 0;
+    const answer = async () => {
+      for (const e of stream.events.slice(seen)) {
+        seen++;
+        const d = e.data;
+        if (e.event === 'files-request') await pc.post('/api/devices/me/files', { id: d.id, ...(!d.share ? { ok: true, shares: [{ id: 'a1b2c3d4', name: 'Camera' }] } : { ok: true, share: 'a1b2c3d4', name: 'Camera', path: '', entries }) });
+        else if (e.event === 'files-copy') { copies.push(d.names.length); await pc.post('/api/devices/me/files', { id: d.id, ok: true, sending: d.names.length, skipped: d.names.slice(0, 1).map(n => ({ n, why: 'in use' })) }); }
+        else if (/^files-/.test(e.event)) await pc.post('/api/devices/me/files', { id: d.id, ok: true, icons: {}, types: {} });
+      }
+    };
+    const pump = setInterval(() => answer().catch(() => {}), 100);
+    ctx.defer(() => clearInterval(pump));
+    await page.evaluate(`openSharedFolders(deviceById('${pc.id}')); true`);
+    await page.waitFor(`$('#genTitle')?.textContent === 'Big PC: Camera' && $$('#genBody .shared-item').length === 2000`, 10000, 'the folder');
+    const ms = await page.evaluate(`(() => { const t = performance.now(); $('#genBody .shared-head input').click(); return performance.now() - t; })()`);
+    await page.waitFor(`/Copy 2,000 files to this device/.test($('#genFoot .shared-copy').textContent) && /2,000 selected/.test($('#genBody .shared-head').textContent)`, 3000, 'all ticked');
+    assert(ms < 1500, `Select all took ${Math.round(ms)} ms`);
+    await page.evaluate(`$('#genFoot .shared-copy').click()`);
+    await page.waitFor(`__toasts.some(t => /Big PC is sending 2,000 files/.test(t))`, 15000, 'copied');
+    eq(copies, Array(20).fill(100), '20 copies of 100');
+    const toast = await page.evaluate(`__toasts.find(t => /Big PC is sending/.test(t))`);
+    assert(/left out: IMG_0000\.jpg \(in use\), .*, and 15 more/.test(toast), toast);
+    await page.evaluate(`$('#genDlg').close(); true`);
+    eq(page.errors, [], 'no page errors');
+    console.log(`    (Select all of 2,000: ${Math.round(ms)} ms)`);
+  });
+
   test('the shared folders page of its own (1.28.1, #files=, the Android app’s screen): only the folders, full screen; Back steps back inside; closing leaves the page; an offline PC says so', async ctx => {
     const page = await ctx.signedIn({ width: 412, height: 860, mobile: true });
     const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Page PC', 'windows', ctx.nextIp(), '1.20.0');

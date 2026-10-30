@@ -476,6 +476,7 @@ namespace Beam
                 throw new InvalidDataException("the download isn't the file Beam has (its SHA-256 or size differs)");
             }
             FileUtil.TryDelete(final);
+            if (File.Exists(final)) final = Path.Combine(DownloadFolder, id + "-" + Guid.NewGuid().ToString("N").Substring(0, 6) + "-" + fileName); // (an earlier one still held)
             File.Move(part, final);
             return final;
         }
@@ -488,14 +489,28 @@ namespace Beam
             File.Copy(from, tmp);
             if (File.Exists(to))
             {
-                string old = to + ".beam-old-" + Process.GetCurrentProcess().Id;
-                FileUtil.TryDelete(old);
+                string old = AsideName(to);
                 File.Move(to, old);
                 try { File.Move(tmp, to); }
                 catch { try { File.Move(old, to); } catch { } throw; }
                 FileUtil.TryDelete(old); // (stays while it runs; CleanLeftovers takes it later)
             }
             else File.Move(tmp, to);
+        }
+
+        // (1.21.2) A free name to rename a file aside to. The one copy per run of Beam was taken when the copy renamed
+        // aside at the last update still runs (Slate open for days): its next update failed with "Cannot create a file
+        // when that file already exists" (Robin Laptop 2026-10-13, Shop Desktop 10-28; the audit of 2026-10-29).
+        static string AsideName(string path)
+        {
+            string stem = path + ".beam-old-" + Process.GetCurrentProcess().Id;
+            for (int i = 0; i < 100; i++)
+            {
+                string old = i == 0 ? stem : stem + "-" + i;
+                FileUtil.TryDelete(old);
+                if (!File.Exists(old) && !Directory.Exists(old)) return old;
+            }
+            return stem + "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
         }
 
         // Every entry inside `dir` (a name that would land outside it, or a full path, is refused); files in use are
@@ -515,9 +530,7 @@ namespace Beam
                     e.ExtractToFile(tmp, true);
                     if (File.Exists(target))
                     {
-                        string old = target + ".beam-old-" + Process.GetCurrentProcess().Id;
-                        FileUtil.TryDelete(old);
-                        try { File.Delete(target); } catch { File.Move(target, old); }
+                        try { File.Delete(target); } catch { File.Move(target, AsideName(target)); }
                     }
                     File.Move(tmp, target);
                 }
