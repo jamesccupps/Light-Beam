@@ -921,6 +921,19 @@ export default function register(test) {
     eq(await page.evaluate('rcLive()'), true, 'input still goes (only that window ignores it)');
     await pc.js(`fakePc.send('ctl', { t: 'state', locked: false, secure: true, elevated: false })`);
     await page.waitFor(`/security prompt/.test(document.querySelector('.rc-card').textContent) && !rcUi.overlay.hidden`, 5000, 'the security prompt');
+    eq(await page.evaluate(`/Administrator windows|Answer Windows/.test(document.querySelector('.rc-card').textContent + rcUi.notice.textContent)`), false, 'an older PC (no helper field): no setup hints');
+    // (Windows 1.22) What the PC could set up: the input helper (none), its prompts option (admin); nothing once it has both
+    await pc.js(`fakePc.send('ctl', { t: 'state', locked: false, secure: false, elevated: true, helper: 'none' })`);
+    await page.waitFor(`!rcUi.notice.hidden && /set up “Administrator windows”/.test(rcUi.notice.textContent)`, 5000, 'the elevated note says what to set up');
+    await pc.js(`fakePc.send('ctl', { t: 'state', locked: false, secure: true, elevated: false, helper: 'none' })`);
+    await page.waitFor(`/set up “Administrator windows”.*Answer Windows’ prompts/.test(document.querySelector('.rc-card').textContent)`, 5000, 'a prompt, no helper: set it up');
+    await pc.js(`fakePc.send('ctl', { t: 'state', locked: false, secure: true, elevated: false, helper: 'admin' })`);
+    await page.waitFor(`/turn on “Answer Windows’ prompts”/.test(document.querySelector('.rc-card').textContent)`, 5000, 'a prompt, the helper without prompts: turn them on');
+    for (const h of ['prompts', 'starting']) {
+      await pc.js(`fakePc.send('ctl', { t: 'state', locked: false, secure: true, elevated: false, helper: '${h}' })`);
+      await page.waitFor(`/security prompt/.test(document.querySelector('.rc-card').textContent) && !/Administrator windows|turn on/.test(document.querySelector('.rc-card').textContent)`, 5000, `a prompt, helper ${h}: no hint`);
+    }
+    eq(await page.evaluate(`[...document.querySelector('.rc-card').childNodes].filter(x => x.nodeType === 3).map(x => x.textContent)`), [], 'no stray text in the card');
     const n = (await rec(pc, 'in')).length;
     const p = await at(page, 0.5, 0.5);
     await mouse(page, 'mousePressed', p, { button: 'left', buttons: 1, clickCount: 1 });

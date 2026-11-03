@@ -74,7 +74,7 @@ const rc = {
   switching: null,     // { id, name } while the PC starts over on another screen
   monitors: [],        // [{ id, name, w, h, primary, scale }] (from the PC's hello)
   monitor: 0,
-  sub: { locked: false, secure: false, elevated: false }, // what the PC reports while live
+  sub: { locked: false, secure: false, elevated: false, helper: null }, // what the PC reports while live (helper: Windows 1.22)
   quality: 'text',
   qualityInfo: null,   // { fps, kbps }: what the PC applied
   // the picture's settings and the PC's screen (1.8)
@@ -412,7 +412,7 @@ function rcTeardown({ endSession = false, reason = 'stopped' } = {}) {
   rc.verified = false;
   rc.pair = null;
   rc.switching = null;
-  rc.sub = { locked: false, secure: false, elevated: false };
+  rc.sub = { locked: false, secure: false, elevated: false, helper: null };
   rc.stats = null;
   rc.encoder = rc.hostCodec = rc.qlr = '';
   rc.qualityInfo = null;
@@ -1356,7 +1356,7 @@ function rcOnCtl(data) {
       rcRenderDetails();
       break;
     case 'state':
-      rc.sub = { locked: m.locked === true, secure: m.secure === true, elevated: m.elevated === true };
+      rc.sub = { locked: m.locked === true, secure: m.secure === true, elevated: m.elevated === true, helper: typeof m.helper === 'string' ? m.helper : null };
       if (rc.sub.locked || rc.sub.secure) rcRelease();
       rcRender();
       rcHook();
@@ -3135,7 +3135,8 @@ function rcRender() {
   // The PC's foreground window runs as administrator: a note over the picture. Windows drops all injected input then
   // (UIPI), not just input to that window (1.7.6: the user found every click and key blocked).
   notice.hidden = !(rc.state === 'live' && rc.sub.elevated && !rc.sub.locked && !rc.sub.secure);
-  notice.textContent = 'An administrator window is in front on the PC, so Windows blocks all of Beam’s clicks and keys. Close it there, or with Remote Desktop.';
+  // (Windows 1.22) A PC with the input helper set up reaches it: then it isn't reported at all; one that could have it says so.
+  notice.textContent = `An administrator window is in front on the PC, so Windows blocks all of Beam’s clicks and keys. Close it there, or with Remote Desktop${rc.sub.helper === 'none' ? '. To reach such windows from here, set up “Administrator windows” in Beam’s settings on that PC.' : '.'}`;
   const button = (label, onclick, cls = '') => el('button', { class: `btn ${cls}`, type: 'button', onclick }, label);
   const rdp = () => rc.device?.can?.remoteDesktop && (!HOST || hostHas('remoteDesktop')) && button('Remote Desktop', () => remoteDesktop(rc.device), 'primary');
   const spin = () => el('div', { class: 'rc-spin', 'aria-hidden': 'true' });
@@ -3161,7 +3162,9 @@ function rcRender() {
       el('div', { class: 'rc-actions' }, rdp(), button('Disconnect', rcDisconnect, 'ghost'))];
   } else if (rc.state === 'live' && rc.sub.secure) {
     parts = [icon('shield', 'i big'), el('strong', {}, 'Waiting for a Windows security prompt'),
-      el('p', {}, `${n} shows a security prompt (User Account Control). Someone at the PC has to answer it; the picture comes back after.`)];
+      el('p', {}, `${n} shows a security prompt (User Account Control). Someone at the PC has to answer it; the picture comes back after.`),
+      (rc.sub.helper === 'none' || rc.sub.helper === 'admin') && el('p', { class: 'muted small' }, rc.sub.helper === 'none' ? 'To answer them from here, set up “Administrator windows” in Beam’s settings on that PC, with “Answer Windows’ prompts”.'
+        : 'To answer them from here, turn on “Answer Windows’ prompts” in Beam’s settings on that PC.')];
   } else if (rc.state === 'live' && rc.switching) {
     parts = [spin(), el('strong', {}, `Switching to ${rc.switching.name}…`), el('p', {}, 'The picture comes back in a moment.')];
   } else if (rc.state === 'live' && (!rc.frames || !rc.hostHello)) {

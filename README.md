@@ -721,6 +721,12 @@ A new build reaches every device within seconds of landing in `dist/`.
   - **Its updates are signed:** the first build makes a key, `%USERPROFILE%\.beam\windows-update-key.pem` (or wherever
     `BEAM_UPDATE_KEY` points), and puts its public half into the app, which then installs only updates signed with
     it. **Back that key up, like the Android keystore:** without it, every PC needs the next Beam installed by hand.
+  - **Remote control into administrator windows:** the first build also makes a code-signing certificate,
+    `%USERPROFILE%\.beam\input-helper-signing.pfx` (or wherever `BEAM_HELPER_CERT` points), and signs Beam's input
+    helper and Beam.exe with it. A PC where you choose Settings → Security → "Administrator windows" trusts that
+    certificate (Windows asks for administrator rights once), so remote control can click and type in windows that run
+    as administrator, and optionally answer Windows' UAC prompts. Keep using the same certificate (back it up too): a
+    new one means setting that up again on each PC.
 - **Android:** you need [Android Studio](https://developer.android.com/studio) (its JDK and SDK) and **your own signing
   key**, made once:
   ```bash

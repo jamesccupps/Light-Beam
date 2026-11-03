@@ -726,6 +726,49 @@ function sectionConnections() {
 
 // ---------------------------------------------------------------- Security
 
+// (Windows 1.22, the user: "make the connect work even if something like an admin window appears") Remote control into
+// windows that run as administrator, and Windows' own prompts (UAC): Beam's input helper, set up here once (Windows asks
+// for administrator rights each time it's set up, changed or removed). The prompts option shows them on the normal
+// screen instead of the secure one.
+let adminHelperBusy = false;
+function adminHelperRows(ah) {
+  const run = async (action, prompts) => {
+    if (adminHelperBusy) return;
+    adminHelperBusy = true;
+    renderSettings();
+    toast('Windows asks for administrator rights on this PC…', { ms: 6000 });
+    const r = await hostDo('adminHelper', { action, prompts });
+    adminHelperBusy = false;
+    if (r?.settings) {
+      hostState.settings = r.settings;
+      toast(action === 'remove' ? 'The input helper is removed' : 'The input helper is set up');
+    }
+    renderSettings();
+  };
+  const setUp = async () => {
+    const box = el('input', { type: 'checkbox' });
+    const extra = el('div', {},
+      el('p', { class: 'muted small' }, 'Beam’s input helper goes into Program Files, and its certificate (made with your copy of Beam) is added to this PC’s trusted ones. It runs only while one of your devices controls this PC.'),
+      el('label', { class: 'check' }, box, el('span', {}, 'Also answer Windows’ prompts (UAC) from other devices',
+        el('small', { class: 'muted block' }, 'Windows then shows its prompts on the normal screen instead of its secure one, so other programs on this PC could see them too.'))));
+    if (await confirmDialog({ title: 'Let remote control reach administrator windows?', text: 'Windows asks for administrator rights to set it up.', confirm: 'Set up', extra })) run('setup', box.checked);
+  };
+  const remove = async () => {
+    if (await confirmDialog({ title: 'Remove the input helper?', text: 'Remote control then can’t reach administrator windows here, and Windows’ prompts go back to how they were. Windows asks for administrator rights.', confirm: 'Remove', danger: true })) run('remove', false);
+  };
+  const ready = ah.ready && ah.current;
+  const hint = ready ? (ah.prompts ? 'Set up: remote control reaches windows that run as administrator, and Windows’ prompts (UAC), shown on the normal screen here.' : 'Set up: remote control reaches windows that run as administrator. Windows’ prompts (UAC) still need someone at this PC.')
+    : ah.installed ? (ah.trusted ? 'This PC has an older input helper: update it to match this Beam.' : 'Not complete: its certificate isn’t trusted here. Set it up again.')
+    : 'Windows keeps remote control out of windows that run as administrator, and out of its own prompts (UAC). Beam’s input helper, set up here once, lets it in.';
+  const button = ready ? smallBtn('Remove', remove, { disabled: adminHelperBusy })
+    : smallBtn(ah.installed ? (ah.trusted ? 'Update' : 'Set up again') : 'Set up…', ah.installed ? () => run('setup', Boolean(ah.prompts)) : setUp, { kind: 'primary', disabled: adminHelperBusy });
+  return [
+    inlineRow('Administrator windows', button, hint),
+    ready && switchRow('Answer Windows’ prompts (UAC) from other devices', Boolean(ah.prompts), on => run('setup', on),
+      { hint: 'Windows then shows its prompts on the normal screen instead of its secure one, so other programs on this PC could see them too. Windows asks for administrator rights to change it.', disabled: adminHelperBusy }),
+  ];
+}
+
 // (2026-10-21, the user: "it can be a per device setting in the app gui settings on that device, it should just be easy
 // to change settings") This device's own switches, only in its own window: whether your other devices may control it,
 // and (a PC) install apps on it. Turning remote control on a PC still goes through Beam's own question there (which
@@ -744,7 +787,8 @@ function thisDeviceCard() {
       if (!hostHas('allowApps')) { renderSettings(); return; }
       after(await hostDo('allowApps'));
     }, { hint: 'Apps you install from Beam’s Apps page go onto this PC without asking each time.' });
-    return rc || apps ? card('This PC', rc, apps) : null;
+    const admin = s.adminHelper?.available && hostHas('adminHelper') ? adminHelperRows(s.adminHelper) : null;
+    return rc || apps || admin ? card('This PC', rc, apps, admin) : null;
   }
   // Beam for Linux's window (its page is that computer's sign-in): the agent does it, as `beam control on` would.
   const d = deviceById(me.id);

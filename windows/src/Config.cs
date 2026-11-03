@@ -69,6 +69,8 @@ namespace Beam
         public int TestRcLeaseSec;             // tests (custom --config only): the remote control lease interval
         public string TestTailscaleExe, TestTailscaleArgs; // tests (custom --config only): a fake `tailscale` CLI
         public string TestHistoryEvents;       // tests (custom --config only, 1.13): Windows' records from this JSON file instead
+        public string TestAdminHelper;         // tests (custom --config only, 1.22): this input helper (records), as if set up
+        public string TestAdminHelperRoot;     // tests (custom --config only, 1.22): the setup's "Program Files", store and policy as files here
         public int WebViewReleaseSec = 180;    // the hidden messenger window's web view is released after this
         public string BadUpdateVersion;        // an update that failed its health check; skipped until a newer one
         public bool AutostartInitialized;      // "start with Windows" was set up once; the user owns it from then on
@@ -281,6 +283,8 @@ namespace Beam
                     c.TestTailscaleArgs = Json.Str(d, "testTailscaleArgs");
                     c.TestHistoryEvents = Json.Str(d, "testHistoryEvents");
                     c.TestWinget = Json.Str(d, "testWinget");
+                    c.TestAdminHelper = Json.Str(d, "testAdminHelper");
+                    c.TestAdminHelperRoot = Json.Str(d, "testAdminHelperRoot");
                 }
                 c.WebViewReleaseSec = (int)Math.Max(5, Json.Long(d, "webViewReleaseSec", 180));
                 c.BadUpdateVersion = Json.Str(d, "badUpdateVersion");

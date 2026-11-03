@@ -44,6 +44,33 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem (1.22) The input helper (helper\BeamInput.cs; remote control into administrator windows): BeamInput.exe with
+rem uiAccess, embedded in Beam.exe for each PC's setup, and BeamInput-test.exe, the same without uiAccess (Windows starts
+rem a uiAccess exe only from Program Files, signed and trusted: the tests use this one). Both, and Beam.exe after (the
+rem helper takes only Beam signed like itself), are signed with the builder's own certificate: helper-sign.ps1 makes it
+rem the first time, %USERPROFILE%\.beam\input-helper-signing.pfx unless BEAM_HELPER_CERT says otherwise.
+set "HELPER_CERT=%BEAM_HELPER_CERT%"
+if not defined HELPER_CERT set "HELPER_CERT=%USERPROFILE%\.beam\input-helper-signing.pfx"
+set "SIGN=powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%HERE%helper-sign.ps1" -Pfx "%HELPER_CERT%""
+if not exist "%HERE%obj" mkdir "%HERE%obj"
+"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /warn:4 /langversion:5 /codepage:65001 ^
+  /out:"%HERE%bin\BeamInput.exe" /win32manifest:"%HERE%helper\helper.manifest" /r:System.dll /r:System.Core.dll "%HERE%helper\BeamInput.cs"
+if errorlevel 1 (
+  echo Build failed ^(the input helper^).
+  exit /b 1
+)
+"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /warn:4 /langversion:5 /codepage:65001 ^
+  /out:"%HERE%bin\BeamInput-test.exe" /win32manifest:"%HERE%helper\helper-test.manifest" /r:System.dll /r:System.Core.dll "%HERE%helper\BeamInput.cs"
+if errorlevel 1 (
+  echo Build failed ^(the input helper's test copy^).
+  exit /b 1
+)
+%SIGN% -Files "%HERE%bin\BeamInput.exe;%HERE%bin\BeamInput-test.exe" -CerOut "%HERE%obj\helper-signer.cer"
+if errorlevel 1 (
+  echo Could not sign the input helper.
+  exit /b 1
+)
+
 "%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /warn:4 /langversion:5 /codepage:65001 ^
   /out:"%HERE%bin\Beam.exe" ^
   /win32icon:"%ICON%" ^
@@ -58,6 +85,8 @@ if errorlevel 1 (
   /resource:"%HERE%rc\rc-host.js",Beam.rc.rc-host.js ^
   /resource:"%HERE%rc\kvm-link.html",Beam.rc.kvm-link.html ^
   /resource:"%HERE%rc\kvm-link.js",Beam.rc.kvm-link.js ^
+  /resource:"%HERE%bin\BeamInput.exe",Beam.helper.BeamInput.exe ^
+  /resource:"%HERE%obj\helper-signer.cer",Beam.helper.signer.cer ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
   /r:System.Net.Http.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Security.dll ^
   /r:"%WINMD%\Windows.Data.winmd" /r:"%WINMD%\Windows.UI.winmd" /r:"%WINMD%\Windows.Foundation.winmd" ^
@@ -66,6 +95,11 @@ if errorlevel 1 (
   "%HERE%src\*.cs" "%HERE%obj\UpdateKey.cs"
 if errorlevel 1 (
   echo Build failed.
+  exit /b 1
+)
+%SIGN% -Files "%HERE%bin\Beam.exe"
+if errorlevel 1 (
+  echo Built Beam.exe but could not sign it ^(its code signature, for the input helper^).
   exit /b 1
 )
 

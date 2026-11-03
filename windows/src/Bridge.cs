@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -218,6 +218,19 @@ namespace Beam
                     if (!app.Cfg.AllowRemoteControl) app.ToggleRemoteControl("Settings on this PC");
                     Reply(id, Obj("settings", app.SettingsObject()));
                     break;
+                case "adminHelper": // (1.22) Settings' "Administrator windows": set up (prompts on or off) or remove, with
+                                    // Windows' own prompt for administrator rights at this PC. A test instance only in its test root.
+                {
+                    if (app.Cfg.CustomPath && AdminHelper.TestRoot == null) { Fail(id, "native-only", "A test instance has no test root for the setup"); break; }
+                    if (app.Rc != null && app.Rc.Active) { Fail(id, "busy", "Not while this PC is being controlled"); break; }
+                    object rid = id;
+                    AdminHelper.Run(app, Json.Str(m, "action"), Json.Bool(m, "prompts", false), err =>
+                    {
+                        if (err != null) Fail(rid, "failed", err);
+                        else Reply(rid, Obj("settings", app.SettingsObject()));
+                    });
+                    break;
+                }
                 case "allowApps": // (1.16) "Let Beam install apps on this PC": on through the native confirmation, at this PC
                     if (!app.Cfg.AppsAllowed) app.Apps.Toggle("Settings on this PC");
                     Reply(id, Obj("settings", app.SettingsObject()));

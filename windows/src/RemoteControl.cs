@@ -113,6 +113,7 @@ namespace Beam
         readonly RcWindow window;
         Hotkeys killKeys;
         volatile InputInjector injector;
+        HelperBackend adminInput;           // (1.22) the injector's way out: the input helper while a session is on
         bool lockFlag, onConsole = true, testLock;
         bool awake;
         bool closing;
@@ -554,6 +555,7 @@ namespace Beam
             injector.Screen = s.Screen;
             injector.AnyScreen = s.Kvm; // (the viewer's pointer goes over all of this PC's screens)
             injector.NewConnection();
+            adminInput.Begin(); // (1.22: administrator windows too, if this PC has the input helper)
             try { await host.Start(); }
             catch (Exception ex)
             {
@@ -617,7 +619,12 @@ namespace Beam
             IInputBackend backend;
             if (app.Cfg.CustomPath) backend = new RecordingBackend(Path.Combine(app.Cfg.Dir, "rc-input.jsonl")); // tests: never real input
             else backend = new SendInputBackend();
-            var inj = new InputInjector(backend, DesktopLayout.Current, () => clock.ElapsedMilliseconds);
+            // (1.22) Through the input helper while a session is on, if this PC has it set up (AdminHelper); tests: the
+            // test helper, recording too.
+            var cfg = app.Cfg;
+            adminInput = new HelperBackend(backend, () => cfg.CustomPath ? cfg.TestAdminHelper : AdminHelper.ReadyExe(),
+                cfg.CustomPath ? Path.Combine(cfg.Dir, "rc-input.jsonl") : null);
+            var inj = new InputInjector(adminInput, DesktopLayout.Current, () => clock.ElapsedMilliseconds);
             inj.Note = note => Log.Write("Remote control: " + note);
             inj.VirtualKeyOf = InputTarget.VirtualKeyOf; // Win+L by virtual key, in whatever layout this PC uses
             Log.Write("Remote control: input through " + backend.Name);
@@ -1284,9 +1291,13 @@ namespace Beam
                 ping["at"] = Fmt.NowMs();
                 SendCtl(s, ping);
             }
-            // What the viewer's input can reach: an elevated window or a secure desktop takes none.
-            bool secure = InputTarget.SecureDesktop(), elevated = !secure && InputTarget.ForegroundElevated();
-            string state = Locked + "|" + secure + "|" + elevated;
+            // What the viewer's input can reach: an elevated window or a secure desktop takes none. (1.22) The input helper
+            // with UIAccess reaches administrator windows (and UAC prompts, when this PC shows them on the normal desktop);
+            // `helper` lets the viewer say what this PC could set up.
+            bool reaches = adminInput != null && adminInput.Reaches;
+            bool secure = InputTarget.SecureDesktop(), elevated = !secure && !reaches && InputTarget.ForegroundElevated();
+            string helper = reaches ? (AdminHelper.PromptsOnScreen() ? "prompts" : "admin") : adminInput != null && adminInput.Wanted ? "starting" : "none";
+            string state = Locked + "|" + secure + "|" + elevated + "|" + helper;
             if (state != s.LastState)
             {
                 s.LastState = state;
@@ -1295,6 +1306,7 @@ namespace Beam
                 st["locked"] = Locked;
                 st["secure"] = secure;
                 st["elevated"] = elevated;
+                st["helper"] = helper;
                 SendCtl(s, st);
             }
             if (s.Clip && ClipPayload.IsolatedDir != null) CheckClipboard(s); // tests: the "clipboard" is a file
@@ -1378,6 +1390,7 @@ namespace Beam
             var host = s.Host;
             if (host != null) host.InputAllowed = false;
             if (injector != null) injector.Stop("the session ended"); // (no input after this, even one on its way: the lock)
+            if (adminInput != null && current == null) adminInput.End(); // (1.22: the helper runs only during a session)
             s.Host = null;
             if (host != null)
             {
@@ -1754,6 +1767,18 @@ namespace Beam
                 case "off": SetOff("test"); break;
                 case "lock": TestLock(arg == "on"); break;
                 case "kill": KillSwitch("test"); break;
+                case "helper": // (1.22) the input helper without a whole session: begin, in:<the viewer's `in`/`mv` JSON>, end
+                    if (current != null) { Log.Write("Remote control: (test) a session is on"); break; }
+                    if (injector == null) injector = NewInjector();
+                    if (arg == "begin") { injector.NewConnection(); adminInput.Begin(); }
+                    else if (arg == "end") { injector.Stop("(test) the end"); adminInput.End(); }
+                    else if (arg != null && arg.StartsWith("in:", StringComparison.Ordinal))
+                    {
+                        var msg = Json.ParseObject(arg.Substring(3));
+                        if (msg != null) { injector.Handle(msg); injector.Flush(); }
+                        Log.Write("Remote control: (test) input through " + adminInput.Name);
+                    }
+                    break;
                 case "trackended": // as if the capture page's track ended just after a display change; :stale = with none lately
                     if (current == null || current.Host == null) { Log.Write("Remote control: (test) no capture"); break; }
                     if (arg == "stale") Interlocked.Exchange(ref displayChanged, 0); else NoteDisplayChange();

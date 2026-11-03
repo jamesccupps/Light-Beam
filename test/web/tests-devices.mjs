@@ -674,6 +674,51 @@ export default function register(test) {
     eq(await older.evaluate(`/Notifications with Reply and Copy/.test($('#set-notifications').textContent)`), false, 'no switch for an older app');
   });
 
+  test('Settings → Security: “Administrator windows”: set up with the prompts option, the switch, Remove; not offered by an older app (Windows 1.22)', async ctx => {
+    // (the user, 2026-11-02: "make the connect work even if something like an admin window appears")
+    const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowRemoteControl', 'adminHelper'];
+    const none = { available: true, installed: false, current: false, trusted: false, prompts: false, ready: false };
+    const { page } = await hostPage(ctx, { features, settings: { allowRemoteControl: true, adminHelper: none } });
+    await page.waitFor(`paired && hostState.ready`);
+    await page.evaluate(`openSettings('security'); true`);
+    const row = `[...$('#set-security').querySelectorAll('.set-inline')].find(r => /Administrator windows/.test(r.textContent))`;
+    await page.waitFor(`Boolean(${row}) && /Set up…/.test(${row}.textContent) && /keeps remote control out/.test(${row}.textContent)`, 5000, 'not set up: the row with Set up…');
+    // Set up: a question with the prompts option (off unless ticked), then the app's own setup
+    await page.evaluate(`__host.reply('adminHelper', m => ({ ok: true, result: { settings: { ...__host.hello.settings, adminHelper: { available: true, installed: true, current: true, trusted: true, ready: true, prompts: m.prompts === true } } } })); true`);
+    await page.evaluate(`${row}.querySelector('button').click(); true`);
+    await page.waitFor(`/reach administrator windows/.test(document.querySelector('#genDlg[open]')?.textContent || '')`, 3000, 'the question');
+    await page.evaluate(`document.querySelector('#genDlg[open] input[type=checkbox]').click(); [...document.querySelectorAll('#genDlg[open] button')].find(b => b.textContent === 'Set up').click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'adminHelper' && m.action === 'setup' && m.prompts === true)`, 3000, 'asked the app: setup with prompts');
+    const sw = `[...$('#set-security').querySelectorAll('label.switch')].find(l => /Answer Windows’ prompts/.test(l.textContent))?.querySelector('input')`;
+    await page.waitFor(`/Set up: remote control reaches windows that run as administrator, and Windows’ prompts/.test(${row}.textContent) && ${sw}?.checked === true && /Remove/.test(${row}.textContent)`, 5000, 'set up: Remove, and the prompts switch on');
+    // The switch: off goes through the app's setup again (prompts false)
+    await page.evaluate(`${sw}.click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'adminHelper' && m.action === 'setup' && m.prompts === false)`, 3000, 'the switch: setup without prompts');
+    await page.waitFor(`${sw}?.checked === false && /still need someone at this PC/.test(${row}.textContent)`, 5000, 'prompts off');
+    // Remove, after its question
+    await page.evaluate(`__host.reply('adminHelper', m => ({ ok: true, result: { settings: { ...__host.hello.settings, adminHelper: ${JSON.stringify(none)} } } })); ${row}.querySelector('button').click(); true`);
+    await page.waitFor(`/Remove the input helper/.test(document.querySelector('#genDlg[open]')?.textContent || '')`, 3000, 'Remove asks');
+    await page.evaluate(`[...document.querySelectorAll('#genDlg[open] button')].find(b => b.textContent === 'Remove').click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'adminHelper' && m.action === 'remove')`, 3000, 'asked the app: remove');
+    await page.waitFor(`/Set up…/.test(${row}.textContent) && !${sw}`, 5000, 'back to Set up…');
+    // Cancelled at Windows' prompt: the error shows, nothing changes
+    await page.evaluate(`__host.reply('adminHelper', () => ({ ok: false, code: 'failed', error: 'cancelled at Windows’ prompt' })); ${row}.querySelector('button').click(); true`);
+    await page.evaluate(`[...document.querySelectorAll('#genDlg[open] button')].find(b => b.textContent === 'Set up').click(); true`);
+    await page.waitFor(`/cancelled at Windows’ prompt/.test(document.body.textContent) && /Set up…/.test(${row}.textContent)`, 5000, 'cancelled: said, unchanged');
+    // An older helper (installed, trusted, not current): Update, which keeps the prompts choice
+    await page.evaluate(`__host.emit({ type: 'settings', settings: { ...hostState.settings, adminHelper: { available: true, installed: true, current: false, trusted: true, ready: true, prompts: true } } }); true`);
+    await page.waitFor(`/older input helper/.test(${row}.textContent) && /Update/.test(${row}.querySelector('button').textContent)`, 5000, 'an older helper: Update');
+    await page.evaluate(`__host.log.length = 0; ${row}.querySelector('button').click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'adminHelper' && m.action === 'setup' && m.prompts === true)`, 3000, 'Update keeps prompts');
+    eq(page.errors, [], 'no page errors');
+    // An older Windows app (no adminHelper feature): no row
+    const older = (await hostPage(ctx, { features: features.filter(f => f !== 'adminHelper'), settings: { allowRemoteControl: true, adminHelper: none } })).page;
+    await older.waitFor(`paired && hostState.ready`);
+    await older.evaluate(`openSettings('security'); true`);
+    await older.waitFor(`/Allow remote control/.test($('#set-security').textContent)`, 5000, 'its This PC card');
+    eq(await older.evaluate(`/Administrator windows/.test($('#set-security').textContent)`), false, 'no row for an older app');
+  });
+
   test('Settings → Security: this device’s own switches (the Windows app’s remote control and app installs, Beam for Linux’s remote control) (2026-10-21)', async ctx => {
     // (the user: "it can be a per device setting in the app gui settings on that device, it should just be easy")
     const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowApps', 'allowRemoteControl'];

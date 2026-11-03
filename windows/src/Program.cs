@@ -205,6 +205,8 @@ namespace Beam
         static int Main(string[] args)
         {
             Embedded.Register();
+            // (1.22) Settings' "Administrator windows": the setup Windows asked about (elevated), and nothing else.
+            if (args.Length > 0 && args[0] == "--admin-helper") return AdminHelper.RunElevated(args);
             var opts = Options.Parse(args);
             opts.ResolvePaths();
             bool custom = opts.Config != null;
@@ -227,6 +229,7 @@ namespace Beam
             if (!created) return Forward(opts);
 
             var cfg = Config.Load(configPath, custom);
+            if (custom) AdminHelper.TestRoot = cfg.TestAdminHelperRoot; // (1.22: tests' stand-ins for Program Files, the store and HKLM)
             DeviceKey.Load(cfg.Dir); // Beam 1.6: this install's key (DPAPI, this Windows account)
             Health.Start(cfg, opts.Health);
             if (Health.BadStarts >= 3 && Updater.RollBackSelf(cfg, args)) { ReleaseLock(); return 1; }

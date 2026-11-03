@@ -8615,7 +8615,7 @@ function serve() {
       log.warn(`Beam also listens for plain HTTP on every network (0.0.0.0:${PORT}). Once every device uses ${remote}, set BEAM_HOST=127.0.0.1 in .env so nothing else can reach it directly (a device still on an http:// address would lose its connection).`);
     }
     appUpdates().then(u => {
-      const offered = Object.entries(u).map(([p, x]) => `${p === 'android' ? 'Android' : 'Windows'} ${x.version}`);
+      const offered = Object.entries(u).map(([p, x]) => `${({ android: 'Android', linux: 'Beam for Linux' })[p] || 'Windows'} ${x.version}`);
       if (offered.length) log.info(`Apps offered for updates: ${offered.join(', ')}`);
     }).catch(() => {});
     setTimeout(() => logStatus().catch(() => {}), 60_000).unref();

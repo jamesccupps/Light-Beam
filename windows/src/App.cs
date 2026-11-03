@@ -2493,6 +2493,8 @@ namespace Beam
             s["nativeToasts"] = Cfg.NativeToasts;           // (1.21) Windows' own notifications with buttons
             // Beam 1.6 (null: the server has no remote control). The page can turn it off, never on; the list is read-only.
             s["allowRemoteControl"] = ServerHas("remote-control") ? (object)Cfg.AllowRemoteControl : null;
+            // (1.22) The input helper for administrator windows: set up or removed only here (Bridge `adminHelper`).
+            s["adminHelper"] = ServerHas("remote-control") ? AdminHelper.StatusObject() : null;
             // Beam 1.21 (null: the server has no apps). As for remote control: the page can turn it off, never on.
             s["appsAllowed"] = ServerHas("apps") ? (object)Cfg.AppsAllowed : null;
             // (1.18, Beam 1.26; null: the server has none) The folders shared from here and who sees each: read-only (the
