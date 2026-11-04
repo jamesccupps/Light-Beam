@@ -62,5 +62,45 @@ check(r.acts.join() === ',on,off,,on' && r.s.kbps === 12000 && !r.s.off && r.act
 r = run([{ allowed: false }, { allowed: false }]);
 check(r.s.kbps === 0, 'never on while not allowed');
 
+// (1.22.1) Across the internet: sized from the speed tests (`link`, Mbit/s), only on a direct path
+const far = (o = {}) => ({ rtt: 24, direct: true, link: 20, ...o });
+r = run([far(), far()]);
+check(r.s.kbps === 10000 && r.acts.join() === ',on' && r.s.kind === 'measured' && r.s.why === 'the speed tests: 20 Mbit/s between them',
+  `24 ms away, 20 Mbit/s measured: on at half of it, 10 Mbps, on the second tick (${r.acts.join()} · ${r.s.why})`);
+r = run([far({ link: 48 }), far({ link: 48 })]);
+check(r.s.kbps === 15000, `48 Mbit/s measured: at most the profile's limit (Auto's 15 Mbps): ${r.s.kbps}`);
+r = run([far({ link: 100, limit: 25000 }), far({ link: 100, limit: 25000 })]);
+check(r.s.kbps === 20000, `100 Mbit/s and Smooth motion's 25: at most 20 Mbps (${r.s.kbps})`);
+r = run([far({ link: 8 }), far({ link: 8 }), far({ link: 8 })]);
+check(r.s.kbps === 0, '8 Mbit/s measured (4 Mbps, no more than WebRTC\'s own estimate): no floor');
+r = run([far({ direct: false }), far({ direct: false }), far({ direct: false })]);
+check(r.s.kbps === 0, 'through a relay (not direct): never on');
+r = run([far({ link: 0 }), far({ link: 0 })]);
+check(r.s.kbps === 0, 'no speed tests from where they are: never on');
+r = run([far({ rtt: null }), far({ rtt: null })]);
+check(r.s.kbps === 0, 'the round trip not known yet: not on (no lowest to watch)');
+r = run([far({ allowed: false }), far({ allowed: false })]);
+check(r.s.kbps === 0, 'mobile data, Data saver, keyboard and mouse: never on');
+r = run([far({ lan: true }), far({ lan: true })]);
+check(r.s.kbps === 12000 && r.s.kind === 'near', `Tailscale direct on the LAN: the LAN's 12 Mbps, not the speed tests' (${r.s.kbps}, ${r.s.why})`);
+r = run([far(), far(), far({ rtt: 50 }), far({ rtt: 30 }), far({ rtt: 55 })]);
+check(r.s.kbps === 10000 && !r.s.off, 'on, then a round trip of 50 and 55 ms with 30 between (lowest 24, the limit 56): it stays on');
+r = run([far(), far(), far({ rtt: 60 }), far({ rtt: 70 })]);
+check(r.s.off === true && r.acts[3] === 'off' && r.s.why === 'a round trip of 70 ms (lowest 24)', `on, then two ticks over 24 × 1.5 + 20 ms: off for the session (${r.s.why})`);
+r = run([far(), far(), far({ rtt: 40 }), far({ rtt: 45 })]);
+check(r.s.kbps === 10000 && !r.s.off, 'on across the internet: the LAN\'s fixed 30 ms doesn\'t apply (40 and 45 ms, lowest 24)');
+r = run([far({ rtt: 30 }), far({ rtt: 22 }), far({ rtt: 54 }), far({ rtt: 55 })]);
+check(r.s.off === true && r.s.low === 22, `the lowest is the session's own (22 ms, then 54 and 55 > 53): off (${r.s.why})`);
+r = run([far(), far(), far({ lost: 3 }), far({ lost: 4 })]);
+check(r.s.off === true && r.s.why === 'loss 4%', `on, then two ticks of loss: off for the session (${r.s.why})`);
+r = run([far(), far(), far({ direct: false }), far(), far()]);
+check(r.acts.join() === ',on,off,,on' && r.s.kbps === 10000 && !r.s.off, `the path stops being direct: off for now, back after two direct ticks (${r.acts.join()})`);
+r = run([far(), far(), far({ direct: false })]);
+check(r.s.why === 'the path isn\'t direct now', `...and says so (${r.s.why})`);
+r = run([far(), far(), far({ rtt: 8 }), far({ rtt: 8 })]);
+check(r.s.kbps === 10000 && r.s.kind === 'measured' && r.acts.slice(2).every(a => !a), 'on from the speed tests, then a round trip of 8 ms: stays as it was (no switching between kinds)');
+r = run([far({ link: 48 }), far({ link: 48 }), far({ link: 48, limit: 8000 })]);
+check(r.s.kbps === 8000 && r.s.why === 'the profile changed', `the profile's limit comes down (Sharp text, 8 Mbps): ${r.s.kbps} (${r.s.why})`);
+
 console.log(failed ? `${failed} failed` : 'all passed');
 process.exit(failed ? 1 : 0);

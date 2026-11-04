@@ -490,6 +490,11 @@ and (Windows 1.12.4) `clip` (id 3, ordered: clipboard pictures; a side before it
   MediaStreamTrackProcessor) and says, for each probe after the first, `{ t: "probe-cap", n, ms }`: from the probe
   reaching the page to a captured frame showing its colour. Less the PC's own `ms`, that's Edge's capture; the viewer
   shows the capture as "capture 53 (Edge 30 + queue 23)", the queue being the rest (the wait before the encoder).
+  (Windows 1.22.1, caps `"probe-big"`) Big changes too: `{ t: "probe", n: 0, on: true, big: true }` puts the square in
+  the corner of a block of text the size of a window opening (62.5% × 74% of the screen), and the viewer then sends
+  `{ t: "probe", n, big: true }` for n = 11…16: each swaps the block's page of text in the same paint as the square's
+  colour (the answers as above). The viewer's details add "A big change (a window of new text, about N KB): N ms",
+  the KB being the picture's bytes it received from the probe until a moment after its frame showed.
 - **The start, step by step (Windows 1.15, web viewer too):** the PC tells, once a session (when its first frame has
   gone out), `{ t: "started", at: { banner, page, offer, answer, connected, checked, capture, picture }, warm }`: ms
   since the request reached it (the banner up; its capture page ready; its offer out; the viewer's answer in;

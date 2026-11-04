@@ -494,7 +494,9 @@ function validateDevices(obj) {
     delete out[id].keyHash;
     if (typeof d.keyHash === 'string' && /^[a-f0-9]{64}$/.test(d.keyHash)) out[id].keyHash = d.keyHash;
     delete out[id].speed; // (1.18) its latest speed test
-    if (isPlainObject(d.speed) && [d.speed.down, d.speed.up, d.speed.at].every(Number.isFinite)) out[id].speed = { down: d.speed.down, up: d.speed.up, at: d.speed.at };
+    if (isPlainObject(d.speed) && [d.speed.down, d.speed.up, d.speed.at].every(Number.isFinite)) {
+      out[id].speed = { down: d.speed.down, up: d.speed.up, at: d.speed.at, ...(/^[a-f0-9]{16}$/.test(d.speed.where) && { where: d.speed.where }) };
+    }
     delete out[id].rcMachine;
     if (isPlainObject(d.rcMachine) && typeof d.rcMachine.machine === 'string' && typeof d.rcMachine.profile === 'string' && d.rcMachine.profile) {
       out[id].rcMachine = { machine: d.rcMachine.machine, profile: d.rcMachine.profile, node: typeof d.rcMachine.node === 'string' ? d.rcMachine.node : null, at: Number(d.rcMachine.at) || 0 };
@@ -2587,7 +2589,7 @@ function connectionList(askingId = null) {
       id: d.id, name: d.name, platform: d.platform, online: list.some(x => isOnline(x.id)),
       machine: { name: t.name, ip: t.ip, ...(self && { self: true }), ...tsStateOf(t.ip) },
       path: self ? null : tsPaths.get(key) || null,
-      speed, ...(canTestSpeed(d) && { speedTest: true }), ...(askingId && list.some(x => x.id === askingId) && { here: true }),
+      speed: speedOut(speed), ...(canTestSpeed(d) && { speedTest: true }), ...(askingId && list.some(x => x.id === askingId) && { here: true }),
     };
   }).sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name));
 }
@@ -2641,6 +2643,7 @@ let speedNoise = null; // 1 MB of random bytes, sent over and over: nothing on t
 const speedAsks = new Map(); // request id -> { target, done(speed) }
 
 const canTestSpeed = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, SPEED_APP_MIN);
+const speedOut = s => s && { down: s.down, up: s.up, at: s.at }; // (1.29.4: never its `where`)
 
 // GET /api/speedtest/down?bytes=N: N bytes of noise (8 MB unless asked; 64 MB at most), never cached.
 function speedDown(req, res, _m, url) {
@@ -2684,12 +2687,18 @@ async function speedResult(req, res, _m, url) {
   const down = mbps(body.down);
   const up = mbps(body.up);
   if (down === null || up === null) throw httpError(400, 'Expected {"down": <Mbit/s>, "up": <Mbit/s>}');
-  d.speed = { down, up, at: now() };
+  // (1.29.4) Where it was taken (lib/tailscale.js whereOf: its direct path's address, hashed), so remote control sizes
+  // a floor from it only while the device is there (rcLinkMbps). Tailscale's look right after the test, while the
+  // path is in use.
+  await refreshTailnet(true);
+  const ip = tailscaleOf(d)?.ip;
+  const where = (ip && tsFacts.get(ip)?.where) || null;
+  d.speed = { down, up, at: now(), ...(where && { where }) };
   persistDevices();
   log.info(`${d.name} tested its speed to this server: ${down} Mbit/s down, ${up} Mbit/s up`);
   const ask = typeof body.id === 'string' ? speedAsks.get(body.id) : null;
-  if (ask && ask.target === d.id) ask.done(d.speed);
-  send(res, 200, { speed: d.speed });
+  if (ask && ask.target === d.id) ask.done(speedOut(d.speed));
+  send(res, 200, { speed: speedOut(d.speed) });
 }
 
 // POST /api/connections/{id}/speed: asks that device's Beam app (Windows 1.13 or later, online) to test now. { speed },
@@ -4436,6 +4445,29 @@ function rcNotAllowed(pc) {
   return `Remote control is off on ${pc.name} ("Allow remote control" is turned on at that PC)`;
 }
 
+// (1.29.4) The link between a PC and its viewer for the picture's bandwidth floor across the internet (Windows 1.22.1
+// rc-host.js floorNext), from their Connections speed tests, each to this Beam: the smaller of the PC's upload and the
+// viewer's download, in Mbit/s. A stand-in for the way between them (the same when one of them is this server's
+// machine, whose own test is loopback: no limit of its own). Only a test from the last 30 days, taken where the device
+// is now (the same direct path's address, lib/tailscale.js whereOf); otherwise, or both on this machine: null.
+const RC_LINK_MAX_AGE = 30 * 86400e3;
+function rcLinkMbps(viewer, pc) {
+  const side = (d, dir) => {
+    const t = d && tailscaleOf(d);
+    const f = t?.ip && tsFacts.get(t.ip);
+    if (!f) return null;
+    if (f.self) return Infinity;
+    const key = tsIndex.get(t.ip)?.key || t.ip;
+    const s = Object.values(devices).filter(x => { const o = tailscaleOf(x); return o?.ip && (tsIndex.get(o.ip)?.key || o.ip) === key; })
+      .map(x => x.speed).filter(x => isPlainObject(x) && Number.isFinite(x.at)).sort((a, b) => b.at - a.at)[0]; // (the machine's latest, as Connections shows)
+    if (!s || !f.where || s.where !== f.where || now() - s.at > RC_LINK_MAX_AGE || !(s[dir] > 0)) return null;
+    return s[dir];
+  };
+  const down = side(viewer, 'down'), up = side(pc, 'up');
+  const mbps = down != null && up != null ? Math.min(down, up) : null;
+  return Number.isFinite(mbps) && mbps > 0 ? mbps : null;
+}
+
 // POST /api/rc/sessions { device, kind? }: the caller (the viewer) asks to see and control that PC, or (kind kvm, 1.16)
 // to work it with the viewer's own keyboard and mouse.
 async function startRemoteControl(req, res, _m, url) {
@@ -4479,7 +4511,8 @@ async function startRemoteControl(req, res, _m, url) {
   check();
   // Where both are on the tailnet, as this server saw them: the viewer on this very request, the PC where its app is.
   const machine = machineOf(req);
-  const [you, host] = await Promise.all([tailnetIdentity(machine), tailnetIdentity(pc.rcMachine.machine)]);
+  // (1.29.4: and a fresh look at where both are, for rcLinkMbps, in the same time)
+  const [you, host] = await Promise.all([tailnetIdentity(machine), tailnetIdentity(pc.rcMachine.machine), Promise.race([refreshTailnet(), sleep(1000)])]);
   // Things may have changed while whois answered: the viewer removed, merged away or signed out; the PC too.
   if (devices[me] !== viewer || (auth.via === 'token' ? !tokenStore.tokens[auth.hash] : KEY !== key)) {
     throw httpError(401, 'This device was signed out or removed meanwhile');
@@ -4505,6 +4538,8 @@ async function startRemoteControl(req, res, _m, url) {
     viewer: { ip: tailscale.isTailscaleIp(ip) ? ip : you.ip4 || you.ip6, ip4: you.ip4, ip6: you.ip6, node: you.node, user: you.user, platform: viewer.platform || null },
     ...(kind !== 'view' && { kind }),
   };
+  const link = kind === 'view' ? rcLinkMbps(viewer, pc) : null;
+  if (link) session.request.link = link;
   rcSessions.set(id, session);
   armRcLease(session);
   rcStats.started++;

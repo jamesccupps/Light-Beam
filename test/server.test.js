@@ -2603,8 +2603,14 @@ test('1.17 lib/tailscale: reading `tailscale ping` and `tailscale status`', asyn
   assert.deepEqual(t.pathOf({ CurAddr: '', Relay: 'NYC', Active: true }), { via: 'relay', relay: 'nyc' });
   assert.deepEqual(t.pathOf({ PeerRelay: '10.0.0.5:40000:vni:3' }), { via: 'peer-relay' });
   const facts = t.machineFacts({ Self: { TailscaleIPs: ['100.64.0.1'], KeyExpiry: '2027-03-28T23:40:29Z' }, Peer: { a: { TailscaleIPs: ['100.64.0.2', 'fd7a:115c:a1e0::2'], Online: false, LastSeen: '0001-01-01T00:00:00Z', KeyExpiry: '2020-01-01T00:00:00Z' } } }, Date.parse('2026-10-06T00:00:00Z'));
-  assert.deepEqual(facts.get('100.64.0.1'), { online: true, lastSeen: null, keyExpiry: Date.parse('2027-03-28T23:40:29Z'), expired: false, path: null, self: true });
-  assert.deepEqual(facts.get('fd7a:115c:a1e0::2'), { online: false, lastSeen: null, keyExpiry: Date.parse('2020-01-01T00:00:00Z'), expired: true, path: null, self: false });
+  assert.deepEqual(facts.get('100.64.0.1'), { online: true, lastSeen: null, keyExpiry: Date.parse('2027-03-28T23:40:29Z'), expired: false, path: null, where: null, self: true });
+  assert.deepEqual(facts.get('fd7a:115c:a1e0::2'), { online: false, lastSeen: null, keyExpiry: Date.parse('2020-01-01T00:00:00Z'), expired: true, path: null, where: null, self: false });
+  // (1.29.4) where a peer is: its direct path's address, hashed (the same address, the same hash); none without one
+  const at = addr => t.machineFacts({ Peer: { a: { TailscaleIPs: ['100.64.0.2'], CurAddr: addr } } }).get('100.64.0.2').where;
+  assert.match(at('203.0.113.9:41641'), /^[a-f0-9]{16}$/);
+  assert.equal(at('203.0.113.9:41641'), at('203.0.113.9:50000'), 'another port, the same place');
+  assert.notEqual(at('203.0.113.9:41641'), at('192.0.2.50:41641'));
+  assert.equal(at(''), null, 'no direct path');
 });
 
 // ---------------------------------------------------------------- 1.18 each PC's history
@@ -5644,6 +5650,53 @@ test('1.6 Remote control: a whole session between two devices; its events reach 
     const metrics = (await s.req('GET', '/api/metrics', { headers: laptop })).json.rc;
     assert.deepEqual([metrics.sessions, metrics.started, metrics.ended.stopped], [0, 1, 1]);
     for (const e of [pcEv, lapEv, phoneEv, watch]) e.close();
+  } finally { await t.stop(); }
+});
+
+test('1.29.4 Remote control: the link between the PC and its viewer, from their speed tests where they are now, goes with the request', async () => {
+  const t = await rcSetup('rc-link');
+  try {
+    const { s, pc, laptop, status, start, rc } = t;
+    const peer = node => t.ts.peers.find(p => p.name === node).info;
+    Object.assign(peer('desk'), { Active: true, CurAddr: '198.51.100.7:41641' });
+    Object.assign(peer('robin-laptop'), { Active: true, CurAddr: '203.0.113.9:41641' });
+    await status(pc, { remoteControl: true, locked: false });
+    const pcEv = await openEvents(s.port, pc, '/api/events?mode=background');
+    await pcEv.wait('hello');
+    // (Tailscale's look now: past the test server's 300 ms reuse of a status answer)
+    const look = async () => { await sleep(400); return s.req('GET', '/api/connections', { headers: laptop }); };
+    const ask = async () => {
+      const r = await start(laptop);
+      assert.equal(r.status, 201, r.body);
+      const asked = (await pcEv.wait('rc-request', d => d.id === r.json.id, 1000)).data;
+      assert.equal((await rc('POST', `sessions/${r.json.id}/end`, laptop, { reason: 'stopped' })).status, 204);
+      return asked.link;
+    };
+    await look();
+    assert.equal(await ask(), undefined, 'no speed tests yet: nothing');
+    assert.equal((await post(s, '/api/speedtest/result', { down: 60, up: 10 }, laptop)).status, 200);
+    assert.equal((await post(s, '/api/speedtest/result', { down: 500, up: 30 }, pc)).status, 200);
+    assert.equal(await ask(), 30, 'the smaller of the PC\'s upload (30) and the laptop\'s download (60)');
+    const r = await post(s, '/api/speedtest/result', { down: 25, up: 10 }, laptop);
+    assert.deepEqual(Object.keys(r.json.speed).sort(), ['at', 'down', 'up'], 'where it was taken stays on the server');
+    assert.deepEqual(Object.keys((await look()).json.machines.find(m => m.id === 'rclaptop001').speed).sort(), ['at', 'down', 'up'], '...in Connections too');
+    assert.equal(await ask(), 25, 'its latest test');
+    await sleep(300);
+    const saved = JSON.parse(fs.readFileSync(path.join(s.data, 'devices.json'), 'utf8'));
+    const kept = (saved.devices || saved).rclaptop001.speed;
+    assert.match(kept.where, /^[a-f0-9]{16}$/, `kept with the device, hashed: ${JSON.stringify(kept)}`);
+    assert.ok(!JSON.stringify(saved).includes('203.0.113.9'), 'never the address itself');
+    peer('robin-laptop').CurAddr = '192.0.2.50:41641';
+    await look();
+    assert.equal(await ask(), undefined, 'the laptop somewhere else now: its test doesn\'t count');
+    peer('robin-laptop').CurAddr = '203.0.113.9:41641';
+    Object.assign(peer('desk'), { CurAddr: '', Relay: 'nyc' });
+    await look();
+    assert.equal(await ask(), undefined, 'the PC through a relay: nothing');
+    peer('desk').CurAddr = '198.51.100.7:41641';
+    await look();
+    assert.equal(await ask(), 25, 'both back where they tested');
+    pcEv.close();
   } finally { await t.stop(); }
 });
 

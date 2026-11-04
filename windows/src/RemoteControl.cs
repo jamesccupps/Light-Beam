@@ -73,6 +73,7 @@ namespace Beam
         public readonly List<KeyValuePair<string, long>> Marks = new List<KeyValuePair<string, long>>();
         public bool StartTold, HostWarm;
         public long Avail;               // (1.17) the network's estimate lately (kbps, the page's stats): this viewer's next start
+        public double LinkMbps;          // (1.22.1) the link to it as the speed tests measured it (the server's word; 0: unknown)
 
         public void Mark(string step)
         {
@@ -396,6 +397,8 @@ namespace Beam
             s.ServerNode = node;
             s.Api = app.Api;
             s.Kvm = kvm;
+            double link = Json.Double(d, "link", 0); // (1.22.1, Beam 1.29.4: the picture's floor across the internet)
+            if (!kvm && link > 0 && link < 1e6) s.LinkMbps = link;
             s.State = RcState.Checking;
             current = s;
             app.MarkChanged();
@@ -656,16 +659,18 @@ namespace Beam
             if (s == null || s.Host != host || s.Kvm) return;
             if (Json.Bool(msg, "off", false)) { CloseProbe(); return; }
             var p = probe;
+            bool big = Json.Bool(msg, "big", false); // (1.22.1) and a page of text that changes too
             if (p == null)
             {
                 var sc = DesktopLayout.Current().Screen(s.Screen);
                 if (sc == null) return;
-                Log.Write("Remote control: the viewer measures the delay (a square in the top left corner of screen " + (s.Screen + 1) + ")");
-                probe = RcProbe.Start(new System.Drawing.Point(sc.X, sc.Y), ms => ProbeAnswer(host, n, false, ms));
+                Log.Write("Remote control: the viewer measures the delay (a square in the top left corner of screen " + (s.Screen + 1) +
+                    (big ? ", on a block of text for big changes" : "") + ")");
+                probe = RcProbe.Start(new System.Drawing.Rectangle(sc.X, sc.Y, sc.W, sc.H), big, ms => ProbeAnswer(host, n, false, ms));
                 return;
             }
             if (Json.Bool(msg, "on", false)) { ProbeAnswer(host, n, p.IsGreen, 0); return; }
-            p.Flip(arrived, (green, ms) => ProbeAnswer(host, n, green, ms));
+            p.Flip(arrived, big, (green, ms) => ProbeAnswer(host, n, green, ms));
         }
 
         static void ProbeAnswer(RcHost host, long n, bool green, double ms)
@@ -822,6 +827,8 @@ namespace Beam
             // (1.17) The network this viewer had last time here (kbps): where its first picture starts
             long net;
             if (!s.Kvm && app.Cfg.RcNet.TryGetValue(s.ViewerId ?? "", out net) && net > 0) c["net"] = net;
+            // (1.22.1) The link to this viewer as both ends' speed tests measured it (Mbit/s): the floor across the internet
+            if (s.LinkMbps > 0) c["link"] = s.LinkMbps;
             return c;
         }
 
@@ -942,7 +949,7 @@ namespace Beam
             // Beam 1.8: what this PC does besides 1.6's (fit-scale: 1.11.4). A kvm session (1.12): input on any of its
             // screens (`mv`, `btn` and `wheel` say which in `m`), "kvm-back", and nothing about a picture.
             // (1.12.4: pictures; 1.12.6: `cursor`, the viewer may draw this PC's pointer itself, and `probe`, the delay)
-            hello["caps"] = s.Kvm ? new object[] { "kvm", "clipimg" } : new object[] { "fit", "fit-scale", "settings", "video", "clipimg", "cursor", "probe", "clipok", "clipkept" };
+            hello["caps"] = s.Kvm ? new object[] { "kvm", "clipimg" } : new object[] { "fit", "fit-scale", "settings", "video", "clipimg", "cursor", "probe", "probe-big", "clipok", "clipkept" };
             if (!s.Kvm) hello["fitted"] = display.Fitted;
             // Where this PC's cursor is, when it's on the shared screen: a phone's trackpad pointer starts there (1.6.1).
             var cursor = CursorOn(layout, s.Screen);

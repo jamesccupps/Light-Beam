@@ -1473,6 +1473,7 @@ export default function register(test) {
     const probes = (await rec(pc, 'in')).filter(x => x.t === 'probe');
     eq([probes[0].n, probes[0].on, probes.at(-1).off], [0, true, true], 'the probes went on `in`: on first, off last');
     assert(probes.length >= 10, `${probes.length} probes`);
+    eq(probes.some(x => 'big' in x), false, 'a PC without `probe-big`: no big changes asked for (1.29.4)');
     eq(await pc.js('fakePc.probeColor'), null, 'the square is gone');
     const text = await page.evaluate(`rcUi.details.hidden ? '' : rcUi.details.textContent`);
     assert(/Measured\d+ ms from a click to the picture \(median of \d+\): to the PC/.test(text), `the details say it: ${text.slice(text.indexOf('Measured'), text.indexOf('Measured') + 160)}`);
@@ -1523,6 +1524,30 @@ export default function register(test) {
     const ctl2 = await rec(pc2, 'ctl');
     eq([ctl2.find(x => x.t === 'hello').caps, ctl2.some(x => x.t === 'pointer')], [['clip', 'text', 'clipimg'], false], 'a phone: no `cursor` in its hello, no `pointer`');
   }, { requires: FEATURE, timeout: 240000 }); // (room for measuring again on a busy PC)
+
+  test('remote control 1.29.4: Measure the delay times a big change too, with a PC that can (a Windows app 1.22.1, `probe-big`)', async ctx => {
+    const pc = await fakePc(ctx, { caps: ['settings', 'video', 'probe', 'probe-big'] });
+    const page = await viewer(ctx, pc.id);
+    await live(page, pc);
+    // (a busy PC's picture can lose probes: measured again, as above)
+    let m = null;
+    for (let i = 0; i < 3 && !(m?.n >= 5 && m.big?.n >= 3); i++) {
+      await page.evaluate(`rcMeasure(); true`);
+      await page.waitFor(`!rc.measuring`, 60000, 'measured');
+      m = await page.evaluate(`rc.measured`);
+    }
+    assert(m?.n >= 5 && m.big?.n >= 3 && m.big.total > 0 && m.big.total < 3000 && m.big.pc === 1.5, `small and big changes timed: ${JSON.stringify(m)}`);
+    assert(Number.isFinite(m.big.kb) && m.big.kb >= 0, `about how big the big change's frame was: ${m.big.kb} KB`);
+    const probes = (await rec(pc, 'in')).filter(x => x.t === 'probe');
+    eq([probes[0].on, probes[0].big], [true, true], 'the first one (on) asks for the block of text');
+    eq([...new Set(probes.filter(x => x.n >= 1 && x.n <= 10).map(x => x.big === true))], [false], 'probes 1 to 10: small changes');
+    eq([...new Set(probes.filter(x => x.n >= 11).map(x => x.big))], [true], 'probes 11 to 16: big changes');
+    assert(Math.max(...probes.map(x => x.n ?? 0)) === 16, 'six big ones');
+    const text = await page.evaluate(`rcUi.details.textContent`);
+    assert(/\d+ ms from a click to the picture \(median of \d+\): .*\. A big change \(a window of new text, about \d+ KB\): \d+ ms \(median of \d+\)/.test(text),
+      `the details say both: ${text.slice(text.indexOf('Measured'), text.indexOf('Measured') + 300)}`);
+    eq(page.errors, [], 'no page errors');
+  }, { requires: FEATURE, timeout: 240000 });
 
   test('remote control in the chat app: Control (a new tab), a locked PC says to use Remote Desktop, Settings → Devices shows who controls a PC (End) and turns it off', async ctx => {
     const pc = await fakePc(ctx);

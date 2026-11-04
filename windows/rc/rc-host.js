@@ -35,7 +35,7 @@
   let codecNow = null, encoderNow = null, ended = false, candidatesIn = 0, candidatesAdded = 0, recapturing = null, kvm = false;
   let startSet = false; // (1.17) the first answer has had its start bitrate
   // (1.17.7) The bandwidth floor (see floorNext): its kbps while on (0: off), and the link as this PC's Tailscale sees it
-  let floor = { kbps: 0, off: false, fast: 0, bad: 0 }, pathLan = false;
+  let floor = { kbps: 0, off: false, fast: 0, bad: 0 }, pathLan = false, pathDirect = false; // (direct: 1.22.1)
   // (1.12.4) Pictures through the clipboard: the `clip` channel of their own (on `ctl` a big one would hold up the pings),
   // Beam's parts sent as it drains (at most 1 MB waiting in it), the viewer's passed to Beam.
   let clipOut = [];
@@ -355,22 +355,38 @@
   // more for it. On once the link is fast two ticks running (Tailscale direct on the LAN, or a round trip of 10 ms or
   // less, with no loss); never on mobile data, in Data saver or for keyboard and mouse; at most the profile's limit.
   // Off for the rest of the session after two ticks of loss over 2% or a round trip over 30 ms (a link that can't carry
-  // it). The answer of every renegotiation carries it while it's on. Pure (rc-floor-check.mjs runs it): `s` the floor
-  // now, `t` this tick { rtt, lost, lan, allowed, limit }; returns the next one, with `act` 'on' / 'off' / '' and `why`.
+  // it). The answer of every renegotiation carries it while it's on.
+  // (1.22.1) Across the internet too, sized from something measured, never the session's own estimate: `link`, the
+  // smaller of this PC's upload and the viewer's download in their Connections speed tests to this Beam, taken where
+  // they are now (Beam 1.29.4 passes it with the request). Half of it, at most 20 Mbps and the profile's limit, and only
+  // when that's 5 Mbps or more (WebRTC's own estimate is ~4); only on a direct path, never through a relay. Off for the
+  // session on loss as above, or when the round trip climbs well over the session's lowest (lowest × 1.5 + 20 ms: the
+  // floor queuing up on a link that can't carry it); off for now when the path stops being direct.
+  // Pure (rc-floor-check.mjs runs it): `s` the floor now, `t` this tick { rtt, lost, lan, direct, link, allowed, limit };
+  // returns the next one, with `act` 'on' / 'off' / '' and `why`.
   function floorNext(s, t) {
-    const n = { kbps: s.kbps, off: s.off, fast: s.fast, bad: s.bad, act: '', why: '' };
+    const n = { kbps: s.kbps, off: s.off, fast: s.fast, bad: s.bad, low: s.low, kind: s.kind, act: '', why: '' };
     if (n.off) return n;
-    const want = t.allowed ? Math.min(12000, t.limit) : 0;
+    if (t.rtt != null && !(n.low <= t.rtt)) n.low = t.rtt;
+    const measured = t.direct && t.link > 0 ? Math.min(20000, Math.round(t.link * 500)) : 0;
+    const wantOf = kind => (!t.allowed ? 0 : kind === 'measured' ? (measured >= 5000 ? Math.min(measured, t.limit) : 0) : Math.min(12000, t.limit));
+    const lossy = t.lost != null && t.lost > 2;
     if (n.kbps) {
-      const lossy = t.lost != null && t.lost > 2, slow = t.rtt != null && t.rtt > 30;
+      const slow = t.rtt != null && (n.kind === 'measured' ? t.rtt > n.low * 1.5 + 20 : t.rtt > 30);
       n.bad = lossy || slow ? n.bad + 1 : 0;
-      if (n.bad >= 2) Object.assign(n, { kbps: 0, off: true, act: 'off', why: lossy ? 'loss ' + t.lost + '%' : 'a round trip of ' + t.rtt + ' ms' });
-      else if (want < 2000) Object.assign(n, { kbps: 0, fast: 0, act: 'off', why: 'not for this picture' });
+      const want = wantOf(n.kind);
+      if (n.bad >= 2) Object.assign(n, { kbps: 0, off: true, act: 'off', why: lossy ? 'loss ' + t.lost + '%' : 'a round trip of ' + t.rtt + ' ms' + (n.kind === 'measured' ? ' (lowest ' + n.low + ')' : '') });
+      else if (want < 2000) Object.assign(n, { kbps: 0, fast: 0, act: 'off', why: n.kind === 'measured' && t.allowed && !t.direct ? 'the path isn\'t direct now' : 'not for this picture' });
       else if (want !== n.kbps) Object.assign(n, { kbps: want, act: 'on', why: 'the profile changed' });
       return n;
     }
-    n.fast = want >= 2000 && (t.lan || (t.rtt != null && t.rtt <= 10)) && !(t.lost != null && t.lost > 2) ? n.fast + 1 : 0;
-    if (n.fast >= 2) Object.assign(n, { kbps: want, act: 'on', why: t.lan ? 'Tailscale direct on the LAN' : 'a round trip of ' + t.rtt + ' ms' });
+    const near = t.lan || (t.rtt != null && t.rtt <= 10);
+    const kind = near ? 'near' : 'measured';
+    const want = wantOf(kind);
+    n.fast = want >= 2000 && (near || t.rtt != null) && !lossy ? n.fast + 1 : 0;
+    if (n.fast >= 2) {
+      Object.assign(n, { kbps: want, kind, act: 'on', why: t.lan ? 'Tailscale direct on the LAN' : near ? 'a round trip of ' + t.rtt + ' ms' : 'the speed tests: ' + t.link + ' Mbit/s between them' });
+    }
     return n;
   }
 
@@ -677,7 +693,7 @@
       // (1.17.7) The floor: on, changed or off by a renegotiation (the next answer carries it, or not); only once Beam's
       // peer check has passed (no video flows before it, and a renegotiation then would bring the viewer's candidates in
       // the middle of the check)
-      const f = !verified || ended ? Object.assign({}, floor, { act: '' }) : floorNext(floor, { rtt: st.rtt, lost: st.lost, lan: pathLan, allowed: !kvm && settings.net !== 'cellular' && profile().name !== 'saver', limit: profile().kbps });
+      const f = !verified || ended ? Object.assign({}, floor, { act: '' }) : floorNext(floor, { rtt: st.rtt, lost: st.lost, lan: pathLan, direct: pathDirect, link: Number(cfg && cfg.link) || 0, allowed: !kvm && settings.net !== 'cellular' && profile().name !== 'saver', limit: profile().kbps });
       const was = floor.kbps;
       floor = f;
       if (f.act === 'on') await renegotiate('a bandwidth floor of ' + f.kbps + ' kbps (' + f.why + ')' + (was ? ', was ' + was : ''));
@@ -790,7 +806,7 @@
       case 'verified': onVerified(m).catch(err => log('verified: ' + (err && err.name))); break;
       case 'send':
         if (m.ch === 'ctl' && m.m && typeof m.m === 'object') {
-          if (m.m.t === 'path') pathLan = m.m.via === 'direct' && m.m.lan === true; // (1.17.7: the floor's "fast")
+          if (m.m.t === 'path') { pathLan = m.m.via === 'direct' && m.m.lan === true; pathDirect = m.m.via === 'direct'; } // (1.17.7: the floor's "fast"; 1.22.1)
           sendCtl(m.m);
         }
         break;

@@ -292,9 +292,15 @@ address, so the browser becomes part of that device instead of a separate entry.
 - **Measure the delay** (Picture, Windows app 1.12.6): ten probes go to the PC the way your clicks do; it turns a small
   square in the top left corner of its screen from magenta to green and back, and the viewer times when each change
   reaches your screen. The details then show the whole (from a click to the picture) and each step: to the PC, on its
-  screen, the capture, encoding, sending, back, decoding and the wait to be shown.
-- **Limits:** a locked or signed-out PC, administrator windows and Ctrl+Alt+Del need Remote Desktop (the existing
-  button). Only Beam apps, or a browser where you signed in with a pairing link, approval or password, can start a
+  screen, the capture, encoding, sending, back, decoding and the wait to be shown. Since the Windows app 1.22.1 six big
+  changes follow (a block of text the size of a window swaps its page), shown as "A big change (… about N KB): N ms".
+- **A bandwidth floor** (Windows app 1.17.7, across the internet since 1.22.1): WebRTC's own estimate stays low while
+  the screen is mostly still, so a window opening would trickle out and hold up what comes after it. On a fast local
+  link the PC asks for at least 12 Mbps; across the internet, half of what the Connections speed tests measured
+  between the two (the PC's upload, your download, each taken where the device is now), at most 20 Mbps. Never on
+  mobile data or in Data saver, only on a direct path, and off for the session if packets get lost or the delay climbs.
+- **Limits:** a locked or signed-out PC and Ctrl+Alt+Del need Remote Desktop (the existing button); administrator
+  windows and Windows' prompts need that PC's "Administrator windows" set up (Windows app 1.22). Only Beam apps, or a browser where you signed in with a pairing link, approval or password, can start a
   session.
 - **Dragging a file out of Beam's chat** on a PC that is being controlled copies it instead (paste it with
   Ctrl+V): a drag there would freeze the session.

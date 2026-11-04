@@ -1271,7 +1271,7 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
 
 | Event | To | Data |
 |---|---|---|
-| `rc-request` | the PC | `{ "id", "from": "<viewer id>", "by": "<viewer name>", "viewer": { "ip", "ip4", "ip6", "node", "user", "platform" }, "at" }` |
+| `rc-request` | the PC | `{ "id", "from": "<viewer id>", "by": "<viewer name>", "viewer": { "ip", "ip4", "ip6", "node", "user", "platform" }, "at", "link"? }` |
 | `rc-signal` | the other party | `{ "id", "from", "kind", "sdp"?, "candidates"? }` |
 | `rc-end` | both parties | `{ "id", "reason", "from", "by" }`: the device that ended it (`from` its id, `by` its name), both `null` when the server did |
 | `rc-disable` | the PC | `{ "from", "by" }`: turn "Allow remote control" off and end every session |
@@ -1287,6 +1287,10 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
     owners) and `viewer.ip` (the Tailscale address the request came from) are confirmed by Tailscale and the request:
     lead with those;
   - `ip4` and `ip6` are the machine's addresses (either may be `null`); `platform` is its Beam platform.
+  - **(1.29.4)** `link`, when known: the link between them in Mbit/s, the smaller of the PC's upload and the viewer's
+    download in their latest speed tests to this Beam (this server's own machine: no limit of its own), each from the
+    last 30 days and taken where the device is now (the same direct Tailscale path's address, kept only as a hash).
+    The Windows app 1.22.1 sizes the picture's bandwidth floor across the internet from it.
 - **`rc-sessions`** isn't urgent (background streams hold only the latest) and never reaches session-only sign-ins.
 - **A PC's app that connects again** hears `rc-request` for sessions still waiting for it, and a pending `rc-disable`.
 - **A pending disable:** `POST /api/rc/disable` for a PC whose switch is on keeps it out of reach (`can.remoteControl`

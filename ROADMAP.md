@@ -63,9 +63,9 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 
 ## Next
 - **Remote control, further:** what's left of the delay is the network and the PC's capture inside Edge (a capture of
-  Beam's own might take 10–15 ms off it, for a lot of work): big screen changes (a window opening) measured as well as
-  small ones, a bandwidth floor across the internet sized from a speed test (so a big change doesn't hold up what comes
-  after it: on fast local links since the Windows app 1.17.7), forward error correction where both ends are Beam's own,
+  Beam's own might take 10–15 ms off it, for a lot of work): H.264 on battery measured with the big changes probe
+  (Measure the delay times a window opening too since the Windows app 1.22.1, and the bandwidth floor works across the
+  internet from the speed tests), forward error correction where both ends are Beam's own,
   a Lowest delay mode, maybe sending the frames itself (WebCodecs over a data channel) or capturing straight into the
   hardware encoder as Parsec does, decoding on the phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard

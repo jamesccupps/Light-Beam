@@ -1060,7 +1060,11 @@ function rcWatchFrames(v) {
 // frame (requestVideoFrameCallback) for the change: from sending a probe to its frame being shown here, and each
 // step's share (half the round trip each way; the PC's own time; its encoding and sending, from its stats; the
 // capture, what's left of the way here; decoding; the wait to be shown).
-const RC_PROBES = 10;
+// (1.29.4) Then big changes, from a PC that can (a Windows app 1.22.1, `probe-big`): its square sits on a block of text
+// the size of a window, and each of these probes swaps the block's page of text in the same paint as the square's
+// colour (a window opening: ~120 KB in AV1 at 1080p); the square still times it, and the bytes that came in meanwhile
+// say about how big its frame was.
+const RC_PROBES = 10, RC_BIG_PROBES = 6;
 
 async function rcMeasure() {
   if (rc.measuring) return;
@@ -1068,22 +1072,36 @@ async function rcMeasure() {
   if (!rc.caps.includes('probe') || !rcLive()) { toast('Measuring the delay needs Beam 1.12.6 or later on the PC, and control of it.'); return; }
   if (typeof v.requestVideoFrameCallback !== 'function') { toast('This browser can’t time the picture’s frames, so it can’t measure the delay.'); return; }
   const gen = rc.gen;
-  rc.measuring = { got: [], caps: {} };
+  const big = rc.caps.includes('probe-big');
+  rc.measuring = { got: [], big: [], caps: {}, of: RC_PROBES + (big ? RC_BIG_PROBES : 0) };
   rc.measured = null;
   if (!rc.pic.details) rcSetPic('details', true);
   rcRenderDetails();
   try {
-    if (!(await rcProbe(0, true))) throw new Error('The PC’s square didn’t show up in the picture, so the delay couldn’t be measured.');
+    if (!(await rcProbe(0, true, big))) throw new Error('The PC’s square didn’t show up in the picture, so the delay couldn’t be measured.');
     for (let i = 1; i <= RC_PROBES && rc.gen === gen && rc.measuring; i++) {
       await new Promise(r => setTimeout(r, 120 + Math.random() * 180)); // (each probe at another point between frames)
       const r = await rcProbe(i, false);
       if (r && rc.measuring) rc.measuring.got.push(r);
       rcRenderDetails();
     }
+    for (let i = RC_PROBES + 1; big && i <= RC_PROBES + RC_BIG_PROBES && rc.gen === gen && rc.measuring; i++) {
+      await new Promise(r => setTimeout(r, 300 + Math.random() * 200)); // (and time for the last one's frames to go)
+      const before = await rcBytesIn();
+      const r = await rcProbe(i, false, true);
+      if (r) {
+        await new Promise(res => setTimeout(res, 100)); // (the stats are a moment behind)
+        const after = await rcBytesIn();
+        if (before != null && after != null && after >= before) r.kb = (after - before) / 1024;
+      }
+      if (r && rc.measuring) rc.measuring.big.push(r);
+      rcRenderDetails();
+    }
     if (rc.gen === gen && rc.measuring) {
       await new Promise(r => setTimeout(r, 200)); // (the PC's word on its own capture of the last one, if it's late)
       if (rc.gen === gen && rc.measuring) {
         rc.measured = rcMeasureSum(rc.measuring.got, rc.measuring.caps);
+        if (rc.measured && rc.measuring.big.length) rc.measured.big = rcBigSum(rc.measuring.big);
         if (!rc.measured) toast('No probe came back in time, so the delay couldn’t be measured.');
       }
     }
@@ -1097,8 +1115,9 @@ async function rcMeasure() {
   }
 }
 
-// One probe: sent, then both the PC's answer and the frame showing the change (3 s at most).
-function rcProbe(n, on) {
+// One probe: sent, then both the PC's answer and the frame showing the change (3 s at most). (1.29.4) `big`: with the
+// PC's block of text (`on`), or a big change (a probe).
+function rcProbe(n, on, big = false) {
   return new Promise(resolve => {
     const p = { n, t0: performance.now(), answer: null, frame: null, done: false };
     const finish = r => { if (p.done) return; p.done = true; clearTimeout(timer); if (rc.probe === p) rc.probe = null; resolve(r); };
@@ -1110,7 +1129,7 @@ function rcProbe(n, on) {
         shown: Number.isFinite(f.received) ? f.shown - f.received - (f.decode || 0) : null, drawn: f.drawn === true });
     };
     rc.probe = p;
-    if (!rcSend('in', on ? { t: 'probe', n, on: true } : { t: 'probe', n })) finish(null);
+    if (!rcSend('in', { t: 'probe', n, ...(on && { on: true }), ...(big && { big: true }) })) finish(null);
   });
 }
 
@@ -1142,6 +1161,22 @@ function rcProbeColor(v, r) {
   if (R > 150 && B > 150 && G < 110) return 'magenta';
   if (G > 150 && R < 110 && B < 110) return 'green';
   return null;
+}
+
+// (1.29.4) The bytes of picture this page has received so far, or null.
+async function rcBytesIn() {
+  try {
+    const s = await rc.pc?.getStats();
+    let n = null;
+    s?.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'video' && Number.isFinite(r.bytesReceived)) n = r.bytesReceived; });
+    return n;
+  } catch { return null; }
+}
+
+// (1.29.4) The big changes' medians: from the probe to its frame here, and about how big that frame was (KB).
+function rcBigSum(got) {
+  const med = list => { const a = list.filter(Number.isFinite).sort((x, y) => x - y); return a.length ? a[a.length >> 1] : null; };
+  return { n: got.length, total: med(got.map(g => g.total)), kb: med(got.map(g => g.kb)), pc: med(got.map(g => g.pc)) };
 }
 
 // The probes' medians, each step's own. (1.15) `caps`: the PC's own capture showing each probe's colour, from the probe
@@ -1185,7 +1220,7 @@ function rcStartText() {
 
 // The result for the details: "48 ms from a click to the picture: to the PC 2 · …".
 function rcMeasuredText() {
-  if (rc.measuring) return `measuring… ${rc.measuring.got.length} of ${RC_PROBES}`;
+  if (rc.measuring) return `measuring… ${rc.measuring.got.length + rc.measuring.big.length} of ${rc.measuring.of}`;
   const m = rc.measured;
   if (!m) return '';
   const ms = v => `${v < 10 ? Math.round(v * 10) / 10 : Math.round(v)}`;
@@ -1196,7 +1231,10 @@ function rcMeasuredText() {
     m.back != null && `back ${ms(m.back)}`, m.decode != null && `decode ${ms(m.decode)}`, m.shown != null && `${m.drawn ? 'drawn' : 'shown'} ${ms(m.shown)}`,
     m.rest != null && `the rest ${ms(m.rest)}`,
   ].filter(Boolean);
-  return `${Math.round(m.total)} ms from a click to the picture (median of ${m.n}): ${parts.join(' · ')}`;
+  // (1.29.4) and a big change's
+  const b = m.big && m.big.total != null
+    ? `. A big change (a window of new text${m.big.kb != null ? `, about ${Math.round(m.big.kb)} KB` : ''}): ${Math.round(m.big.total)} ms (median of ${m.big.n})` : '';
+  return `${Math.round(m.total)} ms from a click to the picture (median of ${m.n}): ${parts.join(' · ')}${b}`;
 }
 
 // ---------------------------------------------------------------- the PC's pointer, drawn here (a Windows app 1.12.6)
@@ -1318,7 +1356,7 @@ function rcOnCtl(data) {
       }
       break;
     case 'probe-cap': // (a Windows app 1.15) the PC's own capture showed that probe's colour this long after it got there
-      if (rc.measuring && Number.isInteger(m.n) && m.n > 0 && m.n <= RC_PROBES && Number.isFinite(m.ms)) rc.measuring.caps[m.n] = Math.max(0, Math.min(m.ms, 5000));
+      if (rc.measuring && Number.isInteger(m.n) && m.n > 0 && m.n <= RC_PROBES + RC_BIG_PROBES && Number.isFinite(m.ms)) rc.measuring.caps[m.n] = Math.max(0, Math.min(m.ms, 5000));
       break;
     case 'started': // (a Windows app 1.15) how the PC's side of the start went: ms since the request got there, per step
       if (rc.start && !rc.start.pc && m.at && typeof m.at === 'object') {

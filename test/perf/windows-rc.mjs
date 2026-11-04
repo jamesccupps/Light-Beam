@@ -396,6 +396,20 @@ const VIEWER_SCRIPT = `window.V = (() => {
       R /= 4; G /= 4; B /= 4;
       return R > 150 && B > 150 && G < 110 ? 'magenta' : G > 150 && R < 110 && B < 110 ? 'green' : 'other ' + Math.round(R) + ',' + Math.round(G) + ',' + Math.round(B);
     },
+    // (1.22.1) Which page of the delay probe's block of text the picture shows: 'a' (bluish), 'b' (yellowish), or what
+    // it is (the middle of the block: a quarter of the screen from its top left corner)
+    block(monW, monH) {
+      if (!video || !video.videoWidth) return 'no picture';
+      const k = video.videoWidth / monW, cv = document.createElement('canvas');
+      cv.width = cv.height = 16;
+      const g = cv.getContext('2d');
+      g.drawImage(video, monW * 0.15 * k, monH * 0.15 * k, monW * 0.3 * k, monH * 0.4 * k, 0, 0, 16, 16);
+      const d = g.getImageData(0, 0, 16, 16).data;
+      let R = 0, B = 0;
+      for (let i = 0; i < d.length; i += 4) { R += d[i]; B += d[i + 2]; }
+      R /= 256; B /= 256;
+      return B > R + 3 && R > 150 ? 'a' : R > B + 3 && B > 150 ? 'b' : 'other ' + Math.round(R) + ',' + Math.round(B);
+    },
     state() { return pc ? pc.connectionState : 'none'; },
     // (1.17.4) the selected pair's remote end, as this viewer reads it
     async selected() {
@@ -628,8 +642,8 @@ try {
   check(!!(await waitLog(/Remote control page: the first picture starts at 4000 kbps$/, from, 5000)), 'the first picture starts at 4 Mbps: nothing known about this viewer yet (1.17)');
   const hello = await waitCtl('hello', t0, 10000);
   check(!!hello && hello.role === 'host' && Array.isArray(hello.monitors) && hello.monitors.length > 0, `the viewer got the host's hello (${hello ? hello.monitors.length + ' screen(s)' : 'none'})`);
-  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video","clipimg","cursor","probe","clipok","clipkept"]' && hello.fitted === false,
-    `...saying what 1.8 adds (and 1.11.4's fit-scale, 1.12.4's clipimg, 1.12.6's cursor and probe, 1.19.1's clipok and clipkept) (${hello ? JSON.stringify(hello.caps) : '-'})`);
+  check(!!hello && JSON.stringify(hello.caps) === '["fit","fit-scale","settings","video","clipimg","cursor","probe","probe-big","clipok","clipkept"]' && hello.fitted === false,
+    `...saying what 1.8 adds (and 1.11.4's fit-scale, 1.12.4's clipimg, 1.12.6's cursor and probe, 1.19.1's clipok and clipkept, 1.22.1's probe-big) (${hello ? JSON.stringify(hello.caps) : '-'})`);
   {
     // 1.6.1: where the cursor is, when it's on the shared screen (this machine's real cursor: wherever it happens to be).
     const hm = hello && (hello.monitors.find(m => m.id === hello.monitor) || hello.monitors[0]);
@@ -755,6 +769,34 @@ try {
   check(!!seen, `...in the picture ${seen ? seen - tp : '-'} ms after the probe was sent (polled, so roughly)`);
   await send('in', { t: 'probe', off: true });
   check(!!(await waitLog(/the delay measurement's square is gone/, from, 3000)), '...and gone when the viewer is done');
+  // (1.22.1) Big changes: with `big` the square sits on a block of text the size of a window opening, and a big probe
+  // swaps the block's page of text in the same paint as the square's colour; a small one turns only the square.
+  let fromBig = logLines().length;
+  tp = Date.now();
+  await send('in', { t: 'probe', n: 0, on: true, big: true });
+  const b0 = await waitCtl('probe', tp, 5000, m => m.n === 0);
+  check(!!b0 && b0.color === 'magenta' && b0.size === 32 && b0.x === 0 && b0.y === 0 && b0.ms < 1000,
+    `big changes: the square again, its block made and shown within a second (the viewer waits 3 s) (${b0 ? JSON.stringify(b0) : 'no answer'})`);
+  check(!!(await waitLog(/a square in the top left corner of screen \d+, on a block of text for big changes/, fromBig, 3000)), '...on a block of text (beam.log)');
+  const blockNow = () => evalIn(`V.block(${mon.w}, ${mon.h})`);
+  const onA = await waitFor(async () => ((await evalIn(`V.color(32, ${mon.w})`)) === 'magenta' && (await blockNow()) === 'a' ? 'a' : null), 5000, 40);
+  check(onA === 'a', `...in the picture: magenta on the block's first page (${onA || await blockNow()})`);
+  tp = Date.now();
+  await send('in', { t: 'probe', n: 1, big: true });
+  const b1 = await waitCtl('probe', tp, 5000, m => m.n === 1);
+  check(!!b1 && b1.color === 'green' && b1.ms > 0 && b1.ms < 1000, `a big probe turns it green, with the block's other page (${b1 ? b1.ms + ' ms on this PC' : 'no answer'})`);
+  const capB = await waitCtl('probe-cap', tp, 3000, m => m.n === 1);
+  check(!!capB, `...its own capture saw the square on the block (${capB ? capB.ms + ' ms' : 'never'})`);
+  const both = await waitFor(async () => ((await evalIn(`V.color(32, ${mon.w})`)) === 'green' && (await blockNow()) === 'b' ? Date.now() : null), 5000, 20);
+  check(!!both, `...both in the picture ${both ? both - tp : '-'} ms after the probe was sent (polled, so roughly)`);
+  tp = Date.now();
+  await send('in', { t: 'probe', n: 2 });
+  const b2 = await waitCtl('probe', tp, 5000, m => m.n === 2);
+  const smallOnly = await waitFor(async () => ((await evalIn(`V.color(32, ${mon.w})`)) === 'magenta' ? await blockNow() : null), 5000, 20);
+  check(!!b2 && b2.color === 'magenta' && smallOnly === 'b', `a small probe on the block: only the square turns (${smallOnly})`);
+  fromBig = logLines().length;
+  await send('in', { t: 'probe', off: true });
+  check(!!(await waitLog(/the delay measurement's square is gone/, fromBig, 3000)), '...and the block goes with it');
   check(inputLines().length === inputBefore, 'probes are never input (nothing recorded)');
   const st2 = await waitCtl('stats', Date.now(), 5000);
   check(!!st2 && 'encMs' in st2 && 'sendMs' in st2, `the stats say a frame's encoding and sending (${st2 ? st2.encMs + ' / ' + st2.sendMs + ' ms' : 'none'})`);
