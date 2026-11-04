@@ -1546,6 +1546,19 @@ export default function register(test) {
     const text = await page.evaluate(`rcUi.details.textContent`);
     assert(/\d+ ms from a click to the picture \(median of \d+\): .*\. A big change \(a window of new text, about \d+ KB\): \d+ ms \(median of \d+\)/.test(text),
       `the details say both: ${text.slice(text.indexOf('Measured'), text.indexOf('Measured') + 300)}`);
+    // (1.29.5) A probe this page drew itself counts when the video's own callback reports that frame, or a later one (it
+    // skips a frame when the next decodes within the same refresh: a big change and its touch-up), never an earlier one.
+    const skip = await page.evaluate(`(() => {
+      const out = [], saved = rc.probe;
+      const probe = (n, rtp) => { const p = { n, t0: performance.now() - 50, answer: { color: 'green', ms: 1 }, frame: null, fast: { shown: performance.now(), rtp } }; p.check = () => out.push([n, p.frame.drawn, p.frame.received]); return p; };
+      rc.probe = probe(1, 1000); rcProbeFrame(rcUi.video, { rtpTimestamp: 1000, receiveTime: 7, processingDuration: 0.002 });
+      rc.probe = probe(2, 1000); rcProbeFrame(rcUi.video, { rtpTimestamp: 4000, receiveTime: 9 });
+      rc.probe = probe(3, 1000); rcProbeFrame(rcUi.video, { rtpTimestamp: 500, receiveTime: 9 });
+      rc.probe = probe(4, 0xfffffff0); rcProbeFrame(rcUi.video, { rtpTimestamp: 0x10, receiveTime: 9 });
+      rc.probe = saved;
+      return out;
+    })()`);
+    eq(skip, [[1, true, 7], [2, true, null], [4, true, null]], 'the same frame (with its receive time), a later one (without), never an earlier one; RTP time wraps');
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 240000 });
 

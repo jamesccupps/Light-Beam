@@ -1042,16 +1042,31 @@ function rcWatchFrames(v) {
     const shownAt = (rcFast.on && rcFast.drawn.get(m.rtpTimestamp)) || m.expectedDisplayTime;
     const d = m.captureTime ? shownAt - m.captureTime : null;
     if (d != null && d >= 0 && d < 10000 && rc.delays.length < 600) rc.delays.push(d);
-    const p = rc.probe;
-    if (p && !p.frame && p.fast && (p.fast.rtp == null || p.fast.rtp === m.rtpTimestamp)) {
-      // (1.17) The probe's frame, drawn by this page (rcFastDraw): its receive time and decoding are this callback's.
-      p.frame = { shown: p.fast.shown, received: p.fast.rtp != null ? m.receiveTime : null, decode: Number.isFinite(m.processingDuration) ? m.processingDuration * 1000 : null, drawn: true };
-      p.check();
-    } else if (p && !p.frame && !rcFast.on) rcProbeLook(v, m);
+    rcProbeFrame(v, m);
     v.requestVideoFrameCallback(tick);
   };
   v.requestVideoFrameCallback(tick);
 }
+
+// A delay probe's frame, from the video's own callback (requestVideoFrameCallback's metadata `m`).
+// (1.17) Drawn by this page (rcFastDraw saw the colour first): its receive time and decoding are this callback's for the
+// same frame. (1.29.5) A later frame instead: the video skips one when the next decodes within the same display refresh
+// (a big change and the touch-up right after it), and the probe waited out its 3 s (the user's Measure the delay from
+// work, 2026-11-04): it counts as drawn then, without its receive and decode split.
+function rcProbeFrame(v, m) {
+  const p = rc.probe;
+  if (!p || p.frame) return;
+  if (!p.fast) { if (!rcFast.on) rcProbeLook(v, m); return; }
+  if (p.fast.rtp == null || p.fast.rtp === m.rtpTimestamp) {
+    p.frame = { shown: p.fast.shown, received: p.fast.rtp != null ? m.receiveTime : null, decode: Number.isFinite(m.processingDuration) ? m.processingDuration * 1000 : null, drawn: true };
+  } else if (rcRtpAfter(m.rtpTimestamp, p.fast.rtp)) {
+    p.frame = { shown: p.fast.shown, received: null, decode: null, drawn: true };
+  } else return;
+  p.check();
+}
+
+// RTP timestamp `a` comes after `b` (32 bits, wrapping).
+const rcRtpAfter = (a, b) => Number.isFinite(a) && Number.isFinite(b) && a !== b && ((a - b) >>> 0) < 0x80000000;
 
 // ---------------------------------------------------------------- the delay, measured end to end (a Windows app 1.12.6)
 
@@ -2571,8 +2586,14 @@ function rcFastDraw(fresh) {
   if (!rcFast.first) { rcFast.first = true; rcStartMark('picture', now); }
   const p = rc.probe;
   if (p && !p.frame && !p.fast && rcProbeColor(f, rc.probeRect || { x: 0, y: 0, size: 32 }) === (p.n % 2 ? 'green' : 'magenta')) {
-    // (its receive time and decoding come with the video's own callback for the same frame: rcWatchFrames)
+    // (its receive time and decoding come with the video's own callback for the same frame: rcProbeFrame; 1.29.5: if
+    // the video never calls back, it counts as drawn after 300 ms)
     p.fast = { shown: now, rtp };
+    setTimeout(() => {
+      if (rc.probe !== p || p.frame) return;
+      p.frame = { shown: p.fast.shown, received: null, decode: null, drawn: true };
+      p.check();
+    }, 300);
   }
 }
 
