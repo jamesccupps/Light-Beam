@@ -1,4 +1,4 @@
-// The banner shown while another device controls this PC (Beam 1.6): "Robin Phone (pixel-9 · 100.70.1.2) is
+// The banner shown while another device controls this PC (Beam 1.6): "Robin Phone (pixel-9 · 100.80.0.8) is
 // controlling this PC · Stop". This PC renders it from its device list and its own Tailscale check, never from text the
 // viewer sends. It appears at the top centre of the screen (Windows' own sharing bar sits at the bottom), never takes
 // the focus, re-asserts top-most every second, and ignores clicks for 500 ms after it appears, so a click meant for
