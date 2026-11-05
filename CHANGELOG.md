@@ -29,7 +29,8 @@ Each release is tagged with the server's version (`v1.29.5`). An entry says whic
 Recent changes:
 
 - **1.29.5:** Measure the delay finishes in a viewer that draws the frames itself (big changes waited out their 3
-  seconds). The tests and `docs/API.md` use made-up addresses and device names only.
+  seconds). The tests and `docs/API.md` use made-up addresses and device names only. The README has screenshots
+  (`docs/images/`, made-up devices on a test server).
 - **1.29.4 / Windows 1.22.1:** Measure the delay also times a big change (a window's worth of new text). The picture's
   bandwidth floor works across the internet too, sized from the Connections speed tests of both ends.
 - **1.29.3 / Windows 1.22.0:** remote control reaches administrator windows and Windows' prompts on a PC set up for it

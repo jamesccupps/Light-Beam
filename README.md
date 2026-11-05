@@ -23,6 +23,14 @@ The browser is all you need to start: the native apps add system integration, an
 > Windows; macOS should work but hasn't been tested yet, and neither have the systemd unit and the Docker files.
 > Reports and fixes are welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
+![Beam in a browser: the devices on the left, a conversation with a phone on the right (photos, a PDF, a reply)](docs/images/chat.png)
+
+| On a phone | Your devices | The Windows app: control and sharing |
+|---|---|---|
+| <img src="docs/images/phone.png" width="190" alt="Beam on a phone, dark: photos, a text, a PDF and a reply"> | <img src="docs/images/devices.png" width="330" alt="Settings, Devices: each device's status, storage, Beam version and system"> | <img src="docs/images/windows-app.png" width="300" alt="The Windows app's Settings, Control and sharing: remote control, shared folders, installing apps"> |
+
+*(Made-up devices on a test server.)*
+
 ## Quick start (browser only)
 
 You need a computer that stays on, with:
