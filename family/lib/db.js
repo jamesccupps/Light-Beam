@@ -218,6 +218,12 @@ const MIGRATIONS = [
   ALTER TABLE users ADD COLUMN appearance TEXT;
   ALTER TABLE spaces ADD COLUMN appearance TEXT;
   `,
+  // v7 (2026-11-05, the user's review M24): a push subscription belongs to the sign-in that registered it (null: a
+  // Tailscale sign-in, the person's). The ones from before go: each browser registers again when its page next loads.
+  `
+  ALTER TABLE push_subs ADD COLUMN session_hash TEXT;
+  DELETE FROM push_subs;
+  `,
 ];
 
 function openDb(file) {

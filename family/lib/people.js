@@ -216,20 +216,25 @@ function createPeople(ctx) {
   }
 
   // POST /api/signin { name, password }
+  // (2026-11-05, the user's review M23) The address's and everyone's budget before the body is read, at most 100 bodies
+  // read at once, 10 s and 4 KB each: slow bodies over the public link could hold every connection.
   async function signIn(req, res) {
-    const body = await readJson(req);
     const ip = auth.clientIp(req);
-    const name = String(body.name ?? '').trim().toLowerCase().slice(0, 64);
-    const nameIp = `${name}|${ip}`;
-    const nameHeld = () => failByNameIp.blocked(nameIp) || (failByName.blocked(name) && !sessionFrom(name, ip));
     // (per address first: an address that is already held back mustn't use up everyone's budget; 1.7.2)
     const known = knownAddress(ip);
     const budget = known ? signinKnown : signinAll;
     const budgetKey = known ? 'known' : 'all';
-    if (!signinByIp.hit(ip) || !budget.hit(budgetKey) || (name && nameHeld())) {
-      const wait = Math.max(budget.wait(budgetKey), signinByIp.wait(ip), name ? Math.max(failByNameIp.wait(nameIp), failByName.wait(name)) : 0);
-      throw httpError(429, `Too many tries: wait ${wait > 90 ? `${Math.ceil(wait / 60)} minutes` : `${wait} seconds`}`, { retryAfter: wait });
-    }
+    const tooMany = wait => httpError(429, `Too many tries: wait ${wait > 90 ? `${Math.ceil(wait / 60)} minutes` : `${wait} seconds`}`, { retryAfter: wait });
+    if (!signinByIp.hit(ip) || !budget.hit(budgetKey)) throw tooMany(Math.max(budget.wait(budgetKey), signinByIp.wait(ip)));
+    if (signinReading >= 100) throw httpError(503, 'Busy: try again in a moment');
+    signinReading++;
+    const slow = setTimeout(() => req.destroy(), 10_000);
+    let body;
+    try { body = await readJson(req, { limit: 4096 }); } finally { clearTimeout(slow); signinReading--; }
+    const name = String(body.name ?? '').trim().toLowerCase().slice(0, 64);
+    const nameIp = `${name}|${ip}`;
+    const nameHeld = () => failByNameIp.blocked(nameIp) || (failByName.blocked(name) && !sessionFrom(name, ip));
+    if (name && nameHeld()) throw tooMany(Math.max(failByNameIp.wait(nameIp), failByName.wait(name)));
     const user = userByName(String(body.name ?? '').trim().slice(0, 64));
     const ok = await auth.checkPassword(String(body.password ?? ''), user?.pass_hash || null);
     if (!ok || !user || user.disabled_at) {
@@ -507,6 +512,8 @@ function createPeople(ctx) {
       if (body.role !== 'admin' && body.role !== 'member') throw httpError(400, 'role must be admin or member');
       if (body.role === 'admin' && admin.role !== 'owner') throw httpError(403, 'Only the owner can make admins');
       db.run('UPDATE users SET role = ? WHERE id = ?', body.role, person.id);
+      // (2026-11-05, the user's review M25) a demoted admin's invites and reset links stop
+      if (body.role === 'member') db.run('UPDATE invites SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL', now(), person.id);
       audit(admin.id, 'role', `${person.id} ${body.role}`);
       log.info(`${admin.name} made ${person.name} ${body.role === 'admin' ? 'an admin' : 'a member'}`);
     }
@@ -516,6 +523,7 @@ function createPeople(ctx) {
       if (body.disabled) {
         db.run('DELETE FROM sessions WHERE user_id = ?', person.id);
         db.run('DELETE FROM push_subs WHERE user_id = ?', person.id);
+        db.run('UPDATE invites SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL', now(), person.id); // (M25)
         hub.disconnectUser(person.id);
       }
       audit(admin.id, body.disabled ? 'disabled' : 'enabled', person.id);
@@ -526,6 +534,7 @@ function createPeople(ctx) {
     send(res, 200, { person: personJson(updated, admin) });
   }
 
+  let signinReading = 0; // (M23) sign-in bodies being read now
   return {
     whoIs, requireUser, requireAdmin, personJson, getUser, audit, hasOwner, createOwner,
     routes: [

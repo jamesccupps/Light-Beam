@@ -147,9 +147,16 @@ async function receiveShare(request) {
     const form = await request.formData();
     const cache = await caches.open(SHARE_CACHE);
     const batch = Date.now();
-    let n = 0;
+    // (2026-11-05, the review's M12) batches older than a day go; a batch is at most 20 files and 200 MB
+    for (const old of await cache.keys()) {
+      const at = Number(/__share\/(\d+)\//.exec(old.url)?.[1]);
+      if (at && batch - at > 86400e3) await cache.delete(old);
+    }
+    let n = 0, bytes = 0;
     for (const file of form.getAll('files')) {
       if (typeof file === 'string') continue;
+      if (n >= 20 || bytes + file.size > 200 * 1024 * 1024) break;
+      bytes += file.size;
       await cache.put(new URL(`__share/${batch}/${n++}`, SCOPE).href, new Response(file, {
         headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Name': encodeURIComponent(file.name || 'file') },
       }));

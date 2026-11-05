@@ -11,6 +11,8 @@ const PROJECT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..',
 const stagingArg = process.argv.indexOf('--staging');
 const STAGING = stagingArg > 0 ? process.argv[stagingArg + 1] : process.env.BEAM_STAGING;
 if (!STAGING) throw new Error('Give the staging folder: --staging <dir> (or BEAM_STAGING)');
+// (2026-11-05, the user's review) a mistyped folder read as empty, so --apply deleted every live file
+if (!['server.js', 'package.json'].every(f => fs.existsSync(path.join(STAGING, f)))) throw new Error(`${STAGING} doesn't look like a copy of Beam (no server.js and package.json)`);
 
 // Paths (relative, forward slashes) that are never compared, copied or deleted.
 const SKIP = [
@@ -65,6 +67,7 @@ const apply = process.argv.indexOf('--apply');
 if (apply > 0) {
   const backup = process.argv[apply + 1];
   if (!backup) throw new Error('--apply needs a backup directory');
+  if (deleted.length > 20 && !process.argv.includes('--allow-deletes')) throw new Error(`${deleted.length} files would be deleted: add --allow-deletes if that's right`);
   for (const rel of [...changed, ...deleted]) {
     const dest = path.join(backup, rel);
     fs.mkdirSync(path.dirname(dest), { recursive: true });

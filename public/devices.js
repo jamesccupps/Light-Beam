@@ -371,9 +371,11 @@ async function setAlerts(fields) {
 // computer can be approved, but never controls others).
 function trustToggle(d, row = false) {
   if (!serverHas('trust') || !me.trusted || d.id === me.id || typeof d.trusted !== 'boolean') return null;
-  const hint = d.platform === 'linux'
+  // (2026-11-05, the review's H1) more than one sign-in of its own: say so, approving lets each of them
+  const many = !d.trusted && d.signIns > 1 ? ` It has ${d.signIns} sign-ins; approving lets each of them. Expected only one? Sign it out and sign it in again.` : '';
+  const hint = (d.platform === 'linux'
     ? 'Install apps and see the phone’s notifications from it. A Linux computer is only ever controlled, never controls others.'
-    : 'Also see the phone’s notifications. Devices that signed in by themselves (Tailscale) need this once.';
+    : 'Also see the phone’s notifications. Devices that signed in by themselves (Tailscale) need this once.') + many;
   return switchRow('Can control PCs and install apps', d.trusted, async (v, box) => {
     try {
       await apiJson(`api/devices/${encodeURIComponent(d.id)}/trust`, jsonBody({ trusted: v }, 'PUT'));

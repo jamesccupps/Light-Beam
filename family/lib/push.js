@@ -82,7 +82,10 @@ function createPush(ctx, { file, contact = '' }) {
 
   // Sends one notification to every subscription of a person (gone ones are forgotten).
   async function sendTo(userId, payload, { urgency = 'normal', topic = null } = {}) {
-    const subs = db.all('SELECT * FROM push_subs WHERE user_id = ?', userId);
+    // (2026-11-05, the user's review M24) only while the sign-in that registered it lasts: "Sign out all the others", a new
+    // password or a reset link left a lost phone showing every message's start on its lock screen
+    const subs = db.all(`SELECT p.* FROM push_subs p WHERE p.user_id = ? AND (p.session_hash IS NULL
+      OR EXISTS (SELECT 1 FROM sessions s WHERE s.hash = p.session_hash AND s.expires_at > ?))`, userId, now());
     await Promise.all(subs.map(async s => {
       let status = 0;
       try {
@@ -151,9 +154,13 @@ function createPush(ctx, { file, contact = '' }) {
     // their notifications. One that has been failing (gone stale) can move.
     const held = db.get('SELECT user_id, failures FROM push_subs WHERE endpoint = ?', endpoint);
     if (held && held.user_id !== user.id && !(held.failures > 0)) throw httpError(409, 'That notification address belongs to someone else');
-    db.run(`INSERT INTO push_subs (id, user_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, failures = 0`,
-    newId(), user.id, endpoint, p256dh, auth, now());
+    const sessionHash = people().whoIs(req).sessionHash || null; // (M24)
+    db.run(`INSERT INTO push_subs (id, user_id, endpoint, p256dh, auth, created_at, session_hash) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, failures = 0, session_hash = excluded.session_hash`,
+    newId(), user.id, endpoint, p256dh, auth, now(), sessionHash);
+    // (2026-11-05) at most 10 a person: the oldest go
+    const extra = db.all('SELECT id FROM push_subs WHERE user_id = ? ORDER BY created_at DESC LIMIT -1 OFFSET 10', user.id);
+    for (const r of extra) db.run('DELETE FROM push_subs WHERE id = ?', r.id);
     send(res, 204);
   }
 

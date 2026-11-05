@@ -8,6 +8,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { newId, isId } = require('./ids');
+const { trimEnds, isSpaceOrDot } = require('../../lib/trim');
 const { httpError, send, readJson, readBody, sendFile, contentDisposition } = require('./http');
 
 const now = () => Date.now();
@@ -32,7 +33,7 @@ const INLINE = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'i
 const BIDI = /[‪-‮⁦-⁩‎‏؜]/g;
 
 function cleanFileName(name) {
-  let s = String(name ?? '').toWellFormed().split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_').replace(BIDI, '').replace(/^[\s.]+|[\s.]+$/g, '');
+  let s = trimEnds(String(name ?? '').toWellFormed().split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_').replace(BIDI, ''), isSpaceOrDot); // (M1: linear)
   const chars = [...s];
   if (chars.length > 150) {
     const ext = path.extname(s);

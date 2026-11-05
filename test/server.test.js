@@ -139,6 +139,8 @@ const cookieValue = res => /beam_key=([^;]*)/.exec([].concat(res.headers['set-co
 // (1.11.1) the sign-in a page got over https (as __Host-beam_key)
 const hostCookieValue = res => /__Host-beam_key=([^;]+)/.exec([].concat(res.headers['set-cookie'] || []).join('\n'))?.[1];
 const post = (srv, route, body, headers) => srv.req('POST', route, { headers: json(headers), body: JSON.stringify(body) });
+// (2026-11-05) The start of a JPEG that says its size (480×640): the server reads it from a thumbnail's header.
+const JPEG_HEAD = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03]);
 const pick = (o, keys) => o && Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k]])); // (1.17)
 
 async function sendText(srv, headers, text, to) {
@@ -1345,7 +1347,7 @@ test('C6: session sign-ins end with the browser and after 12 h idle; their devic
     x = await s.req('PATCH', '/api/settings', { headers: json(borrowed), body: JSON.stringify({ tailscaleSignIn: true }) });
     assert.deepEqual([x.status, x.json.reason], [403, 'temporary'], 'no letting more in');
     x = await post(s, '/api/login-requests/deny', { code: asked.code }, borrowed);
-    assert.equal(x.status, 200, 'denying is fine');
+    assert.deepEqual([x.status, x.json.reason], [403, 'temporary'], 'no turning one down either (2026-11-05)');
     assert.equal((await s.req('GET', '/api/pair', { headers: app(K, 'sessadmin01') })).status, 200, 'a device signed in for good still can');
     await sleep(500); // let devices.json be written (the test kills the server hard)
   } finally { await s.stop(); }
@@ -1538,7 +1540,7 @@ test('B5: export and import round trip; import refuses a used data folder; tar s
     await sendText(s, h, 'short');
     await sendText(s, h, 'z'.repeat(80_000));
     const f = await upload(s, h, 'pic.jpg', crypto.randomBytes(50_000));
-    await s.req('PUT', `/api/items/${f.id}/thumb`, { headers: { ...h, 'Content-Type': 'image/jpeg' }, body: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]) });
+    await s.req('PUT', `/api/items/${f.id}/thumb`, { headers: { ...h, 'Content-Type': 'image/jpeg' }, body: Buffer.concat([JPEG_HEAD, Buffer.from([1, 2, 3])]) });
     fs.writeFileSync(path.join(s.dist, 'Beam.exe'), 'MZ');
     fs.writeFileSync(path.join(s.dist, 'Beam.exe.json'), '{"version":"1.3.0"}');
     const r = await s.req('GET', '/api/admin/export', { headers: h, raw: true });
@@ -1843,7 +1845,7 @@ test('C5/C9: thumbnails and upload progress events', async () => {
     await ev.wait('upload-done', d => d.id === init.json.id);
     const item = put.json.item;
     assert.equal(item.w, 4000);
-    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), crypto.randomBytes(1000)]);
+    const jpeg = Buffer.concat([JPEG_HEAD, crypto.randomBytes(1000)]);
     let r = await s.req('PUT', `/api/items/${item.id}/thumb`, { headers: { ...a, 'Content-Type': 'image/jpeg' }, body: jpeg });
     assert.equal(r.status, 204);
     await ev.wait('update', d => d.id === item.id && d.thumb === true && d.delivered);
@@ -2269,7 +2271,7 @@ test('QW-C: Wake-on-LAN sends magic packets for every adapter (to a test listene
   const s = await startServer('qw-wake', 8791, { env: { BEAM_WOL_TARGETS: '127.0.0.1:8798' } });
   try {
     const K = s.key;
-    const pc = app(K, 'officepc001', 'Office PC', 'windows');
+    const pc = app(K, 'officepc001', 'Office PC', 'windows', { 'X-Beam-Device-Key': deviceKey() }); // (2026-11-05: a PC's own app)
     const phone = app(K, 'phone000001', 'Pixel', 'android', from('100.64.70.2'));
     await s.req('GET', '/api/me', { headers: phone });
     await s.req('GET', '/api/me', { headers: pc });
@@ -2298,7 +2300,7 @@ test('1.24 Wake-on-LAN through Beam for Linux: a connected Beam for Linux 1.3 se
   const streams = [];
   try {
     const K = s.key;
-    const pc = app(K, 'officepc001', 'Office PC', 'windows');
+    const pc = app(K, 'officepc001', 'Office PC', 'windows', { 'X-Beam-Device-Key': deviceKey() }); // (2026-11-05: a PC's own app)
     const phone = app(K, 'phone000001', 'Pixel', 'android', from('100.64.70.2'));
     await s.req('GET', '/api/me', { headers: phone });
     await s.req('PUT', '/api/devices/me/status', { headers: json(pc), body: JSON.stringify({ macs: [MAC1, MAC2] }) });
@@ -4471,7 +4473,7 @@ test('P2: delta sync is exact: random changes by several devices, checked from r
       async h => { const it = pick(await current()); if (it) await s.req('PATCH', `/api/items/${it.id}`, { headers: json(h), body: JSON.stringify({ pinned: rand(2) === 1 }) }); },
       async h => {
         const it = pick((await current()).filter(i => i.mime === 'image/jpeg'));
-        if (it) await s.req('PUT', `/api/items/${it.id}/thumb`, { headers: { ...h, 'Content-Type': 'image/jpeg' }, body: Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), crypto.randomBytes(200)]) });
+        if (it) await s.req('PUT', `/api/items/${it.id}/thumb`, { headers: { ...h, 'Content-Type': 'image/jpeg' }, body: Buffer.concat([JPEG_HEAD, crypto.randomBytes(200)]) });
       },
       async h => { const it = pick(await current()); if (it) await s.req('DELETE', `/api/items/${it.id}`, { headers: h }); },
       async h => { const some = (await current()).filter(() => rand(3) === 0).map(i => i.id); await post(s, '/api/items/delete', { ids: some }, h); },
@@ -5653,6 +5655,86 @@ test('1.6 Remote control: a whole session between two devices; its events reach 
   } finally { await t.stop(); }
 });
 
+test('2026-11-05 review: no taking a device that has a sign-in; automatic sign-ins and wakes limited; a rebound page can’t sign in; a removed device’s links stop', async () => {
+  const ts = await fakeTailscale({ whois: {
+    '100.64.31.10': { login: 'alice@example.com', node: 'alice-laptop' },
+    '100.64.31.11': { login: 'alice@example.com', node: 'alice-tablet' },
+    '100.64.31.12': { login: 'alice@example.com', node: 'alice-phone' },
+    '100.64.31.13': { login: 'alice@example.com', node: 'alice-ipad' },
+  } });
+  const s = await startServer('review1105', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket, BEAM_WOL_TARGETS: '127.0.0.1:8798' } });
+  try {
+    // the first device of a new Beam (trusted), then a tablet Tailscale signs in (not approved yet)
+    let r = await post(s, '/api/autopair', { client: 'app', name: 'Alice laptop', platform: 'windows' }, viaServe('100.64.31.10', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    const laptop = app(r.json.key, r.json.you);
+    r = await post(s, '/api/autopair', { client: 'app', name: 'Alice tablet', platform: 'android' }, viaServe('100.64.31.11', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    const tabletId = r.json.you;
+    const tablet = app(r.json.key, tabletId, 'Alice tablet', 'android');
+    // H1: a program on another of her machines names the tablet's id: it gets a device of its own
+    r = await post(s, '/api/autopair', { client: 'app', name: 'Alice tablet', platform: 'android', deviceId: tabletId }, viaServe('100.64.31.12', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    assert.notEqual(r.json.you, tabletId, 'not the tablet’s id');
+    const other = app(r.json.key, r.json.you, 'Alice tablet', 'android');
+    await waitFor(() => /named the device id of Alice tablet, which has a sign-in already/.test(s.out), 3000);
+    assert.equal((await s.req('GET', '/api/devices', { headers: laptop })).json.devices.find(d => d.id === tabletId).signIns, undefined, 'one sign-in: no count shown');
+    // the setup check is for trusted sign-ins; approving the tablet approves its own sign-in, not the other program's
+    assert.equal((await s.req('GET', '/api/setup', { headers: tablet })).status, 403);
+    r = await s.req('PUT', `/api/devices/${tabletId}/trust`, { headers: json(laptop), body: JSON.stringify({ trusted: true }) });
+    assert.equal(r.status, 200, r.body);
+    assert.equal((await s.req('GET', '/api/setup', { headers: tablet })).status, 200, 'the tablet is approved');
+    assert.equal((await s.req('GET', '/api/setup', { headers: other })).status, 403, 'the other program isn’t');
+
+    // M19: a page whose name was rebound to this machine can set X-Forwarded-Host, never the Host header itself
+    r = await post(s, '/api/autopair', { client: 'app' }, viaServe('100.64.31.10', 'alice@example.com', { Host: 'evil.example:8791', 'X-Forwarded-Host': '127.0.0.1' }));
+    assert.deepEqual([r.status, r.json.reason], [403, 'host']);
+
+    // M20: at most 10 automatic sign-ins in 10 minutes from one machine
+    for (let i = 0; i < 10; i++) assert.equal((await post(s, '/api/autopair', { client: 'app', name: `iPad ${i}`, platform: 'ios' }, viaServe('100.64.31.13', 'alice@example.com'))).status, 200);
+    r = await post(s, '/api/autopair', { client: 'app', name: 'iPad 10', platform: 'ios' }, viaServe('100.64.31.13', 'alice@example.com'));
+    assert.deepEqual([r.status, r.json.reason], [429, 'rate']);
+    assert.equal((await post(s, '/api/autopair', { client: 'app', name: 'Another phone', platform: 'android' }, viaServe('100.64.31.12', 'alice@example.com'))).status, 200, 'another machine isn’t held back');
+
+    // M21: the links a device made stop when it's removed
+    const { key: pairKey } = (await s.req('GET', '/api/pair', { headers: tablet })).json;
+    assert.match(pairKey, /^bp_/);
+    assert.equal((await s.req('DELETE', `/api/devices/${tabletId}`, { headers: laptop })).status, 204);
+    await waitFor(() => /Dropped 1 pairing link made by Alice tablet/.test(s.out), 3000);
+    r = await s.req('GET', `/?key=${encodeURIComponent(pairKey)}`, { headers: from('100.64.31.11') });
+    assert.ok(!/beam_key=bt_/.test([].concat(r.headers['set-cookie'] || []).join(';')), 'the link signs nothing in');
+
+    // M22: only a PC whose Beam app proves itself (its key) is woken, a few times a minute per asker
+    await s.req('PUT', '/api/devices/me/status', { headers: json(other), body: JSON.stringify({ macs: ['0a:1b:2c:3d:4e:5f'] }) });
+    r = await s.req('POST', `/api/devices/${other['X-Beam-Device-Id']}/wake`, { headers: other });
+    assert.equal(r.status, 409, 'a device without a key isn’t woken');
+    const pc = app(s.key, 'officepc111', 'Office PC', 'windows', { 'X-Beam-Device-Key': deviceKey() });
+    await s.req('GET', '/api/me', { headers: pc });
+    await s.req('PUT', '/api/devices/me/status', { headers: json(pc), body: JSON.stringify({ macs: ['0a:1b:2c:3d:4e:5f'] }) });
+    for (let i = 0; i < 6; i++) assert.equal((await s.req('POST', '/api/devices/officepc111/wake', { headers: laptop })).status, 200);
+    assert.equal((await s.req('POST', '/api/devices/officepc111/wake', { headers: laptop })).status, 429, 'the seventh in a minute');
+
+    // M18: only a file's own name (on NTFS the other spellings were the same file and each a new cache entry)
+    assert.equal((await s.req('GET', '/core.js')).status, 200);
+    assert.equal((await s.req('GET', '/CORE.JS')).status, 404);
+    assert.equal((await s.req('GET', '/Core.js')).status, 404);
+
+    // M1: a long run of dots in a name is cleaned in linear time
+    const t0 = Date.now();
+    r = await post(s, '/api/uploads', { name: `a${'.'.repeat(60000)}a.txt`, size: 1, to: [] }, laptop);
+    assert.equal(r.status, 201, r.body);
+    assert.ok(Date.now() - t0 < 2000, `cleaned in ${Date.now() - t0} ms`);
+
+    // M8: a thumbnail whose header says it's bigger than 2048 px a side is refused
+    const item = await upload(s, laptop, 'photo.png', Buffer.from('not really a png'));
+    const sof = (h, w) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, h >> 8, h & 255, w >> 8, w & 255, 0x03]), Buffer.alloc(32)]);
+    r = await s.req('PUT', `/api/items/${item.id}/thumb`, { headers: { ...laptop, 'Content-Type': 'image/jpeg' }, body: sof(8000, 8000) });
+    assert.equal(r.status, 400, r.body);
+    r = await s.req('PUT', `/api/items/${item.id}/thumb`, { headers: { ...laptop, 'Content-Type': 'image/jpeg' }, body: sof(480, 640) });
+    assert.equal(r.status, 204, r.body);
+  } finally { await s.stop(); await ts.close(); }
+});
+
 test('1.29.4 Remote control: the link between the PC and its viewer, from their speed tests where they are now, goes with the request', async () => {
   const t = await rcSetup('rc-link');
   try {
@@ -6587,18 +6669,16 @@ test('1.6 Device keys: a sign-in naming a keyed device without its key gets a de
     r = await s.req('GET', '/api/me', { headers: { Authorization: `Bearer ${approved}`, 'X-Beam-Device-Id': shopId, 'X-Beam-Platform': 'windows', ...from('100.64.91.23') } });
     assert.ok(r.status === 200 && r.json.you !== shopId, 'an approved request');
     assert.match(s.out, /A sign-in \(automatic\) named the device id of Shop Desktop without its device key: it gets a device of its own/);
-    // A device from before 1.6 (no key yet) signed in by Tailscale identity: another such sign-in that names it gets its
-    // id (1.25: it has no trusted sign-in to protect; one that has, as with the master key, is in the 1.25 tests) but
-    // can't set its key; the app's own can.
+    // A device from before 1.6 (no key yet) signed in by Tailscale identity. (2026-11-05, the review's H1) Another such
+    // sign-in that names it gets a device of its own (it has a sign-in already; until then it got its id, and approving
+    // the device approved it too); the app's own sign-in sets its key.
     const camera = () => post(s, '/api/autopair', { client: 'app', deviceId: 'dkold000001', name: 'Camera PC', platform: 'windows' }, viaServe(RC_NET.fresh.ip4, RC_USER));
     const own2 = await camera();
     const taken = await camera();
-    assert.deepEqual([own2.json.you, taken.json.you], ['dkold000001', 'dkold000001']);
+    assert.equal(own2.json.you, 'dkold000001');
+    assert.notEqual(taken.json.you, 'dkold000001', 'not the device that has a sign-in');
     const signedIn = (res, key) => ({ Authorization: `Bearer ${res.json.key}`, 'X-Beam-Device-Id': 'dkold000001', 'X-Beam-Platform': 'windows', 'X-Beam-Profile': 'bcbcbcbcbcbcbcbc', 'X-Beam-Device-Key': key, ...from(RC_NET.fresh.ip4) });
-    const program = signedIn(taken, deviceKey());
-    assert.equal((await s.req('GET', '/api/me', { headers: program })).status, 200);
     assert.equal((await s.req('GET', '/api/me', { headers: signedIn(own2, deviceKey()) })).status, 200, "the app's own sign-in sets it");
-    assert.equal((await s.req('GET', '/api/me', { headers: program })).status, 403, 'and the other one is out');
   } finally { await t.stop(); }
 });
 

@@ -3,6 +3,7 @@
 // reactions, pins, what each person has read, typing, notification levels and search.
 
 const { newId, isId } = require('./ids');
+const { trimEnds, trimLineEnds } = require('../../lib/trim');
 const { httpError, send, readJson } = require('./http');
 const auth = require('./auth');
 const { cleanLook, lookOf } = require('./look');
@@ -17,8 +18,11 @@ const BIDI = /[‪-‮⁦-⁩]/g; // direction overrides and isolates (they can 
 function cleanBody(text) {
   if (text === undefined || text === null) return '';
   if (typeof text !== 'string') throw httpError(400, 'body must be text');
-  const s = text.toWellFormed().replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    .replace(BIDI, '').replace(/[ \t]+$/gm, '').replace(/^\n+|\n+$/g, '');
+  // (2026-11-05, the user's review M1) the length first, then trimming in linear time (the regexes took 12 s on 64,000
+  // spaces, Family waiting meanwhile)
+  if (text.length > MAX_BODY * 8) throw httpError(400, 'A message can be at most 4,000 characters');
+  const s = trimEnds(trimLineEnds(text.toWellFormed().replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(BIDI, '')), c => c === '\n');
   if (s.length > MAX_BODY * 2 || [...s].length > MAX_BODY) throw httpError(400, 'A message can be at most 4,000 characters');
   return s;
 }

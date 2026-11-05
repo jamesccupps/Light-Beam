@@ -318,7 +318,13 @@ async function fullText(cfg, item) {
 }
 
 function safeName(name) {
-  let out = String(name).split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, '_').replace(/^[\s.]+|[\s.]+$/g, '') || 'file';
+  // (2026-11-05, the review's M1) the ends trimmed in linear time (the regex took seconds on a long run of dots)
+  let out = String(name).split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, '_');
+  const trim = c => c === '.' || /\s/.test(c);
+  let a = 0, b = out.length;
+  while (a < b && trim(out[a])) a++;
+  while (b > a && trim(out[b - 1])) b--;
+  out = out.slice(a, b) || 'file';
   if (/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(out)) out = '_' + out;
   // (audit C-6) at most 200 bytes, as the server keeps names (some file systems refuse longer ones); the extension stays
   if (Buffer.byteLength(out) > 200) {

@@ -224,7 +224,7 @@ const OUTBOX_FILE_MAX = 25 * 1024 * 1024;
 // records the Beam it was written for (serverId) and only ever goes there; one for another Beam than the cache's
 // waits for that Beam for 30 days at most (loadOutbox).
 const OUTBOX_KEEP_MS = 30 * 24 * 3600 * 1000;
-const OUTBOX_FIELDS = ['id', 'kind', 'text', 'blob', 'name', 'type', 'size', 'conv', 'to', 'created', 'deviceId', 'serverId', 'maybeSent', 'error'];
+const OUTBOX_FIELDS = ['id', 'kind', 'text', 'blob', 'name', 'type', 'size', 'conv', 'to', 'created', 'deviceId', 'serverId', 'maybeSent', 'error', 'reply']; // (reply: 2026-11-05)
 const outboxStore = {
   all: () => idbGetAll('outbox').then(list => list.filter(e => e.deviceId === me.id).sort((a, b) => a.created - b.created)),
   // Outbox writes aren't owner-checked (each entry says which Beam it's for), and they say whether they committed.

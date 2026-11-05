@@ -20,7 +20,7 @@ const NAME = /^family-backup-\d{8}-\d{6}\.tar\.gz$/;
 const MANIFEST = 'family-backup.json';
 const MB = 1024 * 1024;
 // What an archive may hold, and where each goes in the data folder.
-const ENTRY = /^(family-backup\.json|family\.db|control\.key|vapid\.json|(avatars|files|thumbs)\/[A-Za-z0-9._-]{1,120})$/;
+const ENTRY = /^(family-backup\.json|family\.db|control\.key|vapid\.json|(avatars|files|thumbs)\/(?!\.\.?$)[A-Za-z0-9._-]{1,120})$/; // (2026-11-05: never . or ..)
 
 const stampOf = t => new Date(t).toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
 

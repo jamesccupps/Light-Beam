@@ -212,10 +212,14 @@ function createInvite(db, { createdBy, role = 'member', spaceId = null, maxUses 
   return { id, code, expiresAt: t + days * DAY };
 }
 
-// The invite for a code if it can still be used, else null (unknown, used up, expired, withdrawn).
+// The invite for a code if it can still be used, else null (unknown, used up, expired, withdrawn). (2026-11-05, the
+// user's review M25) and only while whoever made it is still an owner or admin with access (a phished admin turned off
+// left their invites and reset links working); one made at the server's PC (no maker) stays.
 function findInvite(db, code) {
   if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{16,64}$/.test(code)) return null;
-  return db.get('SELECT * FROM invites WHERE hash = ? AND revoked_at IS NULL AND expires_at > ? AND uses < max_uses', hashToken(code), now()) || null;
+  return db.get(`SELECT i.* FROM invites i LEFT JOIN users u ON u.id = i.created_by
+    WHERE i.hash = ? AND i.revoked_at IS NULL AND i.expires_at > ? AND i.uses < i.max_uses
+      AND (i.created_by IS NULL OR (u.disabled_at IS NULL AND u.role IN ('owner', 'admin')))`, hashToken(code), now()) || null;
 }
 
 module.exports = {

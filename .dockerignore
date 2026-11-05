@@ -15,3 +15,11 @@ tailscale-state
 *.log
 *.tgz
 *.tar.gz
+# (2026-11-05, the user's review M34) backups and Family's data made by running from a checkout, at any depth
+beam-backups
+backups
+family-data
+**/*.tar.gz
+**/*.tgz
+**/*.log
+.env*

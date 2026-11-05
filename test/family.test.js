@@ -700,6 +700,43 @@ test('F-G: files: resumable uploads, limits, only sent to the conversation, inli
   } finally { await s.stop(); }
 });
 
+test('2026-11-05 review: a push subscription lasts as long as its sign-in; a turned-off or demoted admin’s invites stop', async () => {
+  const push = await pushService();
+  const s = await start('review1105', 8848);
+  try {
+    const f = await family(s);
+    // M24: Mary's browser registers for notifications, then that sign-in ends: nothing more reaches that browser
+    const mary = await join(s, f.owner, 'Mary');
+    assert.equal((await call(s, 'PUT', '/api/push', mary.who, { endpoint: `${push.url}/mary`, keys: browserKeys().keys })).status, 204);
+    await post(s, f.owner, f.general, 'first');
+    await waitFor(() => push.got.some(g => g.path === '/mary'));
+    assert.equal((await call(s, 'POST', '/api/signout', mary.who, {})).status < 300, true, 'signed out');
+    push.got.length = 0;
+    await post(s, f.owner, f.general, 'second');
+    await sleep(800);
+    assert.deepEqual(push.got.map(g => g.path), [], 'the signed-out browser gets nothing');
+    // M25: an admin's invite stops when the admin is turned off; another's when demoted to a member
+    const invite = async who => {
+      const r = await call(s, 'POST', '/api/invites', who, {});
+      assert.equal(r.status, 201, r.body);
+      return r.json.url.split('/join/')[1];
+    };
+    const ada = await join(s, f.owner, 'Ada', { role: 'admin' });
+    const ben = await join(s, f.owner, 'Ben', { role: 'admin' });
+    const adaCode = await invite(ada.who);
+    const benCode = await invite(ben.who);
+    assert.equal((await call(s, 'GET', `/api/invites/${adaCode}`, {})).status, 200, 'works while Ada is an admin');
+    await call(s, 'PATCH', `/api/people/${ada.id}`, f.owner, { disabled: true });
+    assert.notEqual((await call(s, 'GET', `/api/invites/${adaCode}`, {})).status, 200, 'Ada turned off: her invite stops');
+    assert.equal((await call(s, 'POST', `/api/invites/${adaCode}`, {}, { name: 'Eve', password: 'a long family password' })).status >= 400, true, 'nobody joins with it');
+    await call(s, 'PATCH', `/api/people/${ben.id}`, f.owner, { role: 'member' });
+    assert.notEqual((await call(s, 'GET', `/api/invites/${benCode}`, {})).status, 200, 'Ben made a member: his invite stops');
+    // the owner's own still works
+    const ownCode = await invite(f.owner);
+    assert.equal((await call(s, 'GET', `/api/invites/${ownCode}`, {})).status, 200);
+  } finally { await s.stop(); await push.close?.(); }
+});
+
 test('F-H: push: only the push services browsers use; encrypted for that browser; not to the author, someone looking at it, or as each person chose', async () => {
   const push = await pushService();
   const s = await start('push', 8848);
@@ -1739,7 +1776,7 @@ test('F-AC (1.27, themes): a person’s own look (only they see it; their other 
     await s.stop();
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(path.join(s.data, 'family.db'));
-    try { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 6); } finally { db.close(); }
+    try { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 7); } finally { db.close(); } // (v7: 2026-11-05)
   } finally { await s.stop(); }
 });
 

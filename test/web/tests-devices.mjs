@@ -953,6 +953,12 @@ export default function register(test) {
     await page.send('Storage.clearDataForOrigin', { origin: ctx.srv.base, storageTypes: 'indexeddb' });
     let release = await holdRequests(page, ['*/api/devices*', '*/api/events*']);
     await page.goto(`${ctx.srv.base}/`);
+    // (2026-11-05, the review's M12) what was shared, first; then where it goes
+    const preview = async text => {
+      await page.waitFor(`$('#genDlg')?.open === true && $('#genDlg').textContent.includes(${JSON.stringify(text)}) && /Shared from another app/.test($('#genDlg').textContent)`, 10000, `the preview of "${text}"`);
+      await page.evaluate(`[...$('#genDlg').querySelectorAll('button')].find(b => b.textContent === 'Choose where…').click()`);
+    };
+    await preview('shared on a cold start');
     await page.waitFor(`$('#chooseDlg')?.open === true`, 10000, 'the chooser opens for the share');
     await ctx.sleep(300);
     const waiting = await page.evaluate(`({ rows: $$('#chooseList .conv').length, text: $('#chooseList').textContent, sidebar: $('#convList .devices-loading') !== null })`);
@@ -973,10 +979,39 @@ export default function register(test) {
     await share('shared again');
     release = await holdRequests(page, ['*/api/devices*', '*/api/events*']);
     await page.goto(`${ctx.srv.base}/`);
+    await preview('shared again');
     await page.waitFor(`($('#chooseDlg')?.open === true && $$('#chooseList .conv').length >= 2) || $('#chooseList')?.textContent`, 10000, 'saved devices at once');
     await release();
     await page.evaluate(`$('#chooseDlg').close()`);
   }, { timeout: 60000 });
+
+  test('2026-11-05 review: a paste link previews and never sends by itself; a toast shows inside the open dialog; a dangerous confirm has Cancel focused', async ctx => {
+    const page = await ctx.signedIn();
+    const phone = app(ctx, 'Pixel');
+    await phone.me();
+    const b = await ctx.browser.browserConn();
+    await b.send('Browser.grantPermissions', { origin: ctx.srv.base, browserContextId: page.contextId, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+    await page.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await page.evaluate(`navigator.clipboard.writeText('a secret on the clipboard').then(() => true)`);
+    // M11: ?action=paste&conv=all opens the preview (Send, Put in message box, Cancel); ?conv= doesn't choose for it
+    await page.goto(`${ctx.srv.base}/?action=paste&conv=all`);
+    await page.waitFor(`$('#genDlg')?.open === true && $('#genDlg').textContent.includes('a secret on the clipboard')`, 10000, 'the paste preview');
+    eq(await page.evaluate(`[...$('#genDlg').querySelectorAll('button')].map(b => b.textContent).includes('Cancel')`), true, 'the preview asks first (Send or Cancel)');
+    await page.evaluate(`[...$('#genDlg').querySelectorAll('button')].find(b => b.textContent === 'Cancel').click()`);
+    await ctx.sleep(800);
+    eq((await phone.items()).some(i => i.text === 'a secret on the clipboard'), false, 'nothing was sent');
+    // M14: a toast while a dialog is open shows inside it (not dimmed and inert under it)
+    await page.evaluate(`openDialog({ title: 'A dialog', body: [el('p', {}, 'open')] }); toast('Hello from a toast'); true`);
+    eq(await page.evaluate(`$('#toast').parentElement === $('#genDlg') && $('#toast').classList.contains('show')`), true, 'the toast is in the open dialog');
+    await page.evaluate(`$('#genDlg').close(); toast('And now outside'); true`);
+    eq(await page.evaluate(`$('#toast').parentElement === document.body`), true, 'back on the page');
+    // a dangerous confirm: Cancel focused, so Enter doesn't confirm it
+    await page.evaluate(`window.__c = confirmDialog({ title: 'Delete everything?', text: 'Gone for good.', confirm: 'Delete', danger: true }); true`);
+    eq(await page.evaluate(`document.activeElement?.textContent`), 'Cancel', 'Cancel has the focus');
+    await page.evaluate(`document.activeElement.click()`);
+    eq(await page.evaluate(`__c`), false, 'cancelled');
+    eq(page.errors, [], 'no page errors');
+  });
 
   test('trusted sign-ins (1.25): a device not approved yet has "Can control PCs and install apps" off in Settings → Devices (with why) and in Device info; on approves it, off takes it back', async ctx => {
     const page = await ctx.signedIn();

@@ -283,9 +283,10 @@ function markSent(entry) {
 }
 const sentIds = () => new Set(store.json(SENT_KEY, []));
 
-function dropOutboxEntry(entry) {
+// `keepStored`: out of the list, its stored copy kept (a file whose upload has started: removed when it's done).
+function dropOutboxEntry(entry, { keepStored = false } = {}) {
   outbox.delete(entry.id);
-  outboxStore.remove(entry.id).then(ok => { if (!ok) setTimeout(() => outboxStore.remove(entry.id), 1000); });
+  if (!keepStored) outboxStore.remove(entry.id).then(ok => { if (!ok) setTimeout(() => outboxStore.remove(entry.id), 1000); });
   if (entry.node) entry.node.remove();
   view.nodes.delete(`out:${entry.id}`);
   refreshPending();
@@ -358,10 +359,12 @@ async function sendOutbox() {
         dropOutboxEntry(entry);
       } else {
         const file = new File([entry.blob], entry.name, { type: entry.type });
-        markSent(entry);
-        dropOutboxEntry(entry);
-        enqueueUpload(file, entry.conv);
+        // (2026-11-05, the review's M13) its stored copy (and "sent") only once the upload is done: a tab closed
+        // mid-upload (Android does that to background tabs) left a pasted screenshot nowhere; after a reload it goes again
+        dropOutboxEntry(entry, { keepStored: true });
+        const up = enqueueUpload(file, entry.conv);
         refreshPending();
+        up.done.then(ok => { if (ok) { markSent(entry); outboxStore.remove(entry.id); } });
       }
     } catch (err) {
       entry.sending = false;
@@ -1220,11 +1223,15 @@ async function confirmPaste({ text, files }) {
   send.focus();
 }
 
-// The paste button / Ctrl+Shift+V: send the clipboard now (text wins over an image of it, like Office).
-async function pasteAndSend() {
+// The paste button / Ctrl+Shift+V: send the clipboard now (text wins over an image of it, like Office). (2026-11-05,
+// the review's M11) `confirm`: from a link or the app's shortcut (?action=paste), which any page or message can open:
+// the preview first, as a paste anywhere else gets (a password on the clipboard went to every device).
+async function pasteAndSend({ confirm = false } = {}) {
+  if (confirm && !HOST) return pastePreview();
   const conv = await targetConv('Your clipboard');
   if (!conv) return;
   if (!await ensureSendable(conv)) return toast('That device was removed from Beam.', { error: true });
+  if (confirm && !(await confirmDialog({ title: 'Send your clipboard?', text: `To ${convName(conv)}. A link or shortcut asked for it.`, confirm: 'Send' }))) return;
   if (HOST) {
     const r = await hostDo('sendClipboard', { to: targetsOf(conv) });
     if (r) toast(`Sending ${r.description || 'your clipboard'} to ${convName(conv)}`);
@@ -1250,6 +1257,27 @@ async function pasteAndSend() {
       toast('Clipboard access was blocked. Paste into the message box instead.', { ms: 4000 });
       $('#text').focus();
     } else toast(friendlyError(err), { error: true });
+  }
+}
+
+// (M11) The clipboard into the paste preview (confirmPaste: Send, Put in message box, Cancel).
+async function pastePreview() {
+  try {
+    let text = '';
+    let image = null;
+    if (navigator.clipboard.read) {
+      for (const entry of await navigator.clipboard.read()) {
+        if (entry.types.includes('text/plain')) text = text || await (await entry.getType('text/plain')).text();
+        const type = entry.types.find(t => t.startsWith('image/'));
+        if (type && !image) image = namePasted(new File([await entry.getType(type)], 'image.png', { type }));
+      }
+    } else text = await navigator.clipboard.readText();
+    if (text.trim()) return confirmPaste({ text });
+    if (image) return confirmPaste({ files: [image] });
+    toast('Your clipboard is empty');
+  } catch (err) {
+    if (err.name === 'NotAllowedError' || err.name === 'SecurityError') toast('Clipboard access was blocked. Paste into the message box instead.', { ms: 4000 });
+    else toast(friendlyError(err), { error: true });
   }
 }
 

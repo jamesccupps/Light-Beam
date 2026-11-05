@@ -24,6 +24,7 @@ const tailscale = require('./lib/tailscale');
 const { createLogger } = require('./lib/log');
 const { writeFileDurable, writeFileDurableSync, loadState, jsonWriter, storeStats, syncDir } = require('./lib/store');
 const { createOutbound } = require('./lib/outbound');
+const { trimEnds, isSpaceOrDot } = require('./lib/trim'); // (2026-11-05, M1)
 const { makePrivate } = require('./lib/private-dir');
 const pcHistory = require('./lib/history');
 const winevents = require('./lib/winevents');
@@ -322,9 +323,8 @@ function sanitizeName(name) {
   name = String(name || '').toWellFormed()
     .split(/[\\/]/).pop()
     .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_')
-    .replace(BIDI, '')
-    .replace(/^[\s.]+|[\s.]+$/g, '');
-  name = limitName(name);
+    .replace(BIDI, '');
+  name = limitName(trimEnds(name, isSpaceOrDot)); // (2026-11-05, M1: a regex here took seconds on a long run)
   if (/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(name)) name = '_' + name;
   return name || 'file';
 }
@@ -989,8 +989,14 @@ async function verifiedIdentity(req) {
 // a page on another name pointed at this server (DNS rebinding) must not get a sign-in just because its browser runs
 // on the right machine. IP addresses can't be rebound; names must be this machine's, its tailnet name, or an address
 // Beam knows (its public address, ones seen through tailscale serve).
+// (2026-11-05, the user's review M19) Both the address the proxy says (X-Forwarded-Host) and the request's own Host
+// header: a page in a browser on this PC whose name was rebound to 127.0.0.1 can set the first, never the second.
 async function ownHost(req) {
-  const raw = requestHost(req).trim().toLowerCase();
+  return (await ownHostName(requestHost(req))) && (await ownHostName(String(req.headers.host || '')));
+}
+
+async function ownHostName(name) {
+  const raw = String(name).trim().toLowerCase();
   const host = raw.startsWith('[') ? raw.slice(1, raw.indexOf(']')) : raw.replace(/:\d+$/, '');
   if (!host) return false;
   if (net.isIP(host) || host === 'localhost') return true;
@@ -1135,7 +1141,7 @@ const keyBound = t => Boolean(t?.keyHash) && devices[resolveAlias(t.device || ''
 // the phone's notifications, the password, moves and signing the others out need it. Sign-ins from before 1.25 kept
 // what they could do (grandfatherTrust).
 const isTrusted = auth => auth?.via === 'master' || (auth?.via === 'token' && auth.token?.trusted === true);
-const hasTrustedSignIn = id => Object.values(tokenStore.tokens).some(t => t.trusted === true && t.device && resolveAlias(t.device) === id);
+const hasLiveSignIn = id => Object.values(tokenStore.tokens).some(t => t.device && resolveAlias(t.device) === id && !tokenExpired(t));
 // "<device id>|<platform>" of every device with a trusted sign-in of its own kind (an app's own, a browser's own; a
 // browser merged into an app is another kind): what the devices list says, and what approving a device approves.
 const trustedDevices = () => new Set(Object.values(tokenStore.tokens).filter(t => t.trusted === true && t.device && !t.scope).map(t => `${resolveAlias(t.device)}|${tokenPlatform(t)}`));
@@ -1175,12 +1181,15 @@ function windowsKeyShown(auth, req) {
 // A sign-in that names an existing device with a device key gets that id only with the key (keyHash, from the
 // request); any other gets an id of its own. How the sign-in was made is for the log. (1.25, security review R-1) A
 // sign-in that isn't trusted doesn't take over a device without a key that has a trusted sign-in (the phone, a Linux
-// computer, a browser): naming its id, which every signed-in device can see, it gets an id of its own.
-function claimableId(id, keyHash, how, trusted = true) {
+// computer, a browser): naming its id, which every signed-in device can see, it gets an id of its own. (2026-11-05, the
+// user's review H1) Nor one that has any sign-in at all: a device not approved yet (a new tablet, a browser) was taken
+// that way, and approving the device then approved the sign-in that had taken it. `own`: a link the device made for
+// itself (the Android app's page sign-in).
+function claimableId(id, keyHash, how, trusted = true, own = false) {
   if (!id) return id;
   const d = devices[resolveAlias(id)];
-  if (d && !d.keyHash && !trusted && hasTrustedSignIn(d.id)) {
-    logOnce(`claim-trust ${d.id}`, `A sign-in (${how}) that isn't trusted named the device id of ${d.name}, which has a trusted one: it gets a device of its own`,
+  if (d && !d.keyHash && !trusted && !own && hasLiveSignIn(d.id)) {
+    logOnce(`claim-trust ${d.id}`, `A sign-in (${how}) that isn't trusted named the device id of ${d.name}, which has a sign-in already: it gets a device of its own`,
       n => `${n} more sign-in${n === 1 ? '' : 's'} that aren't trusted named the device id of ${d.name}`);
     return crypto.randomBytes(12).toString('hex');
   }
@@ -1425,6 +1434,8 @@ const passwordIp = new Limiter(5, 5 * 60e3, 5 * 60e3);
 const passwordGlobal = new Limiter(30, 10 * 60e3);
 const badSecrets = new Limiter(30, 5 * 60e3, 5 * 60e3);
 const loginRequestRate = new Limiter(10, 60e3);
+const autopairRate = new Limiter(10, 10 * 60e3); // (2026-11-05, M20) automatic sign-ins per Tailscale machine
+const wakeRate = new Limiter(6, 60e3); // (2026-11-05, M22) wakes per asking device
 
 // ---------------------------------------------------------------- devices
 
@@ -1534,12 +1545,12 @@ function touchDevice(req, url) {
   }
   if (changed) broadcastDevices();
   noteSharedAddress(req, device);
-  return linkSameMachine(device);
+  return linkSameMachine(device, isTrusted(authOf(req)));
 }
 
 // A browser and a Beam app on the same machine are one device: the browser is merged into the app.
 const unmergedNoted = new Set(); // (audit S-2) "old>new" device pairs already logged as not a reinstall
-function linkSameMachine(device) {
+function linkSameMachine(device, trustedCaller = false) {
   if (!device.machine || device.temporary) return device; // a borrowed browser stays separate and temporary
   const recent = d => now() - d.lastSeen < 14 * 86400e3;
   const sameMachine = d => d.id !== device.id && d.machine === device.machine && recent(d);
@@ -1561,7 +1572,13 @@ function linkSameMachine(device) {
     if (GUI_PLATFORMS.has(device.platform)) {
       const looksReplaced = d => sameMachine(d) && d.platform === device.platform && !appOnline(d.id) && d.firstSeen < device.firstSeen;
       for (const old of Object.values(devices).filter(looksReplaced)) {
-        if (old.profile && device.profile && old.profile === device.profile) mergeDevice(old.id, device.id, 'reinstalled app');
+        // (2026-11-05, the user's review M3) and only for a trusted sign-in: X-Beam-Profile is computable by another account
+        // on that machine, so an untrusted one could take a PC's device (its tokens, history, sessions) by naming it
+        if (old.profile && device.profile && old.profile === device.profile && trustedCaller) mergeDevice(old.id, device.id, 'reinstalled app');
+        else if (old.profile && device.profile && old.profile === device.profile && !unmergedNoted.has(`${old.id}>${device.id}`)) {
+          unmergedNoted.add(`${old.id}>${device.id}`);
+          log.info(`Didn't take "${old.name}" over as a reinstall of "${device.name}": the new app's sign-in isn't approved yet (approve it, or remove the old device by hand)`);
+        }
         else if ((!old.profile || !device.profile) && !unmergedNoted.has(`${old.id}>${device.id}`)) {
           unmergedNoted.add(`${old.id}>${device.id}`); // (once per run: this runs on every request)
           log.info(`Didn't take "${old.name}" over as a reinstall of "${device.name}": ${device.profile ? 'the older app' : 'the new app'} didn't say which Windows account it's for (remove the old device by hand if it's this one)`);
@@ -1700,6 +1717,12 @@ function noteSharedAddress(req, device) {
 
 function deviceList() {
   const signedIn = new Set(Object.values(tokenStore.tokens).map(t => t.device).filter(Boolean));
+  const signIns = new Map(); // (2026-11-05, H1) device id -> its live sign-ins of its own kind: what approving it approves
+  for (const t of Object.values(tokenStore.tokens)) {
+    if (!t.device || t.scope || tokenExpired(t)) continue;
+    const id = resolveAlias(t.device);
+    if (tokenPlatform(t) === devices[id]?.platform) signIns.set(id, (signIns.get(id) || 0) + 1);
+  }
   const trusted = trustedDevices(); // (1.25)
   return Object.values(devices)
     .map(d => {
@@ -1708,6 +1731,7 @@ function deviceList() {
         id: d.id, name: d.name, platform: d.platform, online: isOnline(d.id), lastSeen: d.lastSeen, user: d.user || 'owner',
         ...(d.appVersion && { appVersion: d.appVersion }),
         signedIn: signedIn.has(d.id), ...(d.temporary && { temporary: true }), trusted: trusted.has(`${d.id}|${d.platform}`),
+        ...(signIns.get(d.id) > 1 && { signIns: signIns.get(d.id) }),
         ...(d.status && { status: publicStatus(d.status) }),
         ...(ts && { tailscale: { ...ts, ...tsStateOf(ts.ip) } }), // (1.17: + online, lastSeen, keyExpiry, expired)
         can: capabilitiesOf(d, ts),
@@ -1728,6 +1752,7 @@ function broadcastDevices() {
 // Forgets a device: its tokens stop working, its streams close, owners learned only through it are dropped.
 function forgetDeviceNow(id, reason) {
   endRcSessionsOf([id], 'revoked');
+  dropPairingsBy(id);
   revokeTokens((h, t) => t.device && resolveAlias(t.device) === id, reason);
   for (const c of clients) if (c.deviceId === id && c.tokenHash) c.res.end();
   delete devices[id];
@@ -2338,6 +2363,12 @@ function wakeRelays(target) {
 async function wakeDevice(req, res, [id], url) {
   const target = targetDevice(id);
   await readJson(req, { optional: true });
+  // (2026-11-05, the user's review M22) Only a PC whose Beam app proves itself (its device key: the MACs are its own),
+  // and a few a minute per asking device: any sign-in could report MACs for itself and make every relay broadcast.
+  if (!target.keyHash) throw httpError(409, `${target.name} can't be woken by Beam (only PCs with the Beam app for Windows)`);
+  const asker = resolveAlias(deviceIdOf(req, url) || '') || clientIp(req);
+  if (wakeRate.blocked(asker)) throw Object.assign(httpError(429, 'Too many wakes; try again in a minute'), { headers: { 'Retry-After': String(wakeRate.retryAfter(asker)) } });
+  wakeRate.hit(asker);
   const macs = target.status?.macs || [];
   if (!macs.length) throw httpError(409, `${target.name} hasn't told Beam its network adapters yet (the Beam app on that PC does, once it has run there)`);
   const by = whoName(deviceIdOf(req, url), 'A device');
@@ -2436,9 +2467,16 @@ function noteDown(d) {
 
 // (1.27.2) An import writing the data folder (its pid in data/importing): Beam doesn't start until it's done (the
 // scheduled task of install-windows.ps1 -AtBoot starts Beam every 5 minutes). A marker whose process is gone is removed.
+// (2026-11-05, the user's review M17) An import that failed leaves it marked `failed`: Beam doesn't start on a
+// half-written folder (it would move every file to orphaned/) until the import is run again (--force) or the marker
+// removed. 'failed', true (running) or false.
 function importRunning() {
   let pid;
-  try { pid = Number(JSON.parse(fs.readFileSync(FILE.importing, 'utf8')).pid); } catch { return false; }
+  try {
+    const m = JSON.parse(fs.readFileSync(FILE.importing, 'utf8'));
+    if (m.failed) return 'failed';
+    pid = Number(m.pid);
+  } catch { return false; }
   try { process.kill(pid, 0); return true; } catch {}
   try { fs.rmSync(FILE.importing, { force: true }); } catch {}
   return false;
@@ -2955,6 +2993,7 @@ function runSetupCheck() {
 
 // GET /api/setup[?refresh=1]: { checks, at } (refresh: now, at most every 10 s; the first ask runs them).
 async function getSetup(req, res, _m, url) {
+  if (!isTrusted(authOf(req))) throw notTrusted('see the setup check'); // (2026-11-05: its folders, tasks and versions)
   const fresh = url.searchParams.get('refresh') === '1' && now() - (setupState?.at || 0) > (FAST_TIMEOUTS ? 200 : 10_000);
   send(res, 200, (!setupState || fresh ? await runSetupCheck() : setupState) || { checks: [], at: 0 });
 }
@@ -4519,6 +4558,8 @@ async function startRemoteControl(req, res, _m, url) {
   }
   if (devices[pc.id] !== pc) throw httpError(404, 'No such device');
   const running = check();
+  const stillWhy = rcViewerIneligible(req, url, me); // (2026-11-05: its trust may have been taken away while whois answered)
+  if (stillWhy) throw httpError(403, RC_INELIGIBLE[stillWhy], { reason: stillWhy });
   if (!you) throw rcRefused(me, pc, 'no-tailscale', 'This device has no Tailscale address the server knows: connect to Beam through Tailscale');
   if (!rcOwnerOk(you.user)) throw rcRefused(me, pc, 'not-owner', `This device's Tailscale account (${you.user}) isn't one of this Beam's owners`, 403);
   if (!host) throw rcRefused(me, pc, 'no-tailscale', `${pc.name} has no Tailscale address the server knows`);
@@ -5511,6 +5552,7 @@ async function putDeviceTrust(req, res, [id], url) {
     const set = new Set(changed);
     for (const c of clients) if (c.tokenHash && set.has(c.tokenHash)) c.trusted = body.trusted;
     if (!body.trusted) { // (the sessions they control; being controlled goes on)
+      dropPairingsBy(target.id); // (2026-11-05, M21)
       const keys = new Set(changed.map(h => `t:${h}`));
       for (const x of [...rcSessions.values()]) if (keys.has(x.viewerKey)) endRcSession(x, 'revoked');
     }
@@ -5547,10 +5589,10 @@ async function getItemText(req, res, [id]) {
   const item = findItem(id);
   if (!item || item.kind !== 'text') return send(res, 404, { error: 'Not found' });
   const length = item.textFile ? item.textLength : item.text.length;
-  const etag = `"t-${item.id}-${length}"`;
+  const etag = `"t-${item.id}-${length}${item.edited ? `-${item.edited}` : ''}"`; // (2026-11-05: an edit of the same length)
   const headers = {
     'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff', ETag: etag,
-    'Last-Modified': new Date(item.ts).toUTCString(), 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'private, no-cache',
+    'Last-Modified': new Date(item.edited || item.ts).toUTCString(), 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'private, no-cache',
   };
   if (req.headers['if-none-match'] === etag) return send(res, 304, '', headers);
   send(res, 200, await fullText(item), headers);
@@ -6316,12 +6358,36 @@ async function putThumb(req, res, [id]) {
     ? data.length > 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff
     : data.length > 12 && data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP';
   if (!looksRight) throw httpError(400, `That isn't a ${format.toUpperCase()} image`);
+  // (2026-11-05, the user's review M8) its size from its header: a small file that says 8000×8000 decodes to hundreds
+  // of MB on a phone (and crashed it every time its picture was shown)
+  const dims = thumbDims(data, format);
+  if (!dims || dims.w > 2048 || dims.h > 2048) throw httpError(400, 'A thumbnail can be at most 2048 pixels a side');
   await writeFileDurable(thumbPath(id), data);
   if (!findItem(id)) { await rmQuiet(thumbPath(id)); return send(res, 404, { error: 'Not found' }); }
   item.thumb = format;
   itemChanged(item);
   broadcastUpdate(item);
   send(res, 204);
+}
+
+// A JPEG's or WebP's width and height from its header, or null.
+function thumbDims(b, format) {
+  if (format === 'jpeg') {
+    for (let i = 2; i + 9 < b.length;) {
+      if (b[i] !== 0xff) return null;
+      const marker = b[i + 1];
+      if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) { i += 2; continue; }
+      const len = b.readUInt16BE(i + 2);
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return { h: b.readUInt16BE(i + 5), w: b.readUInt16BE(i + 7) };
+      i += 2 + len;
+    }
+    return null;
+  }
+  const chunk = b.toString('ascii', 12, 16);
+  if (chunk === 'VP8 ' && b.length >= 30) return { w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff };
+  if (chunk === 'VP8L' && b.length >= 25) { const v = b.readUInt32LE(21); return { w: (v & 0x3fff) + 1, h: ((v >> 14) & 0x3fff) + 1 }; }
+  if (chunk === 'VP8X' && b.length >= 30) return { w: b.readUIntLE(24, 3) + 1, h: b.readUIntLE(27, 3) + 1 };
+  return null;
 }
 
 async function getThumb(req, res, [id]) {
@@ -6789,11 +6855,24 @@ const FEATURES = [
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)
 // trusted: whether the sign-in it makes is (that of the sign-in that made the link; at the server itself, yes).
+// (2026-11-05) At most 20 a device (the oldest go).
 function createPairing(byDevice, trusted = true) {
   const token = randomSecret('bp_', 24);
+  if (byDevice) {
+    const mine = Object.entries(tokenStore.pairing).filter(([, r]) => r.by === byDevice).sort((a, b) => a[1].created - b[1].created);
+    for (const [h] of mine.slice(0, Math.max(0, mine.length - 19))) delete tokenStore.pairing[h];
+  }
   tokenStore.pairing[sha256hex(token)] = { created: now(), expires: now() + PAIRING_TTL, by: byDevice || null, user: 'owner', role: 'owner', trusted: Boolean(trusted) };
   persistTokens();
   return token;
+}
+
+// (2026-11-05, the user's review M21) The links a device made go when it's removed or loses its trust: someone with the
+// lost phone could otherwise make one, and sign in with it after the phone was removed.
+function dropPairingsBy(id) {
+  let n = 0;
+  for (const [h, r] of Object.entries(tokenStore.pairing)) if (r.by && resolveAlias(r.by) === id) { delete tokenStore.pairing[h]; n++; }
+  if (n) { persistTokens(); log.info(`Dropped ${n} pairing link${n === 1 ? '' : 's'} made by ${nameOf(id) || 'that device'}`); }
 }
 
 // (audit 2026-10-11 S-2) What outlasts a borrowed computer's session takes a device signed in for good: a pairing
@@ -6839,6 +6918,8 @@ async function putRead(req, res, _m, url) {
   if (typeof conversation !== 'string' || !(conversation === 'all' || DEVICE_ID.test(conversation))) throw httpError(400, 'conversation must be a device id or "all"');
   if (!Number.isFinite(ts) || ts < 0) throw httpError(400, 'ts must be a time in milliseconds');
   const conv = conversation === 'all' ? 'all' : resolveAlias(conversation);
+  // (2026-11-05) only a conversation that exists: any device-shaped id grew read.json without end
+  if (conv !== 'all' && !devices[conv]) return send(res, 200, { read: readMarks[me] || {} });
   const marks = (readMarks[me] ||= {});
   const value = Math.min(ts, now() + 60e3);
   if (!(marks[conv] >= value)) {
@@ -7269,7 +7350,7 @@ function listLoginRequests(req, res, _m, url) {
 }
 
 async function answerLoginRequest(req, res, [action], url) {
-  if (action === 'approve') requireLasting(req, url, 'approve a sign-in');
+  requireLasting(req, url, action === 'approve' ? 'approve a sign-in' : 'turn down a sign-in'); // (2026-11-05: deny too)
   const { code } = await readJson(req);
   const r = findLoginRequest(code);
   const by = nameOf(deviceIdOf(req, url)) || deviceNameOf(req, url) || 'a signed-in device';
@@ -7325,6 +7406,12 @@ async function autoPair(req, res) {
       via = 'tailscale';
     } else reason = 'not-owner';
   }
+  const machineKey = identity?.tsNode?.node || identity?.ip || clientIp(req);
+  if (via && autopairRate.blocked(machineKey)) {
+    logOnce(`autopair-rate ${machineKey}`, `Too many automatic sign-ins from ${describeWhereSync(req)}: refused for a while`);
+    return send(res, 429, { error: 'Too many automatic sign-ins from this device; try again in a few minutes', reason: 'rate' }, { 'Retry-After': String(autopairRate.retryAfter(machineKey)) });
+  }
+  if (via) autopairRate.hit(machineKey);
   if (!via) {
     const messages = {
       'no-identity': 'Tailscale didn’t say who this is', 'not-owner': 'This Tailscale account isn’t one of this Beam’s owners',
@@ -7701,6 +7788,9 @@ function knownUrls() {
 // the public address, unless one is configured; others are remembered for knownUrls().
 function learnAddress(req) {
   if (!viaTrustedProxy(req) || !isHttps(req)) return;
+  // (2026-11-05, M19) not from a request whose own Host header is some other name (a rebound page's)
+  const own = String(req.headers.host || '').toLowerCase().replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+  if (!(net.isIP(own) || own === 'localhost' || (tsSelfDns && own === tsSelfDns) || own === String(req.headers['x-forwarded-host'] || '').split(',')[0].trim().toLowerCase().replace(/:\d+$/, ''))) return;
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
   const m = /^([a-z0-9-]+(\.[a-z0-9-]+)+)(:\d+)?$/.exec(host);
   if (!m || net.isIP(m[1]) || /^localhost/.test(host)) return;
@@ -7808,9 +7898,13 @@ async function exportApi(req, res, _m, url) {
   // (1.25, security review R-1) a move approved by a trusted device (before 1.25 anything signed in could approve one)
   if (!isTrusted(auth)) throw httpError(403, 'This move wasn’t approved on a trusted device: approve it again on one', { reason: 'trusted' });
   const freeze = url.searchParams.has('freeze');
+  let holding = null;
   if (freeze) {
     moving = { until: now() + MOVE_FREEZE_MS, by: 'export for a move' };
-    log.info('Exporting for a move: changes are paused until the move completes (at most 30 minutes)');
+    log.info('Exporting for a move: changes are paused until the move completes (at most 30 minutes after the copy)');
+    // (2026-11-05, the user's review M16) kept paused while the copy still streams (a big one over a relayed link
+    // took longer than 30 minutes, and what came after the snapshot stayed on the old server)
+    holding = setInterval(() => { if (moving?.by === 'export for a move') moving.until = now() + MOVE_FREEZE_MS; }, 60e3);
   }
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   res.writeHead(200, {
@@ -7826,6 +7920,9 @@ async function exportApi(req, res, _m, url) {
     if (freeze) moving = null;
     log.warn(`Export stopped: ${err.message}`);
     res.destroy();
+  } finally {
+    clearInterval(holding);
+    if (freeze && moving?.by === 'export for a move') moving.until = now() + MOVE_FREEZE_MS;
   }
 }
 
@@ -8288,7 +8385,25 @@ async function compressEntry(entry, type) {
   return entry;
 }
 
+// (2026-11-05, the user's review M18) Only a file's own name, as it is on disk: on NTFS /REMOTE.JS, remote.js::$DATA
+// and 8.3 names are the same file, and each spelling was a new cache entry (its data, gzip and brotli), no sign-in
+// needed. The list is read again on a miss, at most every 10 s.
+let publicNames = null, publicNamesAt = 0;
+async function onDiskName(file) {
+  const rel = path.relative(PUBLIC_DIR, file).split(path.sep).join('/');
+  const look = async () => {
+    publicNames = new Set((await fsp.readdir(PUBLIC_DIR, { recursive: true })).map(n => String(n).split(path.sep).join('/')));
+    publicNamesAt = now();
+  };
+  if (!publicNames) await look();
+  if (publicNames.has(rel)) return true;
+  if (now() - publicNamesAt < 10_000) return false;
+  await look();
+  return publicNames.has(rel);
+}
+
 async function staticEntry(file) {
+  if (!(await onDiskName(file))) throw Object.assign(new Error('not a file'), { code: 'ENOENT' });
   const stat = await fsp.stat(file);
   if (!stat.isFile()) throw Object.assign(new Error('not a file'), { code: 'ENOENT' });
   const cached = staticCache.get(file);
@@ -8406,7 +8521,7 @@ async function handle(req, res) {
       const secret = url.searchParams.get('key');
       const linked = linkSecret(secret, { pairingOnly: true });
       if (linked) {
-        const device = claimableId(linked.device || rawDeviceIdOf(req, url), deviceKeyOf(req), 'link', linked.trusted === true);
+        const device = claimableId(linked.device || rawDeviceIdOf(req, url), deviceKeyOf(req), 'link', linked.trusted === true, Boolean(linked.device));
         const token = issueToken({ device: device ? resolveAlias(device) : null, via: linked.via, origin: linked.origin, platform: linked.platform || 'web', trusted: linked.trusted === true });
         log.info(`Signed in ${device ? `"${nameOf(resolveAlias(device))}"` : 'a browser'} with a pairing link from ${describeWhereSync(req)}`);
         return send(res, 302, '', { Location: './', 'Set-Cookie': authCookie(req, token), 'Referrer-Policy': 'no-referrer' });
@@ -8572,7 +8687,12 @@ async function shutdown(code = 0) {
 
 function serve() {
   log.setFile(path.join(DIR.logs, 'server.log'));
-  if (importRunning()) {
+  const importing = importRunning();
+  if (importing === 'failed') {
+    log.error(`An import into ${DATA_DIR} failed part-way: Beam doesn't start on it. Run the import again with --force, or remove ${FILE.importing} to start on what's there.`);
+    process.exit(1);
+  }
+  if (importing) {
     log.warn(`An import is writing ${DATA_DIR}: Beam starts once it's done.`);
     process.exit(0);
   }
@@ -8778,17 +8898,29 @@ async function assertDataFolderFree(force) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+// (1.27.2) An import writes data/importing while it runs: Beam doesn't start meanwhile. (2026-11-05, M17) import-from too,
+// and a failed one leaves it marked failed (importRunning).
+async function withImportGuard(fn) {
+  fs.writeFileSync(FILE.importing, JSON.stringify({ pid: process.pid, at: now() }));
+  let ok = false;
+  try {
+    const result = await fn();
+    ok = true;
+    return result;
+  } finally {
+    if (ok) fs.rmSync(FILE.importing, { force: true });
+    else try { fs.writeFileSync(FILE.importing, JSON.stringify({ pid: process.pid, at: now(), failed: true })); } catch {}
+  }
+}
+
 async function commandImport(file, flags) {
   if (!file) throw new Error('Usage: node server.js import <beam-export.tar.gz> [--force]');
   await assertDataFolderFree(flags.has('--force'));
-  fs.writeFileSync(FILE.importing, JSON.stringify({ pid: process.pid, at: now() })); // (1.27.2) Beam doesn't start meanwhile
-  try {
+  await withImportGuard(async () => {
     const result = await importArchive(fs.createReadStream(file));
     tidyImportedSettings({ keepPublicUrl: flags.has('--keep-public-url') });
     console.error(`Imported ${result.files} files (${formatSize(result.bytes)}) into ${DATA_DIR}: Beam ${result.manifest.serverId}, exported ${result.manifest.created}.`);
-  } finally {
-    fs.rmSync(FILE.importing, { force: true });
-  }
+  });
 }
 
 async function postJsonTo(url, body, headers = {}) {
@@ -8803,6 +8935,10 @@ async function commandImportFrom(oldUrl, flags, options) {
   const base = normalizeBaseUrl(oldUrl || '');
   if (!base) throw new Error('Usage: node server.js import-from <old address> [--public-url <new address>] [--no-redirect] [--force]');
   await assertDataFolderFree(flags.has('--force'));
+  return withImportGuard(() => importFrom(base, flags, options)); // (2026-11-05, M17)
+}
+
+async function importFrom(base, flags, options) {
   const hello = await outbound.request(`${base}/api/hello`, { timeout: 15_000 }).then(r => r.json()).catch(err => {
     throw new Error(`Can't reach ${base} (${err.message})${outbound.proxied ? '' : '. In a container with userspace Tailscale, set BEAM_TAILNET_PROXY (see docker-compose.yml)'}`);
   });

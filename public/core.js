@@ -155,6 +155,11 @@ let toastAction = null;
 function toast(message, opts = {}) {
   if (typeof opts === 'number') opts = { ms: opts };
   const node = $('#toast');
+  // (2026-11-05, the review's M14) into the topmost open modal dialog, as openMenu does: under one it was dimmed, inert
+  // and not announced (Device info → Ring's Stop couldn't be clicked)
+  let host = document.body;
+  try { host = [...document.querySelectorAll('dialog[open]')].filter(d => d.matches(':modal')).at(-1) || document.body; } catch {}
+  if (node.parentElement !== host) host.append(node);
   // (2026-10-28, audit 2026-10-11) An error is announced at once, the rest when the screen reader is free.
   node.setAttribute('role', opts.error ? 'alert' : 'status');
   node.setAttribute('aria-live', opts.error ? 'assertive' : 'polite');
@@ -208,7 +213,7 @@ function confirmDialog({ title, text, confirm = 'OK', cancel = 'Cancel', danger 
     const ok = el('button', { class: `btn ${danger ? 'danger-fill' : 'primary'}`, type: 'button', onclick: () => { dlg.returnValue = 'ok'; dlg.close('ok'); } }, confirm);
     const no = el('button', { class: 'btn ghost', type: 'button', onclick: () => dlg.close('cancel') }, cancel);
     const dlg = openDialog({ title, body: [text && el('p', {}, text), extra], buttons: [no, ok], onClose: v => resolve(v === 'ok') });
-    ok.focus();
+    (danger ? no : ok).focus(); // (2026-11-05: Enter mustn't confirm a dangerous one)
   });
 }
 

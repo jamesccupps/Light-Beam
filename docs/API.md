@@ -117,7 +117,9 @@ A pairing link looks like `https://beam.example.ts.net/?key=bp_…`.
 Here are the ways in, from most to least seamless.
 
 **0. Automatically (v3).** `POST /api/autopair` with an optional JSON body
-`{ "client": "app" | "web", "deviceId", "name", "platform" }`. It succeeds when:
+`{ "client": "app" | "web", "deviceId", "name", "platform" }`. **(1.30)** At most 10 in 10 minutes from one Tailscale
+machine (`429 { reason: 'rate' }`); the request's own Host header must be one of this Beam's names too; a `deviceId` of
+a device that already has a sign-in gets a device of its own. It succeeds when:
 - **Tailscale vouches for an owner.** This means the request came through `tailscale serve` on the Beam machine, with
   the `Tailscale-User-Login` header. It must come from a Tailscale address and not through Funnel. `tailscale whois`
   must confirm that address belongs to that login (since 1.7.2 no answer counts as no: while tailscaled can't be
@@ -529,7 +531,7 @@ an **All devices** conversation for broadcasts.
 | `PUT /api/devices/me/backup` | **(1.8.1, feature `backups`)** an app keeps a copy of its own settings here: `{ "install": "<its id, 8–64 of A–Z a–z 0–9 _ ->", "app": "windows"\|"android", "version", "settings": {…} }` → `204`; event `devices`. Never a sign-in or a key. One per install (the same install replaces its own), the newest three per device; when a reinstall's new device is linked to the old one, they go along. `settings` is an object of at most 32 KB (`413` above). `403` for a session-only sign-in. What the apps keep: Windows (1.8.1) its Settings, hotkeys and remote control's devices; Android (1.8.2) `deviceName`, `stayConnected`, `autoCopy`, `autoDownload`, `wifiOnlyDownloads`, `maxDownloadMb`, `tileTarget` (`""` = ask), `mutedDevices`, `autoCopyDevices`, `shareNotifications`, `sharedApps` (package names), sent only when they changed. A reinstalled phone comes back with the same device id (from ANDROID_ID), so it finds its earlier install's here |
 | `GET /api/devices/{id}/backups`, `GET /api/devices/me/backups` | **(1.8.1)** `{ "device", "name", "backups": [{ "install", "app", "version", "at", "settings" }] }`, newest first: for an app to offer them back after a reinstall, or to set up a new PC like another. Any of the owner's devices signed in for good (`403` for a session-only sign-in). The device list says only when: `backup: { "at", "app" }` |
 | `POST /api/devices/{id}/ring` | **(1.3)** body `{ "stop"?: true }` → `202 { "online" }`; event `ring`. `404` unknown device, `409` a device that can't ring (`can.ring` is false) |
-| `POST /api/devices/{id}/wake` | **(1.3)** Wake-on-LAN → `200 { "sent": <packets>, "macs": <number of adapters>, "relays": [names] }` (**(1.24)** `relays`: the Beam for Linux computers also asked to send it, event `wake-relay`). `409` when the device hasn't reported any adapters |
+| `POST /api/devices/{id}/wake` | **(1.3)** Wake-on-LAN → `200 { "sent": <packets>, "macs": <number of adapters>, "relays": [names] }` (**(1.24)** `relays`: the Beam for Linux computers also asked to send it, event `wake-relay`). `409` when the device hasn't reported any adapters, or **(1.30)** isn't a PC whose Beam app proves itself with its device key; `429` after 6 a minute from one device |
 | `GET /api/devices/{id}/remote-desktop.rdp` | **(1.3)** a Remote Desktop connection file (`application/x-rdp`, attachment `<name>.rdp`). `404` when no Tailscale name or address is known |
 
 ### Device status, ring, Wake-on-LAN, Remote Desktop (1.3)
@@ -695,7 +697,7 @@ install: Tailscale on and not a test; `BEAM_SETUP_CHECK=on|off` decides otherwis
 
 | Method & path | Result |
 |---|---|
-| `GET /api/setup?refresh=1` | `{ "checks": [{ "id", "title", "ok": true \| false \| null, "detail", "fix"? }], "at" }`: without `refresh`, the last results (the first ask runs them); with it, a new look (at most every 10 s). `ok: null` is "can't tell yet"; `fix` (only when `ok` is false) says what to do |
+| `GET /api/setup?refresh=1` | `{ "checks": [{ "id", "title", "ok": true \| false \| null, "detail", "fix"? }], "at" }`: without `refresh`, the last results (the first ask runs them); with it, a new look (at most every 10 s). `ok: null` is "can't tell yet"; `fix` (only when `ok` is false) says what to do. **(1.30)** a trusted sign-in only (`403 trusted`) |
 
 The checks (each only where it applies):
 - `boot`: the servers start when Windows does (a Windows server: a scheduled task with a boot trigger runs this
@@ -845,7 +847,7 @@ points the server at a stand-in for tests); downloads only from github.com and i
 | `POST /api/items/{id}/fastlink` | **(1.13, feature `fast-links`)** `{ "hours": 1–720 }` (default 24; **1.15:** also `"maxDownloads": 1–1000` and `"removeLocation": true`, Beam Family's choices: see docs/FAMILY.md) → `201 { "link": { "id", "url", "expires", "created", "downloads", "by", "maxDownloads", "removeLocation" } }`: a link anyone can download this file with, without Beam or signing in, until it runs out. Beam Family on the same machine makes it (its local admin API, with the control.key in `BEAM_FAMILY_DATA`; docs/FAMILY.md), from the file itself: a hard link on the same drive, else a copy the link follows as it arrives. `400` not a file, or hours out of range; `404` not on the server any more; `503` Beam Family isn't set up, answering, or new enough; Family's own errors pass on (`409` no owner yet, `429` 50 links working, `507` storage full) |
 | `POST /api/items/delete` | **(v3)** `{ "ids": [...] }` (up to 1000) → `{ "deleted": n }`; events `delete` |
 | `POST /api/items/ack` | **(1.23.4)** `{ "ids": [...] }` (up to 1000): several marked as delivered to the calling device at once (the web app sends what it has seen in one request) → `{ "delivered": { id: { device: time } } }` for the items that exist; an event `update` for each one that changed |
-| `PUT /api/items/{id}/thumb` | **(v3)** body = a JPEG or WebP thumbnail (`Content-Type: image/jpeg|image/webp`, ≤ 256 KB; Beam's apps make them 640 px on the longest side since 1.23.4, 320 before; **(1.24.1)** a device that showed a picture from its original makes one when it has none), only for image/video items → `204`; event `update` with `thumb: true` |
+| `PUT /api/items/{id}/thumb` | **(v3)** body = a JPEG or WebP thumbnail (`Content-Type: image/jpeg|image/webp`, ≤ 256 KB; Beam's apps make them 640 px on the longest side since 1.23.4, 320 before; **(1.24.1)** a device that showed a picture from its original makes one when it has none), only for image/video items → `204`; event `update` with `thumb: true`. **(1.30)** its header must say its size, at most 2048 px a side (`400` otherwise) |
 | `GET /api/items/{id}/thumb` | **(v3)** the thumbnail, or `404` |
 | `DELETE /api/items/{id}` | Delete one → `204` |
 | `DELETE /api/items` | Delete all → `{ "deleted": n }` |
@@ -1287,6 +1289,7 @@ The PC enforces every rule itself: its switch, its banner, the lease, and the pe
     owners) and `viewer.ip` (the Tailscale address the request came from) are confirmed by Tailscale and the request:
     lead with those;
   - `ip4` and `ip6` are the machine's addresses (either may be `null`); `platform` is its Beam platform.
+  - **(1.30)** a session can't be started by a viewer whose trust was taken away while it was being set up.
   - **(1.29.4)** `link`, when known: the link between them in Mbit/s, the smaller of the PC's upload and the viewer's
     download in their latest speed tests to this Beam (this server's own machine: no limit of its own), each from the
     last 30 days and taken where the device is now (the same direct Tailscale path's address, kept only as a hash).

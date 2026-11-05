@@ -197,7 +197,8 @@ function serve() {
     }
     try {
       if (p.startsWith('/api/')) {
-        if (p === '/api/hello') return send(res, 200, { family: true, version: VERSION });
+        // (2026-11-05) the exact version only on this machine (not to every visitor of the public link)
+        if (p === '/api/hello') return send(res, 200, { family: true, ...(auth.fromLoopback(req) && !req.headers['x-forwarded-for'] && { version: VERSION }) });
         if (p === '/api/admin/shutdown' || p === '/api/admin/backup' || p === '/api/admin/fastlink') {
           const given = Buffer.from(String(req.headers['x-family-control'] || ''));
           const ok = req.method === 'POST' && auth.fromLoopback(req) && !req.headers['x-forwarded-for'] && given.length === Buffer.byteLength(control) && crypto.timingSafeEqual(given, Buffer.from(control));
@@ -243,6 +244,7 @@ function serve() {
   const purge = () => {
     try {
       const t = now();
+      db.run('DELETE FROM push_subs WHERE session_hash IS NOT NULL AND session_hash NOT IN (SELECT hash FROM sessions WHERE expires_at > ?)', t); // (M24)
       const gone = db.run('DELETE FROM sessions WHERE expires_at < ?', t).changes + db.run('DELETE FROM invites WHERE expires_at < ?', t - 30 * 86400e3).changes
         + db.run('DELETE FROM audit WHERE at < ?', t - 365 * 86400e3).changes;
       if (gone) log.info(`Cleaned up ${gone} expired sign-in${gone === 1 ? '' : 's'}, invites and old audit lines`);

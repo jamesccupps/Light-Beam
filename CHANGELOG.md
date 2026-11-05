@@ -11,6 +11,29 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 
 Each release is tagged with the server's version (`v1.29.5`). An entry says which other parts moved.
 
+## 1.30.0 (2026-11-05): a review's fixes, server, web app and Beam Family
+
+**Versions:** server 1.30.0 (Beam Family with it; its database moves to version 7), Windows app 1.22.1, Android app
+1.15.0, Beam for Linux 1.5.1 (unchanged).
+
+- **Sign-in and trust:** a sign-in that isn't approved can no longer take the id of a device that already has a sign-in
+  (approving that device used to approve both); the approval switch says when a device has more than one sign-in.
+  Automatic (Tailscale) sign-ins are limited per machine and check the request's own Host header too; a removed or
+  unapproved device's pairing links stop working; Wake-on-LAN only for PCs whose Beam app proves itself, a few a minute;
+  the setup check and turning down a sign-in need an approved, lasting sign-in.
+- **No more stalls from long names or messages:** trimming is linear (a name or message with a very long run of dots,
+  spaces or blank lines held the server for seconds).
+- **Data:** a move stays paused for as long as its copy runs; a failed import leaves a marker so the server doesn't
+  start on half a data folder; static files only by their names on disk; an edited long text isn't served from an old
+  copy; thumbnails bigger than 2048 px a side are refused.
+- **Web app:** a link that asks to paste shows the paste preview first; a share shows what it holds before you choose
+  where it goes; a file queued offline is kept until its upload finishes; messages show above open dialogs; dangerous
+  confirmations start on Cancel.
+- **Beam Family:** sign-in limits apply before a request's body is read; browser notifications stop when the sign-in
+  that turned them on ends (each browser registers again when Family is next opened there); an invite stops working when
+  the admin who made it is turned off or made a member.
+- **Packaging:** `.dockerignore` keeps backups and Family's data out of images.
+
 ## 1.29.5 (2026-11-05): where things stand
 
 **Versions:** server 1.29.5, Windows app 1.22.1, Android app 1.15.0, Beam for Linux 1.5.1.

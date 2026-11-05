@@ -216,6 +216,23 @@ async function pickUpShares() {
     const shareCache = await caches.open('beam-share');
     const requests = await shareCache.keys();
     if (!requests.length) return;
+    // (2026-11-05, the review's M12) what it is, first: any web page can post a "share" to Beam's service worker, and
+    // the chooser said only "1 shared item"
+    const list = el('div', { class: 'paste-files' });
+    for (const request of requests.slice(0, 12)) {
+      const res = await shareCache.match(request);
+      if (!res) continue;
+      if (res.headers.get('X-Kind') === 'text') {
+        const text = await res.clone().text();
+        list.append(el('pre', { class: 'paste-preview' }, text.length > 600 ? `${text.slice(0, 600)}…` : text));
+      } else {
+        const size = Number((await res.clone().blob()).size) || 0;
+        list.append(el('div', { class: 'fname' }, `${decodeURIComponent(res.headers.get('X-Name') || 'file')} · ${formatSize(size)}`));
+      }
+    }
+    if (requests.length > 12) list.append(el('div', { class: 'muted small' }, `and ${requests.length - 12} more`));
+    const ok = await confirmDialog({ title: 'Send what was shared?', text: 'Shared from another app. Check it’s what you meant to send.', extra: list, confirm: 'Choose where…' });
+    if (!ok) { await Promise.all(requests.map(r => shareCache.delete(r))); return; }
     const conv = await chooseConv(`${plural(requests.length, 'shared item')}`);
     if (!conv) { await Promise.all(requests.map(r => shareCache.delete(r))); return; }
     openConv(conv);
@@ -303,7 +320,8 @@ async function init() {
   const shareError = params.has('share-error');
   if ([...params.keys()].length) history.replaceState(history.state, '', BASE.pathname + location.hash);
   // (1.23.5, audit) only a conversation's shape: `?conv=__proto__` put "[object Object]" in the composer
-  if (convParam && (convParam === 'all' || (DEVICE_ID.test(convParam) && !Object.hasOwn(Object.prototype, convParam)))) current = convParam;
+  // (2026-11-05, M11) not with ?action=paste: a link mustn't choose where the clipboard goes
+  if (convParam && !wantsPaste && (convParam === 'all' || (DEVICE_ID.test(convParam) && !Object.hasOwn(Object.prototype, convParam)))) current = convParam;
 
   initIdentity();
   bindUI();
@@ -361,7 +379,7 @@ async function init() {
   if (paired) {
     loadComposerDraft(current);
     pickUpShares();
-    if (wantsPaste) pasteAndSend();
+    if (wantsPaste) pasteAndSend({ confirm: true });
     if (shareError) toast('Couldn’t take that share (not enough storage on this device?).', { error: true });
   }
   window.launchQueue?.setConsumer(p => {
@@ -369,7 +387,7 @@ async function init() {
     const q = new URL(p.targetURL).searchParams;
     if (q.get('approve') && paired) lookUpApproval(q.get('approve'));
     if (q.get('conv') && paired) openConv(q.get('conv'));
-    if (q.get('action') === 'paste' && paired) pasteAndSend();
+    if (q.get('action') === 'paste' && paired) pasteAndSend({ confirm: true });
   });
 }
 
