@@ -814,8 +814,8 @@ The short version (the threat model and how to report a problem are in [SECURITY
 
 ## Roadmap and contributing
 
-Where it's going: [ROADMAP.md](ROADMAP.md). How to help, and how the code is laid out:
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Where it's going: [ROADMAP.md](ROADMAP.md). What changed in each release: [CHANGELOG.md](CHANGELOG.md). How to help,
+and how the code is laid out: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 
