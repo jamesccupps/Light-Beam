@@ -878,6 +878,9 @@ server:
 `POST /api/text` with JSON `{ "text": "hello", "to": ["<device id>", ...] }` → `201` + Item.
 - **(1.14, feature `replies`)** `"reply": "<item id>"` makes it a reply: the item gets `reply` (see the Item's fields),
   a preview of what it answers as it was then. `400` for something that isn't an item id.
+- **(1.30.2)** `"nonce": "<8–64 of A–Z a–z 0–9 _ ->"`: the client's own id for this text, the same on each try. The same
+  device sending the same nonce again within 15 minutes (its answer was lost on the way) gets `200` + the first item,
+  and nothing new is made. The web app and the Android app (1.16.1) send one; older servers ignore it.
 - Omit `to`, or pass `[]` or `null`, to send to all devices.
 - **(v3)** `to` must be a list of strings or a comma-separated string. Anything else is `400` (it used to silently
   mean "everyone").

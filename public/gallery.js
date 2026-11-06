@@ -27,12 +27,23 @@ function startPicking(id = '') {
 function stopPicking() {
   if (!pick.on) return;
   pick.on = false;
-  for (const id of pick.ids) markPicked(id, false);
   pick.ids.clear();
+  markAllPicked();
   pick.last = '';
   $('#app').classList.remove('picking');
   $('#galleryPanel .gal-select')?.removeAttribute('hidden');
   for (const n of $$('#galleryPanel [data-id]')) n.removeAttribute('aria-pressed');
+}
+
+// (2026-11-06, the review's speed item 6) Everything drawn, in one pass: a search of the gallery panel per item was
+// O(n²) (Select all in a gallery of thousands hung, as Select all in shared folders did until 1.29.2).
+function markAllPicked() {
+  for (const [key, node] of view.nodes) if (key.startsWith('m:')) node.classList.toggle('picked', pick.ids.has(key.slice(2)));
+  for (const node of $$('#galleryPanel [data-id]')) {
+    const on = pick.ids.has(node.dataset.id);
+    node.classList.toggle('picked', on);
+    if (pick.on) node.setAttribute('aria-pressed', String(on));
+  }
 }
 
 function markPicked(id, on) {
@@ -55,8 +66,10 @@ function togglePick(id, { range = false, order = null } = {}) {
   if (!pick.on) startPicking();
   const from = range && pick.last && order ? order.indexOf(pick.last) : -1;
   const to = order ? order.indexOf(id) : -1;
-  if (from >= 0 && to >= 0) for (let i = Math.min(from, to); i <= Math.max(from, to); i++) setPicked(order[i], true);
-  else setPicked(id, !pick.ids.has(id));
+  if (from >= 0 && to >= 0) {
+    for (let i = Math.min(from, to); i <= Math.max(from, to); i++) pick.ids.add(order[i]);
+    markAllPicked();
+  } else setPicked(id, !pick.ids.has(id));
   pick.last = id;
   renderPickBar();
 }
@@ -64,7 +77,8 @@ function togglePick(id, { range = false, order = null } = {}) {
 // Everything in the list on screen: the conversation (all of it, not only what's drawn), or the gallery's tab.
 function pickAll() {
   if (!pick.on) startPicking();
-  for (const item of gallery.open ? galleryItems(gallery.tab) : threadItems()) setPicked(item.id, true);
+  for (const item of gallery.open ? galleryItems(gallery.tab) : threadItems()) pick.ids.add(item.id);
+  markAllPicked();
   renderPickBar();
 }
 

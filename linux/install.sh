@@ -76,6 +76,10 @@ main() {
   fi
 
   has curl || fail "curl is needed (sudo apt install curl)"
+  # (Beam for Linux 1.6) A Pi Zero or Pi 1 (ARMv6) says armhf too, but nodejs.org's armv7l Node.js doesn't run there.
+  if [ "$(uname -m)" = armv6l ] && ! { has node && node_ok "$(command -v node)"; } && ! [ -x "$app_dir/node/bin/node" ]; then
+    fail "this is an ARMv6 computer (a Pi Zero or Pi 1): nodejs.org has no Node.js for it. Install Node.js 20 or later (unofficial-builds.nodejs.org has armv6l builds), then run this again."
+  fi
   case "$(dpkg --print-architecture 2>/dev/null || uname -m)" in
     arm64|aarch64) node_arch=arm64 ;;
     armhf|armv7l) node_arch=armv7l ;;
@@ -206,10 +210,11 @@ get_node() {
   say "Node.js $("$app_dir/node/bin/node" --version) is in $app_dir/node."
 }
 
-# ~/.beam.json signs in to this Beam (the address the installer came from).
+# ~/.beam.json signs in to this Beam (the address the installer came from), as Beam for Linux (1.6: an older plain
+# `beam login` is the command line's own sign-in, and Control of this computer never connected with it).
 signed_in() {
   [ -f "$HOME/.beam.json" ] || return 1
-  "$1" -e 'const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(c.key && c.url === process.argv[2] ? 0 : 1)' "$HOME/.beam.json" "$2" >/dev/null 2>&1
+  "$1" -e 'const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(c.key && c.url === process.argv[2] && c.app === "linux" ? 0 : 1)' "$HOME/.beam.json" "$2" >/dev/null 2>&1
 }
 
 main "$@"

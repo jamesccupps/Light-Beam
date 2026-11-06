@@ -229,6 +229,7 @@ namespace Beam
                     object rid = id;
                     AdminHelper.Run(app, Json.Str(m, "action"), Json.Bool(m, "prompts", false), err =>
                     {
+                        AdminHelper.StatusChanged(); // (1.23.1: what Settings shows is looked at again)
                         if (err != null) Fail(rid, "failed", err);
                         else Reply(rid, Obj("settings", app.SettingsObject()));
                         app.StatusNow("the input helper"); // (1.23) uacOnScreen may have changed

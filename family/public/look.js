@@ -33,11 +33,14 @@ const familyLookColour = (() => {
   };
 })();
 
-// Shows a look ({ theme: auto|light|dark, accent: '#rrggbb'|null }, or null: Family's own, like the device).
+// Shows a look ({ theme: auto|light|dark, accent: '#rrggbb'|null, text? }, or null: Family's own, like the device).
 function familyApplyLook(look) {
   const root = document.documentElement;
   const theme = look && (look.theme === 'light' || look.theme === 'dark') ? look.theme : '';
   if (theme) root.dataset.theme = theme; else delete root.dataset.theme;
+  // (2026-11-06) the text size (every font size is in rem): small, normal, large, larger
+  const text = look && ['small', 'large', 'larger'].includes(look.text) ? look.text : '';
+  if (text) root.dataset.text = text; else delete root.dataset.text;
   for (const name of [...root.style]) if (name.startsWith('--u-')) root.style.removeProperty(name);
   if (look && typeof look.accent === 'string' && /^#[0-9a-f]{6}$/i.test(look.accent)) {
     for (const [name, value] of Object.entries(familyLookColour(look.accent))) root.style.setProperty(name, value);

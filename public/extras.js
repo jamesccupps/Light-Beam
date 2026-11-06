@@ -413,14 +413,11 @@ function openLink(href) {
 const pendingDeletes = new Map(); // item id -> item, removed on screen but not yet on the server
 
 function deleteItems(ids, { undo = true } = {}) {
-  const removed = [];
-  for (const id of ids) {
-    const item = removeItem(id);
-    if (!item) continue;
-    touchItem(id);
-    removed.push(item);
-    pendingDeletes.set(id, item);
-    onItemRemoved(id);
+  const removed = removeItemsNow(ids); // (2026-11-06: one pass over the list)
+  for (const item of removed) {
+    touchItem(item.id);
+    pendingDeletes.set(item.id, item);
+    onItemRemoved(item.id);
   }
   if (!removed.length) return;
   const commit = () => commitDeletes(removed.map(i => i.id));
@@ -912,6 +909,20 @@ async function previewTextFile(item) {
   ];
   openDialog({ title: item.name, body: [about, filter.bar, pre], buttons, wide: true });
   show(false);
+}
+
+// (2026-11-06) A text too long for its bubble, in a window of its own: plain text (no links laid out), with the line
+// filter, and Copy all.
+function showWholeText(item, text) {
+  const pre = el('pre', { class: 'file-preview' });
+  const filter = lineFilter(pre);
+  openDialog({
+    title: `${senderName(item)}, ${shortWhen(item.ts)}`,
+    body: [el('p', { class: 'muted small' }, `${text.length.toLocaleString()} characters`), filter.bar, pre],
+    buttons: [el('button', { class: 'btn', type: 'button', onclick: () => copyText(text) }, 'Copy all')],
+    wide: true,
+  });
+  filter.set(text);
 }
 
 function showQr(text) {

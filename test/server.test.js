@@ -2346,6 +2346,13 @@ test('1.24 Wake-on-LAN through Beam for Linux: a connected Beam for Linux 1.3 se
     await waitFor(() => /Sent Wake-on-LAN for Office PC on this computer's network \(Pixel asked; 6 packets\)/.test(agent.out), 5000);
     await sleep(300);
     assert.ok(![oldPi, otherPc].some(e => e.events.some(ev => ev.event === 'wake-relay')), 'not to an older Beam for Linux, nor to another app');
+    // (Beam for Linux 1.6, the review's M22) Asked again at once: the Pi doesn't send it again within 30 seconds.
+    const before = packets.length;
+    r = await s.req('POST', '/api/devices/officepc001/wake', { headers: phone });
+    assert.equal(r.status, 200, r.body);
+    await waitFor(() => /Didn't send Wake-on-LAN for Office PC again: sent less than 30 seconds ago/.test(agent.out), 5000);
+    await sleep(800);
+    assert.equal(packets.length, before, 'no more packets from the Pi');
   } finally {
     for (const e of streams) e.close();
     for (const run of runs) try { run.child.kill(); } catch {}
@@ -3684,6 +3691,117 @@ test('1.22 Beam for Linux: the agent says how the computer is, sends its log (ne
   }
 });
 
+// (Beam for Linux 1.6, the user's review of 2026-11-05, round D) The agent as Beam for Linux runs it, installed where
+// linux/install.sh puts it: a save never holds its stream up (M31), a file too big for its disk waits unacknowledged, an
+// update must run on this Node.js (M32), and a build that keeps stopping goes back to the one before and is never
+// taken again.
+test('Beam for Linux 1.6 (the review, round D): a slow save never holds the agent up, a file too big for its disk waits, an update must run here, a build that keeps stopping goes back', async () => {
+  const s = await startServer('agent16', 8798);
+  const runs = [];
+  try {
+    const K = s.key;
+    const admin = app(K, 'admin000160', 'Admin');
+    const home = homeDir('agent16');
+    const root = path.join(TMP, 'agent16-root');
+    fs.rmSync(root, { recursive: true, force: true });
+    for (const [f, text] of Object.entries({ 'etc/os-release': 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\n', 'etc/machine-id': '0123456789abcdef0123456789abcd16\n' })) {
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+    buildLinux(s.dist);
+    const source = fs.readFileSync(path.join(s.dist, 'beam-linux.js'), 'utf8');
+    const version = /^const VERSION = '(.+)';$/m.exec(source)[1];
+    const installed = path.join(home, '.local', 'share', 'beam', 'beam.js');
+    fs.mkdirSync(path.dirname(installed), { recursive: true });
+    fs.writeFileSync(path.join(path.dirname(installed), 'package.json'), '{ "type": "commonjs" }\n');
+    fs.writeFileSync(installed, source);
+    let r = await cli(['setup', `http://127.0.0.1:${s.port}/?key=${K}`, '--name', 'Shed Pi'], { home, env: { BEAM_APP: 'linux' } });
+    assert.equal(r.code, 0, r.out);
+    const id = cliConfig(home).deviceId;
+    const saved = path.join(home, 'Downloads', 'Beam');
+    const base = { HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, '.local', 'state'), BEAM_TEST_LINUX_ROOT: root, BEAM_TEST_THROTTLED: 'throttled=0x0', BEAM_TEST_AGENT_PAUSE: '100' };
+    const startAgent = (extra = {}) => {
+      const child = spawn(process.execPath, [installed, 'agent', '--no-copy', '--no-notify'], { env: cleanEnv({ ...base, ...extra }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      children.add(child);
+      const run = { child, out: '', exited: new Promise(resolve => child.on('exit', code => { children.delete(child); resolve(code); })) };
+      child.stdout.on('data', d => { run.out += d; });
+      child.stderr.on('data', d => { run.out += d; });
+      runs.push(run);
+      return run;
+    };
+    const stopAgent = async run => { run.child.kill(); await run.exited; };
+    const device = () => s.req('GET', '/api/devices', { headers: admin }).then(x => x.json.devices.find(d => d.id === id));
+    const online = () => waitFor(async () => (await device())?.online, 15000, 200);
+    const delivered = async item => (await s.req('GET', `/api/items/${item.id}`, { headers: admin })).json.delivered?.[id];
+    const parts = () => (fs.existsSync(saved) ? fs.readdirSync(saved).filter(n => n.endsWith('.beam-part')) : []);
+
+    // (M31) A save that takes its time (BEAM_TEST_SAVE_PAUSE holds it before its rename): the stream goes on being read,
+    // so a request for the log and a text meanwhile are answered at once, and the file lands after.
+    let agent = startAgent({ BEAM_TEST_SAVE_PAUSE: '5000' });
+    await online();
+    const slow = await upload(s, admin, 'slow save.bin', Buffer.alloc(64 * 1024, 7), { to: [id] });
+    await waitFor(() => parts().length === 1, 10000);
+    assert.match(parts()[0], /^slow save\.bin\.\d+\.beam-part$/, 'a part file of this process’s own');
+    const t0 = Date.now();
+    r = await post(s, `/api/devices/${id}/log`, {}, admin);
+    assert.equal(r.status, 200, r.body);
+    const text = await sendText(s, admin, 'while it saves', [id]);
+    await waitFor(() => delivered(text), 3000);
+    assert.ok(Date.now() - t0 < 4500 && parts().length === 1, 'answered while the file was still being saved');
+    assert.ok((await device()).online, 'online all the while');
+    await waitFor(() => delivered(slow), 15000);
+    assert.equal(fs.readFileSync(path.join(saved, 'slow save.bin')).length, 64 * 1024);
+    await stopAgent(agent);
+
+    // A file too big for what's free (BEAM_TEST_FREE_BYTES: 64 KB above what a save leaves free): not saved, not
+    // acknowledged (it waits for this computer), nothing written.
+    agent = startAgent({ BEAM_TEST_FREE_BYTES: String(512 * 1024 * 1024 + 64 * 1024) });
+    await online();
+    const tight = await upload(s, admin, 'tight.bin', Buffer.alloc(128 * 1024, 1), { to: [id] });
+    await waitFor(() => /Not saved: tight\.bin from Admin \(not enough room on this computer/.test(agent.out), 10000);
+    await sleep(500);
+    assert.ok(!(await delivered(tight)), 'not acknowledged');
+    assert.ok(!fs.existsSync(path.join(saved, 'tight.bin')) && !parts().length, 'nothing written');
+    await stopAgent(agent);
+
+    // (M32) A build that Node.js can parse but that stops at once here: refused (`version` must say its version).
+    const bump = n => version.replace(/\d+$/, x => String(Number(x) + n));
+    const as = (v, extra = '') => source.replace(`\nconst VERSION = '${version}';\n`, `\nconst VERSION = '${v}';\n${extra}`);
+    agent = startAgent();
+    await online();
+    publishLinux(s.dist, as(bump(1), "throw new Error('this build needs Node.js 99');\n"), bump(1));
+    await waitFor(() => agent.out.includes(`Didn't update to Beam for Linux ${bump(1)}: it doesn't run on Node.js ${process.versions.node} here`), 15000);
+    assert.match(agent.out, /this build needs Node\.js 99/);
+    assert.equal(fs.readFileSync(installed, 'utf8'), source, 'still the one it had');
+
+    // One that runs (`version` is right) but stops within seconds of every start: taken, the one before kept...
+    const bad = as(bump(2), "if (process.argv[2] === 'agent') setTimeout(() => process.exit(3), 1500);\n");
+    publishLinux(s.dist, bad, bump(2));
+    assert.equal(await Promise.race([agent.exited, sleep(20000).then(() => 'still running')]), 0, agent.out.split('\n').slice(-4).join('\n'));
+    assert.equal(fs.readFileSync(installed, 'utf8'), bad);
+    assert.equal(fs.readFileSync(path.join(path.dirname(installed), 'beam.prev.js'), 'utf8'), source, 'the one before, kept');
+    // ...and after three quick stops (the service starts it again each time), the fourth start goes back to it.
+    for (let i = 1; i <= 3; i++) {
+      agent = startAgent();
+      assert.equal(await Promise.race([agent.exited, sleep(15000).then(() => 'still running')]), 3, `start ${i}: ${agent.out.split('\n').slice(-3).join('\n')}`);
+    }
+    agent = startAgent();
+    assert.equal(await Promise.race([agent.exited, sleep(15000).then(() => 'still running')]), 0, agent.out.split('\n').slice(-3).join('\n'));
+    assert.match(agent.out, new RegExp(`Beam for Linux ${bump(2).replace(/\./g, '\\.')} stopped 3 times within a minute of starting: back to ${version.replace(/\./g, '\\.')}`));
+    assert.equal(fs.readFileSync(installed, 'utf8'), source, 'back to the one before');
+    // The one before runs again, and never takes that build again, though Beam still offers it.
+    agent = startAgent();
+    await waitFor(async () => (await device())?.appVersion === version && (await device()).online, 15000, 200);
+    await sleep(1500);
+    assert.ok(!agent.out.includes(`Beam offers Beam for Linux ${bump(2)}`), agent.out);
+    assert.equal(fs.readFileSync(installed, 'utf8'), source);
+    assert.equal(agent.child.exitCode, null, 'still running');
+  } finally {
+    for (const run of runs) try { run.child.kill(); } catch {}
+    await s.stop();
+  }
+});
+
 // Beam for Linux 1.1: Beam in the menu of a Linux desktop. The agent writes the menu entry; `beam window` opens Beam's
 // pages in a Chromium app window of its own (a Node.js script stands in for the browser here). On Linux (CI) the agent's
 // clipboard and notifications run too, with stand-ins for wl-copy, notify-send and gdbus: never this PC's own.
@@ -4276,7 +4394,7 @@ net.createServer(c => { c.on('error', () => {}); c.write('RFB 003.008\\n'); c.on
       throw new Error(`no greeting; x11vnc's stand-in: ${(fs.existsSync(x11Args) ? fs.readFileSync(x11Args, 'utf8') : 'not started').replace(/\n/g, ' | ')} || the agent: ${x11.out.replace(/\n/g, ' | ')}`);
     });
     assert.deepEqual(JSON.parse(fs.readFileSync(x11Args, 'utf8').trim().split('\n')[0]),
-      ['-display', ':0', '-auth', 'guess', '-unixsock', pipe || path.join(runDir, 'beam', 'vnc.sock'), '-rfbport', '0', '-forever', '-shared', '-nopw', '-quiet'],
+      ['-display', ':0', '-auth', 'guess', '-unixsock', pipe || path.join(runDir, 'beam', 'vnc.sock'), '-rfbport', '0', '-forever', '-shared', '-nopw', '-quiet', '-norc', '-noremote', '-nocmds', '-novncconnect'],
       'x11vnc on the private socket, no network port');
     assert.match(x11.out, /Started x11vnc for remote control \(an X11 desktop, :0\)/);
     x11Viewer.close();
@@ -5691,6 +5809,91 @@ test('2026-11-05 review, round B: a sign-in that isn’t approved changes only i
     r = await s.req('DELETE', '/api/items', { headers: laptop });
     assert.deepEqual([r.status, r.json.deleted], [200, 2]);
   } finally { await s.stop(); await ts.close(); }
+});
+
+test('2026-11-05 review, round E (Beam 1.30.2): a text sent again with its nonce is the first one, an ack of many is one log line, a forward that shares a file counts once, a full limit says what holds it, an upload of unknown length stops at the room there is, one finished just before a stop is kept', async () => {
+  const s = await startServer('review1105e', 8791, { env: { BEAM_MAX_STORAGE_GB: String(1 / 1024) } }); // (a 1 MB limit)
+  try {
+    const K = s.key;
+    const desk = app(K, 'desk00000e01', 'Desk');
+    const shelf = app(K, 'shelf0000e01', 'Shelf PC');
+    await s.req('GET', '/api/me', { headers: shelf });
+
+    // The same text with the same nonce (its answer was lost): the first item again, not a second one.
+    let r = await post(s, '/api/text', { text: 'on my way', nonce: 'w0123456789a' }, desk);
+    assert.equal(r.status, 201, r.body);
+    const first = r.json.id;
+    r = await post(s, '/api/text', { text: 'on my way', nonce: 'w0123456789a' }, desk);
+    assert.deepEqual([r.status, r.json.id], [200, first], 'the first one again');
+    r = await post(s, '/api/text', { text: 'on my way' }, desk);
+    assert.equal(r.status, 201, 'without a nonce: a text of its own');
+    r = await post(s, '/api/text', { text: 'on my way', nonce: 'w0123456789a' }, shelf);
+    assert.equal(r.status, 201, 'another device’s nonce is its own');
+    assert.equal((await s.req('GET', '/api/items', { headers: desk })).json.items.filter(i => i.text === 'on my way').length, 3);
+
+    // An ack of many: one line in the log, not one per item.
+    const texts = [];
+    for (let i = 0; i < 5; i++) texts.push((await sendText(s, desk, `note ${i}`, ['shelf0000e01'])).id);
+    r = await post(s, '/api/items/ack', { ids: texts }, shelf);
+    assert.equal(r.status, 200, r.body);
+    await waitFor(() => /Delivered 5 items to Shelf PC/.test(s.out), 3000);
+    assert.ok(!texts.some(id => s.out.includes(`Delivered [${id.slice(0, 6)}`)), 'no line per item');
+
+    // A file and two forwards of it (hard links: the same bytes) count once against the 1 MB limit...
+    const photo = await upload(s, desk, 'photo.jpg', Buffer.alloc(600 * 1024, 3), { to: ['shelf0000e01'] });
+    for (let i = 0; i < 2; i++) {
+      r = await post(s, `/api/items/${photo.id}/forward`, { to: ['shelf0000e01'] }, desk);
+      assert.equal(r.status, 201, r.body);
+    }
+    const more = await upload(s, desk, 'more.bin', Buffer.alloc(200 * 1024, 4), { to: ['shelf0000e01'] });
+    assert.ok(more.id, 'room left: the forwards took none');
+    // ...and a full limit says what holds it (everything waits for Shelf PC).
+    const init = await post(s, '/api/uploads', { name: 'too much.bin', size: 400 * 1024, to: ['shelf0000e01'] }, desk);
+    assert.equal(init.status, 507, init.body);
+    assert.match(init.json.error, /storage limit \(1\.0 MB\) is full: 8\d\d KB waits for Shelf PC\. Delete or unpin some items\./);
+
+    // An upload of unknown length (chunked) stops at the room there is: 507, nothing kept.
+    const chunked = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: s.port, method: 'PUT', path: '/api/file?name=stream.bin', headers: { ...desk, 'Content-Type': 'application/octet-stream' } }, res => {
+        let body = '';
+        res.on('data', d => { body += d; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject);
+      const piece = Buffer.alloc(64 * 1024, 5);
+      let sent = 0;
+      const pump = () => { while (sent < 16) { sent++; if (!req.write(piece)) return void req.once('drain', pump); } req.end(); };
+      pump();
+    }).catch(err => ({ status: 0, body: err.message }));
+    assert.ok(chunked.status === 507 || chunked.status === 0, `refused (${chunked.status} ${chunked.body})`);
+    await sleep(300);
+    assert.ok(!(await s.req('GET', '/api/items', { headers: desk })).json.items.some(i => i.name === 'stream.bin'), 'nothing kept');
+
+    // An upload renamed into files/ just before Beam stopped (its item not kept yet): its item at the next start.
+    const pending = await post(s, '/api/uploads', { name: 'last one.txt', size: 5, to: ['shelf0000e01'] }, shelf);
+    assert.equal(pending.status, 201, pending.body);
+    await s.stop();
+    fs.writeFileSync(path.join(s.data, 'files', pending.json.id), 'hello');
+    fs.rmSync(path.join(s.data, 'uploads', `${pending.json.id}.part`), { force: true });
+    const again = await startServer('review1105e', 8791, { keep: true, env: { BEAM_MAX_STORAGE_GB: String(1 / 1024) } });
+    try {
+      const it = (await again.req('GET', `/api/items/${pending.json.id}`, { headers: desk })).json;
+      assert.deepEqual([it.name, it.size], ['last one.txt', 5], 'an item, not an upload from 0');
+      assert.equal((await again.req('GET', `/api/uploads/${pending.json.id}`, { headers: shelf })).status, 404, 'no upload left');
+      assert.match(again.out, /had finished just before Beam stopped: it's an item now/);
+    } finally { await again.stop(); }
+  } finally { await s.stop(); }
+});
+
+test('2026-11-05 review, round E: a GitHub app’s chosen file with a version in its name is found again in the next release', () => {
+  const appsLib = require(path.join(ROOT, 'lib', 'apps.js'));
+  const asset = name => ({ name, browser_download_url: `https://github.com/o/tool/releases/download/x/${name}` });
+  const next = { tag_name: 'v1.2.4', assets: [asset('Tool-1.2.4-win64.zip'), asset('Tool-1.2.4-linux.tar.gz'), asset('Tool-Setup-1.2.4.exe')] };
+  assert.equal(appsLib.pickAsset(next, 'tool', 'Tool-1.2.3-win64.zip').asset?.name, 'Tool-1.2.4-win64.zip');
+  assert.equal(appsLib.pickAsset(next, 'tool', 'Tool-Setup-1.2.3.exe').asset?.name, 'Tool-Setup-1.2.4.exe');
+  assert.equal(appsLib.pickAsset(next, 'tool', 'Other-1.0.zip').asset, null, 'another file: none, as before');
+  const two = { assets: [asset('Tool-2.0-a.zip'), asset('Tool-2.1-a.zip')] };
+  assert.equal(appsLib.pickAsset(two, 'tool', 'Tool-1.0-a.zip').asset, null, 'two that look the same: none (never a guess)');
 });
 
 test('2026-11-05 review: no taking a device that has a sign-in; automatic sign-ins and wakes limited; a rebound page can’t sign in; a removed device’s links stop', async () => {

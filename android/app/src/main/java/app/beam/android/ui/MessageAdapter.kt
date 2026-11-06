@@ -170,6 +170,9 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         val b = holder.b
         // Long-press on the padding, the time or a file: the menu. On the text itself: Android's selection.
         b.bubble.setOnLongClickListener { v -> holder.row?.let { longPress(v, it, b) } ?: false }
+        // (1.16.1, the user's review) what a long-press does, said by a screen reader ("double-tap and hold to …")
+        ViewCompat.replaceAccessibilityAction(b.bubble, androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_LONG_CLICK,
+            ctx.getString(R.string.message_options), null)
         b.bubble.setOnClickListener {
             when (val row = holder.row) {
                 is Row.Msg -> if (row.item.isFile) actions.open(row.item)

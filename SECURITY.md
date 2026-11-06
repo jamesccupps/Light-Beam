@@ -28,7 +28,9 @@ for the owner's family, which may face the internet.
   shows.
 - **Updates.** The apps install only what your own server offers, and only when it's signed with the key they were
   built with: Windows checks the build's signature (`windows/update-key.mjs`, since 1.7.3), Android that the update is
-  signed with the same key as the installed app. A changed `dist` folder or a server that isn't yours can't push
+  signed with the same key as the installed app, Beam for Linux its signature (the same key as Windows', its own
+  message) and the version it says, and (1.6) that it runs on that computer's Node.js before it takes its place; a build
+  that then keeps stopping goes back to the one before. A changed `dist` folder or a server that isn't yours can't push
   its own build.
 
 ## What Beam trusts

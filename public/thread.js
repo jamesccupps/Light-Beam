@@ -432,7 +432,10 @@ function buildMsg(item) {
   node.append(el('div', { class: 'sender' }, who));
   let bubble;
   if (item.kind === 'text') {
-    const text = view.fullText.get(item.id) || item.text;
+    // (2026-11-06, the review's speed item 6) A text up to 5 MB once Show all fetched it: its bubble has the start (its
+    // links found and laid out with every message there), the whole is in a window of its own.
+    const whole = view.fullText.get(item.id) || item.text;
+    const text = whole.length > BUBBLE_TEXT_MAX ? `${cutText(whole, BUBBLE_TEXT_MAX)}…` : whole;
     const body = linkify(el('div', { class: 'text' }), text);
     bubble = el('div', { class: 'bubble' }, item.reply && replyQuote(item.reply), body); // (1.14.0: what it answers)
     if (text.length > 700 || text.split('\n').length > 12) {
@@ -450,6 +453,10 @@ function buildMsg(item) {
     if (item.truncated && !view.fullText.has(item.id)) {
       const btn = el('button', { class: 'more', type: 'button' }, `Show all ${item.textLength.toLocaleString()} characters`);
       btn.addEventListener('click', () => loadFullText(item));
+      bubble.append(el('div', { class: 'fsize trunc' }, btn));
+    } else if (whole.length > BUBBLE_TEXT_MAX) {
+      const btn = el('button', { class: 'more', type: 'button' }, `Open all ${whole.length.toLocaleString()} characters`);
+      btn.addEventListener('click', () => showWholeText(item, whole));
       bubble.append(el('div', { class: 'fsize trunc' }, btn));
     }
   } else {
@@ -523,6 +530,16 @@ function reactionsRow(item) {
     chip.addEventListener('click', e => { e.stopPropagation(); toggleReaction(item, emoji); });
     return chip;
   }));
+}
+
+// (2026-11-06) How much of a text its bubble holds.
+const BUBBLE_TEXT_MAX = 100_000;
+
+// A string cut at n UTF-16 units, never in the middle of a surrogate pair.
+function cutText(s, n) {
+  if (s.length <= n) return s;
+  const code = s.charCodeAt(n - 1);
+  return s.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
 }
 
 async function loadFullText(item) {
@@ -693,13 +710,25 @@ function onItemAdded(item, { fromMe = false, quiet = false } = {}) {
   if (item.pinned || convsOf(item).includes(current)) renderHeader();
 }
 
+// (2026-11-06, the user's review, speed item 2) Many removals in a row (a clean-up's deletes, Delete on hundreds, another
+// device emptying a conversation) draw once, in the next frame: each drew the whole thread, sidebar and header.
+const removedDraw = { queued: false, thread: false, pick: false };
 function onItemRemoved(id) {
-  const key = `m:${id}`;
-  if (view.nodes.has(key)) renderThread({ scroll: 'keep' });
-  if (gallery.open) renderGallery();
-  if (pick.ids.delete(id)) renderPickBar();
+  if (view.nodes.has(`m:${id}`)) removedDraw.thread = true;
+  if (pick.ids.delete(id)) removedDraw.pick = true;
   view.expanded.delete(id);
   view.fullText.delete(id);
+  if (removedDraw.queued) return;
+  removedDraw.queued = true;
+  (document.hidden ? fn => setTimeout(fn, 50) : requestAnimationFrame)(drawRemoved);
+}
+
+function drawRemoved() {
+  const { thread, pick: picked } = removedDraw;
+  Object.assign(removedDraw, { queued: false, thread: false, pick: false });
+  if (thread) renderThread({ scroll: 'keep' });
+  if (gallery.open) renderGallery();
+  if (picked) renderPickBar();
   renderSidebar();
   renderHeader();
 }

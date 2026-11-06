@@ -457,7 +457,7 @@ namespace Beam
                 await InjectIdentity();
                 await SetCookie();
                 try { web.ZoomFactor = app.Cfg.Zoom; } catch { }
-                web.ZoomFactorChanged += (s, e) => { app.Cfg.Zoom = web.ZoomFactor; app.Cfg.Save(); };
+                web.ZoomFactorChanged += (s, e) => { app.Cfg.Zoom = web.ZoomFactor; app.SaveSoon(); }; // (1.23.1: a second later)
                 Navigate();
                 if (pageHidden) { Trim(); suspendTimer.Stop(); suspendTimer.Start(); } // closed while it was starting
             }

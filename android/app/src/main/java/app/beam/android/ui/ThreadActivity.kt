@@ -212,6 +212,11 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         }
     }
 
+    // (1.16.1) The rows of the last build (only buildRows touches these, on the flow's own thread)
+    private var lastRows: Map<String, Row.Msg> = emptyMap()
+    private var rowsFor: Map<String, Device>? = null
+    private var rowsMe = ""
+
     private fun buildRows(
         s: Repository.State,
         uploads: List<TransferManager.Upload>,
@@ -233,23 +238,38 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
                 rows += Row.Day(Format.day(ts), "d:$d")
             }
         }
+        // (1.16.1, the user's review, speed item 5) A row whose inputs are the same objects as last time (the item, the
+        // device list, its download, its saved copy) is kept as it was: during a transfer each was made again from its
+        // item 4 times a second, and each compared whole. The same object stops DiffUtil's comparison at once.
+        val reuse = rowsFor === devices && rowsMe == s.me
+        val kept = HashMap<String, Row.Msg>(items.size)
         for (item in items) {
             day(item.ts)
-            val mine = item.isFrom(s.me)
-            val sender = when {
-                mine -> null
-                item.from == null -> getString(R.string.from_device, item.device)
-                key == Conversations.ALL -> devices[item.from]?.name ?: item.device
-                else -> null
+            val download = downloads[item.id]
+            val local = locals[item.id]
+            val old = if (reuse) lastRows[item.id] else null
+            val row = if (old != null && old.item === item && old.download === download && old.local?.toString() == local) old else {
+                val mine = item.isFrom(s.me)
+                val sender = when {
+                    mine -> null
+                    item.from == null -> getString(R.string.from_device, item.device)
+                    key == Conversations.ALL -> devices[item.from]?.name ?: item.device
+                    else -> null
+                }
+                Row.Msg(
+                    item, mine, sender,
+                    Conversations.deliveryStatus(item, key, s.me, devices),
+                    mine && Conversations.isDelivered(item, key, s.me),
+                    download,
+                    local?.toUri(),
+                )
             }
-            rows += Row.Msg(
-                item, mine, sender,
-                Conversations.deliveryStatus(item, key, s.me, devices),
-                mine && Conversations.isDelivered(item, key, s.me),
-                downloads[item.id],
-                locals[item.id]?.toUri(),
-            )
+            kept[item.id] = row
+            rows += row
         }
+        lastRows = kept
+        rowsFor = devices
+        rowsMe = s.me
         for (up in pending) {
             day(up.createdAt)
             rows += Row.Up(up)
@@ -298,11 +318,22 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
                 // Not while text is selected: the list stays put under the selection.
                 grewAtEnd && (atBottom || mineAtEnd) && !adapter.hasSelection -> b.list.smoothScrollToPosition(last)
             }
+            // (1.16.1, the user's review) a message that arrives in the open conversation is read out by a screen reader
+            if (!firstList && grewAtEnd && !mineAtEnd && newLast is Row.Msg && isResumed) announceArrival(newLast)
             if (snap.rows.isNotEmpty()) firstList = false
         }
         picks.keepOnly(snap.rows.mapNotNullTo(HashSet()) { (it as? Row.Msg)?.item?.id })
         picks.onDownloads(snap.downloads)
         if (isResumed) markRead()
+    }
+
+    private fun announceArrival(row: Row.Msg) {
+        val am = getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+        if (am?.isEnabled != true) return
+        val who = row.sender ?: convTitle
+        val what = if (row.item.isFile) row.item.displayName else row.item.text.orEmpty().take(200)
+        @Suppress("DEPRECATION") // (a live region would read the whole list; this is one line, once)
+        b.list.announceForAccessibility("$who: $what")
     }
 
     /** Title, subtitle and the device's menu entries (not while the toolbar is the selection bar). */

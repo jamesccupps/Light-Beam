@@ -153,7 +153,9 @@ namespace Beam
                 // 5 minutes (or when kicked, e.g. "Retry"). Signing in again starts a new stream at once. Hammering
                 // would also count as failed sign-ins and could lock this PC's address out of the server.
                 unauthorizedInARow = Unauthorized ? unauthorizedInARow + 1 : 0;
-                int wait = unauthorizedInARow >= 2 ? 5 * 60 * 1000 : backoff;
+                // (1.23.1, the user's review, speed item 8) with a little jitter: after a server restart every PC retried on
+                // the same beat
+                int wait = unauthorizedInARow >= 2 ? 5 * 60 * 1000 : Jitter(backoff);
                 NextRetrySeconds = wait / 1000;
                 if (Disconnected != null) Disconnected(reason);
                 // Wait for the backoff delay, or until kicked.
@@ -163,6 +165,9 @@ namespace Beam
                 backoff = Math.Min(backoff * 2, 30000);
             }
         }
+
+        static readonly Random jitter = new Random();
+        static int Jitter(int ms) { lock (jitter) return (int)(ms * (0.8 + jitter.NextDouble() * 0.4)); }
 
         const int MaxEventChars = 1 << 20; // the server's own events stay far below this
 

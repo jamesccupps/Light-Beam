@@ -12,6 +12,37 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.30.2 (2026-11-06): a review's last rounds, Beam for Linux, speed, polish and CI
+
+**Versions:** server 1.30.2 (Beam Family with it), Windows app 1.23.1, Android app 1.16.1, Beam for Linux 1.6.0.
+
+- **Beam for Linux:** a big file being saved no longer holds the agent up (it went offline for minutes, and what came
+  meanwhile was lost); a file too big for the disk waits instead of filling it; an update must run on that computer's
+  Node.js before it takes over, and one that keeps stopping goes back to the version before (and is never taken again);
+  Wake-on-LAN is relayed once per device in 30 seconds; notifications show `<`, `&` and backslashes and work in any
+  locale; remote control's screen sharing starts once however many ask, and stops when a session ends while starting;
+  the log is readable by its own account only; an ARMv6 Pi gets a clear message from the installer.
+- **Speed:** finding an item by id no longer scans the list (acks and deletes of many at once were slow on a big Beam);
+  an ack of many writes one log line; in the web app many removals draw once, and Select all in a big gallery is quick;
+  a very long text shows its start in the conversation and the whole in a window of its own; the Windows app's folder
+  scans, settings saves and helper checks no longer run on its window's thread; the Android conversation reuses the rows
+  that didn't change during a transfer.
+- **Sent once:** a text whose answer was lost on the way and was sent again is the same message (web, Android, Beam
+  Family).
+- **Storage:** a forwarded file counts once; uploads still arriving are counted against the disk; an upload of unknown
+  length stops at the room there is; a full storage limit says what holds it ("800 KB waits for Shelf PC"); an upload
+  finished just before Beam stopped is kept; a log that can't be rotated (a viewer holds it) no longer grows without end.
+- **Windows:** notifications wait 2 seconds at most; a file that can't be moved into place at once (an antivirus
+  holding it, a name taken) tries again; "Save as" replaces in one step; leftovers of files to send are cleared after a
+  day; a sent screenshot gets its thumbnail; text boxes, the send picker and the keyboard-and-mouse arrangement work with
+  a screen reader and the keyboard.
+- **Apps:** a GitHub app's chosen file is found again in a release whose file names carry the new version.
+- **Beam Family:** search for short words is quick; the downloads panel no longer loses a click on Stop; text sizes
+  follow the browser's setting, with a Text size choice in Appearance.
+- **CI:** actions pinned to commits (kept current by Dependabot), read-only permissions, `npm audit` of what ships, the
+  Linux installer test required, and Beam for Linux tested on Node.js 20 and 22; the Gradle wrapper's download checked
+  against its published checksum.
+
 ## Android 1.16.0 (2026-11-06): a review's fixes, the Android app
 
 **Versions:** Android app 1.16.0; server 1.30.1, Windows app 1.23.0, Beam for Linux 1.5.1 (all unchanged).

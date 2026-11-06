@@ -641,6 +641,7 @@ namespace Beam
                     {
                         Initialized = Json.Bool(d, "initialized", true);
                         BaselineTs = Json.Long(d, "baselineTs", 0);
+                        HandledFloor = Json.Long(d, "handledFloor", 0); // (1.23.1)
                         ServerId = Json.Str(d, "serverId");
                         foreach (var id in Json.StrList(d, "ids")) if (handled.Add(id)) handledOrder.Add(id);
                         foreach (var id in Json.StrList(d, "notDelivered")) notDelivered.Add(id);
@@ -692,6 +693,18 @@ namespace Beam
             MarkHandled(new[] { id });
         }
 
+        // (1.23.1, the user's review) With its time: when it's dropped from the 2,000 kept, the floor rises to it, and
+        // anything for this PC from before the floor counts as handled (with "keep forever" or more than 2,000 items, old
+        // texts came onto the clipboard again and files were saved again as "(1)").
+        public void MarkHandled(string id, long ts)
+        {
+            if (id != null && ts > 0) handledTs[id] = ts;
+            MarkHandled(new[] { id });
+        }
+
+        public long HandledFloor;
+        readonly Dictionary<string, long> handledTs = new Dictionary<string, long>();
+
         public void MarkHandled(IEnumerable<string> ids)
         {
             bool changed = false;
@@ -701,6 +714,8 @@ namespace Beam
             }
             while (handledOrder.Count > MaxHandled)
             {
+                long ts;
+                if (handledTs.TryGetValue(handledOrder[0], out ts)) { if (ts > HandledFloor) HandledFloor = ts; handledTs.Remove(handledOrder[0]); }
                 handled.Remove(handledOrder[0]);
                 handledOrder.RemoveAt(0);
             }
@@ -712,6 +727,8 @@ namespace Beam
         {
             handled.Clear();
             handledOrder.Clear();
+            handledTs.Clear();
+            HandledFloor = 0;
             notDelivered.Clear();
             Initialized = false;
             BaselineTs = 0;
@@ -732,6 +749,7 @@ namespace Beam
                 var d = new Dictionary<string, object>();
                 d["initialized"] = Initialized;
                 d["baselineTs"] = BaselineTs;
+                d["handledFloor"] = HandledFloor; // (1.23.1)
                 d["serverId"] = ServerId;
                 d["ids"] = handledOrder.ToArray();
                 d["notDelivered"] = notDelivered.ToArray();

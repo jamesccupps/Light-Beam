@@ -76,7 +76,7 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Alerts from your other programs:** a send-only key and an ntfy-style address, so the tools you already run (stock
   and network watchers, weather stations, printers, Home Assistant) post their alerts into Beam, each as its own
   conversation you can mute; camera live views and a network path monitor later.
-- **Linux, further:** an always-on Pi waking the PCs on its own network, the Apps page for Linux (.deb files, apt), a
+- **Linux, further:** the Apps page for Linux (.deb files, apt), a
   script you allowed there run on request; a terminal on it from Beam; its screen directly between the two devices
   where they can reach each other (WebRTC) rather than through Beam; later a desktop app with a tray icon.
 - **Testing beyond Windows:** the server on Linux and macOS, the Docker setup on a NAS.

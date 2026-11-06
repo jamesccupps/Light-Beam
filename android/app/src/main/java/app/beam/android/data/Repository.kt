@@ -356,10 +356,10 @@ class Repository(private val app: BeamApp) {
     /** Sends a text right now (the [Outbox] wraps this with queueing while offline). */
     suspend fun sendText(text: String, to: List<String>, reply: String? = null): Item = withContext(Dispatchers.IO) { sendTextBlocking(text, to, reply) }
 
-    fun sendTextBlocking(text: String, to: List<String>, reply: String? = null): Item {
+    fun sendTextBlocking(text: String, to: List<String>, reply: String? = null, nonce: String? = null): Item {
         val api = app.api ?: throw IllegalStateException("Not paired")
         val item = try {
-            api.sendText(text, to, reply)
+            api.sendText(text, to, reply, nonce)
         } catch (e: BeamException) {
             // A target that was forgotten on the server: refresh the device list so it disappears.
             if (e.status == 400) runCatching { resyncBlocking() }

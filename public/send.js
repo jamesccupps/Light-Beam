@@ -5,15 +5,18 @@
 // ---------------------------------------------------------------- text
 
 async function sendText(text, conv = current, { reply = null } = {}) {
-  if (net.state === 'offline') { queueText(text, conv, { reply }); return null; }
+  // (2026-11-06, the review's Low) One nonce for this text, the outbox's retry too: Beam 1.30.2 takes a repeat (its
+  // answer lost on the way) for the first one, so it can't arrive twice.
+  const nonce = `w${randomId(10)}`;
+  if (net.state === 'offline') { queueText(text, conv, { reply, nonce }); return null; }
   const draft = showSending(text, conv, reply);
   try {
-    const item = await apiJson('api/text', jsonBody({ text, to: targetsOf(conv), ...(reply && { reply }) }));
+    const item = await apiJson('api/text', jsonBody({ text, to: targetsOf(conv), nonce, ...(reply && { reply }) }));
     acceptOwnItem(item, draft);
     return item;
   } catch (err) {
     if (dropSending(draft)) refreshPending();
-    if (err.offline) { queueText(text, conv, { maybeSent: true, reply }); return null; }
+    if (err.offline) { queueText(text, conv, { maybeSent: true, reply, nonce }); return null; }
     throw err;
   }
 }
@@ -245,8 +248,8 @@ async function discardOtherBeamOutbox() {
   if ($('#settingsDlg').open) renderSettings();
 }
 
-function queueText(text, conv, { maybeSent = false, reply = null } = {}) {
-  const entry = { id: `o${randomId(6)}`, kind: 'text', text, conv, to: targetsOf(conv), created: Date.now(), deviceId: me.id, serverId: outboxBeam(), maybeSent, ...(reply && { reply }) };
+function queueText(text, conv, { maybeSent = false, reply = null, nonce = null } = {}) {
+  const entry = { id: `o${randomId(6)}`, kind: 'text', text, conv, to: targetsOf(conv), created: Date.now(), deviceId: me.id, serverId: outboxBeam(), maybeSent, ...(reply && { reply }), nonce: nonce || `w${randomId(10)}` };
   addToOutbox(entry, 'You’re offline. It will be sent when Beam is back.');
 }
 
@@ -353,8 +356,10 @@ async function sendOutbox() {
     try {
       if (entry.kind === 'text') {
         // A request that failed half-way may have arrived after all: don't send it twice.
-        const dup = entry.maybeSent && items.find(i => i.from === me.id && i.kind === 'text' && i.text === entry.text && i.ts >= entry.created - 2000);
-        if (!dup) acceptOwnItem(await apiJson('api/text', jsonBody({ text: entry.text, to: entry.to, ...(entry.reply && { reply: entry.reply }) })));
+        // (2026-11-06, the review's Low) a text over 16 KB is listed cut: its length and start then
+        const same = i => i.text === entry.text || (i.truncated && i.textLength === entry.text.length && entry.text.startsWith(i.text));
+        const dup = entry.maybeSent && items.find(i => i.from === me.id && i.kind === 'text' && i.ts >= entry.created - 2000 && same(i));
+        if (!dup) acceptOwnItem(await apiJson('api/text', jsonBody({ text: entry.text, to: entry.to, ...(entry.nonce && { nonce: entry.nonce }), ...(entry.reply && { reply: entry.reply }) })));
         markSent(entry);
         dropOutboxEntry(entry);
       } else {

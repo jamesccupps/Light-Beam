@@ -5,7 +5,7 @@
 // the service worker's stream broke files there), or when no direct connection comes up (then from the start).
 // (1.15.1) A connection that drops goes on from where it got to (a new direct connection, else https from that byte);
 // it used to start over in the browser's own download.
-import { h, fill, formatSize, iconBtn } from './ui.js';
+import { h, formatSize, iconBtn } from './ui.js';
 import { DIRECT_MIN, directAvailable, directConnection } from './direct.js';
 import { IOS, openSink, plainSave, receiveResuming, took } from './saving.js';
 
@@ -103,20 +103,45 @@ const STATUS = {
   plain: j => `Downloading the usual way (${j.note}): see your downloads`,
 };
 
+// (2026-11-06, the user's review) Each row is made once and changed in place: rebuilt four times a second, a click on
+// Stop could land on a row just replaced, and a screen reader read the whole panel out again each time. The live region
+// says only when a download starts or ends, never its progress.
+const rows = new Map(); // job -> { row, status, stop, fill }
+let said = null;
+
+function makeRow(j) {
+  const status = h('span', { class: 'dl-status' });
+  const stop = iconBtn('x', `Stop downloading ${j.f.name}`, () => {
+    if (j.state === 'waiting') { j.state = 'stopped'; render(); } else j.stop?.();
+  });
+  const fill = h('span', { class: 'dl-fill' });
+  const row = h('div', { class: 'dl-row' },
+    h('div', { class: 'dl-text' }, h('strong', { class: 'dl-name' }, j.f.name), status), stop, h('span', { class: 'dl-track' }, fill));
+  return { row, status, stop, fill, state: '' };
+}
+
 function render() {
-  if (!jobs.length) { panel?.remove(); panel = null; return; }
+  if (!jobs.length) { panel?.remove(); panel = null; said = null; rows.clear(); return; }
   if (!panel) {
-    panel = h('div', { class: 'downloads', role: 'status', 'aria-live': 'polite', 'aria-label': 'Downloads' });
+    said = h('div', { class: 'sr-only', role: 'status', 'aria-live': 'polite' });
+    panel = h('div', { class: 'downloads', role: 'region', 'aria-label': 'Downloads' }, said);
     document.body.append(panel);
   }
   if (running) clearTimeout(hideTimer);
-  fill(panel, ...jobs.map(j => {
-    const live = LIVE.has(j.state);
-    return h('div', { class: `dl-row ${j.state}` },
-      h('div', { class: 'dl-text' }, h('strong', { class: 'dl-name' }, j.f.name), h('span', { class: 'dl-status' }, STATUS[j.state](j))),
-      live ? iconBtn('x', `Stop downloading ${j.f.name}`, () => {
-        if (j.state === 'waiting') { j.state = 'stopped'; render(); } else j.stop?.();
-      }) : null,
-      h('span', { class: 'dl-track' }, h('span', { class: 'dl-fill', style: { width: `${j.state === 'done' ? 100 : Math.round((j.got / Math.max(j.f.size, 1)) * 100)}%` } })));
-  }));
+  for (const [j, r] of rows) if (!jobs.includes(j)) { r.row.remove(); rows.delete(j); }
+  jobs.forEach((j, i) => {
+    let r = rows.get(j);
+    if (!r) rows.set(j, (r = makeRow(j)));
+    const text = STATUS[j.state](j);
+    if (r.status.textContent !== text) r.status.textContent = text;
+    if (r.state !== j.state) {
+      r.state = j.state;
+      r.row.className = `dl-row ${j.state}`;
+      r.stop.hidden = !LIVE.has(j.state);
+      if (j.state === 'going' || !LIVE.has(j.state)) said.textContent = `${j.f.name}: ${text}`;
+    }
+    r.fill.style.width = `${j.state === 'done' ? 100 : Math.round((j.got / Math.max(j.f.size, 1)) * 100)}%`;
+    const at = panel.children[i + 1]; // (after the live region)
+    if (at !== r.row) panel.insertBefore(r.row, at || null);
+  });
 }

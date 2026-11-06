@@ -115,7 +115,7 @@ class Outbox(private val app: BeamApp) {
         }
         change(localId) { copy(status = Status.SENDING, error = null) }
         return try {
-            val item = app.repo.sendTextBlocking(e.text, e.to, e.reply)
+            val item = app.repo.sendTextBlocking(e.text, e.to, e.reply, nonce = e.localId) // (1.16.1: the same each try)
             cancel(localId)
             Result.Sent(item)
         } catch (err: BeamException) {

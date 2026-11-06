@@ -190,4 +190,42 @@ export default function register(test) {
     await page.evaluate(`HOST.features = HOST.features.filter(f => f !== 'copyFiles'); renderPickBar(); 0`);
     eq(await page.evaluate(`copyPlan(pickedItems()).kind`), 'text', 'an older app: the text');
   });
+
+  test('2026-11-05 review, round E: Select all in a gallery of 3,000 photos and back is quick, 500 removals draw once, a text of 130,000 characters opens whole in a window of its own, a queued text has a nonce', async ctx => {
+    const { page, phone, meId } = await withPhone(ctx, ['hello']);
+    // 3,000 photos, put straight into the page (big ones: no previews fetched)
+    await page.evaluate(`(() => { const now = Date.now(); for (let i = 0; i < 3000; i++) putItem({ id: 'g' + String(i).padStart(15, '0'), kind: 'file', name: 'IMG_' + i + '.jpg', size: 50e6, mime: 'image/jpeg', from: '${phone.id}', device: 'Pixel', to: ['${meId}'], delivered: {}, ts: now - 60000 - i * 1000 }); renderThread({ scroll: 'keep' }); return true; })()`);
+    await page.evaluate(`openGallery(); true`);
+    await page.waitFor(`$$('#galleryPanel .gal-tile').length === 3000`, 15000, 'the gallery');
+    const ms = await page.evaluate(`(() => { const t = performance.now(); pickAll(); return performance.now() - t; })()`);
+    eq(await page.evaluate(`[pick.ids.size, $$('#galleryPanel .gal-tile.picked').length]`), [3000, 3000], 'all picked');
+    assert(ms < 1000, `Select all took ${Math.round(ms)} ms`);
+    const back = await page.evaluate(`(() => { const t = performance.now(); stopPicking(); return performance.now() - t; })()`);
+    eq(await page.evaluate(`$$('#galleryPanel .gal-tile.picked').length`), 0, 'none picked');
+    assert(back < 1000, `stopping took ${Math.round(back)} ms`);
+    console.log(`    (Select all of 3,000: ${Math.round(ms)} ms; back: ${Math.round(back)} ms)`);
+    await page.evaluate(`closeGallery(); true`);
+
+    // 500 removals in a row (another device's clean-up): the thread is drawn once, not once each.
+    await page.evaluate(`(() => { window.__draws = 0; const was = renderThread; window.renderThread = (...a) => { window.__draws++; return was(...a); }; for (let i = 0; i < 500; i++) onEventDelete('g' + String(i).padStart(15, '0')); return true; })()`);
+    await page.evaluate(`new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 100))))`);
+    eq(await page.evaluate(`[window.__draws, itemsIn('${phone.id}').length]`), [1, 2501], 'one draw for 500 removals');
+
+    // A text of 130,000 characters: Show all, then its bubble has the start and "Open all", which has the whole.
+    const long = 'line of text\n'.repeat(10000);
+    await phone.text(long, [meId]);
+    await page.waitFor(`[...itemMap.values()].some(i => i.truncated && i.textLength === ${long.length})`, 8000, 'the long text');
+    const id = await page.evaluate(`[...itemMap.values()].find(i => i.truncated && i.textLength === ${long.length}).id`);
+    await page.evaluate(`loadFullText(itemMap.get('${id}'))`);
+    await page.waitFor(`/Open all 130,000 characters/.test(document.querySelector('#thread [data-id="${id}"]')?.textContent || '')`, 8000, 'its bubble has the start');
+    eq(await page.evaluate(`document.querySelector('#thread [data-id="${id}"] .text').textContent.length`), 100001, 'the first 100,000 and …');
+    await page.evaluate(`[...document.querySelectorAll('#thread [data-id="${id}"] button.more')].find(b => /Open all/.test(b.textContent)).click()`);
+    await page.waitFor(`document.querySelector('dialog[open] pre.file-preview')?.textContent.length === ${long.length}`, 5000, 'the whole in a window');
+    await page.evaluate(`document.querySelector('dialog[open]').close(); true`);
+
+    // A text queued while offline keeps a nonce for its sending (Beam 1.30.2 takes a repeat for the first one).
+    const nonce = await page.evaluate(`(() => { queueText('later', '${phone.id}'); const e = [...outbox.values()].at(-1); const n = e.nonce; outbox.delete(e.id); outboxStore.remove(e.id); return n; })()`);
+    assert(/^w[A-Za-z0-9_-]{8,}$/.test(nonce), `a nonce: ${nonce}`);
+    eq(page.errors, [], 'no page errors');
+  });
 }

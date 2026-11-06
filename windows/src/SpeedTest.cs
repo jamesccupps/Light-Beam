@@ -12,6 +12,27 @@ using System.Threading.Tasks;
 
 namespace Beam
 {
+    // (1.23.1, the user's review, speed item 8) A body of zeros written from one small block.
+    class ZeroContent : HttpContent
+    {
+        static readonly byte[] block = new byte[64 * 1024];
+        readonly long size;
+
+        public ZeroContent(long size) { this.size = size; }
+
+        protected override async Task SerializeToStreamAsync(System.IO.Stream stream, System.Net.TransportContext context)
+        {
+            for (long left = size; left > 0; left -= block.Length)
+                await stream.WriteAsync(block, 0, (int)Math.Min(block.Length, left)).ConfigureAwait(false);
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = size;
+            return true;
+        }
+    }
+
     static class SpeedTest
     {
         const double Seconds = 3;
@@ -66,7 +87,7 @@ namespace Beam
                 {
                     using (var req = api.Request(HttpMethod.Post, "/api/speedtest/up"))
                     {
-                        req.Content = new ByteArrayContent(new byte[size]);
+                        req.Content = new ZeroContent(size); // (1.23.1: no 16 MB array for each request)
                         req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
                         using (var resp = await api.Send(req, 60, CancellationToken.None, HttpCompletionOption.ResponseContentRead).ConfigureAwait(false))
                         {

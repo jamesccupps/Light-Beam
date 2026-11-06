@@ -88,6 +88,10 @@ namespace Beam
         bool familyPending, familyPendingQuiet;  // asked for (--family, an update) before the server said where Family is
         readonly HashSet<string> alertsShown = new HashSet<string>();
         readonly Timer uiTimer, resyncTimer, integrationTimer, rediscoverTimer, updateTimer, updateRetryTimer, healthTimer;
+        // (1.23.1, the user's review, speed item 4) What changes often (the zoom at each step, the last targets at each
+        // send) is saved a second later, together: each was a whole config written and flushed to disk on the UI thread.
+        readonly Timer saveSoonTimer;
+        public void SaveSoon() { saveSoonTimer.Stop(); saveSoonTimer.Start(); }
         readonly Dictionary<string, ApproveForm> approvals = new Dictionary<string, ApproveForm>();
         readonly HashSet<string> dismissedLogins = new HashSet<string>();
         bool switchingServer, updateChecked, updating, restored, signInOffered;
@@ -189,6 +193,9 @@ namespace Beam
             updateTimer = new Timer();
             updateTimer.Interval = 6 * 3600 * 1000;
             updateTimer.Tick += (s, e) => CheckForUpdates(false, null);
+            saveSoonTimer = new Timer();
+            saveSoonTimer.Interval = 1000;
+            saveSoonTimer.Tick += (s, e) => { saveSoonTimer.Stop(); Cfg.Save(); };
             updateRetryTimer = new Timer();
             updateRetryTimer.Interval = 30000;
             updateRetryTimer.Tick += (s, e) => { updateRetryTimer.Stop(); TryInstallUpdate(); };
@@ -591,7 +598,7 @@ namespace Beam
                 LearnServer();
                 LoadReadMarkers();
                 CheckPendingLogins();
-                if (!restored) { restored = true; RestoreTransfers(); }
+                if (!restored) { restored = true; RestoreTransfers(); SweepOutgoing(); }
                 SweepPartials();
                 BecameHealthy();
                 if (!updateChecked) { updateChecked = true; CheckForUpdates(false, null); }
@@ -1073,17 +1080,21 @@ namespace Beam
         // Partial files of uploads that will never finish: `<name>.<id>.beampart` in the save folder.
         void DeletePartials(string id)
         {
-            try
+            string folder = Cfg.SaveFolderPath;
+            // (1.23.1, the user's review, speed item 4) off the UI thread: a folder of thousands is a slow look
+            Task.Run(() =>
             {
-                string folder = Cfg.SaveFolderPath;
-                if (!Directory.Exists(folder)) return;
-                foreach (var f in Directory.GetFiles(folder, "*." + id + ".beampart"))
+                try
                 {
-                    FileUtil.TryDelete(f);
-                    Log.Write("Removed the partial file of cancelled upload " + id);
+                    if (!Directory.Exists(folder)) return;
+                    foreach (var f in Directory.GetFiles(folder, "*." + id + ".beampart"))
+                    {
+                        FileUtil.TryDelete(f);
+                        Log.Write("Removed the partial file of cancelled upload " + id);
+                    }
                 }
-            }
-            catch (Exception ex) { Log.Error("Partial files", ex); }
+                catch (Exception ex) { Log.Error("Partial files", ex); }
+            });
         }
 
         // After a catch-up: partial files whose id is neither an item nor an upload still in progress (the sender
@@ -1093,11 +1104,11 @@ namespace Beam
             var api = Api;
             if (api == null) return;
             string[] files;
+            string folder = Cfg.SaveFolderPath;
             try
             {
-                string folder = Cfg.SaveFolderPath;
-                if (!Directory.Exists(folder)) return;
-                files = Directory.GetFiles(folder, "*.beampart");
+                // (1.23.1, the user's review, speed item 4) the look at the folder off the UI thread (after every catch-up)
+                files = await Task.Run(() => Directory.Exists(folder) ? Directory.GetFiles(folder, "*.beampart") : new string[0]);
             }
             catch { return; }
             foreach (var f in files.Take(20))
@@ -1829,6 +1840,7 @@ namespace Beam
                 return;
             }
             if (receiving.Contains(it.Id)) return;
+            if (it.Ts > 0 && it.Ts <= St.HandledFloor) return; // (1.23.1) older than the ids kept: handled long ago
             receiving.Add(it.Id);
             if (it.IsText) ReceiveText(it);
             else ReceiveFile(it);
@@ -1922,7 +1934,7 @@ namespace Beam
                 FileUtil.OpenUrl(text.Trim());
                 Log.Write("Opened the link in " + it.Id);
                 if (!Watching(it)) notifier.ShowItem("Opened a link from " + SenderName(it), Fmt.OneLine(text, 180), null, "link opened " + it.Id, it.Id);
-                St.MarkHandled(it.Id);
+                St.MarkHandled(it.Id, it.Ts);
                 receiving.Remove(it.Id);
                 Ack(it);
                 return;
@@ -1944,7 +1956,7 @@ namespace Beam
                 if (!copied) extras.Buttons.Add(new ToastButton("Copy", () => { if (ClipPayload.SetText(all, Cfg.ClipboardHistory)) Log.Write("Notification: copied " + id); }));
                 notifier.ShowItem((link ? "Link from " : "Text from ") + SenderName(it), body + "\n" + hint, click, "text item " + id, id, extras);
             }
-            St.MarkHandled(it.Id);
+            St.MarkHandled(it.Id, it.Ts);
             receiving.Remove(it.Id);
             Ack(it);
         }
@@ -1981,7 +1993,7 @@ namespace Beam
                 extras.Buttons.Add(new ToastButton("Save", () => SaveItemById(id, "reveal", null)));
                 notifier.ShowItem("File from " + from, it.Name + " (" + Fmt.Size(it.Size) + ")\n" + why, () => SaveItemById(id, "reveal", null), "file item " + id, id, extras);
             }
-            St.MarkHandled(it.Id);
+            St.MarkHandled(it.Id, it.Ts);
             receiving.Remove(it.Id);
             Ack(it);
         }
@@ -2063,7 +2075,7 @@ namespace Beam
                         notifier.ShowItem("Saved " + it.Name + " from " + SenderName(it), Fmt.Size(it.Size) + (media ? " · Click to see it in Beam" : " · Click to show it in the folder"),
                             media ? (Action)(() => OpenItem(itemId)) : () => FileUtil.ShowInFolder(path), "file item " + it.Id + " saved", it.Id, extras);
                     }
-                    St.MarkHandled(it.Id);
+                    St.MarkHandled(it.Id, it.Ts);
                     Ack(it);
                 }
             }
@@ -2076,7 +2088,7 @@ namespace Beam
             else if (job.Auto && (state == JobState.Gone || state == JobState.Cancelled))
             {
                 // Deleted on the server, or cancelled by the user.
-                St.MarkHandled(it.Id);
+                St.MarkHandled(it.Id, it.Ts);
                 if (state == JobState.Cancelled) Ack(it);
             }
             else if (state == JobState.Failed)
@@ -2087,7 +2099,7 @@ namespace Beam
                 // A refused sign-in isn't about this file: it's saved after signing in again.
                 if (job.Auto && job.Permanent && job.ErrorStatus != 401)
                 {
-                    St.MarkHandled(it.Id);
+                    St.MarkHandled(it.Id, it.Ts);
                     // (1.23, the user's review M5) a problem here (disk full, a folder it can't write) isn't "delivered": the
                     // sender's view said Delivered for a file that wasn't there, and the server cleared it first
                     if (job.ErrorStatus == 0) St.SetNotDelivered(it.Id, true);
@@ -2264,7 +2276,8 @@ namespace Beam
                 if (job.Result != null)
                 {
                     AddItem(job.Result);
-                    if (Thumbnail.IsImage(job.Name) && job.Path != null && File.Exists(job.Path) && ServerApi >= 3) SendThumb(job.Result.Id, job.Path);
+                    if (job.Thumb != null && ServerApi >= 3) SendThumbBytes(job.Result.Id, job.Thumb); // (1.23.1: a copy already gone)
+                    else if (Thumbnail.IsImage(job.Name) && job.Path != null && File.Exists(job.Path) && ServerApi >= 3) SendThumb(job.Result.Id, job.Path);
                     if (!job.DeleteWhenDone && job.SourceFolder == null && job.Path != null)
                     {
                         St.SetLocalPath(job.Result.Id, job.Path);
@@ -2310,6 +2323,30 @@ namespace Beam
         }
 
         // Uploads and saves that were in progress when Beam last stopped carry on where the server has them.
+        // (1.23.1, the user's review) Beam's own copies to send (clipboard pictures, zipped folders, long texts) that no
+        // upload has any more, a day old or more: cancelled screenshots, dismissed zips and texts\*.txt stayed for good.
+        void SweepOutgoing()
+        {
+            string dir = Cfg.OutgoingFolder;
+            var keep = new HashSet<string>(St.Uploads.Select(s => s.Path).Concat(Uploads.Select(j => j.Path)).Where(p => p != null), StringComparer.OrdinalIgnoreCase);
+            Task.Run(() =>
+            {
+                try
+                {
+                    if (!Directory.Exists(dir)) return;
+                    int gone = 0;
+                    var before = DateTime.UtcNow.AddDays(-1);
+                    foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                    {
+                        if (keep.Contains(f)) continue;
+                        try { if (File.GetLastWriteTimeUtc(f) < before) { File.Delete(f); gone++; } } catch { }
+                    }
+                    if (gone > 0) Log.Write("Removed " + gone + " leftover cop" + (gone == 1 ? "y" : "ies") + " of files to send (a day old, no upload has them)");
+                }
+                catch (Exception ex) { Log.Error("Outgoing folder", ex); }
+            });
+        }
+
         void RestoreTransfers()
         {
             foreach (var s in St.Uploads.ToList())
@@ -2351,6 +2388,16 @@ namespace Beam
         }
 
         // A small JPEG preview of an image we sent, so every device can show it without downloading it (v3).
+        void SendThumbBytes(string itemId, byte[] jpeg)
+        {
+            var api = Api;
+            Task.Run(async () =>
+            {
+                try { await api.PutThumb(itemId, jpeg); }
+                catch (Exception ex) { Log.Error("Thumbnail", ex); }
+            });
+        }
+
         void SendThumb(string itemId, string path)
         {
             var api = Api;
@@ -3082,7 +3129,7 @@ namespace Beam
         public void RememberTargets(List<string> targets)
         {
             Cfg.LastTargets = targets.Count == 0 ? new List<string> { "*" } : new List<string>(targets);
-            Cfg.Save();
+            SaveSoon();
         }
 
         // Last picked targets that still exist ([] = all devices), or null if there are none.
@@ -3506,6 +3553,7 @@ namespace Beam
                 if (answer != DialogResult.OK) return;
             }
             quitting = true;
+            if (saveSoonTimer.Enabled) { saveSoonTimer.Stop(); Cfg.Save(); } // (1.23.1: a save still waiting)
             Log.Write(Program.Handoff != null ? "Quitting for the update" : "Quitting");
             try
             {
@@ -3624,10 +3672,15 @@ namespace Beam
             n.Click = onClick;
             n.LogLine = logLine ?? "notification";
             n.Sent = sent;
+            if (pending.Count == 0) firstPending = DateTime.UtcNow;
             pending.Add(n);
+            // (1.23.1, the user's review) The wait starts again at each one, to show them together, but never past 2 s from
+            // the first waiting: a steady stream (one under every 600 ms) held every one back.
+            if (pending.Count > 1 && (DateTime.UtcNow - firstPending).TotalMilliseconds >= 1400) return;
             timer.Stop();
             timer.Start();
         }
+        DateTime firstPending;
 
         // About an item that came: on its own it does onClick; merged with others, a click opens the newest such item.
         public void ShowItem(string title, string text, Action onClick, string logLine, string itemId)

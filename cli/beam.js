@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.5.1';
+const VERSION = '1.6.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -345,19 +345,34 @@ async function uniquePath(dir, name) {
   }
 }
 
+// (Beam for Linux 1.6) What a save leaves free on its disk at least.
+const ROOM_LEFT = 512 * 1024 * 1024;
+
+async function freeBytes(dir) {
+  if (process.env.BEAM_TEST_FREE_BYTES) return Number(process.env.BEAM_TEST_FREE_BYTES);
+  try { const s = await fsp.statfs(dir); return s.bavail * s.bsize; } catch { return null; }
+}
+
 async function download(cfg, item, dir) {
   await fsp.mkdir(dir, { recursive: true });
+  // (Beam for Linux 1.6, the review's Low) Room for it first: a file too big for a Pi's SD card filled it, failed, and
+  // filled it again at every start of the agent.
+  const free = await freeBytes(dir);
+  if (free !== null && item.size > free - ROOM_LEFT) throw Object.assign(new Error(`not enough room on this computer (${formatSize(Math.max(free, 0))} free)`), { noRoom: true });
   const res = await api(cfg, `/api/file/${item.id}`);
   const dest = await uniquePath(dir, safeName(item.name));
-  const part = `${dest}.beam-part`;
+  // (1.6) A part file of this process's own: `beam pull` beside the agent wrote into the same one.
+  const part = `${dest}.${process.pid}.beam-part`;
   try {
     await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(part));
-    await fsp.rename(part, dest);
+    if (process.env.BEAM_TEST_SAVE_PAUSE) await new Promise(r => setTimeout(r, Number(process.env.BEAM_TEST_SAVE_PAUSE)));
+    const final = await uniquePath(dir, path.basename(dest)); // (taken meanwhile: the next free name)
+    await fsp.rename(part, final);
+    return final;
   } catch (err) {
     await fsp.rm(part, { force: true });
     throw err;
   }
-  return dest;
 }
 
 // ---------------------------------------------------------------- OS integration
@@ -502,14 +517,20 @@ async function desktopNotify(title, body = '', launch = webUrl) {
       // (Beam for Linux 1.1) with Beam's icon; without notify-send (not every desktop has it), straight to the desktop's
       // notifications through gdbus (GLib's, there wherever a GTK desktop is)
       const icon = AS_LINUX && fs.existsSync(ICON_FILE) ? ICON_FILE : '';
-      await run('notify-send', ['-a', 'Beam', ...(icon ? ['-i', icon] : []), title, body], { env, timeout: 10_000 }).catch(err => {
-        if (err.code !== 'ENOENT') throw err;
-        return run('gdbus', ['call', '--session', '--dest', 'org.freedesktop.Notifications', '--object-path', '/org/freedesktop/Notifications',
-          '--method', 'org.freedesktop.Notifications.Notify', gvText('Beam'), '0', gvText(icon), gvText(title), gvText(body), '[]', '{}', '-1'], { env, timeout: 10_000 });
-      });
+      // (Beam for Linux 1.6, the review's Low) A notification's body is markup ("a < b" broke it, "&" too), notify-send
+      // reads backslash escapes in it, and a locale that isn't UTF-8 (raspberrypi2's) dropped every notification with a
+      // "·" in it. And gdbus on any failure, not only a missing notify-send.
+      const markup = escapeMarkup(body);
+      const utf8 = { ...env, LC_ALL: 'C.UTF-8' };
+      await run('notify-send', ['-a', 'Beam', ...(icon ? ['-i', icon] : []), String(title), markup.replace(/\\/g, '\\\\')], { env: utf8, timeout: 10_000 }).catch(() =>
+        run('gdbus', ['call', '--session', '--dest', 'org.freedesktop.Notifications', '--object-path', '/org/freedesktop/Notifications',
+          '--method', 'org.freedesktop.Notifications.Notify', gvText('Beam'), '0', gvText(icon), gvText(title), gvText(markup), '[]', '{}', '-1'], { env: utf8, timeout: 10_000 }));
     }
   } catch {}
 }
+
+// (1.6) Text for a notification's body, which is markup.
+const escapeMarkup = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // A string as GVariant text (gdbus call reads its arguments that way).
 const gvText = s => `'${String(s).replace(/[\\']/g, c => `\\${c}`).replace(/\n/g, '\\n')}'`;
@@ -575,21 +596,26 @@ function ask(question, { hidden = false } = {}) {
     input.setRawMode(true);
     input.resume();
     input.setEncoding('utf8');
-    const onData = ch => {
-      if (ch === '\r' || ch === '\n' || ch === '\u0004') {
-        input.setRawMode(false);
-        input.pause();
-        input.off('data', onData);
-        process.stderr.write('\n');
-        resolve(value);
-      } else if (ch === '\u0003') {
-        process.stderr.write('\n');
-        process.exit(130);
-      } else if (ch === '\u007f' || ch === '\b') {
-        value = value.slice(0, -1);
-      } else {
-        value += ch;
-        if (!hidden) process.stderr.write(ch);
+    // (Beam for Linux 1.6, the review's Low) A paste arrives as one chunk: each of its characters counts (it was taken as
+    // one character, the Enter at its end included).
+    const onData = chunk => {
+      for (const ch of chunk) {
+        if (ch === '\r' || ch === '\n' || ch === '\u0004') {
+          input.setRawMode(false);
+          input.pause();
+          input.off('data', onData);
+          process.stderr.write('\n');
+          resolve(value);
+          return;
+        } else if (ch === '\u0003') {
+          process.stderr.write('\n');
+          process.exit(130);
+        } else if (ch === '\u007f' || ch === '\b') {
+          value = value.slice(0, -1);
+        } else {
+          value += ch;
+          if (!hidden) process.stderr.write(ch);
+        }
       }
     };
     input.on('data', onData);
@@ -1167,7 +1193,16 @@ async function listen(cfg, opt, hooks = {}) {
       }
       if (notify && clipboard) desktopNotify(copy ? `Copied from ${item.device}` : `Text from ${item.device}`, preview(text, 120));
     } else if (save && item.size <= maxSave) {
-      const dest = await download(cfg, item, dir);
+      let dest;
+      try {
+        dest = await download(cfg, item, dir);
+      } catch (err) {
+        if (!err.noRoom) throw err;
+        // (1.6) Not acknowledged: it stays waiting for this computer (the next start looks again)
+        log(`Not saved: ${item.name} from ${item.device} (${err.message})`);
+        if (notify) desktopNotify(`Not saved: ${item.name}`, `From ${item.device}: ${err.message}`);
+        return;
+      }
       log(`Saved ${item.name} from ${item.device} → ${dest}`);
       if (notify) desktopNotify(`${item.name}`, `From ${item.device} · saved to ${path.basename(dir)}`);
     } else {
@@ -1182,7 +1217,19 @@ async function listen(cfg, opt, hooks = {}) {
   async function catchUp() {
     const pending = (await listItems(cfg)).filter(i => isFor(cfg, i) && !i.delivered?.[cfg.deviceId] && !seen.has(i.id)).reverse();
     const newestText = pending.filter(i => i.kind === 'text').at(-1);
-    for (const item of pending) await receive(item, { clipboard: item === newestText }).catch(err => log(`Error: ${err.message}`));
+    for (const item of pending) take(item, { clipboard: item === newestText });
+  }
+
+  // (Beam for Linux 1.6, the review's M31) What arrives is taken on chains of its own, texts and files, while the stream
+  // goes on being read: a file saved in the loop held it up for minutes (a 2 GB video), its watchdog cut the stream, the
+  // server showed the computer offline, and rc-request, log-request, wake-relay and control-set meanwhile were lost. Each
+  // chain keeps its order; `seen` keeps repeats out.
+  let texts = Promise.resolve();
+  let files = Promise.resolve();
+  function take(item, opts) {
+    const go = () => receive(item, opts).catch(err => log(`Error: ${err.message}`));
+    if (item.kind === 'text') texts = texts.then(go);
+    else files = files.then(go);
   }
 
   await whoAmI(cfg);
@@ -1204,7 +1251,7 @@ async function listen(cfg, opt, hooks = {}) {
       connectedBefore = true;
       await catchUp();
       for await (const ev of sseEvents(res.body, alive)) {
-        if (ev.event === 'item') await receive(JSON.parse(ev.data)).catch(err => log(`Error: ${err.message}`));
+        if (ev.event === 'item') take(JSON.parse(ev.data));
         else if (ev.event === 'refresh') await whoAmI(cfg).then(catchUp).catch(() => {});
         else if (ev.event === 'moved') throw Object.assign(new Error('Beam moved'), { moved: JSON.parse(ev.data).movedTo });
         else if (ev.event === 'hello') hooks.onHello?.(jsonOr(ev.data));
@@ -1246,11 +1293,17 @@ function logLine(msg) {
   console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
   if (!logToFile) return;
   try {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true, mode: 0o700 });
     if ((fs.statSync(LOG_FILE, { throwIfNoEntry: false })?.size || 0) > LOG_MAX) fs.renameSync(LOG_FILE, `${LOG_FILE}.old`);
-    fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`);
+    fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`, { mode: 0o600 });
+    // (Beam for Linux 1.6, the review's Low) Its own only (it was readable by every account on the computer)
+    if (!logPrivate) {
+      logPrivate = true;
+      for (const [f, mode] of [[path.dirname(LOG_FILE), 0o700], [LOG_FILE, 0o600], [`${LOG_FILE}.old`, 0o600]]) { try { fs.chmodSync(f, mode); } catch {} }
+    }
   } catch {}
 }
+let logPrivate = false;
 
 const readSys = file => { try { return fs.readFileSync(path.join(SYSROOT, file), 'utf8'); } catch { return null; } };
 const oneLine = (text, max = 60) => String(text || '').replace(/\0/g, '').replace(/\s+/g, ' ').trim().slice(0, max).trim();
@@ -1391,6 +1444,7 @@ function checkForUpdate(cfg) {
   updating = (async () => {
     const offer = (await (await api(cfg, '/api/updates')).json()).linux;
     if (!offer?.version || !newerThan(offer.version, VERSION) || refusedUpdates.has(`${offer.version} ${offer.sha256}`)) return;
+    if (badBuilds().has(offer.version)) return; // (1.6) gone back from once: never again
     logLine(`Beam offers Beam for Linux ${offer.version}: updating`);
     const data = Buffer.from(await (await api(cfg, '/download/linux')).arrayBuffer());
     const sha = crypto.createHash('sha256').update(data).digest('hex');
@@ -1404,8 +1458,19 @@ function checkForUpdate(cfg) {
         fs.rmSync(next, { force: true });
         return refuse(offer, `Node.js can't read it (${oneLine(err.message, 200)})`);
       }
+      // (Beam for Linux 1.6, the review's M32) and it runs on this Node.js (20 or 22 on a Pi): one that only parses could
+      // stop at once, and the service would start it again every 5 seconds, for good. `version` loads all of it.
+      try {
+        const said = (await run(process.execPath, [next, 'version'], { timeout: 60_000 })).trim();
+        if (said !== offer.version) throw new Error(`it says ${oneLine(said, 40) || 'nothing'}`);
+      } catch (err) {
+        fs.rmSync(next, { force: true });
+        return refuse(offer, `it doesn't run on Node.js ${process.versions.node} here (${oneLine(err.message, 200)})`);
+      }
+      try { fs.copyFileSync(SELF, PREV_FILE); } catch {} // the one it updates from, to go back to (guardStarts)
       fs.renameSync(next, SELF);
       updated = true;
+      cleanStop();
       logLine(`Updated to Beam for Linux ${offer.version}: starting again`);
       setTimeout(() => process.exit(0), 200); // (the service starts it again; let the log line out first)
       return;
@@ -1413,6 +1478,46 @@ function checkForUpdate(cfg) {
     refuse(offer, problem);
   })().catch(err => logLine(`Couldn't check for an update: ${err.message}`)).finally(() => { updating = null; });
   return updating;
+}
+
+// (Beam for Linux 1.6, the review's M32) A build that stops within a minute of starting, three times running, goes back to
+// the one it updated from (beam.prev.js): otherwise the service starts it every 5 seconds, for good. The build gone back
+// from is never taken again (bad-builds). A stop asked for (the service stopped, an update) doesn't count.
+const PREV_FILE = path.join(LINUX_HOME, 'beam.prev.js');
+const BAD_FILE = path.join(LINUX_HOME, 'bad-builds');
+const STARTS_FILE = path.join(LINUX_HOME, 'starts');
+
+function badBuilds() {
+  return new Set((readText(BAD_FILE) || '').split('\n').map(s => s.trim()).filter(Boolean));
+}
+
+function cleanStop() {
+  try { fs.rmSync(STARTS_FILE, { force: true }); } catch {}
+}
+
+// At the agent's start: true when it went back (and stops; the service starts the build before).
+function guardStarts() {
+  if (SELF !== path.join(LINUX_HOME, 'beam.js')) return false;
+  const now = Date.now();
+  const starts = (readText(STARTS_FILE) || '').split('\n').map(l => l.split(' ')).filter(([v, at]) => v === VERSION && now - Number(at) < 10 * 60e3).map(([, at]) => Number(at));
+  starts.push(now);
+  try { fs.writeFileSync(STARTS_FILE, `${starts.map(at => `${VERSION} ${at}`).join('\n')}\n`); } catch {}
+  const before = /\nconst VERSION = '([^']+)';\n/.exec(readText(PREV_FILE) || '')?.[1];
+  if (starts.length > 3 && before && before !== VERSION) {
+    try {
+      fs.writeFileSync(`${SELF}.tmp`, fs.readFileSync(PREV_FILE));
+      fs.renameSync(`${SELF}.tmp`, SELF);
+      fs.appendFileSync(BAD_FILE, `${VERSION}\n`);
+      cleanStop();
+      logLine(`Beam for Linux ${VERSION} stopped ${starts.length - 1} times within a minute of starting: back to ${before}`);
+      setTimeout(() => process.exit(0), 200);
+      return true;
+    } catch (err) {
+      logLine(`Couldn't go back to Beam for Linux ${before}: ${err.message}`);
+    }
+  }
+  setTimeout(cleanStop, 60e3).unref(); // up for a minute: it works
+  return false;
 }
 
 function refuse(offer, why) {
@@ -1443,6 +1548,7 @@ const ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 const MENU_ENTRY = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'applications', 'beam.desktop');
 const MENU_ADDED = path.join(LINUX_HOME, 'menu-added'); // (taken out of the menu by hand: it stays out)
 const WINDOW_PROFILE = path.join(LINUX_HOME, 'window');
+const BROWSER_SIGNED_IN = path.join(LINUX_HOME, 'browser-signed-in'); // (1.6) Beam in the default browser has signed in
 const BROWSERS = ['chromium-browser', 'chromium', 'google-chrome-stable', 'google-chrome', 'microsoft-edge-stable', 'microsoft-edge', 'brave-browser'];
 
 const readText = file => { try { return fs.readFileSync(file, 'utf8'); } catch { return null; } };
@@ -1515,7 +1621,14 @@ async function openWindow(cfg, opt) {
   if (!env) throw new Error('there\'s no desktop on this computer to open Beam\'s window on');
   // (tests: BEAM_TEST_BROWSER, a Node.js script that stands in for the browser)
   const browser = process.env.BEAM_TEST_BROWSER ? [process.execPath, process.env.BEAM_TEST_BROWSER] : [findBrowser()].filter(Boolean);
-  if (!browser.length) return openWebApp(cfg, opt);
+  if (!browser.length) {
+    // (Beam for Linux 1.6, the review's Low) Beam in the default browser: a pairing key only the first time (or with
+    // --sign-in). One at every click of Beam in the menu was a new sign-in each time.
+    if (fs.existsSync(BROWSER_SIGNED_IN) && !opt['sign-in']) return openInBrowser(`${cfg.url}/`);
+    await openWebApp(cfg, opt);
+    try { fs.writeFileSync(BROWSER_SIGNED_IN, `${new Date().toISOString()}\n`); } catch {}
+    return;
+  }
   const first = !fs.existsSync(WINDOW_PROFILE);
   const key = first || opt['sign-in'] ? await pairingKey(cfg) : null;
   fs.mkdirSync(WINDOW_PROFILE, { recursive: true, mode: 0o700 });
@@ -1588,6 +1701,13 @@ function keyboardLayout() {
   return layout ? (variant ? `${layout}-${variant}` : layout) : null;
 }
 
+// (Beam for Linux 1.6, the review's Low) One start at a time: two requests together started two servers.
+let vncStarting = null;
+function ensureVnc() {
+  if (wayvnc && !wayvnc.exited) { clearTimeout(wayvnc.stopTimer); return Promise.resolve(); }
+  return (vncStarting ??= startWayvnc().finally(() => { vncStarting = null; }));
+}
+
 // wayvnc on the private socket, started if it isn't on. Throws, in words for the viewer, when it can't be.
 async function startWayvnc() {
   if (wayvnc && !wayvnc.exited) { clearTimeout(wayvnc.stopTimer); return; }
@@ -1642,7 +1762,10 @@ async function startX11vnc(env) {
   fs.mkdirSync(RUN_DIR, { recursive: true, mode: 0o700 });
   fs.chmodSync(RUN_DIR, 0o700);
   try { fs.rmSync(VNC_SOCKET, { force: true }); } catch {}
-  const args = [...before, '-display', display, '-auth', 'guess', '-unixsock', VNC_SOCKET, '-rfbport', '0', '-forever', '-shared', '-nopw', '-quiet'];
+  // (1.6, the review's Low) and nothing else of x11vnc's: no ~/.x11vncrc, no -remote control, no commands it runs, no
+  // vncconnect property
+  const args = [...before, '-display', display, '-auth', 'guess', '-unixsock', VNC_SOCKET, '-rfbport', '0', '-forever', '-shared', '-nopw', '-quiet',
+    '-norc', '-noremote', '-nocmds', '-novncconnect'];
   const state = { child: spawn(cmd, args, { env: { ...process.env, ...env, DISPLAY: display }, stdio: ['ignore', 'ignore', 'pipe'] }), exited: false, err: '', stopTimer: null, name: 'x11vnc' };
   state.child.stderr.on('data', d => { state.err = (state.err + d).slice(-2000); });
   state.child.on('error', err => { state.exited = true; state.err ||= err.message; });
@@ -1771,15 +1894,18 @@ async function startControl(cfg, request) {
   try {
     if (!controlAllowed()) throw Object.assign(new Error('remote control is off here (beam control on)'), { reason: 'declined' });
     const checked = viewerProblem(request.viewer); // (beside wayvnc's start: no time added)
-    await startWayvnc();
+    await ensureVnc();
     const problem = await checked;
     if (problem) throw Object.assign(new Error(problem), { reason: 'declined' });
+    // (1.6, the review's Low) Ended while the screen sharing started: nothing more of it (its lease went on every 30 s,
+    // and the server it started stayed on)
+    if (!controls.has(id)) return idleStop();
     await api(cfg, `/api/rc/sessions/${id}/lease`, { method: 'POST' });
+    if (!controls.has(id)) return idleStop();
     session.lease = setInterval(() => {
-      api(cfg, `/api/rc/sessions/${id}/lease`, { method: 'POST' }).catch(err => { if (err.status === 404 || err.status === 410) stopControl(id); });
+      api(cfg, `/api/rc/sessions/${id}/lease`, { method: 'POST' }).catch(err => { if (err.status === 404 || err.status === 410) { clearInterval(session.lease); stopControl(id); } });
     }, 30e3);
     session.lease.unref();
-    if (!controls.has(id)) return;
     const link = await wsConnect(cfg, `/api/rc/sessions/${id}/vnc`);
     session.link = link;
     if (!controls.has(id)) return link.close();
@@ -1850,12 +1976,16 @@ function stopControl(id) {
     logLine(`${session.by} stopped controlling this computer`);
     if (controlNotices) desktopNotify(`${session.by} stopped controlling this computer`, 'Beam');
   }
-  if (!controls.size && wayvnc && !wayvnc.exited) {
-    clearTimeout(wayvnc.stopTimer);
-    const was = wayvnc;
-    was.stopTimer = setTimeout(() => { if (wayvnc === was && !controls.size) { wayvnc = null; was.child.kill(); logLine(`Stopped ${was.name || 'wayvnc'} (no one is controlling this computer)`); } }, Number(process.env.BEAM_TEST_WAYVNC_IDLE) || 60e3);
-    was.stopTimer.unref();
-  }
+  idleStop();
+}
+
+// The screen sharing stops a minute after the last session.
+function idleStop() {
+  if (controls.size || !wayvnc || wayvnc.exited) return;
+  clearTimeout(wayvnc.stopTimer);
+  const was = wayvnc;
+  was.stopTimer = setTimeout(() => { if (wayvnc === was && !controls.size) { wayvnc = null; was.child.kill(); logLine(`Stopped ${was.name || 'wayvnc'} (no one is controlling this computer)`); } }, Number(process.env.BEAM_TEST_WAYVNC_IDLE) || 60e3);
+  was.stopTimer.unref();
 }
 
 // (Beam for Linux 1.3) Wake-on-LAN for another device, sent on this computer's own network(s): a PC on the same network
@@ -1882,9 +2012,24 @@ function wakeTargets() {
   return [...addresses].flatMap(address => [9, 7].map(port => ({ address, port })));
 }
 
-async function relayWake(data) {
-  const macs = (Array.isArray(data.macs) ? data.macs : []).filter(m => typeof m === 'string' && /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(m)).slice(0, 8);
-  if (!macs.length) return;
+// (Beam for Linux 1.6, the review's M22) One relay at a time, and a device woken in the last 30 seconds isn't again: any
+// sign-in may ask to wake a PC (Beam limits each to 6 a minute), and each ask had every Beam for Linux broadcast.
+const recentWakes = new Map(); // MAC → when it was sent for
+let waking = Promise.resolve();
+function relayWake(data) {
+  const now = waking.then(() => relayWakeNow(data));
+  waking = now.catch(() => {});
+  return now;
+}
+
+async function relayWakeNow(data) {
+  const asked = (Array.isArray(data.macs) ? data.macs : []).filter(m => typeof m === 'string' && /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(m)).slice(0, 8);
+  if (!asked.length) return;
+  const at = Date.now();
+  for (const [mac, when] of recentWakes) if (at - when >= 30e3) recentWakes.delete(mac);
+  const macs = asked.filter(m => !recentWakes.has(m));
+  if (!macs.length) return logLine(`Didn't send Wake-on-LAN for ${oneLine(data.name, 60) || 'a device'} again: sent less than 30 seconds ago`);
+  for (const mac of macs) recentWakes.set(mac, at);
   const socket = require('node:dgram').createSocket('udp4');
   await new Promise((resolve, reject) => {
     socket.once('error', reject);
@@ -1916,6 +2061,8 @@ async function agent(cfg, opt) {
   logToFile = true;
   controlNotices = !opt['no-notify'];
   logLine(`Beam for Linux ${VERSION} on ${osName()}${hardwareModel() ? `, ${hardwareModel()}` : ''} (Node.js ${process.versions.node})`);
+  if (guardStarts()) return new Promise(() => {}); // (1.6) back to the build before: it stops in a moment
+  for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { cleanStop(); process.exit(0); }); // a stop asked for
   ensureMenuEntry();
   // At boot the service can start before the network (or Tailscale) is up: wait for Beam, rather than stopping.
   for (let wait = 2000; ; wait = Math.min(wait * 2, 60e3)) {

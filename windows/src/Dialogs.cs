@@ -157,6 +157,7 @@ namespace Beam
             ColW = colW;
             Section("THIS PC");
             name = AddField(cfg.DeviceName, 0, Ui.S(10));
+            name.Label = "This PC's name";
             var phoneOn = app.PhoneNotificationsOn;
             if (phoneOn.HasValue)
             {
@@ -188,6 +189,7 @@ namespace Beam
             int indent = Ui.S(28);
             var upTo = Row("Up to", X0 + indent, Ui.S(48));
             maxMb = new TextField();
+            maxMb.Label = "Save files up to this many MB";
             maxMb.BackColor = Theme.Bg;
             maxMb.Text = cfg.MaxSaveMB.ToString();
             maxMb.SetBounds(upTo.Right + Ui.S(4), Y, Ui.S(90), Ui.S(36));
@@ -304,6 +306,7 @@ namespace Beam
             var browse = Button("Browse…", false);
             browse.SetBounds(X0 + W0 - browse.Width, Y, browse.Width, browse.Height);
             var f = new TextField();
+            f.Label = label;
             f.BackColor = Theme.Bg;
             f.Text = value;
             f.SetBounds(lbl.Right + Ui.S(4), Y, browse.Left - Ui.S(8) - lbl.Right - Ui.S(4), Ui.S(36));
@@ -384,6 +387,62 @@ namespace Beam
 
         int HeaderH { get { return Ui.S(62); } }
         int RowH { get { return Ui.S(44); } }
+
+        // (1.23.1, the user's review) Its rows for screen readers: it's drawn by Beam, so it had no accessible items, only
+        // a window called Beam. Each row: its device, online or not, ticked or not; the one picked with the arrows is the
+        // one in focus.
+        protected override AccessibleObject CreateAccessibilityInstance() { return new PickerAccessible(this); }
+
+        void Announce()
+        {
+            if (IsHandleCreated) AccessibilityNotifyClients(AccessibleEvents.Focus, sel);
+        }
+
+        string RowName(int i)
+        {
+            string key = keys[i];
+            if (key == "*") return "All devices" + (ticked.Contains(key) ? ", ticked" : "");
+            var d = app.DeviceById(key);
+            return app.NameOf(key) + (d != null && d.Online ? ", online" : ", offline") + (ticked.Contains(key) ? ", ticked" : "");
+        }
+
+        class PickerAccessible : Control.ControlAccessibleObject
+        {
+            readonly TargetPicker p;
+            public PickerAccessible(TargetPicker p) : base(p) { this.p = p; }
+            public override AccessibleRole Role { get { return AccessibleRole.List; } }
+            public override string Name { get { return p.title; } }
+            public override int GetChildCount() { return p.keys.Count; }
+            public override AccessibleObject GetChild(int index) { return index >= 0 && index < p.keys.Count ? new Row(p, this, index) : null; }
+            public override AccessibleObject GetFocused() { return GetChild(p.sel); }
+        }
+
+        class Row : AccessibleObject
+        {
+            readonly TargetPicker p;
+            readonly AccessibleObject parent;
+            readonly int i;
+            public Row(TargetPicker p, AccessibleObject parent, int i) { this.p = p; this.parent = parent; this.i = i; }
+            public override AccessibleObject Parent { get { return parent; } }
+            public override AccessibleRole Role { get { return AccessibleRole.ListItem; } }
+            public override string Name { get { return p.RowName(i); } }
+            public override string DefaultAction { get { return "Send"; } }
+            public override void DoDefaultAction() { p.Pick(i); }
+            public override AccessibleStates State
+            {
+                get
+                {
+                    var s = AccessibleStates.Focusable | AccessibleStates.Selectable;
+                    if (i == p.sel) s |= AccessibleStates.Focused | AccessibleStates.Selected;
+                    if (p.ticked.Contains(p.keys[i])) s |= AccessibleStates.Checked;
+                    return s;
+                }
+            }
+            public override Rectangle Bounds
+            {
+                get { return p.RectangleToScreen(new Rectangle(Ui.S(6), p.HeaderH + i * p.RowH, p.Width - Ui.S(12), p.RowH - Ui.S(2))); }
+            }
+        }
         int FooterH { get { return ticked.Count > 0 ? Ui.S(52) : Ui.S(30); } }
 
         public static void Show(App app, string title, string what, Action<List<string>> onPick)
@@ -485,8 +544,8 @@ namespace Beam
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if (e.KeyCode == Keys.Escape) Close();
-            else if (e.KeyCode == Keys.Down) { sel = (sel + 1) % keys.Count; Invalidate(); }
-            else if (e.KeyCode == Keys.Up) { sel = (sel + keys.Count - 1) % keys.Count; Invalidate(); }
+            else if (e.KeyCode == Keys.Down) { sel = (sel + 1) % keys.Count; Invalidate(); Announce(); }
+            else if (e.KeyCode == Keys.Up) { sel = (sel + keys.Count - 1) % keys.Count; Invalidate(); Announce(); }
             else if (e.KeyCode == Keys.Space) Toggle(sel);
             else if (e.KeyCode == Keys.Enter) { if (ticked.Count > 0) PickTicked(); else Pick(sel); }
             else if (e.KeyCode >= Keys.D1 && e.KeyCode <= Keys.D9) Pick(e.KeyCode - Keys.D1);

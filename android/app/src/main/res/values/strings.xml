@@ -203,6 +203,7 @@
     <string name="transfer_of">%1$s of %2$s</string>
     <string name="transfer_paused">Paused · %1$s of %2$s</string>
     <string name="transfer_waiting_wifi">Waiting for Wi-Fi · %1$s of %2$s</string>
+    <string name="message_options">show what you can do with this message</string>
     <string name="transfer_download_failed">Couldn\'t download: %1$s</string>
     <string name="transfer_not_sent">Not sent: %1$s</string>
     <string name="file_saved_meta">%1$s · Saved</string>

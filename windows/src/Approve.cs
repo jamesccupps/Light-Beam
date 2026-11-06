@@ -53,6 +53,7 @@ namespace Beam
             status = Add(new Label2("", Ui.Small, true));
             countdown = Add(new Label2("", Ui.Small, true));
             codeField = new TextField();
+            codeField.Label = "Code on the new device";
             codeField.BackColor = Theme.Bg;
             codeField.Box.CharacterCasing = CharacterCasing.Upper;
             codeField.Box.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Find(); } };

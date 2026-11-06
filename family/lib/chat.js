@@ -408,6 +408,9 @@ function createChat(ctx) {
     return { ids: [...ids], everyone: EVERYONE.test(body) };
   }
 
+  const recentPosts = new Map(); // (2026-11-06) "<user>:<channel>:<nonce>" -> { id, at }
+  const REPEAT_MS = 15 * 60e3;
+
   // POST /api/channels/:id/messages { body, reply?, files?: [attachment ids], nonce? }
   async function postMessage(req, res, { id }) {
     const user = people().requireUser(req);
@@ -425,6 +428,13 @@ function createChat(ctx) {
       replyTo = r.id;
     }
     const nonce = typeof body.nonce === 'string' ? body.nonce.slice(0, 64) : undefined;
+    // (2026-11-06, the user's review) The same nonce again from this person here within 15 minutes: its answer was lost
+    // and the page sent it again. It's the first message (it was posted twice).
+    const repeatKey = nonce && `${user.id}:${c.id}:${nonce}`;
+    const first = repeatKey && recentPosts.get(repeatKey);
+    if (first && now() - first.at < REPEAT_MS && db.get('SELECT 1 FROM messages WHERE id = ? AND deleted_at IS NULL', first.id)) {
+      return send(res, 201, { message: messageJson(first.id), nonce });
+    }
     const to = audience(c); // (audit P-4) once: for the mentions and for the event
     const mentions = mentionsIn(text, c, to);
     const messageId = newId();
@@ -442,6 +452,10 @@ function createChat(ctx) {
       db.run('UPDATE channels SET last_id = ? WHERE id = ?', messageId, c.id);
       db.run('INSERT OR REPLACE INTO reads (user_id, channel_id, last_id) VALUES (?, ?, ?)', user.id, c.id, messageId);
     });
+    if (repeatKey) {
+      recentPosts.set(repeatKey, { id: messageId, at: now() });
+      if (recentPosts.size > 2000) for (const k of recentPosts.keys()) { recentPosts.delete(k); if (recentPosts.size <= 1500) break; }
+    }
     const message = messageJson(messageId);
     hub.emit(to, 'msg', { message, nonce });
     ctx.push?.notifyMessage({ message, channel: c, author: user, to, mentions }).catch(err => log.warn(`Push: ${err.message}`));
@@ -592,7 +606,9 @@ function createChat(ctx) {
     const user = people().requireUser(req);
     const words = String(url.searchParams.get('q') || '').toWellFormed().split(/\s+/).map(w => w.replace(/"/g, '')).filter(Boolean).slice(0, 8);
     if (!words.length) return send(res, 200, { messages: [] });
-    const match = words.map((w, i) => `"${w}"${i === words.length - 1 ? '*' : ''}`).join(' ');
+    // (2026-11-06, the user's review, speed item 7) The last word is a word's start only from 3 letters ("a*" was nearly
+    // every message), and the newest come straight from the index (rowid order), not from a sort of every match.
+    const match = words.map((w, i) => `"${w}"${i === words.length - 1 && [...w].length >= 3 ? '*' : ''}`).join(' ');
     const only = url.searchParams.get('channel');
     const ids = only ? [channelFor(user, only).id] : visibleChannels(user).map(c => c.id);
     if (!ids.length) return send(res, 200, { messages: [] });
@@ -600,7 +616,7 @@ function createChat(ctx) {
     try {
       rows = db.all(`SELECT m.* FROM messages_fts f JOIN messages m ON m.rowid = f.rowid
         WHERE messages_fts MATCH ? AND m.deleted_at IS NULL AND m.kind = 'user' AND m.channel_id IN (${placeholders(ids.length)})
-        ORDER BY m.id DESC LIMIT 50`, match, ...ids);
+        ORDER BY f.rowid DESC LIMIT 50`, match, ...ids);
     } catch {
       throw httpError(400, 'Try other words');
     }

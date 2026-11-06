@@ -263,6 +263,9 @@ function lookSection(render) {
     return own ? saveMine(next) : saveFamily(next);
   };
   const seg = (value, label) => h('button', { type: 'button', class: `seg${look.theme === value ? ' on' : ''}`, 'aria-pressed': String(look.theme === value), onclick: () => save({ theme: value }) }, label);
+  // (2026-11-06) the text size, as in Beam
+  const size = look.text || 'normal';
+  const textSeg = (value, label) => h('button', { type: 'button', class: `seg${size === value ? ' on' : ''}`, 'aria-pressed': String(size === value), onclick: () => save({ text: value }) }, label);
   const preset = window.FAMILY_ACCENTS.some(([, hex]) => hex === look.accent);
   const swatch = (name, hex) => {
     const b = h('button', { type: 'button', class: 'swatch', title: name, 'aria-label': name, 'aria-pressed': String(look.accent === hex), onclick: () => save({ accent: hex }) },
@@ -287,6 +290,7 @@ function lookSection(render) {
     canEdit ? h('div', {},
       h('div', { class: 'muted small' }, own ? 'Your look' : 'The family’s look'),
       h('div', { class: 'seg-row', role: 'group', 'aria-label': 'Theme' }, seg('auto', 'Like the device'), seg('light', 'Light'), seg('dark', 'Dark')),
+      h('div', { class: 'seg-row', role: 'group', 'aria-label': 'Text size' }, textSeg('small', 'Small'), textSeg('normal', 'Normal'), textSeg('large', 'Large'), textSeg('larger', 'Larger')),
       h('div', { class: 'swatches', role: 'group', 'aria-label': 'Accent colour' }, ...window.FAMILY_ACCENTS.map(([name, hex]) => swatch(name, hex)), custom)) : null,
   ];
 }

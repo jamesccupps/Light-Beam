@@ -128,6 +128,7 @@ namespace Beam
             changeServer.Quiet = true;
             changeServer.Click += (s, e) => { typingAddress = true; choosing = false; Relayout(); address.Box.Focus(); };
             address = new TextField();
+            address.Label = "Your Beam server's address";
             address.BackColor = Theme.Bg;
             address.Box.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; ConnectTyped(); } };
             Controls.Add(address);

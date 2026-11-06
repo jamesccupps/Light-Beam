@@ -555,6 +555,13 @@ namespace Beam
             set { Box.Text = value; }
         }
 
+        // (1.23.1, the user's review) What a screen reader calls the box (it had no name).
+        public string Label
+        {
+            get { return Box.AccessibleName; }
+            set { Box.AccessibleName = value; AccessibleName = value; }
+        }
+
         public bool ReadOnly
         {
             get { return Box.ReadOnly; }

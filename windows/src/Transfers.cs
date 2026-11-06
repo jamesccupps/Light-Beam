@@ -173,6 +173,7 @@ namespace Beam
 
     class UploadJob : Job
     {
+        public byte[] Thumb; // (1.23.1) made before a copy of Beam's own is deleted
         public string LocalId;
         public string Path;
         public string SourceFolder;       // a folder being zipped into Path
@@ -441,7 +442,13 @@ namespace Beam
 
         protected override void Done(UploadJob job)
         {
-            if (job.State == JobState.Done && job.DeleteWhenDone) FileUtil.TryDelete(job.Path);
+            if (job.State == JobState.Done && job.DeleteWhenDone)
+            {
+                // (1.23.1, the user's review) its thumbnail first: a screenshot sent from the clipboard never got one (its copy
+                // was gone when the thumbnail was to be made)
+                try { if (Thumbnail.IsImage(job.Name) && job.Path != null && File.Exists(job.Path)) job.Thumb = Thumbnail.Jpeg(job.Path, 640, 256 * 1024); } catch { }
+                FileUtil.TryDelete(job.Path);
+            }
             changed(job);
         }
 
@@ -1021,13 +1028,32 @@ namespace Beam
             {
                 if (!File.Exists(job.PartPath)) File.WriteAllBytes(job.PartPath, new byte[0]);
                 string final;
-                if (job.SaveAs != null)
+                // (1.23.1, the user's review) A few tries: the name may have been taken meanwhile (the other lane saving one
+                // of the same name: a fresh name then), or something may hold the part a moment (an antivirus reading it).
+                // "Save as" replaces in one step (deleting the old one first lost it when the move then failed).
+                for (int attempt = 0; ; attempt++)
                 {
-                    final = job.SaveAs;
-                    if (File.Exists(final)) File.Delete(final);
+                    try
+                    {
+                        if (job.SaveAs != null)
+                        {
+                            final = job.SaveAs;
+                            if (File.Exists(final)) File.Replace(job.PartPath, final, null);
+                            else File.Move(job.PartPath, final);
+                        }
+                        else
+                        {
+                            final = FileUtil.UniquePath(job.Folder, FileUtil.SafeName(job.Item.Name));
+                            File.Move(job.PartPath, final);
+                        }
+                        break;
+                    }
+                    catch (IOException)
+                    {
+                        if (attempt >= 4) throw;
+                        Thread.Sleep(250 * (attempt + 1));
+                    }
                 }
-                else final = FileUtil.UniquePath(job.Folder, FileUtil.SafeName(job.Item.Name));
-                File.Move(job.PartPath, final);
                 FileUtil.MarkFromInternet(final, job.Referrer);
                 job.FinalPath = final;
                 job.State = JobState.Done;

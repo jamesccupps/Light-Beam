@@ -61,7 +61,25 @@ namespace Beam
 
         // For Settings: whether this build has the helper, whether it's set up here (and the same as this build's),
         // whether its certificate is trusted, whether UAC prompts are on the normal desktop.
+        // (1.23.1, the user's review, speed item 4) Kept for half a minute, dropped by a setup or removal: Settings asked for
+        // it at every reply, and each time two programs were compared byte by byte and the machine's certificate store was
+        // opened twice, on the UI thread.
+        static Dictionary<string, object> statusKept;
+        static DateTime statusAt;
+
+        public static void StatusChanged() { statusKept = null; }
+
         public static Dictionary<string, object> StatusObject()
+        {
+            var kept = statusKept;
+            if (kept != null && (DateTime.UtcNow - statusAt).TotalSeconds < 30) return new Dictionary<string, object>(kept);
+            var d = MakeStatus();
+            statusKept = d;
+            statusAt = DateTime.UtcNow;
+            return new Dictionary<string, object>(d);
+        }
+
+        static Dictionary<string, object> MakeStatus()
         {
             var d = new Dictionary<string, object>();
             var cert = Signer();
@@ -458,24 +476,30 @@ namespace Beam
                 p = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 4096, sec);
             }
             catch (Exception ex) { Log.Error("Remote control: the input helper's pipe", ex); return; }
-            Process proc;
-            try
-            {
-                string args = "--pipe " + name + " --parent " + Process.GetCurrentProcess().Id + " --token " + Hex(token) + (record != null ? " --record \"" + record + "\"" : "");
-                var psi = new ProcessStartInfo(exe, args);
-                psi.UseShellExecute = true; // (a UIAccess program starts through Windows' AppInfo)
-                psi.WindowStyle = ProcessWindowStyle.Hidden;
-                proc = Process.Start(psi);
-                if (proc == null) throw new InvalidOperationException("no process");
-            }
-            catch (Exception ex)
-            {
-                p.Dispose();
-                Log.Write("Remote control: the input helper didn't start (" + ex.Message + "); input goes the usual way");
-                return;
-            }
+            string args = "--pipe " + name + " --parent " + Process.GetCurrentProcess().Id + " --token " + Hex(token) + (record != null ? " --record \"" + record + "\"" : "");
             lock (io) pipe = p;
-            Task.Run(() => Connect(p, proc, token, mine));
+            // (1.23.1, the user's review, speed item 4) Started off the UI thread: Windows' AppInfo takes a moment, and the
+            // session's start waited for it. Input goes the usual way until it's connected, as before.
+            Task.Run(() =>
+            {
+                Process proc;
+                try
+                {
+                    var psi = new ProcessStartInfo(exe, args);
+                    psi.UseShellExecute = true; // (a UIAccess program starts through Windows' AppInfo)
+                    psi.WindowStyle = ProcessWindowStyle.Hidden;
+                    proc = Process.Start(psi);
+                    if (proc == null) throw new InvalidOperationException("no process");
+                }
+                catch (Exception ex)
+                {
+                    lock (io) { if (pipe == p) pipe = null; }
+                    p.Dispose();
+                    Log.Write("Remote control: the input helper didn't start (" + ex.Message + "); input goes the usual way");
+                    return;
+                }
+                Task connecting = Connect(p, proc, token, mine); // (it checks the session it was started for)
+            });
         }
 
         async Task Connect(NamedPipeServerStream p, Process proc, byte[] token, int mine)

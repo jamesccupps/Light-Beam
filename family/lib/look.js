@@ -6,17 +6,20 @@
 const { httpError } = require('./http');
 
 const THEMES = ['auto', 'light', 'dark'];
+const TEXTS = ['small', 'normal', 'large', 'larger']; // (2026-11-06, the user's review: as Beam's since 1.29)
 
 function cleanLook(v) {
   if (v === null) return null;
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw httpError(400, 'appearance must be {"theme": "auto"|"light"|"dark", "accent": "#rrggbb"|null} or null');
-  const unknown = Object.keys(v).filter(k => k !== 'theme' && k !== 'accent');
+  const unknown = Object.keys(v).filter(k => k !== 'theme' && k !== 'accent' && k !== 'text');
   if (unknown.length) throw httpError(400, `Unknown appearance field: ${unknown.join(', ')}`);
   const theme = v.theme ?? 'auto';
   if (!THEMES.includes(theme)) throw httpError(400, 'appearance.theme must be auto, light or dark');
   const accent = v.accent ?? null;
   if (accent !== null && !(typeof accent === 'string' && /^#[0-9a-f]{6}$/i.test(accent))) throw httpError(400, 'appearance.accent must be a colour like #2563eb, or null');
-  return { theme, accent: accent && accent.toLowerCase() };
+  const text = v.text ?? 'normal';
+  if (!TEXTS.includes(text)) throw httpError(400, 'appearance.text must be small, normal, large or larger');
+  return { theme, accent: accent && accent.toLowerCase(), ...(text !== 'normal' && { text }) };
 }
 
 // What's kept (JSON text), read back safely.

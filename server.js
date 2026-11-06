@@ -1089,9 +1089,18 @@ function tidOf(h1) {
   return sha256hex(h1).slice(0, 16);
 }
 
+// (1.30.2, the review's speed item 8) Each token's id is worked out once: every sign-in made or removed hashed them all.
+const tidOfHash = new Map(); // token hash (hex) -> its tid
 function indexTokens() {
   masterTid = KEY ? tidOf(sha256raw(KEY)) : '';
-  tidIndex = new Map(Object.keys(tokenStore.tokens).map(hash => [tidOf(Buffer.from(hash, 'hex')), Buffer.from(hash, 'hex')]));
+  const hashes = Object.keys(tokenStore.tokens);
+  const keep = new Set(hashes);
+  for (const h of tidOfHash.keys()) if (!keep.has(h)) tidOfHash.delete(h);
+  tidIndex = new Map(hashes.map(hash => {
+    let tid = tidOfHash.get(hash);
+    if (!tid) tidOfHash.set(hash, (tid = tidOf(Buffer.from(hash, 'hex'))));
+    return [tid, Buffer.from(hash, 'hex')];
+  }));
 }
 
 function keyMatches(candidate) {
@@ -5068,7 +5077,18 @@ async function ntfyPost(fields) {
 const filePath = id => path.join(DIR.files, id);
 const textPath = id => path.join(DIR.texts, `${id}.txt`);
 const thumbPath = id => path.join(DIR.thumbs, id);
-const findItem = id => items.find(i => i.id === id);
+// (Beam 1.30.2, the user's review of 2026-11-05, speed item 2) An id → item index: findItem was a scan of up to 100,000
+// items, and an ack of 1,000 ids or a clean-up's deletes did one each. Made again after a removal (the list is a new
+// array then); addItem keeps it up to date (the only way the list grows).
+let itemIndex = new Map();
+let indexedList = null;
+function findItem(id) {
+  if (indexedList !== items || itemIndex.size !== items.length) {
+    itemIndex = new Map(items.map(i => [i.id, i]));
+    indexedList = items;
+  }
+  return itemIndex.get(id);
+}
 
 function newId() {
   let id;
@@ -5186,6 +5206,7 @@ function cursorRev(cursor) {
 function addItem(item) {
   log.info(`${item.forwardedFrom ? 'Forwarded' : 'Sent'} ${describeItem(item)} from ${whoName(item.from, item.device)} to ${targetsText(item.to)} [${shortId(item.id)}]`);
   items.unshift(item);
+  if (indexedList === items) itemIndex.set(item.id, item); // (1.30.2: the index stays right)
   enforceMaxItems(item.id);
   itemChanged(item);
   broadcast('item', summary(item));
@@ -5362,9 +5383,39 @@ async function fullItem(item) {
 
 function storageUsed() {
   let used = 0;
-  for (const i of items) used += i.kind === 'file' ? i.size : i.textFile ? i.textLength : 0;
+  for (const i of items) {
+    // (1.30.2, the review's Low) a forward that shares its original's file (a hard link) takes no room of its own
+    if (i.sharesFile && findItem(i.sharesFile)) continue;
+    used += i.kind === 'file' ? i.size : i.textFile ? i.textLength : 0;
+  }
   for (const u of uploads.values()) used += u.size;
   return used;
+}
+
+// (1.30.2, the review's Low) What the uploads under way still bring: the disk must hold that too.
+function bytesToCome() {
+  let left = 0;
+  for (const u of uploads.values()) left += Math.max(0, u.size - Math.max(u.offset || 0, u.received || 0));
+  return left;
+}
+
+// (1.30.2, the review's polish) What holds a full storage limit: the most that waits for one device, or what's pinned.
+function storageHolder() {
+  const waiting = new Map();
+  let pinned = 0;
+  for (const i of items) {
+    const bytes = i.kind === 'file' ? i.size : i.textFile ? i.textLength : 0;
+    if (!bytes || (i.sharesFile && findItem(i.sharesFile))) continue;
+    if (i.pinned) { pinned += bytes; continue; }
+    for (const t of i.to || []) if (t !== i.from && devices[t] && !i.delivered?.[t]) waiting.set(t, (waiting.get(t) || 0) + bytes);
+  }
+  const [top, bytes] = [...waiting].sort((a, b) => b[1] - a[1])[0] || [];
+  if (top && bytes >= pinned) {
+    const d = devices[top];
+    const away = !isOnline(top) && d.lastSeen && now() - d.lastSeen >= 60e3 ? `, offline for ${durationText(now() - d.lastSeen)}` : '';
+    return `${formatSize(bytes)} waits for ${d.name}${away}`;
+  }
+  return pinned ? `${formatSize(pinned)} is pinned` : '';
 }
 
 async function diskInfo() {
@@ -5382,19 +5433,33 @@ async function diskInfo() {
 
 // Refuses (507) what the disk can't hold with 100 MB to spare, and keeps under BEAM_MAX_STORAGE_GB by removing
 // the oldest delivered, unpinned items first.
-async function ensureSpace(bytes) {
+// (1.30.2) `keep`: an item that must stay (the text being edited); the disk counts what running uploads still bring.
+async function ensureSpace(bytes, { keep = null } = {}) {
   const disk = await diskInfo();
-  if (disk && bytes + DISK_MARGIN > disk.free) {
-    throw httpError(507, `Not enough space on the Beam server: ${formatSize(Math.max(0, disk.free - DISK_MARGIN))} available, ${formatSize(bytes)} needed.`, { free: disk.free });
+  const coming = bytesToCome();
+  if (disk && bytes + coming + DISK_MARGIN > disk.free) {
+    throw httpError(507, `Not enough space on the Beam server: ${formatSize(Math.max(0, disk.free - DISK_MARGIN - coming))} available, ${formatSize(bytes)} needed.`, { free: disk.free });
   }
   if (MAX_STORAGE > 0 && storageUsed() + bytes > MAX_STORAGE) {
-    evictForSpace(storageUsed() + bytes - MAX_STORAGE);
-    if (storageUsed() + bytes > MAX_STORAGE) throw httpError(507, `Beam's storage limit (${formatSize(MAX_STORAGE)}) is full. Delete or unpin some items.`);
+    evictForSpace(storageUsed() + bytes - MAX_STORAGE, keep);
+    if (storageUsed() + bytes > MAX_STORAGE) {
+      const holder = storageHolder();
+      throw httpError(507, `Beam's storage limit (${formatSize(MAX_STORAGE)}) is full${holder ? `: ${holder}` : ''}. Delete or unpin some items.`);
+    }
   }
 }
 
-function evictForSpace(needed) {
-  const candidates = items.filter(i => !i.pinned && isDelivered(i) && (i.kind === 'file' || i.textFile)).sort((a, b) => a.ts - b.ts);
+// (1.30.2) The most a body of unknown length may be: the room there is now (a chunked one-shot upload wasn't counted).
+async function roomLeft() {
+  const disk = await diskInfo();
+  let room = MAX_UPLOAD;
+  if (disk) room = Math.min(room, disk.free - DISK_MARGIN - bytesToCome());
+  if (MAX_STORAGE > 0) room = Math.min(room, MAX_STORAGE - storageUsed());
+  return Math.max(0, room);
+}
+
+function evictForSpace(needed, keep = null) {
+  const candidates = items.filter(i => !i.pinned && i.id !== keep && isDelivered(i) && (i.kind === 'file' || i.textFile)).sort((a, b) => a.ts - b.ts);
   const gone = new Set();
   let freed = 0;
   for (const i of candidates) {
@@ -5616,21 +5681,26 @@ async function ackSome(req, res, params, url) {
   const deviceId = deviceIdOf(req, url);
   if (!deviceId) throw httpError(400, 'X-Beam-Device-Id is required');
   const delivered = {};
+  let fresh = 0;
   for (const id of new Set(ids)) {
     const item = findItem(id);
     if (!item) continue;
-    markDelivered(item, deviceId);
+    if (markDelivered(item, deviceId, { quiet: ids.length > 1 })) fresh++;
     delivered[id] = item.delivered || {};
   }
+  // (1.30.2, the review's speed item 2) one line for them all (there was one per item, up to 1,000)
+  if (fresh > 1) log.info(`Delivered ${fresh} items to ${whoName(deviceId)}`);
+  else if (fresh === 1) log.info(`Delivered 1 item to ${whoName(deviceId)}`);
   send(res, 200, { delivered });
 }
 
-function markDelivered(item, deviceId) {
-  if (deviceId === item.from || item.delivered?.[deviceId]) return;
-  log.info(`Delivered [${shortId(item.id)}] to ${whoName(deviceId)} after ${durationText(now() - item.ts)}`);
+function markDelivered(item, deviceId, { quiet = false } = {}) {
+  if (deviceId === item.from || item.delivered?.[deviceId]) return false;
+  if (!quiet) log.info(`Delivered [${shortId(item.id)}] to ${whoName(deviceId)} after ${durationText(now() - item.ts)}`);
   item.delivered = { ...item.delivered, [deviceId]: now() };
   itemChanged(item);
   broadcastUpdate(item);
+  return true;
 }
 
 async function deleteItem(req, res, [id]) {
@@ -5688,14 +5758,16 @@ async function forwardItem(req, res, [id], url) {
   const body = await readJson(req);
   const to = resolveTargets(body.to);
   const copy = { id: newId(), kind: source.kind, forwardedFrom: source.id };
+  // (1.30.2, the review's Low) the same file under a second name counts once (storageUsed): the original's own root
+  const shares = linked => { if (linked) copy.sharesFile = source.sharesFile && findItem(source.sharesFile) ? source.sharesFile : source.id; };
   if (source.kind === 'text') {
     copy.text = source.text;
     if (source.textFile) {
-      await linkOrCopy(textPath(source.id), textPath(copy.id), source.textLength);
+      shares(await linkOrCopy(textPath(source.id), textPath(copy.id), source.textLength));
       Object.assign(copy, { textFile: true, textLength: source.textLength });
     }
   } else {
-    await linkOrCopy(filePath(source.id), filePath(copy.id), source.size);
+    shares(await linkOrCopy(filePath(source.id), filePath(copy.id), source.size));
     Object.assign(copy, { name: source.name, size: source.size, mime: source.mime });
     if (source.w) Object.assign(copy, { w: source.w, h: source.h });
   }
@@ -5753,9 +5825,11 @@ async function fastLinkItem(req, res, [id], url) {
   send(res, 201, { link: answer.link });
 }
 
+// True when it's a second name for the same file (a hard link), false for a copy.
 async function linkOrCopy(from, to, size) {
   try {
     await fsp.link(from, to);
+    return true;
   } catch (err) {
     if (err.code === 'ENOENT') throw httpError(404, 'The original is missing on the server');
     if (size) await ensureSpace(size);
@@ -5765,6 +5839,7 @@ async function linkOrCopy(from, to, size) {
       await fsp.rm(to, { force: true }).catch(() => {}); // (no half copy left behind; 1.7.2)
       throw copyErr;
     }
+    return false;
   }
 }
 
@@ -5790,7 +5865,7 @@ async function editText(item, text) {
   if (!text.trim()) throw httpError(400, 'Nothing would be left: delete it instead');
   if (Buffer.byteLength(text) > MAX_TEXT) throw httpError(413, 'Too large');
   const before = item.textFile ? item.textLength : item.text.length;
-  if (text.length > before) await ensureSpace(Buffer.byteLength(text) - before);
+  if (text.length > before) await ensureSpace(Buffer.byteLength(text) - before, { keep: item.id }); // (1.30.2: never itself)
   if (text.length > INLINE_TEXT_LIMIT) {
     await writeFileDurable(textPath(item.id), text);
     Object.assign(item, { text: cutText(text, LIST_TEXT_LIMIT), textLength: text.length, textFile: true });
@@ -5836,7 +5911,7 @@ async function postText(req, res, _m, url) {
   const type = String(req.headers['content-type'] || '');
   if (authOf(req).source === 'cookie' && !isJsonType(req)) throw httpError(415, 'Send JSON (Content-Type: application/json)');
   let text = (await readTextBody(req)).toString('utf8');
-  let bodyTo, bodyReply;
+  let bodyTo, bodyReply, nonce = null;
   if (type.includes('application/json')) {
     let body;
     try { body = JSON.parse(text); } catch { throw httpError(400, 'Invalid JSON'); }
@@ -5844,6 +5919,7 @@ async function postText(req, res, _m, url) {
     text = body.text;
     bodyTo = body.to;
     bodyReply = body.reply; // (1.14.0)
+    if (typeof body.nonce === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(body.nonce)) nonce = body.nonce; // (1.30.2)
     if (typeof text !== 'string') throw httpError(400, 'Expected {"text": "..."}');
   } else if (type.includes('application/x-www-form-urlencoded')) {
     // `curl -d "hello"` sends raw text with this type; only unwrap a real `text=` field.
@@ -5852,6 +5928,11 @@ async function postText(req, res, _m, url) {
   }
   text = text.replace(/^\uFEFF/, '').toWellFormed();
   if (!text.trim()) throw httpError(400, 'Nothing to send');
+  // (1.30.2, the review's Low) The same text again from the same device with the same nonce within 15 minutes: its
+  // answer was lost and the app sent it again. It's the first one (it went twice).
+  const repeatKey = nonce && `${deviceIdOf(req, url)}:${nonce}`;
+  const first = repeatKey && recentTexts.get(repeatKey);
+  if (first && now() - first.at < REPEAT_MS && findItem(first.id)) return send(res, 200, summary(findItem(first.id)));
   const to = targetsFromRequest(req, url, bodyTo);
   await ensureSpace(Buffer.byteLength(text));
   const fields = { kind: 'text', text };
@@ -5864,9 +5945,17 @@ async function postText(req, res, _m, url) {
   }
   const item = newItem(req, url, fields, to);
   addItem(item);
+  if (repeatKey) {
+    recentTexts.set(repeatKey, { id: item.id, at: now() });
+    if (recentTexts.size > 2000) for (const [k, v] of recentTexts) { if (now() - v.at < REPEAT_MS && recentTexts.size <= 1500) break; recentTexts.delete(k); }
+  }
   await saved();
   send(res, 201, summary(item));
 }
+
+// (1.30.2) texts sent with a nonce lately: "<device>:<nonce>" -> { id, at }
+const recentTexts = new Map();
+const REPEAT_MS = 15 * 60e3;
 
 // Optional image size from the sender, for laying out previews before they load.
 function imageSize(w, h) {
@@ -5884,15 +5973,19 @@ async function postFile(req, res, _m, url) {
   const declared = Number(req.headers['content-length']);
   if (declared > MAX_UPLOAD) throw httpError(413, `File is larger than the ${formatSize(MAX_UPLOAD)} limit`);
   const to = targetsFromRequest(req, url);
-  await ensureSpace(Number.isFinite(declared) ? declared : 0);
+  const known = Number.isFinite(declared);
+  await ensureSpace(known ? declared : 0);
+  // (1.30.2, the review's Low) one of unknown length (chunked) stops at the room there is
+  const limit = known ? MAX_UPLOAD : await roomLeft();
   const name = fileNameFrom(req, url);
   const id = newId();
   const dest = filePath(id);
   let size;
   try {
-    size = await receiveBody(req, dest, MAX_UPLOAD, { durable: { want: (_n, end) => end, done: () => syncDir(DIR.files) } });
+    size = await receiveBody(req, dest, limit, { durable: { want: (_n, end) => end, done: () => syncDir(DIR.files) } });
   } catch (err) {
     await rmQuiet(dest);
+    if (err.status === 413 && limit < MAX_UPLOAD) throw httpError(507, `Not enough space on the Beam server for ${name} (${formatSize(limit)} available)`);
     if (err.status === 413) throw httpError(413, `File is larger than the ${formatSize(MAX_UPLOAD)} limit`);
     if (err.code === 'ENOSPC') throw diskFull();
     if (!res.headersSent && !res.socket?.destroyed) throw httpError(400, 'Upload interrupted');
@@ -5980,6 +6073,20 @@ function loadUploads() {
       const upload = JSON.parse(fs.readFileSync(path.join(DIR.uploads, name), 'utf8'));
       if (!ITEM_ID.test(upload.id)) continue;
       const part = uploadPaths(upload.id).part;
+      // (1.30.2, the review's Low) Finished (renamed into files/) when Beam stopped, before its item was kept: the item
+      // now, not the upload again from 0.
+      const done = filePath(upload.id);
+      if (!fs.existsSync(part) && fs.existsSync(done) && fs.statSync(done).size === upload.size) {
+        if (!findItem(upload.id)) {
+          const { id, name, size, mime, w, h, from, device, to } = upload;
+          items.unshift({ id, kind: 'file', name, size, mime, ...(w && { w, h }), from, device, to: Array.isArray(to) ? to : [], delivered: {}, ts: Math.round(fs.statSync(done).mtimeMs) });
+          items.sort((a, b) => b.ts - a.ts);
+          persist();
+          log.info(`Upload of "${upload.name}" [${shortId(upload.id)}] had finished just before Beam stopped: it's an item now`);
+        }
+        fs.rmSync(path.join(DIR.uploads, name), { force: true });
+        continue;
+      }
       const size = fs.existsSync(part) ? fs.statSync(part).size : 0;
       // Resume from the last fsynced point: after a power cut the rest may not be real data. (Uploads saved by 1.3
       // have no checkpoint and keep their size.)

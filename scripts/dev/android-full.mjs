@@ -26,8 +26,12 @@ function startServer(port, name) {
   const dir = path.join(scratch, name);
   fs.mkdirSync(path.join(dir, 'data'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'dist'), { recursive: true });
-  const env = { ...process.env, BEAM_TAILSCALE: 'off', BEAM_HOST: '127.0.0.1', BEAM_PORT: String(port),
-    BEAM_DATA: path.join(dir, 'data'), BEAM_DIST: path.join(dir, 'dist') };
+  // (2026-11-06, the user's review) none of this shell's BEAM_* and no backups: a run in a folder with a .env wrote a
+  // scratch backup into the real backup folder and pruned a real one (what's set here wins over .env)
+  const own = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('BEAM_')));
+  const env = { ...own, BEAM_TAILSCALE: 'off', BEAM_HOST: '127.0.0.1', BEAM_PORT: String(port),
+    BEAM_DATA: path.join(dir, 'data'), BEAM_DIST: path.join(dir, 'dist'), BEAM_BACKUP_HOURS: '0', BEAM_BACKUP_DIR: path.join(dir, 'backups'),
+    BEAM_FAMILY_BACKUP_DIR: path.join(dir, 'family-backups') };
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: 'ignore', windowsHide: true });
   return { child, dir, port };
 }

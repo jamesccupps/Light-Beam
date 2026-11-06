@@ -29,6 +29,8 @@ namespace Beam
                 "the next. Move it back to come back.", Ui.Font, true, Ui.S(14));
             on = AddCheck("Use this PC's keyboard and mouse on the PCs beside it", null, app.Cfg.KvmOn, 0, Ui.S(12));
             Arrange = new KvmArrange(app, app.Cfg.KvmPlaces);
+            Arrange.TabStop = true; // (1.23.1: the keyboard reaches it)
+            Arrange.AccessibleName = "Arrange the PCs";
             Arrange.BackColor = Theme.Bg;
             Arrange.SetBounds(X0, Y, W0, Ui.S(300));
             Host.Controls.Add(Arrange);
@@ -135,6 +137,66 @@ namespace Beam
 
         public int Count { get { return places.Count; } }
         public bool Dragging { get { return dragging; } }
+
+        // ------------------------------------------------------------------ the keyboard (1.23.1, the user's review)
+        // It was mouse-only. Tab comes here; the arrow keys move a frame from cell to cell; Ctrl+arrow moves the PC in the
+        // frame a cell that way (where it can go); Enter, Space or the menu key opens that cell's menu (which PC goes in an
+        // empty one, or Remove). A screen reader hears the cell in the frame.
+        Point kbd = Point.Empty;
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            var k = keyData & Keys.KeyCode;
+            return k == Keys.Left || k == Keys.Right || k == Keys.Up || k == Keys.Down || base.IsInputKey(keyData);
+        }
+
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); SayCell(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            int dx = e.KeyCode == Keys.Left ? -1 : e.KeyCode == Keys.Right ? 1 : 0;
+            int dy = e.KeyCode == Keys.Up ? -1 : e.KeyCode == Keys.Down ? 1 : 0;
+            Grid();
+            if (dx != 0 || dy != 0)
+            {
+                var next = new Point(kbd.X + dx, kbd.Y + dy);
+                var pc = PcAt(kbd);
+                if (e.Control && pc != null) { if (MoveTo(pc.Id, next)) kbd = next; }
+                else if (next.X >= minX && next.X < minX + cols && next.Y >= minY && next.Y < minY + rows) kbd = next;
+                e.Handled = true;
+                Invalidate();
+                SayCell();
+            }
+            else if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space || e.KeyCode == Keys.Apps || (e.KeyCode == Keys.F10 && e.Shift))
+            {
+                var pc = PcAt(kbd);
+                if (pc != null) PcMenu(pc);
+                else if (IsSlot(kbd)) AddMenu(kbd);
+                e.Handled = true;
+            }
+            base.OnKeyDown(e);
+        }
+
+        static string Where(Point c)
+        {
+            if (c == Point.Empty) return "";
+            var parts = new List<string>();
+            if (c.X != 0) parts.Add((Math.Abs(c.X) > 1 ? Math.Abs(c.X) + " " : "") + (c.X < 0 ? "left" : "right"));
+            if (c.Y != 0) parts.Add((Math.Abs(c.Y) > 1 ? Math.Abs(c.Y) + " " : "") + (c.Y < 0 ? "above" : "below"));
+            return string.Join(", ", parts) + " of this PC";
+        }
+
+        void SayCell()
+        {
+            var pc = PcAt(kbd);
+            string text = kbd == Point.Empty ? "This PC, in the middle"
+                : pc != null ? NameOf(pc.Id) + ", " + Where(kbd) + ". Ctrl and an arrow key move it; Enter for its menu"
+                : IsSlot(kbd) ? "Empty, " + Where(kbd) + ": a PC can go here. Enter to choose one"
+                : "Empty, " + Where(kbd);
+            AccessibleName = "Arrange the PCs: " + text;
+            if (IsHandleCreated) AccessibilityNotifyClients(AccessibleEvents.NameChange, -1);
+        }
 
         public List<KvmPlace> Places() { return places.Select(p => new KvmPlace { Id = p.Id, X = p.X, Y = p.Y }).ToList(); }
 
@@ -407,6 +469,12 @@ namespace Beam
                 if (p != null) Tile(g, new Rectangle(dragAt.X - grab.Width, dragAt.Y - grab.Height, cw, ch), p, true, false, false, true);
             }
             Note(g, joined);
+            if (Focused) // (1.23.1) the keyboard's frame
+            {
+                var f = Cell(kbd);
+                f.Inflate(Ui.S(3), Ui.S(3));
+                using (var pen = new Pen(Theme.Accent, Ui.S(2))) { pen.DashStyle = DashStyle.Dot; g.DrawRectangle(pen, f); }
+            }
         }
 
         static Rectangle Inner(Rectangle r) { return new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1); }

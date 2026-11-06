@@ -252,9 +252,12 @@ class BeamApi(
         execute(request(url("/api/items/$id")).delete().build()).close()
     }
 
-    fun sendText(text: String, to: List<String>, reply: String? = null): Item {
+    fun sendText(text: String, to: List<String>, reply: String? = null, nonce: String? = null): Item {
         val body = JSONObject().put("text", text).put("to", JSONArray(to))
         if (reply != null) body.put("reply", reply) // (server 1.14 `replies`)
+        // (1.16.1, the user's review) Beam 1.30.2 takes a repeat with the same nonce for the first one (an answer lost on the
+        // way sent it twice); older servers ignore it
+        if (nonce != null) body.put("nonce", nonce)
         return Item.parse(json(request(url("/api/text")).post(body.toString().toRequestBody(JSON)).build()))
     }
 

@@ -68,6 +68,24 @@ function putItem(raw) {
   return true;
 }
 
+// (2026-11-06, the review's speed item 2) Several at once: the list filtered once (one each was a search of it per id).
+function removeItemsNow(ids) {
+  const gone = [];
+  for (const id of ids) {
+    const item = itemMap.get(id);
+    if (!item) continue;
+    itemMap.delete(id);
+    acked.delete(id);
+    releasePreview(id);
+    gone.push(item);
+  }
+  if (!gone.length) return gone;
+  const set = new Set(gone);
+  items = items.filter(i => !set.has(i));
+  dataVersion++;
+  return gone;
+}
+
 function removeItem(id) {
   const item = itemMap.get(id);
   if (!item) return null;

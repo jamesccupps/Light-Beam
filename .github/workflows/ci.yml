@@ -1,6 +1,10 @@
-# The lint and the server and Beam Family test suites on every push and pull request (1.15.0, the audit's D-3).
-# The browser, Windows and Android suites need a desktop browser, Windows and its WebView2, or the Android SDK: they
-# stay runs by hand before a release (scripts/dev/android-full.mjs for Android). Changes to docs alone don't run it.
+# The lint and the server and Beam Family test suites on every push and pull request (1.15.0, the audit's D-3), and
+# Beam for Linux's installer end to end. The browser, Windows and Android suites need a desktop browser, Windows and its
+# WebView2, or the Android SDK: they stay runs by hand before a release (scripts/dev/android-full.mjs for Android).
+# Changes to docs alone don't run it.
+# (2026-11-06, the user's review §11) Actions pinned to commits (Dependabot keeps them current), read-only permissions,
+# no credentials kept in the checkout, `npm audit --omit=dev` (what ships; the lint toolchain's own advisories don't),
+# and Beam for Linux on Node.js 20 and 22 as well: the Pis run those (an update that doesn't load there is refused, M32).
 name: CI
 
 on:
@@ -9,27 +13,54 @@ on:
   pull_request:
     paths-ignore: ['**/*.md', 'docs/**', 'opensource/**']
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - name: What ships has no known advisories
+        run: npm audit --omit=dev --audit-level=moderate
       - name: Lint
         run: npx eslint .
       - name: Server tests
         run: node test/server.test.js
       - name: Beam Family tests
         run: node test/family.test.js
-      # (1.22) linux/install.sh as a person runs it, on a computer with systemd: the runner is one. New, so for now its
-      # failure is a warning on the run (and an annotation), not a failed run.
+      # (1.22) linux/install.sh as a person runs it, on a computer with systemd: the runner is one.
       - name: Beam for Linux's installer, end to end
-        continue-on-error: true
         run: |
           sudo loginctl enable-linger "$(id -un)"
           node test/linux-install.mjs
+
+  linux-node:
+    name: Beam for Linux on Node.js ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: It loads
+        run: node cli/beam.js version
+      - name: Its tests (the server and the agent on this Node.js)
+        run: node test/server.test.js "Beam for Linux"
