@@ -576,6 +576,10 @@ their last value, and `null` clears one. Unknown fields or bad values are `400`.
 - **(1.27.1, Beam for Linux 1.4, feature `control-here`)** `controlProblem`: why its remote control can't be turned on
   there, 1–200 characters ("x11vnc isn't installed (this desktop runs on X11: sudo apt install x11vnc)"); `null` when
   nothing is in the way. Beam's window shows it under the switch.
+- **(1.30.1, Windows app 1.23, feature `uac-status`)** `uacOnScreen`: `true` when Windows shows its prompts (UAC) on that
+  PC's normal screen instead of its secure one (`PromptOnSecureDesktop` 0: Settings → Security → "Answer Windows’
+  prompts (UAC) from other devices"). Then your devices can answer them through remote control, and so could any program
+  on that PC: Device info shows it as a warning. The app sends it only to a server that lists the feature.
 - Others see `status` (without the MACs), `tailscale` and `can` in the device list; the `devices` event goes out at
   most every 5 s for status changes. Low battery or storage, and (1.22) a hot or under-powered Pi can raise alerts
   (see Alerts).
@@ -841,7 +845,7 @@ points the server at a stand-in for tests); downloads only from github.com and i
 | `GET /api/items/{id}` | the full Item |
 | `GET /api/items/{id}/text` | full text as `text/plain`. Sends `ETag`/`Last-Modified` (`304` with `If-None-Match`) (v3) |
 | `POST /api/items/{id}/ack` | Mark as delivered to the calling device → `{ "id", "delivered" }` |
-| `PATCH /api/items/{id}` | **(v3)** `{ "pinned": true|false }` and **(1.14, feature `edit`)** `{ "text": "…" }` (a text's new words: any of the owner's devices may; `edited` is set; a long one goes to data/texts as when it was sent; `400` for a file or nothing left) → the Item; event `update` |
+| `PATCH /api/items/{id}` | **(v3)** `{ "pinned": true|false }` and **(1.14, feature `edit`)** `{ "text": "…" }` (a text's new words: its sender's device, or **(1.30.1)** an approved sign-in, else `403 {reason: "trusted"}`; `edited` is set; a long one goes to data/texts as when it was sent; `400` for a file or nothing left) → the Item; event `update` |
 | `PUT /api/items/{id}/reactions/{emoji}`, `DELETE …` | **(1.14, feature `reactions`)** this device's reaction (one emoji, at most 16 characters, URL-encoded in the path) on or off → `200` + the Item; at most 20 kinds on an item (`409`); event `update` |
 | `POST /api/items/{id}/forward` | **(v3)** `{ "to": [...] }` → `201` + a new Item from the caller with the same content (files are hard-linked, not copied) |
 | `POST /api/items/{id}/fastlink` | **(1.13, feature `fast-links`)** `{ "hours": 1–720 }` (default 24; **1.15:** also `"maxDownloads": 1–1000` and `"removeLocation": true`, Beam Family's choices: see docs/FAMILY.md) → `201 { "link": { "id", "url", "expires", "created", "downloads", "by", "maxDownloads", "removeLocation" } }`: a link anyone can download this file with, without Beam or signing in, until it runs out. Beam Family on the same machine makes it (its local admin API, with the control.key in `BEAM_FAMILY_DATA`; docs/FAMILY.md), from the file itself: a hard link on the same drive, else a copy the link follows as it arrives. `400` not a file, or hours out of range; `404` not on the server any more; `503` Beam Family isn't set up, answering, or new enough; Family's own errors pass on (`409` no owner yet, `429` 50 links working, `507` storage full) |
@@ -850,7 +854,7 @@ points the server at a stand-in for tests); downloads only from github.com and i
 | `PUT /api/items/{id}/thumb` | **(v3)** body = a JPEG or WebP thumbnail (`Content-Type: image/jpeg|image/webp`, ≤ 256 KB; Beam's apps make them 640 px on the longest side since 1.23.4, 320 before; **(1.24.1)** a device that showed a picture from its original makes one when it has none), only for image/video items → `204`; event `update` with `thumb: true`. **(1.30)** its header must say its size, at most 2048 px a side (`400` otherwise) |
 | `GET /api/items/{id}/thumb` | **(v3)** the thumbnail, or `404` |
 | `DELETE /api/items/{id}` | Delete one → `204` |
-| `DELETE /api/items` | Delete all → `{ "deleted": n }` |
+| `DELETE /api/items` | Delete all → `{ "deleted": n }`. **(1.30.1)** An approved (`403 trusted`), lasting (`403 temporary`) sign-in only |
 | `GET /api/latest/text` | Newest text *for the calling device* (or any, without a device id), `text/plain`. `404` if none |
 | `GET /api/latest?kind=text|file` | Newest item for the calling device → the full Item, `404` if none |
 

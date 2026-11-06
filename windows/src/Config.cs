@@ -552,7 +552,7 @@ namespace Beam
     // A transfer that must survive a restart (see App.RestoreTransfers).
     class SavedUpload
     {
-        public string LocalId, Path, Name, Mime, UploadId, Origin;
+        public string LocalId, Path, Name, Mime, UploadId, Origin, OutboxEntry;
         public long Size, MtimeTicks, Ts;
         public List<string> To = new List<string>();
         public bool DeleteWhenDone, Notify;
@@ -563,6 +563,7 @@ namespace Beam
             d["localId"] = LocalId; d["path"] = Path; d["name"] = Name; d["mime"] = Mime; d["uploadId"] = UploadId;
             d["origin"] = Origin; d["size"] = Size; d["mtime"] = MtimeTicks; d["ts"] = Ts; d["to"] = To.ToArray();
             d["deleteWhenDone"] = DeleteWhenDone; d["notify"] = Notify;
+            if (OutboxEntry != null) d["outboxEntry"] = OutboxEntry;
             return d;
         }
 
@@ -574,6 +575,7 @@ namespace Beam
             s.Mime = Json.Str(d, "mime"); s.UploadId = Json.Str(d, "uploadId"); s.Origin = Json.Str(d, "origin");
             s.Size = Json.Long(d, "size", 0); s.MtimeTicks = Json.Long(d, "mtime", 0); s.Ts = Json.Long(d, "ts", 0);
             s.To = Json.StrList(d, "to"); s.DeleteWhenDone = Json.Bool(d, "deleteWhenDone", false); s.Notify = Json.Bool(d, "notify", false);
+            s.OutboxEntry = Json.Str(d, "outboxEntry");
             return s.Path == null || s.LocalId == null ? null : s;
         }
     }
@@ -610,6 +612,9 @@ namespace Beam
         readonly List<string> handledOrder = new List<string>();
         readonly List<string> pathOrder = new List<string>(); // (audit 2026-10-11) LocalPaths' keys, oldest first
         readonly HashSet<string> handled = new HashSet<string>();
+        // (1.23, the review's M5) handled here but not saved (a local problem: disk full, a folder it can't write): never
+        // acknowledged as delivered, until a save of it works
+        readonly HashSet<string> notDelivered = new HashSet<string>();
         public bool Initialized;
         public long BaselineTs;
         public string ServerId;   // the server this state belongs to
@@ -638,6 +643,7 @@ namespace Beam
                         BaselineTs = Json.Long(d, "baselineTs", 0);
                         ServerId = Json.Str(d, "serverId");
                         foreach (var id in Json.StrList(d, "ids")) if (handled.Add(id)) handledOrder.Add(id);
+                        foreach (var id in Json.StrList(d, "notDelivered")) notDelivered.Add(id);
                     }
                 }
             }
@@ -669,6 +675,18 @@ namespace Beam
             return handled.Contains(id);
         }
 
+        public bool IsNotDelivered(string id)
+        {
+            return id != null && notDelivered.Contains(id);
+        }
+
+        public void SetNotDelivered(string id, bool on)
+        {
+            if (id == null || !(on ? notDelivered.Add(id) : notDelivered.Remove(id))) return;
+            while (notDelivered.Count > 500) notDelivered.Remove(notDelivered.First());
+            SaveHandled();
+        }
+
         public void MarkHandled(string id)
         {
             MarkHandled(new[] { id });
@@ -694,6 +712,7 @@ namespace Beam
         {
             handled.Clear();
             handledOrder.Clear();
+            notDelivered.Clear();
             Initialized = false;
             BaselineTs = 0;
             ServerId = serverId;
@@ -715,6 +734,7 @@ namespace Beam
                 d["baselineTs"] = BaselineTs;
                 d["serverId"] = ServerId;
                 d["ids"] = handledOrder.ToArray();
+                d["notDelivered"] = notDelivered.ToArray();
                 handledWriter.Write(Json.Stringify(d));
             }
             catch (Exception ex) { Log.Error("Saving handled.json", ex); }

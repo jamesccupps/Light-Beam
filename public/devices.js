@@ -120,8 +120,14 @@ async function showDeviceLog(d) {
   const copy = el('button', { class: 'btn', type: 'button', onclick: async () => {
     try { await navigator.clipboard.writeText(r.text || ''); toast('Copied'); } catch { toast('Copying didn’t work here: use Save', { error: true }); }
   } }, icon('copy'), 'Copy');
-  const save = el('button', { class: 'btn', type: 'button', onclick: () => {
-    const a = el('a', { href: URL.createObjectURL(new Blob([r.text || ''], { type: 'text/plain' })), download: `${d.name} ${r.name || 'beam.log'}` });
+  const save = el('button', { class: 'btn', type: 'button', onclick: async () => {
+    const name = `${d.name} ${r.name || 'beam.log'}`;
+    if (HOST && hostHas('saveText')) { // (Windows 1.23, the user's review: the app's window blocks blob: downloads)
+      try { await hostCall('saveText', { name, text: r.text || '' }); toast('Saved'); }
+      catch (err) { if (err.code !== 'cancelled') toast(err.message || 'Couldn’t save it', { error: true }); }
+      return;
+    }
+    const a = el('a', { href: URL.createObjectURL(new Blob([r.text || ''], { type: 'text/plain' })), download: name });
     document.body.append(a);
     a.click();
     a.remove();
@@ -235,6 +241,8 @@ function openDeviceInfo(d, { refresh = false } = {}) {
     s.model && ['Hardware', s.model],
     // (1.20) whether Windows' own startup list has its Beam app
     typeof s.startsWithWindows === 'boolean' && ['Starts with Windows', s.startsWithWindows ? 'Yes' : s.startWanted === false ? 'No (turned off in its settings)' : 'No', !s.startsWithWindows && s.startWanted !== false],
+    // (1.30.1, the user's review M28) "Answer Windows' prompts" is on there: a warning, not a fault
+    s.uacOnScreen === true && ['Windows’ prompts (UAC)', 'On its normal screen: your devices can answer them, and so could any program on that PC', true],
     beamVersionOf(d) && ['Beam', beamVersionOf(d)],
     (d.tailscale?.dns || d.tailscale?.ip) && ['Tailscale', d.tailscale.dns || d.tailscale.ip],
     key && ['Tailscale sign-in', key.text, key.low],

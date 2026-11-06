@@ -157,7 +157,7 @@ try {
   const state = await waitLog(/Settings: \(test\) /, from, 8000);
   console.log(`     ${state ? state.replace(/^.*Settings: \(test\) /, '') : 'no state'}`);
   forward(['--test-backups', 'answer:restore']);
-  const kept = await waitLog(/Settings backup: kept this PC's saveFolder \(Q:\\No such drive\\Beam isn't here\)/, from, 10000);
+  const kept = await waitLog(/Settings backup: kept this PC's saveFolder \(another PC's isn't taken: Q:\\No such drive\\Beam\)/, from, 10000);
   check(!!kept, "restoring another PC's settings keeps this PC's save folder");
   const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
   check(cfg.saveFolder === dir('saves'), `...in its settings (${cfg.saveFolder})`);

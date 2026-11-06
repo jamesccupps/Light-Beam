@@ -11,6 +11,28 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 
 Each release is tagged with the server's version (`v1.29.5`). An entry says which other parts moved.
 
+## 1.30.1 (2026-11-05): a review's fixes, the Windows app
+
+**Versions:** server 1.30.1, Windows app 1.23.0, Android app 1.15.0, Beam for Linux 1.5.1 (unchanged).
+
+- **Only approved devices make a PC act by itself:** copying a text, opening a link and saving a file automatically
+  happen only for this PC's own items or an approved device's (the others still show their notification, with Copy and
+  Save). Restore settings lists only approved PCs and never takes another PC's folders. On the server, a sign-in that
+  isn't approved can change only its own messages and can't delete everything.
+- **Receiving:** a long text whose full copy can't be fetched is never copied as its cut-off preview; an automatic save
+  needs room on the drive; a save that fails on the PC isn't reported to the sender as delivered; a saved file is on the
+  disk before it's renamed.
+- **Outbox:** an entry whose upload a restart interrupted is sent once (it went twice) and then moved to Sent.
+- **Apps:** an app never takes over another program's folder of the same name ("Python" goes to "Python (Beam)"), and
+  an uninstall removes only the files Beam put there.
+- **Remote control and KVM:** "Answer Windows' prompts (UAC)" says what it costs (any program on the PC could answer
+  them) and Device info shows the PCs where it's on; the keyboard and mouse link no longer reads a big clipboard at
+  every crossing; "Allow remote control" lists only devices that can control a PC and ticks only approved ones.
+- **Smaller:** previews only from pictures up to 100 megapixels; names Windows treats as devices are renamed and long
+  names keep their extension; shared folders are judged by where they really are (links, subst and network drives); the
+  delay probe can't take Beam down; Device info → Beam log → Save works in the app's window; the elevated input-helper
+  setup writes only its own result file.
+
 ## 1.30.0 (2026-11-05): a review's fixes, server, web app and Beam Family
 
 **Versions:** server 1.30.0 (Beam Family with it; its database moves to version 7), Windows app 1.22.1, Android app

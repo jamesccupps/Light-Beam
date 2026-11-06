@@ -178,24 +178,60 @@ namespace Beam
                     case "--config": config = args[i + 1]; break;
                 }
             }
+            // (1.23, the user's review) With administrator rights a test's stand-ins are refused (any program of this user
+            // could run this behind Windows' prompt and point them anywhere), and the log stays in its usual place.
+            bool elevated = IsElevated();
+            bool testRefused = elevated && (root != null || config != null);
+            if (elevated) { root = null; config = null; }
             Log.FilePath = Path.Combine(Path.GetDirectoryName(config != null ? Path.GetFullPath(config) : Config.DefaultPath()), "beam.log");
             TestRoot = root;
             string err = null;
             try
             {
-                if (action == "setup") Install(prompts == "on");
+                if (testRefused) err = "a test setup isn't done with administrator rights";
+                else if (action == "setup") Install(prompts == "on");
                 else if (action == "remove") Remove();
                 else err = "unknown action";
             }
             catch (Exception ex) { err = ex.Message; Log.Error("Admin helper (" + action + ")", ex); }
-            if (result != null)
+            if (result != null && ResultNameOk(result))
             {
                 var r = new Dictionary<string, object>();
                 r["ok"] = err == null;
                 if (err != null) r["error"] = err;
-                try { File.WriteAllText(result, Json.Stringify(r), new UTF8Encoding(false)); } catch { }
+                // (1.23) a new file only (never one already there, or a link someone put there)
+                try
+                {
+                    using (var f = new FileStream(result, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        var b = new UTF8Encoding(false).GetBytes(Json.Stringify(r));
+                        f.Write(b, 0, b.Length);
+                    }
+                }
+                catch (Exception ex) { Log.Write("Admin helper: no result written (" + ex.Message + ")"); }
             }
+            else if (result != null) Log.Write("Admin helper: a result file not named like Beam's own is ignored");
             return err == null ? 0 : 1;
+        }
+
+        // The result's name as Run makes it: beam-admin-helper-<32 hex>.json (in the asking user's temp folder).
+        static bool ResultNameOk(string path)
+        {
+            try
+            {
+                string name = Path.GetFileName(path);
+                return Path.IsPathRooted(path) && System.Text.RegularExpressions.Regex.IsMatch(name, "^beam-admin-helper-[0-9a-f]{32}\\.json$");
+            }
+            catch { return false; }
+        }
+
+        static bool IsElevated()
+        {
+            try
+            {
+                using (var id = WindowsIdentity.GetCurrent()) return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+            }
+            catch { return true; } // (unknown: as if it were)
         }
 
         static void Install(bool prompts)

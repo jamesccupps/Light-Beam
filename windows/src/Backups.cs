@@ -138,7 +138,8 @@ namespace Beam
             try
             {
                 choices.AddRange((await Fetch(null, true)).Where(c => c.Install != app.Cfg.InstallId));
-                foreach (var d in app.Devices.Where(x => x.Id != app.Me && x.Platform == "windows" && !x.Temporary).ToList())
+                // (1.23, the user's review M2) only approved PCs' (any lasting sign-in may keep a backup for itself)
+                foreach (var d in app.Devices.Where(x => x.Id != app.Me && x.Platform == "windows" && !x.Temporary && x.Trusted).ToList())
                 {
                     try { choices.AddRange((await Fetch(d.Id, false)).Take(1)); } catch { }
                 }
@@ -185,10 +186,6 @@ namespace Beam
             if (!Ui.TestOffscreen) { form.Activate(); Native.SetForegroundWindow(form.Handle); }
         }
 
-        static bool SafeExists(string folder)
-        {
-            try { return System.IO.Directory.Exists(folder); } catch { return false; }
-        }
 
         public void Apply(BackupChoice c)
         {
@@ -196,13 +193,13 @@ namespace Beam
             var apply = new Dictionary<string, object>();
             foreach (var k in Keys) if (s.ContainsKey(k) && s[k] != null) apply[k] = s[k];
             if (!c.Here) apply.Remove("deviceName"); // (another PC's name stays its own)
-            // (audit B-12) ...and its folders only where this PC has them (D:\Beam on a PC without a D: would make every
-            // automatic save fail); otherwise this PC keeps its own.
+            // ...and (1.23, the user's review M2) never its folders: this PC keeps its own (audit B-12 took them where this PC
+            // had them; a folder from another device's backup could be the Startup folder)
             if (!c.Here)
                 foreach (var k in new[] { "saveFolder", "outboxFolder" })
                 {
                     string f = apply.ContainsKey(k) ? (Json.Str(apply, k) ?? "").Trim() : "";
-                    if (f.Length > 0 && !SafeExists(f)) { apply.Remove(k); Log.Write("Settings backup: kept this PC's " + k + " (" + f + " isn't here)"); }
+                    if (apply.Remove(k) && f.Length > 0) Log.Write("Settings backup: kept this PC's " + k + " (another PC's isn't taken: " + f + ")");
                 }
             string err = app.ApplySettings(apply);
             var hk = Json.Obj(Json.Get(s, "hotkeys"));

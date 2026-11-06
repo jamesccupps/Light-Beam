@@ -118,6 +118,10 @@ try {
   const outgoing = path.join(cfgDir, 'outgoing');
   put(path.join(outgoing, 'keep-me.txt'), 'in the outgoing folder');
   put(dir('outside-share/x.txt'), 'in %TEMP%, outside the instance\'s folder');
+  // (1.23, the review) a junction inside the instance's own folder to that one: judged by where it really is
+  fs.mkdirSync(path.join(cfgDir, 'shares'), { recursive: true });
+  const toTemp = spawnSync('cmd.exe', ['/c', 'mklink', '/J', path.join(cfgDir, 'shares', 'ToTemp'), dir('outside-share')], { windowsHide: true, encoding: 'utf8' });
+  check(toTemp.status === 0, 'a junction in its own folder to the folder in %TEMP%');
   // (1.20) a real picture, a big text, a file of no kind, and what a .zip of Photos must leave out
   const sunset = pngOf(64, 48), bigText = 'line of a big log\n'.repeat(20000), blob = Buffer.alloc(5000, 0);
   put(path.join(dl, 'Photos', 'sunset.png'), sunset);
@@ -140,6 +144,7 @@ try {
       { id: 'b2b2b2b2', name: 'Other', path: path.join(cfgDir, 'shares', 'Other'), devices: [otherId] },
       { id: 'c3c3c3c3', name: 'Outgoing', path: outgoing, devices: [askerId] },
       { id: 'd4d4d4d4', name: 'Temp', path: dir('outside-share'), devices: [askerId] },
+      { id: 'e5e5e5e5', name: 'Through a link', path: path.join(cfgDir, 'shares', 'ToTemp'), devices: [askerId] },
     ] }, null, 2));
   app = spawn(appExe, ['--config', cfgPath, '--background'], { env, windowsHide: true, stdio: 'ignore' });
   app.on('exit', () => { exited = true; });
@@ -152,6 +157,8 @@ try {
   check(!!online && online.can?.files2 === true, 'the PC (Beam for Windows 1.20) is online and shares folders (can.files, can.files2)');
   check(!!(await waitLog(/Shared folders: Temp \(.*outside-share\) isn't shared: Windows' and apps' own folders can't be shared$/, 1000)),
     'a folder outside its own folder, in %TEMP% (AppData), is refused when the config is read');
+  check(!!(await waitLog(/Shared folders: Through a link \(.*ToTemp\) isn't shared: Windows' and apps' own folders can't be shared$/, 1000)),
+    '(1.23) ...and so is a junction to it inside its own folder (where it really is counts)');
 
   // What each device may see
   const files = (h, body) => call(h, 'POST', `/api/devices/${pcId}/files`, body);

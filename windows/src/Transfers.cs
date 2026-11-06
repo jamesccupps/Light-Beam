@@ -180,6 +180,7 @@ namespace Beam
         public string Name;
         public string Mime;
         public string Origin;             // "send", "outbox", "clipboard", "page"… (for the log only)
+        public string OutboxEntry;        // (1.23, the review's M26) the outbox entry it sends (a file, or the folder zipped into Path)
         public List<string> To = new List<string>();
         public string UploadId;
         public long Offset;
@@ -986,6 +987,13 @@ namespace Beam
                                 // next attempt resumes from the file's real length).
                                 reader.Abandon();
                                 if (writing != null) { try { writing.Wait(10000); } catch { } }
+                            }
+                            // (1.23, the review's M5) all of it on the disk before it's renamed and acknowledged: these PCs
+                            // lose power now and then, and a file acknowledged as saved could come back short
+                            if (job.Done >= item.Size)
+                            {
+                                try { file.Flush(true); }
+                                catch (IOException ex) { throw new LocalFileException("Can't write the file: " + ex.Message, ex); }
                             }
                         }
                     }

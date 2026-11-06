@@ -2182,6 +2182,11 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     const after = (await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(x => x.id === 'gamingpc001');
     assert.equal(after.status.battery, undefined);
     assert.equal(after.status.os, 'Windows 11 Pro 24H2');
+    // (1.30.1, the review's M28) a PC whose Windows prompts (UAC) show on its normal screen says so; the others see it
+    assert.ok((await s.req('GET', '/api/info', { headers: phone })).json.features.includes('uac-status'));
+    assert.equal(after.status.uacOnScreen, undefined);
+    assert.equal((await put({ uacOnScreen: true })).status, 204);
+    assert.equal((await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(x => x.id === 'gamingpc001').status.uacOnScreen, true);
     // MAC addresses never leave the server, in any form
     const macRe = /0a[:-]?1b[:-]?2c|0A[:-]?1B[:-]?2C/i;
     await sleep(400);
@@ -2199,6 +2204,7 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
       { macs: ['not a mac'] }, { macs: ['ff:ff:ff:ff:ff:ff'] }, { macs: ['01:00:5e:00:00:01'] }, { macs: Array(9).fill(MAC1) }, { remoteDesktop: 'on' },
       { update: 'failed' }, { update: { version: 'soon', problem: 'x' } }, { update: { version: '1.6.3', problem: ' ' } },
       { update: { version: '1.6.3', problem: 'p'.repeat(301) } }, { update: { version: '1.6.3', problem: 'p', extra: 1 } },
+      { uacOnScreen: 'yes' },
     ]) {
       assert.equal((await put(bad)).status, 400, JSON.stringify(bad));
     }
@@ -5653,6 +5659,38 @@ test('1.6 Remote control: a whole session between two devices; its events reach 
     assert.deepEqual([metrics.sessions, metrics.started, metrics.ended.stopped], [0, 1, 1]);
     for (const e of [pcEv, lapEv, phoneEv, watch]) e.close();
   } finally { await t.stop(); }
+});
+
+test('2026-11-05 review, round B: a sign-in that isn’t approved changes only its own texts and can’t delete everything', async () => {
+  const ts = await fakeTailscale({ whois: {
+    '100.64.32.10': { login: 'alice@example.com', node: 'alice-laptop' },
+    '100.64.32.11': { login: 'alice@example.com', node: 'alice-tablet' },
+  } });
+  const s = await startServer('review1105b', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket } });
+  try {
+    let r = await post(s, '/api/autopair', { client: 'app', name: 'Alice laptop', platform: 'windows' }, viaServe('100.64.32.10', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    const laptop = app(r.json.key, r.json.you);
+    r = await post(s, '/api/autopair', { client: 'app', name: 'Alice tablet', platform: 'android' }, viaServe('100.64.32.11', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    const tablet = app(r.json.key, r.json.you, 'Alice tablet', 'android'); // (not approved)
+    const link = await sendText(s, laptop, 'https://example.com/pay/0001');
+    r = await s.req('PATCH', `/api/items/${link.id}`, { headers: json(tablet), body: JSON.stringify({ text: 'https://example.net/pay/0001' }) });
+    assert.deepEqual([r.status, r.json.reason], [403, 'trusted'], 'another device’s words: no');
+    assert.equal((await s.req('GET', `/api/items/${link.id}`, { headers: laptop })).json.text, 'https://example.com/pay/0001');
+    r = await s.req('PATCH', `/api/items/${link.id}`, { headers: json(tablet), body: JSON.stringify({ pinned: true }) });
+    assert.equal(r.status, 200, 'pinning is still open');
+    const own = await sendText(s, tablet, 'see you at 6');
+    r = await s.req('PATCH', `/api/items/${own.id}`, { headers: json(tablet), body: JSON.stringify({ text: 'see you at 7' }) });
+    assert.equal(r.status, 200, 'its own words: yes');
+    r = await s.req('PATCH', `/api/items/${own.id}`, { headers: json(laptop), body: JSON.stringify({ text: 'see you at 8' }) });
+    assert.equal(r.status, 200, 'an approved sign-in: yes');
+    r = await s.req('DELETE', '/api/items', { headers: tablet });
+    assert.deepEqual([r.status, r.json.reason], [403, 'trusted'], 'Delete all: not from a sign-in that isn’t approved');
+    assert.equal((await s.req('GET', '/api/items', { headers: laptop })).json.items.length, 2);
+    r = await s.req('DELETE', '/api/items', { headers: laptop });
+    assert.deepEqual([r.status, r.json.deleted], [200, 2]);
+  } finally { await s.stop(); await ts.close(); }
 });
 
 test('2026-11-05 review: no taking a device that has a sign-in; automatic sign-ins and wakes limited; a rebound page can’t sign in; a removed device’s links stop', async () => {

@@ -154,6 +154,21 @@ try {
   await bridge({ type: 'adminHelper', id: 'test-ah-6', action: 'remove' });
   check(!('PromptOnSecureDesktop' in (readJson(dir('root/policy.json')) || {})), `...and Remove takes it away again (${JSON.stringify(readJson(dir('root/policy.json')))})`);
 
+  // (1.23, the review) The setup's result only as a new file named like Beam's own: not any path, never one already there
+  const elevatedRun = a => spawnSync(appExe, ['--admin-helper', ...a], { windowsHide: true, timeout: 20000 }); // (as Run starts it)
+  const elsewhere = dir('not-a-result.json');
+  elevatedRun(['remove', '--result', elsewhere, '--root', dir('root'), '--config', cfgPath]);
+  check(!fs.existsSync(elsewhere), 'the setup writes no result to a file not named like its own');
+  const already = path.join(os.tmpdir(), `beam-admin-helper-${crypto.randomBytes(16).toString('hex')}.json`);
+  fs.writeFileSync(already, 'theirs');
+  elevatedRun(['remove', '--result', already, '--root', dir('root'), '--config', cfgPath]);
+  check(fs.readFileSync(already, 'utf8') === 'theirs', '...nor over one that is already there');
+  fs.rmSync(already, { force: true });
+  const fresh = path.join(os.tmpdir(), `beam-admin-helper-${crypto.randomBytes(16).toString('hex')}.json`);
+  elevatedRun(['remove', '--result', fresh, '--root', dir('root'), '--config', cfgPath]);
+  check(readJson(fresh)?.ok === true, `...and writes a new one of its own (${fs.existsSync(fresh) ? fs.readFileSync(fresh, 'utf8') : 'none'})`);
+  fs.rmSync(fresh, { force: true });
+
   // A session's input through the helper (recording, never real input)
   fs.rmSync(inputPath, { force: true });
   let from = logLines().length;

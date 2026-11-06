@@ -395,7 +395,11 @@ export default function register(test) {
     const stream = pc.stream();
     ctx.defer(() => stream.close());
     await page.waitFor(`deviceById('${pc.id}')?.online === true && deviceById('${pc.id}')?.can?.log === true`, 8000, 'online, and can send its log');
+    // (1.30.1, the user's review M28) a PC whose Windows prompts (UAC) other devices can answer: a warning row
+    await pc.putStatus({ uacOnScreen: true });
+    await page.waitFor(`deviceById('${pc.id}')?.status?.uacOnScreen === true`, 8000, 'the status');
     await page.evaluate(`openDeviceInfo(deviceById('${pc.id}'))`);
+    await page.waitFor(`(() => { const dt = [...$$('#genBody dl.facts dt')].find(x => x.textContent === 'Windows’ prompts (UAC)'); return dt && dt.nextElementSibling.classList.contains('low') && /any program on that PC/.test(dt.nextElementSibling.textContent); })()`, 5000, 'Device info: the UAC row, as a warning');
     await page.waitFor(`[...$('#genFoot').querySelectorAll('button')].some(b => b.textContent.trim() === 'Beam log')`, 5000, 'the button');
     await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent.trim() === 'Beam log').click()`);
     const deadline = Date.now() + 8000;
@@ -684,19 +688,22 @@ export default function register(test) {
     const row = `[...$('#set-security').querySelectorAll('.set-inline')].find(r => /Administrator windows/.test(r.textContent))`;
     await page.waitFor(`Boolean(${row}) && /Set up…/.test(${row}.textContent) && /keeps remote control out/.test(${row}.textContent)`, 5000, 'not set up: the row with Set up…');
     // Set up: a question with the prompts option (off unless ticked), then the app's own setup
-    await page.evaluate(`__host.reply('adminHelper', m => ({ ok: true, result: { settings: { ...__host.hello.settings, adminHelper: { available: true, installed: true, current: true, trusted: true, ready: true, prompts: m.prompts === true } } } })); true`);
+    // (the fake keeps what it answers, as the real app does: the page reads the settings again now and then)
+    await page.evaluate(`__host.reply('adminHelper', m => { __host.hello.settings.adminHelper = { available: true, installed: true, current: true, trusted: true, ready: true, prompts: m.prompts === true }; return { ok: true, result: { settings: { ...__host.hello.settings } } }; }); true`);
     await page.evaluate(`${row}.querySelector('button').click(); true`);
     await page.waitFor(`/reach administrator windows/.test(document.querySelector('#genDlg[open]')?.textContent || '')`, 3000, 'the question');
     await page.evaluate(`document.querySelector('#genDlg[open] input[type=checkbox]').click(); [...document.querySelectorAll('#genDlg[open] button')].find(b => b.textContent === 'Set up').click(); true`);
     await page.waitFor(`__host.log.some(m => m.type === 'adminHelper' && m.action === 'setup' && m.prompts === true)`, 3000, 'asked the app: setup with prompts');
     const sw = `[...$('#set-security').querySelectorAll('label.switch')].find(l => /Answer Windows’ prompts/.test(l.textContent))?.querySelector('input')`;
     await page.waitFor(`/Set up: remote control reaches windows that run as administrator, and Windows’ prompts/.test(${row}.textContent) && ${sw}?.checked === true && /Remove/.test(${row}.textContent)`, 5000, 'set up: Remove, and the prompts switch on');
+    // (1.23, the user's review M28) the switch says what it costs
+    assert(/any program on this PC could answer them/.test(await page.evaluate(`${sw}.closest('label').textContent`)), 'the prompts hint: any program could answer them');
     // The switch: off goes through the app's setup again (prompts false)
     await page.evaluate(`${sw}.click(); true`);
     await page.waitFor(`__host.log.some(m => m.type === 'adminHelper' && m.action === 'setup' && m.prompts === false)`, 3000, 'the switch: setup without prompts');
     await page.waitFor(`${sw}?.checked === false && /still need someone at this PC/.test(${row}.textContent)`, 5000, 'prompts off');
     // Remove, after its question
-    await page.evaluate(`__host.reply('adminHelper', m => ({ ok: true, result: { settings: { ...__host.hello.settings, adminHelper: ${JSON.stringify(none)} } } })); ${row}.querySelector('button').click(); true`);
+    await page.evaluate(`__host.reply('adminHelper', () => { __host.hello.settings.adminHelper = ${JSON.stringify(none)}; return { ok: true, result: { settings: { ...__host.hello.settings } } }; }); ${row}.querySelector('button').click(); true`);
     await page.waitFor(`/Remove the input helper/.test(document.querySelector('#genDlg[open]')?.textContent || '')`, 3000, 'Remove asks');
     await page.evaluate(`[...document.querySelectorAll('#genDlg[open] button')].find(b => b.textContent === 'Remove').click(); true`);
     await page.waitFor(`__host.log.some(m => m.type === 'adminHelper' && m.action === 'remove')`, 3000, 'asked the app: remove');
@@ -706,7 +713,7 @@ export default function register(test) {
     await page.evaluate(`[...document.querySelectorAll('#genDlg[open] button')].find(b => b.textContent === 'Set up').click(); true`);
     await page.waitFor(`/cancelled at Windows’ prompt/.test(document.body.textContent) && /Set up…/.test(${row}.textContent)`, 5000, 'cancelled: said, unchanged');
     // An older helper (installed, trusted, not current): Update, which keeps the prompts choice
-    await page.evaluate(`__host.emit({ type: 'settings', settings: { ...hostState.settings, adminHelper: { available: true, installed: true, current: false, trusted: true, ready: true, prompts: true } } }); true`);
+    await page.evaluate(`__host.hello.settings.adminHelper = { available: true, installed: true, current: false, trusted: true, ready: true, prompts: true }; __host.emit({ type: 'settings', settings: { ...hostState.settings, adminHelper: __host.hello.settings.adminHelper } }); true`);
     await page.waitFor(`/older input helper/.test(${row}.textContent) && /Update/.test(${row}.querySelector('button').textContent)`, 5000, 'an older helper: Update');
     await page.evaluate(`__host.log.length = 0; ${row}.querySelector('button').click(); true`);
     await page.waitFor(`__host.log.some(m => m.type === 'adminHelper' && m.action === 'setup' && m.prompts === true)`, 3000, 'Update keeps prompts');

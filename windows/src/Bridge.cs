@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper", "saveText" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -130,6 +130,9 @@ namespace Beam
                 case "saveFileAs":
                     SaveAs(id, itemId);
                     break;
+                case "saveText": // (1.23, the user's review) a text the page has (a PC's Beam log): this window blocks blob: downloads
+                    SaveText(id, Json.Str(m, "name"), Json.Str(m, "text"));
+                    break;
                 case "openFile":
                 case "revealFile":
                 {
@@ -228,6 +231,7 @@ namespace Beam
                     {
                         if (err != null) Fail(rid, "failed", err);
                         else Reply(rid, Obj("settings", app.SettingsObject()));
+                        app.StatusNow("the input helper"); // (1.23) uacOnScreen may have changed
                     });
                     break;
                 }
@@ -353,6 +357,36 @@ namespace Beam
                 app.SaveItemById(itemId, null, dlg.FileName);
                 Reply(id, null);
             }
+        }
+
+        void SaveText(object id, string name, string text)
+        {
+            if (text == null || text.Length > 16 * 1024 * 1024) { Fail(id, "bad-request", "There's nothing to save"); return; }
+            string file = FileUtil.SafeName(string.IsNullOrEmpty(name) ? "beam.log" : name);
+            try
+            {
+                if (app.Cfg.CustomPath) // (a test instance: into its own folder, no dialog)
+                {
+                    string dir = Path.Combine(app.Cfg.Dir, "saved");
+                    Directory.CreateDirectory(dir);
+                    string path = FileUtil.UniquePath(dir, file);
+                    File.WriteAllText(path, text, new System.Text.UTF8Encoding(false));
+                    Log.Write("Web window: (test) saved " + Path.GetFileName(path));
+                    Reply(id, null);
+                    return;
+                }
+                using (var dlg = new SaveFileDialog())
+                {
+                    dlg.FileName = file;
+                    dlg.InitialDirectory = app.Cfg.SaveFolderPath;
+                    dlg.OverwritePrompt = true;
+                    dlg.Title = "Save " + file;
+                    if (dlg.ShowDialog(win) != DialogResult.OK) { Fail(id, "cancelled", "Cancelled"); return; }
+                    File.WriteAllText(dlg.FileName, text, new System.Text.UTF8Encoding(false));
+                    Reply(id, null);
+                }
+            }
+            catch (Exception ex) { Fail(id, "failed", "Couldn't save it: " + ex.Message); }
         }
 
         async void CopyText(object id, string itemId, string text)

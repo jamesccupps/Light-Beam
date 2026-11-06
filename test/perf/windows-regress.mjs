@@ -5,7 +5,7 @@
 // any check fails.
 //
 //   node test/perf/windows-regress.mjs [all|reconnect|restart|revoke|ack|doublepoke|nonbeam401|cancel-after-restart|cancel-live|lane
-//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open] [--exe <Beam.exe>]
+//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open|outbox-restart|names] [--exe <Beam.exe>]
 //
 // Isolated like the other windows-* checks: a scratch server (this checkout's server.js) on 127.0.0.1:8805, the app
 // reaching it through a small TCP proxy on 8855 (so its connections can be dropped), a fake peer, and a copy of Beam.exe
@@ -81,10 +81,18 @@ class Run {
       });
       src.on('end', () => { chain = chain.then(() => { if (!dst.destroyed) dst.end(); }); });
     };
+    // (1.23) `upRate` (bytes a second): what the app sends is paced, so a test can stop it half way through an upload
+    const paced = (src, dst) => {
+      src.on('data', chunk => {
+        if (!dst.destroyed) dst.write(chunk);
+        if (this.upRate) { src.pause(); setTimeout(() => src.resume(), (1000 * chunk.length) / this.upRate); }
+      });
+      src.on('end', () => { if (!dst.destroyed) dst.end(); });
+    };
     this.proxy = net.createServer(c => {
       const s = net.connect(PORT, '127.0.0.1');
       this.sockets.add(c); this.sockets.add(s);
-      pipe(c, s);
+      if (this.upRate !== undefined && !latency) paced(c, s); else pipe(c, s);
       if (this.dropFinish) {
         // The server's answer that finishes an upload never arrives: the connection drops instead (once).
         s.on('data', chunk => {
@@ -661,6 +669,64 @@ async function notifyOpen(r) {
 // 1.8.1: the app keeps its settings on the server (after looking for an earlier install's: none), sends a change 10 s
 // later; a reinstall (a new install with its own config, id and key, on this PC and Windows account) is offered the old
 // install's settings once, and gets them back.
+// (1.23, the review's M26) An outbox entry whose upload a crash stopped half way: after the restart it's resumed (not sent
+// again by the new outbox) and moved to Sent when it's done. Before 1.23 it went twice and stayed until the second one.
+async function outboxRestart(r) {
+  const outbox = path.join(r.dir, 'outbox');
+  r.upRate = 4 * MB; // 40 MB at 4 MB a second: about 10 s
+  await r.setup({ outbox: true, outboxFolder: outbox });
+  const all = path.join(outbox, 'To All devices');
+  r.check(await r.waitFor(() => fs.existsSync(all), 15000), 'the outbox folders are made');
+  const data = crypto.randomBytes(40 * MB);
+  const entry = path.join(all, 'outbox-big.bin');
+  let from = r.logLines().length;
+  fs.writeFileSync(entry, data);
+  r.check(!!(await r.waitLog(/Outbox: sending an entry/, from, 20000)), 'the outbox starts sending it');
+  await r.waitLog(/upload|Upload/, from, 10000);
+  await sleep(4000); // part of it on the server
+  r.app.kill(); // a crash (nothing saved on the way out)
+  await r.waitFor(() => r.appExit !== undefined, 10000);
+  const items0 = ((await r.api('GET', '/api/items')).data.items || []).filter(i => i.name === 'outbox-big.bin');
+  r.check(items0.length === 0, 'not finished before the crash (the test sent it slowly enough)');
+  r.check(fs.existsSync(entry), 'the entry is still in the outbox');
+  r.upRate = 0;
+  from = r.logLines().length;
+  r.startApp();
+  r.check(!!(await r.waitLog(/Resuming upload/, from, 30000)), 'the upload resumes after the restart');
+  r.check(await r.waitFor(() => fs.existsSync(path.join(all, 'Sent', 'outbox-big.bin')), 45000), 'the entry is moved to Sent when it\'s done');
+  await sleep(6000); // the outbox's checks of a steady entry take 2 to 3 s: time for a second send, if there were one
+  const items = ((await r.api('GET', '/api/items')).data.items || []).filter(i => i.name === 'outbox-big.bin');
+  r.check(items.length === 1, `sent once (${items.length} items)`);
+  r.check(r.count(/Outbox: sending an entry/, from) === 0, 'the new outbox didn\'t send it again');
+  if (items.length) {
+    const res = await fetch(`${r.base}/api/file/${items[0].id}`, { headers: r.peerHeaders() });
+    const got = Buffer.from(await res.arrayBuffer());
+    r.check(res.status === 200 && sha(got) === sha(data), 'the file on the server is complete');
+  }
+}
+
+// (1.23, the review) Names Windows treats as devices get a "_" first ("CON .txt" too: Windows drops the stem's trailing
+// space); a long name is cut before its extension, not through it.
+async function names(r) {
+  await r.setup();
+  const long = 'L'.repeat(200) + '.pdf';
+  const want = { 'CON .txt': '_CON .txt', 'conin$.log': '_conin$.log', 'COM0.txt': '_COM0.txt', 'LPT\u00b9.txt': '_LPT\u00b9.txt' };
+  const ids = [];
+  for (const name of [...Object.keys(want), long]) {
+    const data = Buffer.from('hello ' + name);
+    const c = await r.api('POST', '/api/uploads', { name, size: data.length, mime: 'application/octet-stream', to: [r.appId] });
+    if (c.status !== 201) { r.check(false, `upload ${name}: ${JSON.stringify(c)}`); continue; }
+    await r.upload(c.data.id, data, 0, data.length);
+    ids.push(c.data.id);
+  }
+  const got = () => r.downFiles().filter(n => !n.endsWith('.beampart'));
+  await r.waitFor(() => got().length >= ids.length, 30000);
+  const files = got();
+  for (const [name, saved] of Object.entries(want)) r.check(files.includes(saved), `"${name}" is saved as "${saved}" (${JSON.stringify(files.filter(f => !f.startsWith('L')))})`);
+  const l = files.find(f => f.startsWith('LLLL'));
+  r.check(!!l && l.endsWith('.pdf') && l.length <= 180, `a ${long.length}-character name keeps its extension (${l ? l.length + ' characters, …' + l.slice(-8) : 'not saved'})`);
+}
+
 async function backups(r) {
   await r.setup({ autoCopy: false, hotkeys: { picker: 'Ctrl+Alt+P' } });
   const get = async () => { const x = await r.api('GET', `/api/devices/${r.appId}/backups`); return x.status === 200 ? x.data.backups || [] : []; };
@@ -708,7 +774,8 @@ async function backups(r) {
 }
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
-  'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups };
+  'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups,
+  'outbox-restart': outboxRestart, names };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

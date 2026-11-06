@@ -36,22 +36,45 @@ namespace Beam
             var ready = new ManualResetEventSlim();
             var t = new Thread(() =>
             {
-                p.marshal = new Control();
-                GC.KeepAlive(p.marshal.Handle);
-                Bitmap[] pages = big ? Pages(screen.Width, screen.Height) : null;
-                var at = pages != null ? new Rectangle(screen.X, screen.Y, pages[0].Width, pages[0].Height) : new Rectangle(screen.X, screen.Y, Size, Size);
-                p.square = new Square(at, Magenta, pages);
-                var idle = new System.Windows.Forms.Timer();
-                idle.Interval = 1000;
-                idle.Tick += (s, e) => { if (Ms(p.last) > IdleMs) p.Close(); };
-                idle.Start();
-                ready.Set();
-                p.square.Show();
-                p.square.Refresh();
-                DwmFlush();
-                shown(Ms(from));
-                Application.Run();
-                idle.Dispose();
+                // (1.23, the user's review) nothing here may end Beam (an 8K screen's pages are big), and a Close that came
+                // before this thread was ready still closes it (the square is topmost)
+                System.Windows.Forms.Timer idle = null;
+                try
+                {
+                    var c = new Control();
+                    GC.KeepAlive(c.Handle);
+                    p.marshal = c; // (only with its handle: BeginInvoke on one without throws)
+                    Bitmap[] pages = null;
+                    if (big)
+                    {
+                        try { pages = Pages(screen.Width, screen.Height); }
+                        catch (Exception ex) { Log.Error("Remote control: the delay probe's block (the square alone)", ex); }
+                    }
+                    var at = pages != null ? new Rectangle(screen.X, screen.Y, pages[0].Width, pages[0].Height) : new Rectangle(screen.X, screen.Y, Size, Size);
+                    p.square = new Square(at, Magenta, pages);
+                    idle = new System.Windows.Forms.Timer();
+                    idle.Interval = 1000;
+                    idle.Tick += (s, e) => { if (Ms(p.last) > IdleMs) p.Close(); };
+                    idle.Start();
+                    ready.Set();
+                    if (p.closed) { p.square.Dispose(); return; } // (closed before it was shown)
+                    p.square.Show();
+                    p.square.Refresh();
+                    DwmFlush();
+                    shown(Ms(from));
+                    Application.Run();
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("Remote control: the delay probe", ex);
+                    p.closed = true;
+                    try { if (p.square != null) { p.square.Close(); p.square.Dispose(); } } catch { }
+                }
+                finally
+                {
+                    ready.Set();
+                    if (idle != null) idle.Dispose();
+                }
             });
             t.SetApartmentState(ApartmentState.STA);
             t.IsBackground = true;

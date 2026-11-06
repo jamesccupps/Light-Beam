@@ -2003,7 +2003,7 @@ async function logStatus() {
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
 // (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
 const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted',
-  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem']);
+  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen']);
 // (1.22) What a Raspberry Pi's firmware says about its power and speed (vcgencmd get_throttled), now and since it started.
 const THROTTLE_FLAGS = new Set(['undervoltage', 'capped', 'throttled', 'softLimit']);
 const HOT_C = 80; // a Pi 4 or 5 slows itself down from 80 °C
@@ -2070,7 +2070,7 @@ function parseStatus(body) {
       const macs = Array.isArray(value) && value.length <= 8 ? value.map(normalizeMac) : [null];
       if (macs.some(m => !m)) throw bad('macs must be a list of up to 8 addresses like aa:bb:cc:dd:ee:ff');
       out.macs = [...new Set(macs)];
-    } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked' || key === 'startsWithWindows' || key === 'startWanted') {
+    } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked' || key === 'startsWithWindows' || key === 'startWanted' || key === 'uacOnScreen') {
       if (typeof value !== 'boolean') throw bad(`${key} must be true or false`);
       out[key] = value;
     } else if (key === 'update') {
@@ -2088,13 +2088,14 @@ function parseStatus(body) {
 
 // What other devices see of a status report (no MAC addresses).
 function publicStatus(status) {
-  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, at } = status;
+  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, uacOnScreen, at } = status;
   return {
     ...(battery && { battery }), ...(storage && { storage }), ...(os && { os }),
     ...(remoteControl !== undefined && { remoteControl }), ...(locked !== undefined && { locked }), ...(update && { update }),
     ...(startsWithWindows !== undefined && { startsWithWindows }), ...(startWanted !== undefined && { startWanted }), // (1.20)
     ...(model && { model }), ...(bootedAt && { bootedAt }), ...(temperature !== undefined && { temperature }), ...(throttled && { throttled }), // (1.22)
     ...(controlProblem && { controlProblem }), // (1.27.1) Beam for Linux: why its remote control can't be on
+    ...(uacOnScreen !== undefined && { uacOnScreen }), // (1.30.1) Windows shows its prompts (UAC) on the normal screen there
     at: at || 0,
   };
 }
@@ -5640,7 +5641,10 @@ async function deleteItem(req, res, [id]) {
   send(res, 204);
 }
 
-async function clearItems(req, res) {
+async function clearItems(req, res, _m, url) {
+  // (1.30.1, the user's review M2) everything, pinned and undelivered too: an approved, lasting sign-in only
+  if (!isTrusted(authOf(req))) throw notTrusted('delete every item');
+  requireLasting(req, url, 'delete every item');
   const deleted = removeItems(() => true);
   log.info(`Deleted every item (${deleted}) (by ${whoName(deviceIdOf(req, new URL(req.url, 'http://beam')))})`);
   await saved();
@@ -5657,7 +5661,7 @@ async function deleteSome(req, res) {
   send(res, 200, { deleted });
 }
 
-async function patchItem(req, res, [id]) {
+async function patchItem(req, res, [id], url) {
   const item = findItem(id);
   if (!item) return send(res, 404, { error: 'Not found' });
   // (1.14.0: a text's words too, so as much as a text may hold)
@@ -5666,6 +5670,9 @@ async function patchItem(req, res, [id]) {
   if (unknown.length) throw httpError(400, `Can't change ${unknown.join(', ')}`);
   if (!('pinned' in body) && !('text' in body)) throw httpError(400, 'Expected {"pinned": true|false} or {"text": "…"}');
   if ('pinned' in body && typeof body.pinned !== 'boolean') throw httpError(400, 'Expected {"pinned": true|false}');
+  // (1.30.1, the user's review M2) a text's words: only its sender's device, or an approved sign-in (a link the phone
+  // sent could be swapped for another of the same length)
+  if ('text' in body && resolveAlias(item.from) !== deviceIdOf(req, url) && !isTrusted(authOf(req))) throw notTrusted('change another device’s message');
   if ('text' in body) await editText(item, body.text);
   if (body.pinned === true) item.pinned = true;
   else if (body.pinned === false) delete item.pinned;
@@ -6851,6 +6858,7 @@ const FEATURES = [
   'shared-folders-2', // (1.28.0: POST /api/devices/{id}/files/icons|thumbs|preview|search, sub-paths and folders in a copy, `can.files2`)
   'shared-folders-page', // (1.28.1: index.html#files=<PC id>, a PC's shared folders alone: the Android app's Shared folders)
   'text-size', // (1.29.0: appearance.text, the web app's text size: small, normal, large, larger)
+  'uac-status', // (1.30.1: status `uacOnScreen`, a PC whose UAC prompts any program there could answer; the review's M28)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)

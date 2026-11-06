@@ -336,7 +336,9 @@ namespace Beam
 
     static class FileUtil
     {
-        static readonly string[] Reserved = { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" };
+        static readonly string[] Reserved = { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+            // (1.23, the user's review) the others Windows also treats as devices
+            "COM0", "LPT0", "COM\u00B9", "COM\u00B2", "COM\u00B3", "LPT\u00B9", "LPT\u00B2", "LPT\u00B3", "CONIN$", "CONOUT$" };
 
         // Opening these runs code: Beam shows them in their folder instead of opening them.
         static readonly HashSet<string> Executable = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -379,8 +381,17 @@ namespace Beam
                 sb.Append(invalid.Contains(c) || c < 32 ? '_' : c);
             }
             name = sb.ToString().Trim().Trim('.').Trim();
-            if (name.Length > 180) name = name.Substring(0, 180);
-            string stem = name.Split('.')[0].ToUpperInvariant();
+            if (name.Length > 180)
+            {
+                // (1.23) the extension kept (it was cut off with the rest), and never half a surrogate pair
+                string ext = Path.GetExtension(name);
+                if (ext.Length > 16 || ext.Length == name.Length) ext = "";
+                string head = name.Substring(0, 180 - ext.Length);
+                if (head.Length > 0 && char.IsHighSurrogate(head[head.Length - 1])) head = head.Substring(0, head.Length - 1);
+                name = head.TrimEnd(' ', '.') + ext;
+            }
+            // (1.23) Windows drops the stem's trailing spaces: "CON .txt" is CON
+            string stem = name.Split('.')[0].TrimEnd(' ').ToUpperInvariant();
             if (Array.IndexOf(Reserved, stem) >= 0) name = "_" + name;
             return name.Length == 0 ? "file" : name;
         }

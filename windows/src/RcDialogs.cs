@@ -37,12 +37,14 @@ namespace Beam
                 " stops it too. A locked PC can't be controlled. You can turn this off here, or from any of your devices.", Ui.Font, true, Ui.S(14));
             Section("DEVICES THAT MAY CONTROL THIS PC");
             var listed = app.Cfg.RemoteControlDevices;
-            var devices = app.Devices.Where(d => d.Id != app.Me && !d.Temporary).OrderBy(d => d.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+            // (1.23, the user's review) never a Linux computer (it's only controlled), and turning on ticks only approved devices
+            var devices = app.Devices.Where(d => d.Id != app.Me && !d.Temporary && d.Platform != "linux").OrderBy(d => d.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
             foreach (var d in devices)
             {
                 var entry = listed.FirstOrDefault(a => a.Id == d.Id);
-                bool tick = turningOn && ticked != null ? ticked.Contains(d.Id) : turningOn || entry != null;
+                bool tick = turningOn && ticked != null ? ticked.Contains(d.Id) : turningOn ? d.Trusted : entry != null;
                 string machine = entry != null && entry.Machine != null ? "on " + entry.Machine + " (pinned)" : d.TailscaleName != null ? "on " + d.TailscaleName : "no Tailscale address yet";
+                if (!d.Trusted) machine += " · not approved yet (it can't control PCs until it is)";
                 var c = AddCheck(d.Name, Platform(d.Platform) + " · " + machine, tick, 0, Ui.S(6));
                 checks.Add(new KeyValuePair<string, FlatCheck>(d.Id, c));
             }

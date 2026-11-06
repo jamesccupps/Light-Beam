@@ -33,6 +33,9 @@ namespace Beam
     class InstalledApp
     {
         public string Id, Name, Kind, Version, Sha256, Dir, Exe, Shortcut, UninstallKey, ProductCode, Winget;
+        // (1.23, the review's M27) what Beam wrote in Dir (relative; a folder ends with \): only these go at an uninstall.
+        // null: installed by 1.22 or older (an .exe's own file is known; a .zip's folder is left as it is)
+        public List<string> Files;
 
         public Dictionary<string, object> ToJson()
         {
@@ -40,6 +43,7 @@ namespace Beam
             d["id"] = Id; d["name"] = Name; d["kind"] = Kind; d["version"] = Version; d["sha256"] = Sha256;
             d["dir"] = Dir; d["exe"] = Exe; d["shortcut"] = Shortcut; d["uninstallKey"] = UninstallKey;
             d["productCode"] = ProductCode; d["winget"] = Winget;
+            if (Files != null) d["files"] = Files.ToArray();
             return d;
         }
 
@@ -51,6 +55,7 @@ namespace Beam
             a.Id = Json.Str(d, "id"); a.Name = Json.Str(d, "name"); a.Kind = Json.Str(d, "kind"); a.Version = Json.Str(d, "version");
             a.Sha256 = Json.Str(d, "sha256"); a.Dir = Json.Str(d, "dir"); a.Exe = Json.Str(d, "exe"); a.Shortcut = Json.Str(d, "shortcut");
             a.UninstallKey = Json.Str(d, "uninstallKey"); a.ProductCode = Json.Str(d, "productCode"); a.Winget = Json.Str(d, "winget");
+            if (Json.Get(d, "files") != null) a.Files = Json.StrList(d, "files");
             return a.Id != null && a.Kind != null ? a : null;
         }
     }
@@ -368,25 +373,39 @@ namespace Beam
                     if (why != null) throw new InvalidOperationException(why);
                     return a;
                 }
-                string dir = Path.Combine(ProgramsFolder, FolderName(name));
-                Directory.CreateDirectory(dir);
+                var prev = Cfg.InstalledApps.FirstOrDefault(x => x.Id == id);
+                bool made;
+                string dir = AppFolder(id, name, prev, out made);
                 a.Dir = dir;
-                if (type == "zip")
+                var written = new List<string>();
+                try
                 {
-                    a.Kind = "zip";
-                    await Task.Run(() => Unzip(got, dir));
-                    a.Exe = ZipProgram(dir, Json.Str(info, "run"), name);
+                    if (made) Directory.CreateDirectory(dir);
+                    Mark(dir, id);
+                    if (type == "zip")
+                    {
+                        a.Kind = "zip";
+                        await Task.Run(() => Unzip(got, dir, written));
+                        a.Exe = ZipProgram(dir, Json.Str(info, "run"), name);
+                    }
+                    else
+                    {
+                        a.Kind = "exe";
+                        a.Exe = Path.Combine(dir, fileName);
+                        PutInPlace(got, a.Exe);
+                        written.Add(fileName);
+                    }
                 }
-                else
+                catch
                 {
-                    a.Kind = "exe";
-                    a.Exe = Path.Combine(dir, fileName);
-                    PutInPlace(got, a.Exe);
+                    if (made) RemoveListed(dir, written); // a folder made just now: what this try wrote goes again
+                    throw;
                 }
+                a.Files = Manifest(prev, dir, written);
                 if (a.Exe != null)
                 {
-                    a.Shortcut = Path.Combine(Cfg.StartMenuFolder, FolderName(name) + ".lnk");
-                    try { Shortcut.Create(a.Shortcut, a.Exe, "", name); }
+                    a.Shortcut = ShortcutFor(name, prev);
+                    try { if (a.Shortcut != null) Shortcut.Create(a.Shortcut, a.Exe, "", name); }
                     catch (Exception ex) { Log.Write("Apps: no Start menu shortcut for " + name + " (" + ex.Message + ")"); a.Shortcut = null; }
                 }
                 a.UninstallKey = Register(a, Json.Str(info, "version"));
@@ -513,9 +532,9 @@ namespace Beam
             return stem + "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
         }
 
-        // Every entry inside `dir` (a name that would land outside it, or a full path, is refused); files in use are
-        // renamed aside first.
-        static void Unzip(string zip, string dir)
+        // Every entry inside `dir` (a name that would land outside it, or a full path, is refused: (1.23) all of them
+        // checked before anything is written); files in use are renamed aside first. `written` gets what it wrote.
+        static void Unzip(string zip, string dir, List<string> written)
         {
             string root = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
             using (var archive = ZipFile.OpenRead(zip))
@@ -524,7 +543,17 @@ namespace Beam
                 {
                     string target = Path.GetFullPath(Path.Combine(root, e.FullName));
                     if (!target.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("the .zip has a file that would go outside its folder (" + e.FullName + ")");
-                    if (e.FullName.EndsWith("/") || e.FullName.EndsWith("\\")) { Directory.CreateDirectory(target); continue; }
+                }
+                foreach (var e in archive.Entries)
+                {
+                    string target = Path.GetFullPath(Path.Combine(root, e.FullName));
+                    string rel = target.Substring(root.Length);
+                    if (e.FullName.EndsWith("/") || e.FullName.EndsWith("\\"))
+                    {
+                        Directory.CreateDirectory(target);
+                        if (rel.Length > 0) written.Add(rel.TrimEnd('\\') + "\\");
+                        continue;
+                    }
                     Directory.CreateDirectory(Path.GetDirectoryName(target));
                     string tmp = target + ".beam-new";
                     e.ExtractToFile(tmp, true);
@@ -533,8 +562,148 @@ namespace Beam
                         try { File.Delete(target); } catch { File.Move(target, AsideName(target)); }
                     }
                     File.Move(tmp, target);
+                    written.Add(rel);
                 }
             }
+        }
+
+        // (1.23, the review's M27) Where an app goes: its own folder from before (this app's), else Programs\<name> only
+        // when nothing has that name yet (or it's marked as this app's), else "<name> (Beam)", "<name> (Beam 2)"…;
+        // never Beam's own folder or name. Before 1.23 an app called "Python" or "Git" took that program's own folder.
+        string AppFolder(string id, string name, InstalledApp prev, out bool made)
+        {
+            made = false;
+            if (prev != null && prev.Dir != null && Directory.Exists(prev.Dir)) return prev.Dir;
+            string own = Path.GetDirectoryName(Path.GetFullPath(Application.ExecutablePath)).TrimEnd('\\');
+            string baseName = FolderName(name);
+            for (int i = 0; i < 100; i++)
+            {
+                string n = Candidate(baseName, i);
+                if (n == null) continue;
+                string dir = Path.Combine(ProgramsFolder, n);
+                if (string.Equals(Path.GetFullPath(dir).TrimEnd('\\'), own, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!Directory.Exists(dir) && !File.Exists(dir)) { made = true; return dir; }
+                if (MarkedFor(dir, id)) return dir;
+            }
+            throw new IOException("there's no free folder for " + name + " in " + ProgramsFolder);
+        }
+
+        // The Start menu shortcut: its own from before, else the first free name like the folder's.
+        string ShortcutFor(string name, InstalledApp prev)
+        {
+            if (prev != null && prev.Shortcut != null) return prev.Shortcut;
+            string baseName = FolderName(name);
+            for (int i = 0; i < 100; i++)
+            {
+                string n = Candidate(baseName, i);
+                if (n == null) continue;
+                string p = Path.Combine(Cfg.StartMenuFolder, n + ".lnk");
+                if (!File.Exists(p)) return p;
+            }
+            return null;
+        }
+
+        // "<name>", "<name> (Beam)", "<name> (Beam 2)"…; never Beam's own names.
+        static string Candidate(string baseName, int i)
+        {
+            if (i == 0) return string.Equals(baseName, "Beam", StringComparison.OrdinalIgnoreCase) || string.Equals(baseName, "Beam Family", StringComparison.OrdinalIgnoreCase) ? null : baseName;
+            return baseName + (i == 1 ? " (Beam)" : " (Beam " + i + ")");
+        }
+
+        // A hidden file in each app's folder: the app's id (CleanLeftovers' "*.beam-*" must never match it).
+        const string Marker = ".beamapp";
+
+        static void Mark(string dir, string id)
+        {
+            string m = Path.Combine(dir, Marker);
+            try
+            {
+                if (File.Exists(m)) File.SetAttributes(m, FileAttributes.Normal);
+                File.WriteAllText(m, id + "\r\nInstalled by Beam. Uninstalling it removes only the files Beam put here.\r\n");
+                File.SetAttributes(m, FileAttributes.Hidden);
+            }
+            catch (Exception ex) { Log.Write("Apps: no marker in " + dir + " (" + ex.Message + ")"); }
+        }
+
+        static bool MarkedFor(string dir, string id)
+        {
+            try
+            {
+                var lines = File.ReadAllLines(Path.Combine(dir, Marker));
+                return lines.Length > 0 && lines[0].Trim() == id;
+            }
+            catch { return false; }
+        }
+
+        // What Beam has written in `dir` now: this install's files, and an update's earlier ones in the same folder.
+        // More than 5,000: none kept (its folder is then left as it is at an uninstall).
+        static List<string> Manifest(InstalledApp prev, string dir, List<string> written)
+        {
+            IEnumerable<string> before = null;
+            if (prev != null && prev.Dir != null && string.Equals(prev.Dir, dir, StringComparison.OrdinalIgnoreCase))
+                before = (IEnumerable<string>)prev.Files ?? (prev.Kind == "exe" && prev.Exe != null ? new[] { RelativeTo(dir, prev.Exe) } : null);
+            var all = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in (before ?? Enumerable.Empty<string>()).Concat(written)) if (f != null && seen.Add(f)) all.Add(f);
+            return all.Count <= 5000 ? all : null;
+        }
+
+        static string RelativeTo(string dir, string path)
+        {
+            try
+            {
+                string root = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
+                string full = Path.GetFullPath(path);
+                return full.StartsWith(root, StringComparison.OrdinalIgnoreCase) && full.Length > root.Length ? full.Substring(root.Length) : null;
+            }
+            catch { return null; }
+        }
+
+        // (1.23, the review's M27) Only what Beam wrote goes: the files it put there (and its copies of them renamed
+        // aside), then its marker and the folders that leaves empty, the app's own folder last. Never through a link
+        // (a junction someone put in its place). null, or why a file couldn't go (in use).
+        static string RemoveListed(string dir, IEnumerable<string> files)
+        {
+            string root = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
+            var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { root.TrimEnd('\\') };
+            string failed = null;
+            foreach (var rel in files)
+            {
+                if (string.IsNullOrEmpty(rel)) continue;
+                string p = Path.GetFullPath(Path.Combine(root, rel)).TrimEnd('\\');
+                if (!p.StartsWith(root, StringComparison.OrdinalIgnoreCase) || ThroughLink(root, p)) continue;
+                for (string d = Path.GetDirectoryName(p); d != null && d.Length >= root.Length; d = Path.GetDirectoryName(d)) dirs.Add(d);
+                if (rel.EndsWith("\\") || rel.EndsWith("/")) { dirs.Add(p); continue; }
+                try
+                {
+                    if (File.Exists(p)) File.Delete(p);
+                    string parent = Path.GetDirectoryName(p);
+                    if (Directory.Exists(parent)) foreach (var old in Directory.GetFiles(parent, Path.GetFileName(p) + ".beam-*")) FileUtil.TryDelete(old);
+                }
+                catch (IOException ex) { if (failed == null) failed = ex.Message; }
+                catch (UnauthorizedAccessException ex) { if (failed == null) failed = ex.Message; }
+            }
+            if (failed != null) return failed;
+            try
+            {
+                string m = Path.Combine(root, Marker);
+                if (File.Exists(m)) { File.SetAttributes(m, FileAttributes.Normal); File.Delete(m); }
+            }
+            catch { }
+            foreach (var d in dirs.OrderByDescending(x => x.Length)) { try { Directory.Delete(d, false); } catch { } }
+            return null;
+        }
+
+        // A folder on the way from the app's folder (itself included) to p that is a link (junction, symlink).
+        static bool ThroughLink(string root, string p)
+        {
+            try
+            {
+                for (string d = Path.GetDirectoryName(p); d != null && d.Length >= root.Length - 1; d = Path.GetDirectoryName(d))
+                    if ((File.GetAttributes(d) & FileAttributes.ReparsePoint) != 0) return true;
+                return false;
+            }
+            catch { return true; } // (gone already, or unreadable: left alone)
         }
 
         // The program a .zip's shortcut starts: the one named (`run`), else its only .exe, else the one named like the app.
@@ -543,7 +712,8 @@ namespace Beam
             if (!string.IsNullOrEmpty(run))
             {
                 string p = Path.GetFullPath(Path.Combine(dir, run.Replace('/', '\\')));
-                if (p.StartsWith(Path.GetFullPath(dir), StringComparison.OrdinalIgnoreCase) && File.Exists(p)) return p;
+                // (1.23, the review) with the separator: ..\Slate2\x.exe from …\Slate passed before
+                if (p.StartsWith(Path.GetFullPath(dir).TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase) && File.Exists(p)) return p;
             }
             var exes = Directory.GetFiles(dir, "*.exe", SearchOption.AllDirectories).Where(f => f.IndexOf(".beam-", StringComparison.OrdinalIgnoreCase) < 0).ToList();
             if (exes.Count == 1) return exes[0];
@@ -577,13 +747,22 @@ namespace Beam
             catch (Exception ex) { Log.Write("Apps: not listed in Installed apps (" + ex.Message + ")"); return null; }
         }
 
-        // What Beam put here goes (the folder, the shortcut, the Installed apps entry). null, or why it couldn't.
+        // What Beam put here goes (its files, the shortcut, the Installed apps entry). null, or why it couldn't.
+        // (1.23, the review's M27) Only the files Beam wrote: the folder whole went before, a portable app's own data in
+        // it too, and the folder of another program that had the app's name.
         string RemoveFiles(InstalledApp a)
         {
             if (a.Dir != null && Directory.Exists(a.Dir))
             {
-                try { Directory.Delete(a.Dir, true); }
-                catch (Exception ex) { return a.Name + " is in use on this PC (close it, then uninstall again): " + ex.Message; }
+                var files = a.Files;
+                if (files == null && a.Kind == "exe" && a.Exe != null) files = new List<string> { RelativeTo(a.Dir, a.Exe) }; // (by 1.22 or older)
+                if (files != null)
+                {
+                    string inUse = RemoveListed(a.Dir, files);
+                    if (inUse != null) return a.Name + " is in use on this PC (close it, then uninstall again): " + inUse;
+                    if (Directory.Exists(a.Dir)) Log.Write("Apps: kept " + a.Dir + " (files " + a.Name + " made there itself)");
+                }
+                else Log.Write("Apps: left " + a.Dir + " as it is (installed by an older Beam, which kept no list of its files)");
             }
             if (a.Shortcut != null) FileUtil.TryDelete(a.Shortcut);
             if (a.UninstallKey != null && a.UninstallKey.StartsWith(UninstallRoot + "BeamApp-", StringComparison.Ordinal))

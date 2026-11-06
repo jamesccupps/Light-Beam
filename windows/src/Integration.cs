@@ -540,7 +540,7 @@ namespace Beam
         void Consider(string path)
         {
             string entry = TopEntry(path);
-            if (entry == null || sending.Contains(entry) || Ignored(entry) || TargetOf(entry) == null) return;
+            if (entry == null || sending.Contains(entry) || app.OutboxUploading(entry) || Ignored(entry) || TargetOf(entry) == null) return;
             if (!File.Exists(entry) && !Directory.Exists(entry)) return;
             DateTime when;
             if (failed.TryGetValue(entry, out when))
@@ -634,23 +634,26 @@ namespace Beam
                 }
                 candidates.Remove(entry);
                 string target = TargetOf(entry);
-                if (target == null || !app.Cfg.Paired) continue;
+                if (target == null || !app.Cfg.Paired || app.OutboxUploading(entry)) continue;
                 sending.Add(entry);
                 Log.Write("Outbox: sending an entry to " + (target == "*" ? "all devices" : target));
                 string path = entry;
-                app.SendFiles(new[] { path }, App.TargetsOf(target), true, "outbox", job =>
-                {
-                    sending.Remove(path);
-                    if (job.State == JobState.Done) MoveToSent(path);
-                    else if (job.State == JobState.Failed && job.Permanent)
-                    {
-                        try { failed[path] = File.GetLastWriteTimeUtc(path); } catch { }
-                    }
-                });
+                app.SendFiles(new[] { path }, App.TargetsOf(target), true, "outbox", job => Finished(path, job));
             }
         }
 
-        void MoveToSent(string entry)
+        // An entry's upload ended (also one resumed after a restart: App.OutboxUploadFinished).
+        public void Finished(string path, UploadJob job)
+        {
+            sending.Remove(path);
+            if (job.State == JobState.Done) MoveToSent(path);
+            else if (job.State == JobState.Failed && job.Permanent)
+            {
+                try { failed[path] = File.GetLastWriteTimeUtc(path); } catch { }
+            }
+        }
+
+        public static void MoveToSent(string entry)
         {
             try
             {

@@ -731,6 +731,8 @@ function sectionConnections() {
 // for administrator rights each time it's set up, changed or removed). The prompts option shows them on the normal
 // screen instead of the secure one.
 let adminHelperBusy = false;
+// (1.23, the user's review M28) what answering Windows' prompts from other devices costs: any program could answer them
+const UAC_RISK = 'Windows then shows its prompts on the normal screen instead of its secure one: any program on this PC could answer them, and a fake prompt would look the same. Turn it on only on PCs where you need it.';
 function adminHelperRows(ah) {
   const run = async (action, prompts) => {
     if (adminHelperBusy) return;
@@ -750,7 +752,7 @@ function adminHelperRows(ah) {
     const extra = el('div', {},
       el('p', { class: 'muted small' }, 'Beam’s input helper goes into Program Files, and its certificate (made with your copy of Beam) is added to this PC’s trusted ones. It runs only while one of your devices controls this PC.'),
       el('label', { class: 'check' }, box, el('span', {}, 'Also answer Windows’ prompts (UAC) from other devices',
-        el('small', { class: 'muted block' }, 'Windows then shows its prompts on the normal screen instead of its secure one, so other programs on this PC could see them too.'))));
+        el('small', { class: 'muted block' }, UAC_RISK))));
     if (await confirmDialog({ title: 'Let remote control reach administrator windows?', text: 'Windows asks for administrator rights to set it up.', confirm: 'Set up', extra })) run('setup', box.checked);
   };
   const remove = async () => {
@@ -765,7 +767,7 @@ function adminHelperRows(ah) {
   return [
     inlineRow('Administrator windows', button, hint),
     ready && switchRow('Answer Windows’ prompts (UAC) from other devices', Boolean(ah.prompts), on => run('setup', on),
-      { hint: 'Windows then shows its prompts on the normal screen instead of its secure one, so other programs on this PC could see them too. Windows asks for administrator rights to change it.', disabled: adminHelperBusy }),
+      { hint: `${UAC_RISK} Windows asks for administrator rights to change it.`, disabled: adminHelperBusy }),
   ];
 }
 

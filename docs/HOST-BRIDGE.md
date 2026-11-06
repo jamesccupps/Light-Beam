@@ -116,6 +116,7 @@ every device.
 | `sendClipboard` | `to` | `{ kind: "text" \| "image" \| "files", description }` or `code: "empty"` | Reads the Windows clipboard itself (text, screenshots, files copied in Explorer) and sends it. Use it for **pasted files/images** and the paste button: pasted blobs have no disk path. |
 | `saveFile` | `itemId` | `{}` | Downloads the file into the Beam folder (resumes after restarts). Progress arrives as `transfer` events, then `localFile`. |
 | `saveFileAs` | `itemId` | `{}` or `code: "cancelled"` | Native "Save as" dialog, then downloads there. |
+| `saveText` | `name`, `text` (≤ 16 M characters) | `{}`, `code: "cancelled"` or `"failed"` | **(1.23, feature `saveText`)** A text the page has (Device info → Beam log → Save): a native "Save as" dialog, written as UTF-8. The window blocks `blob:` downloads, so the page's own Save link did nothing there. A test instance writes into its config folder's `saved\` without a dialog. |
 | `openFile` | `itemId` | `{}` | Opens the local copy with its default app. If it isn't saved yet, saves first and opens when done. **Executables and scripts are never run**: they're shown in the folder instead. |
 | `revealFile` | `itemId` | `{}` | Shows the local copy selected in Explorer (saves first if needed). |
 | `cancelTransfer` | `transferId` | `{}` | Cancels a queued or running upload or download. |

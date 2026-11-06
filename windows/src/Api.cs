@@ -25,6 +25,7 @@ namespace Beam
         public string User;               // "owner"
         public string TailscaleIp, TailscaleName; // the machine the server knows it on (tailscale.ip / .name)
         public bool CanRemoteControl;     // Beam 1.6: can.remoteControl (a PC that allows it, unlocked)
+        public bool Trusted = true;       // (1.23, the review's M2) approved (Beam 1.25 `trusted`; an older server says nothing: yes)
 
         public static Device Parse(Dictionary<string, object> d)
         {
@@ -42,6 +43,7 @@ namespace Beam
             dev.TailscaleIp = Json.Str(ts, "ip");
             dev.TailscaleName = Json.Str(ts, "name");
             dev.CanRemoteControl = Json.Bool(Json.Obj(Json.Get(d, "can")), "remoteControl", false);
+            dev.Trusted = Json.Bool(d, "trusted", true);
             return dev.Id == null ? null : dev;
         }
 

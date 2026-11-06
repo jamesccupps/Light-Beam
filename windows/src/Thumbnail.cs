@@ -12,6 +12,8 @@ namespace Beam
     static class Thumbnail
     {
         static readonly string[] Images = { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff" };
+        // (1.23, the user's review M8) the most pixels a preview is made from: decoding is whole (4 bytes a pixel)
+        const long MaxPixels = 100L * 1000 * 1000;
 
         public static bool IsImage(string name)
         {
@@ -56,6 +58,7 @@ namespace Beam
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             using (var src = Image.FromStream(fs, false, false))
             {
+                if ((long)src.Width * src.Height > MaxPixels) return null; // (only the header read so far)
                 int orientation = Orientation(src);
                 bool sideways = orientation >= 5 && orientation <= 8;
                 int w = sideways ? src.Height : src.Width, h = sideways ? src.Width : src.Height;

@@ -1037,6 +1037,7 @@ namespace Beam
             if (it == null) return;
             it.Kind = "file";
             if (it.Size < SaveWhileArriving || it.Size > Cfg.MaxSaveBytes || !IsForMe(it)) return;
+            if (!ActsOn(it) || !RoomToSave(it.Size)) return; // (1.23: decided when its item comes, ReceiveFile)
             DownloadJob running;
             if (Downloads.TryGetValue(it.Id, out running))
             {
@@ -1824,7 +1825,7 @@ namespace Beam
                 // Handled but the server doesn't know yet: a file saved while it was still arriving (its receipt
                 // went out before the item existed), or an ack lost while offline. Items from before signing in
                 // aren't acked. A file still being saved (a retry) is acked once it's saved.
-                if (!saving && !it.Delivered.ContainsKey(Me) && it.Ts > St.BaselineTs) Ack(it);
+                if (!saving && !it.Delivered.ContainsKey(Me) && it.Ts > St.BaselineTs && !St.IsNotDelivered(it.Id)) Ack(it);
                 return;
             }
             if (receiving.Contains(it.Id)) return;
@@ -1861,29 +1862,62 @@ namespace Beam
             again.Start();
         }
 
+        // (1.23, the user's review M2) Copying a text, saving a file or opening a link by itself: only for one from this PC
+        // or from a device that's approved ("Can control PCs and install apps"); the others get their notification, with
+        // Copy and Save. A program that signed in by itself could otherwise put its text on every PC's clipboard.
+        bool ActsOn(Item it)
+        {
+            if (it.From == Me) return true;
+            var d = DeviceById(it.From);
+            return d != null && d.Trusted;
+        }
+
+        // (1.23, the user's review M5) Room on the save folder's drive for one more automatic save: its size and what the
+        // automatic saves already running still need, with max(5 GB, 5 %) left over. A share or an error: yes.
+        bool RoomToSave(long size)
+        {
+            try
+            {
+                string root = Path.GetPathRoot(Path.GetFullPath(Cfg.SaveFolderPath));
+                if (string.IsNullOrEmpty(root) || root.StartsWith(@"\\")) return true;
+                var drive = new DriveInfo(root);
+                long pending = 0;
+                foreach (var j in Downloads.Values) if (j.Active && j.Auto) pending += Math.Max(0, j.Item.Size - j.Done);
+                long keep = Math.Max(5L << 30, drive.TotalSize / 20);
+                return drive.AvailableFreeSpace - pending >= size + keep;
+            }
+            catch { return true; }
+        }
+
         async void ReceiveText(Item it)
         {
             string text = it.Text;
             int mine = session;
             if (it.Truncated)
             {
-                try { text = await Api.FullText(it.Id) ?? text; }
+                // (1.23, the user's review M4) never the 16 KB preview as if it were the text: on a failure it waits for the
+                // next catch-up (it used to be copied, marked handled and acknowledged as delivered)
+                string full = null;
+                try { full = await Api.FullText(it.Id); }
                 catch (Exception ex) { Log.Error("Fetching full text", ex); }
                 if (mine != session) return; // signed out meanwhile
+                if (full == null) { receiving.Remove(it.Id); return; }
+                text = full;
             }
+            bool acts = ActsOn(it);
             // (1.21.3) Windows refuses the clipboard while this PC is locked (every text that came then, in the PCs' logs of
             // October): the newest one is copied when it's unlocked (Unlocked).
             bool copied = false, kept = false;
-            if (Cfg.AutoCopy)
+            if (Cfg.AutoCopy && acts)
             {
                 if (!Rc.SessionLocked) copied = ClipPayload.SetText(text, Cfg.ClipboardHistory);
                 kept = !copied && Rc.Locked;
                 if (kept) { unlockCopy = text; unlockCopyId = it.Id; unlockCopySession = session; }
             }
-            Log.Write("Received text " + it.Id + " from " + it.DeviceName + (copied ? " (copied)" : kept ? " (copied once this PC is unlocked)" : ""));
+            Log.Write("Received text " + it.Id + " from " + it.DeviceName + (copied ? " (copied)" : kept ? " (copied once this PC is unlocked)" : !acts ? " (not copied: that device isn't approved)" : ""));
             // "Open links sent to this PC automatically": only a link sent to this PC itself (not to all devices), and
             // only while it's fresh (not a week-old link found when the PC wakes up).
-            if (Cfg.AutoOpenLinks && Fmt.IsLink(text) && it.To.Contains(Me) && it.From != Me && Math.Abs(Fmt.NowMs() - it.Ts) < 10 * 60 * 1000)
+            if (Cfg.AutoOpenLinks && acts && Fmt.IsLink(text) && it.To.Contains(Me) && it.From != Me && Math.Abs(Fmt.NowMs() - it.Ts) < 10 * 60 * 1000)
             {
                 FileUtil.OpenUrl(text.Trim());
                 Log.Write("Opened the link in " + it.Id);
@@ -1928,12 +1962,17 @@ namespace Beam
         void ReceiveFile(Item it)
         {
             string from = SenderName(it);
-            if (Cfg.AutoSave && it.Size <= Cfg.MaxSaveBytes)
+            bool acts = ActsOn(it), room = !Cfg.AutoSave || RoomToSave(it.Size);
+            if (Cfg.AutoSave && acts && room && it.Size <= Cfg.MaxSaveBytes)
             {
                 StartDownload(it, true, null, null);
                 return;
             }
-            string why = !Cfg.AutoSave ? "Click to save it." : "It's larger than " + Fmt.Size(Cfg.MaxSaveBytes) + ". Click to save it.";
+            string why = !Cfg.AutoSave ? "Click to save it."
+                : !acts ? "It's from a device that isn't approved yet. Click to save it."
+                : !room ? "There isn't enough free space to save it by itself. Click to save it."
+                : "It's larger than " + Fmt.Size(Cfg.MaxSaveBytes) + ". Click to save it.";
+            if (Cfg.AutoSave && (!acts || !room)) Log.Write("Not saving " + it.Id + " by itself: " + (!acts ? "its device isn't approved" : "not enough free space"));
             string id = it.Id;
             if (!Watching(it))
             {
@@ -2005,6 +2044,7 @@ namespace Beam
             if (state == JobState.Done)
             {
                 St.SetLocalPath(it.Id, job.FinalPath);
+                if (St.IsNotDelivered(it.Id)) { St.SetNotDelivered(it.Id, false); Ack(it); } // (1.23: saved by hand after all)
                 if (LocalFileChanged != null) LocalFileChanged(it.Id, true);
                 if (job.Then == "open") FileUtil.Open(job.FinalPath);
                 else if (job.Then == "reveal") FileUtil.ShowInFolder(job.FinalPath);
@@ -2048,7 +2088,10 @@ namespace Beam
                 if (job.Auto && job.Permanent && job.ErrorStatus != 401)
                 {
                     St.MarkHandled(it.Id);
-                    Ack(it);
+                    // (1.23, the user's review M5) a problem here (disk full, a folder it can't write) isn't "delivered": the
+                    // sender's view said Delivered for a file that wasn't there, and the server cleared it first
+                    if (job.ErrorStatus == 0) St.SetNotDelivered(it.Id, true);
+                    else Ack(it);
                 }
             }
             if (job.Auto) receiving.Remove(it.Id);
@@ -2124,6 +2167,7 @@ namespace Beam
                 job.NotifyWhenDone = notify;
                 job.Finished = finished;
                 job.Origin = origin;
+                if (origin == "outbox") job.OutboxEntry = p;
                 Uploads.Add(job);
                 count++;
                 if (isDir)
@@ -2189,7 +2233,7 @@ namespace Beam
             if (s == null) { s = new SavedUpload(); s.LocalId = job.LocalId; St.Uploads.Add(s); }
             s.Path = job.Path; s.Name = job.Name; s.Mime = job.Mime; s.UploadId = job.UploadId; s.Origin = job.Origin;
             s.Size = job.Size; s.MtimeTicks = job.MtimeTicks; s.Ts = job.Ts; s.To = new List<string>(job.To);
-            s.DeleteWhenDone = job.DeleteWhenDone; s.Notify = job.NotifyWhenDone;
+            s.DeleteWhenDone = job.DeleteWhenDone; s.Notify = job.NotifyWhenDone; s.OutboxEntry = job.OutboxEntry;
             St.Save();
         }
 
@@ -2250,6 +2294,21 @@ namespace Beam
             }
         }
 
+        // (1.23, the review's M26) An outbox entry with an upload still going (one resumed after a restart): the outbox
+        // leaves it alone.
+        public bool OutboxUploading(string entry)
+        {
+            foreach (var j in Uploads)
+                if (j.OutboxEntry != null && !j.FinalHandled && string.Equals(j.OutboxEntry, entry, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        void OutboxUploadFinished(UploadJob job)
+        {
+            if (outbox != null) outbox.Finished(job.OutboxEntry, job);
+            else if (job.State == JobState.Done) Outbox.MoveToSent(job.OutboxEntry); // finished before the outbox started
+        }
+
         // Uploads and saves that were in progress when Beam last stopped carry on where the server has them.
         void RestoreTransfers()
         {
@@ -2270,6 +2329,11 @@ namespace Beam
                 job.LocalId = s.LocalId; job.Path = s.Path; job.Name = s.Name; job.Mime = s.Mime; job.UploadId = s.UploadId;
                 job.Origin = s.Origin; job.Size = s.Size; job.MtimeTicks = s.MtimeTicks; job.Ts = s.Ts; job.To = new List<string>(s.To);
                 job.DeleteWhenDone = s.DeleteWhenDone; job.NotifyWhenDone = s.Notify; job.NeedsResync = s.UploadId != null;
+                // (1.23, the review's M26) one from the outbox reports to it again: moved to Sent when it's done, and the
+                // outbox doesn't send it a second time meanwhile (OutboxUploading). One saved by 1.22 or older has no
+                // entry: a file it sent itself is its entry (a folder's .zip, deleted when done, isn't).
+                job.OutboxEntry = s.OutboxEntry ?? (s.Origin == "outbox" && !s.DeleteWhenDone ? s.Path : null);
+                if (job.OutboxEntry != null) job.Finished = OutboxUploadFinished;
                 Uploads.Add(job);
                 up.Enqueue(job);
                 Log.Write("Resuming upload " + job.TransferId);

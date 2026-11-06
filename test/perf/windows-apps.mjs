@@ -157,7 +157,18 @@ try {
     'echo Successfully installed',
     'exit /b 0',
   ].join('\r\n'));
-  const pc = await startPc({ testWinget: fakeWinget });
+  // (1.23, the review's M27) Another program's folder with the tool's name, already there; and an app an older Beam
+  // installed (no list of its files): its .exe and a file of its own beside it.
+  const theirs = path.join(dir('cfg'), 'Programs', 'Beam Test Tool');
+  fs.mkdirSync(theirs, { recursive: true });
+  fs.writeFileSync(path.join(theirs, 'BeamTestTool.exe'), 'theirs');
+  fs.writeFileSync(path.join(theirs, 'notes.txt'), 'keep me');
+  const oldDir = path.join(dir('cfg'), 'Programs', 'Old Tool');
+  fs.mkdirSync(oldDir, { recursive: true });
+  fs.writeFileSync(path.join(oldDir, 'old.exe'), 'old');
+  fs.writeFileSync(path.join(oldDir, 'user.txt'), 'its own');
+  const legacy = { id: 'abcdef12', name: 'Old Tool', kind: 'exe', version: '1.0', dir: oldDir, exe: path.join(oldDir, 'old.exe') };
+  const pc = await startPc({ testWinget: fakeWinget, installedApps: [legacy] });
   check(!!(await pc.waitLog(/Events: connected/)), 'the PC connects');
   const dl = await call('GET', '/api/devices');
   check(dl.json?.devices?.find(d => d.id === pc.id)?.can?.apps === true, `the server says it can install apps (Windows 1.16) (${dl.status} ${dl.json?.devices ? '' : dl.text.slice(0, 160)})`);
@@ -176,10 +187,14 @@ try {
   check(!!asks && asks.includes(`"appAsks":[{"id":"${tool.id}"`) && asks.includes('"name":"Beam Test Tool"'), `...and the window's bar has it (settings.appAsks) (${(asks || '').match(/"appAsks":[^\]]*\]/)?.[0]})`);
   pc.forward(['--test-apps', `answer:${tool.id}:install`]);
   let s = await waitState(tool.id, pc.id, 'installed');
-  const toolExe = path.join(pc.cfgDir, 'Programs', 'Beam Test Tool', 'BeamTestTool.exe');
+  const toolExe = path.join(pc.cfgDir, 'Programs', 'Beam Test Tool (Beam)', 'BeamTestTool.exe');
   check(!!s && /^\d/.test(s.version || ''), `Install: installed, at the program's own version (${s?.version})`);
   check(fs.existsSync(toolExe) && sha(fs.readFileSync(toolExe)) === sha(where), '...the file in its Programs folder (under the test\'s config folder), byte for byte');
   check(fs.existsSync(path.join(pc.cfgDir, 'Start Menu', 'Beam Test Tool.lnk')), '...with a Start menu shortcut');
+  const theirsLeft = () => fs.readFileSync(path.join(theirs, 'BeamTestTool.exe'), 'utf8') === 'theirs' && fs.readFileSync(path.join(theirs, 'notes.txt'), 'utf8') === 'keep me';
+  check(theirsLeft(), '(1.23) the folder of that name that was already there (another program\'s) is left alone: the app went to "Beam Test Tool (Beam)"');
+  const marker = path.join(path.dirname(toolExe), '.beamapp');
+  check(fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').split(/\r?\n/)[0] === tool.id, '...with Beam\'s marker (the app\'s id)');
   let cfg = JSON.parse(fs.readFileSync(pc.cfgPath, 'utf8'));
   check(cfg.appsAllowed !== true && cfg.installedApps?.some(a => a.id === tool.id && a.kind === 'exe'), 'still not allowed for the next one; the config knows what it installed');
 
@@ -201,6 +216,9 @@ try {
   check(!!s && fs.existsSync(path.join(kitDir, 'bin', 'kit.exe')) && fs.readFileSync(path.join(kitDir, 'readme.txt'), 'utf8') === 'hello', 'Always allow: the .zip unpacked into its folder');
   cfg = JSON.parse(fs.readFileSync(pc.cfgPath, 'utf8'));
   check(cfg.appsAllowed === true && cfg.installedApps?.find(a => a.id === kit.id)?.exe?.endsWith('bin\\kit.exe'), '...allowed from now on; its shortcut starts bin\\kit.exe');
+  const kitFiles = cfg.installedApps?.find(a => a.id === kit.id)?.files || [];
+  check(['bin\\kit.exe', 'readme.txt'].every(f => kitFiles.includes(f)), `(1.23) the config lists what Beam wrote (${JSON.stringify(kitFiles)})`);
+  fs.writeFileSync(path.join(kitDir, 'settings.ini'), 'its own'); // the app's own file, next to its program
 
   // 3. Allowed now: no question. winget for one user first, then as the package wants.
   from = pc.mark();
@@ -216,6 +234,7 @@ try {
   s = await waitState(evil.id, pc.id, 'failed');
   check(!!s && /would go outside its folder/.test(s.error || ''), `a .zip escaping its folder is refused (${s?.error})`);
   check(!fs.existsSync(path.join(pc.cfgDir, 'Programs', 'evil.txt')), '...and nothing was written outside');
+  check(!fs.existsSync(path.join(pc.cfgDir, 'Programs', 'Beam Test Evil')), '(1.23) ...nor inside: every name is checked first, and the folder made for it goes again');
 
   // 5. A new version of the tool: the PC that has it gets it (in place of the old one). (1.21.2) The name the old copy
   // is renamed to is taken (an earlier update's copy still running: here a folder of that name): another one is used.
@@ -234,14 +253,30 @@ try {
   check(r.status === 200, 'uninstall asked');
   check(!!(await waitState(tool.id, pc.id, null)), '...done: the server forgets it there');
   check(!fs.existsSync(path.dirname(toolExe)) && !fs.existsSync(path.join(pc.cfgDir, 'Start Menu', 'Beam Test Tool.lnk')), '...its folder and shortcut are gone');
+  check(theirsLeft(), '(1.23) ...and the other program\'s folder of that name is still all there');
   await call('POST', `/api/apps/${wg.id}/uninstall`, { devices: [pc.id] });
   check(!!(await waitState(wg.id, pc.id, null)), 'winget\'s app: uninstalled');
   check(/^uninstall --id Beam\.TestPackage --exact --silent/.test(fs.readFileSync(wingetLog, 'utf8').trim().split(/\r?\n/).pop()), '...by winget');
   pc.forward(['--remove-app', kit.id]);
   check(!!(await waitState(kit.id, pc.id, null)), 'Windows\' Installed apps → Uninstall (--remove-app): removed, and the server told');
-  check(!fs.existsSync(kitDir), '...its folder gone');
+  check(!fs.existsSync(path.join(kitDir, 'readme.txt')) && !fs.existsSync(path.join(kitDir, 'bin')) && !fs.existsSync(path.join(kitDir, '.beamapp')),
+    '(1.23) ...the files Beam wrote gone (its folder bin\\ too, and the marker)');
+  check(fs.existsSync(path.join(kitDir, 'settings.ini')), '...the app\'s own file kept (and its folder with it)');
+  // (1.23) An app from an older Beam: only its .exe goes (no list of what it wrote)
+  from = pc.mark();
+  pc.forward(['--remove-app', legacy.id]);
+  check(!!(await pc.waitLog(/Apps: Old Tool uninstalled/, from)), 'an app an older Beam installed: uninstalled');
+  check(!fs.existsSync(path.join(oldDir, 'old.exe')) && fs.readFileSync(path.join(oldDir, 'user.txt'), 'utf8') === 'its own', '...its .exe gone, the file of its own kept');
   cfg = JSON.parse(fs.readFileSync(pc.cfgPath, 'utf8'));
   check(!(cfg.installedApps || []).length, 'the config has nothing left');
+
+  // (1.23, the review) The Beam log's Save in the app's window: the bridge's saveText (a test instance: into saved\)
+  at = pc.mark();
+  pc.forward(['--test-bridge', JSON.stringify({ type: 'saveText', id: 'test-save', name: 'Test PC beam.log', text: 'line one\nline two' })]);
+  const savedReply = await pc.waitLog(/Bridge test reply: .*"id":"test-save"/, at);
+  const savedFile = path.join(pc.cfgDir, 'saved', 'Test PC beam.log');
+  check(!!savedReply && /"ok":true/.test(savedReply) && fs.existsSync(savedFile) && fs.readFileSync(savedFile, 'utf8') === 'line one\nline two',
+    `the window's Save of a text (a PC's Beam log) writes it (${(savedReply || 'no reply').replace(/^.*Bridge test reply: /, '').slice(0, 120)})`);
 
   // 7. Nothing real touched: the real Programs folder, Start menu and Installed apps.
   const realAfter = NAMES.map(n => [fs.existsSync(path.join(realPrograms, n)), fs.existsSync(path.join(realStart, `${n}.lnk`))]);

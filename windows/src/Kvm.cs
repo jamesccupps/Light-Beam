@@ -47,6 +47,7 @@ namespace Beam
         public int Fails;
         public string Why;                   // what happened last (the tray, beam.log)
         public string ClipHad;               // the clipboard text it has from here, or gave here (\n line ends)
+        public uint ClipTextSeq;             // (1.23) this PC's clipboard (text sequence) when its text was last looked at for it
         public string ClipImgHad;            // (1.12.4) the same for a picture: its bytes' hash
         public uint ClipImgSeq;              // this PC's clipboard (sequence) when its picture was last looked at for it
         public bool ClipImgRecent;           // the picture coming from it started while the pointer was there (or just left)
@@ -1105,10 +1106,32 @@ namespace Beam
 
         static string Norm(string s) { return s == null ? null : s.Replace("\r\n", "\n"); }
 
-        // This PC's clipboard text goes along when the pointer goes to a PC that doesn't have it yet.
+        // This PC's clipboard text goes along when the pointer goes to a PC that doesn't have it yet. (1.23, the user's
+        // review M30) Only when something was copied here since it was looked at for that PC, and read on a thread of its
+        // own: a big Excel range is made on demand (seconds, tens of MB), and the pointer froze, then jumped, at every
+        // crossing.
         void ClipTo(KvmLink l)
         {
-            string text = Norm(ClipNow());
+            uint seq = ClipPayload.TextSequence();
+            if (seq == l.ClipTextSeq) return; // (nothing new here: a picture neither)
+            l.ClipTextSeq = seq;
+            if (clipSet != null && seq == clipSetSeq) { ClipTextTo(l, Norm(clipSet)); return; } // (what a PC gave, marked not to share: from here)
+            var t = new Thread(() =>
+            {
+                string text = Norm(ClipPayload.ReadSharableText());
+                app.Post(() =>
+                {
+                    if (!started || !links.Contains(l) || ClipPayload.TextSequence() != seq) return; // (changed meanwhile: the next crossing)
+                    ClipTextTo(l, text);
+                });
+            });
+            t.SetApartmentState(ApartmentState.STA); // (the clipboard wants one)
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        void ClipTextTo(KvmLink l, string text)
+        {
             if (string.IsNullOrEmpty(text)) { ClipImageTo(l); return; } // (1.12.4: no text, maybe a picture)
             if (text == l.ClipHad || Encoding.UTF8.GetByteCount(text) > MaxClip) return;
             l.ClipHad = text;
@@ -1117,14 +1140,6 @@ namespace Beam
             c["text"] = text;
             Send(l, "ctl", c);
             Log.Write("Keyboard and mouse: this PC's clipboard text went to " + NameOf(l) + " (" + text.Length + " characters)");
-        }
-
-        // This PC's clipboard text: what was copied here, or the text it got from a PC last (Beam marks that one as not
-        // to share, so it's taken from here while the clipboard hasn't changed since).
-        string ClipNow()
-        {
-            if (clipSet != null && ClipPayload.TextSequence() == clipSetSeq) return clipSet;
-            return ClipPayload.ReadSharableText();
         }
 
         // (1.12.4) This PC's clipboard picture (a screenshot) to a PC, when there's no text: read and encoded on a thread of

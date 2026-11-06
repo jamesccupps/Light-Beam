@@ -151,6 +151,9 @@ namespace Beam
                     body["startsWithWindows"] = Autostart.IsEnabled(app.Cfg);
                     body["startWanted"] = app.Cfg.AutostartWanted != false;
                 }
+                // (1.23, Beam 1.30.1, the review's M28) Windows shows its prompts (UAC) on the normal screen here
+                // ("Answer Windows' prompts"): any program on this PC could answer them. Device info says so.
+                if (app.ServerHas("uac-status")) body["uacOnScreen"] = AdminHelper.PromptsOnScreen();
                 if (!force && !Changed(body)) return;
                 bool gone = !body.ContainsKey("battery") && Part(last, "battery") != null;
                 if (gone) body["battery"] = null; // it went away (a UPS unplugged)

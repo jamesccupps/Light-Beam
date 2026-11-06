@@ -97,9 +97,27 @@ namespace Beam
             catch { return "that isn't a folder"; }
             if (full.StartsWith(@"\\")) return "a network folder can't be shared";
             if (!Directory.Exists(full)) return "that folder isn't there";
+            // (1.23, the user's review) where it really is, too: a junction (C:\Documents and Settings is one to C:\Users),
+            // a subst drive, a mapped network drive
+            try { if (new DriveInfo(System.IO.Path.GetPathRoot(full)).DriveType == DriveType.Network) return "a network folder can't be shared"; }
+            catch { }
+            string real = FinalPath(full);
+            if (real == null) return "Beam can't tell where that folder really is";
+            if (real.StartsWith(@"\\")) return "a network folder can't be shared";
+            string why = RefusalAt(full, cfg);
+            if (why == null && !real.Equals(full, StringComparison.OrdinalIgnoreCase)) why = RefusalAt(real, cfg);
+            return why;
+        }
+
+        static string RefusalAt(string full, Config cfg)
+        {
             string root = (System.IO.Path.GetPathRoot(full) ?? "").TrimEnd('\\');
             if (full.Equals(root, StringComparison.OrdinalIgnoreCase)) return "a whole drive can't be shared: pick a folder on it";
-            if (cfg != null && cfg.CustomPath && !string.IsNullOrEmpty(cfg.Dir) && Within(full, cfg.Dir.TrimEnd('\\'))) return null;
+            if (cfg != null && cfg.CustomPath && !string.IsNullOrEmpty(cfg.Dir))
+            {
+                string own = cfg.Dir.TrimEnd('\\'), ownReal = FinalPath(own);
+                if (Within(full, own) || (ownReal != null && Within(full, ownReal))) return null;
+            }
             string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\');
             if (profile.Length > 0 && Within(profile, full)) return "your whole user folder can't be shared: pick a folder in it, like Downloads";
             foreach (var sf in new[] { Environment.SpecialFolder.ApplicationData, Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.CommonApplicationData,
@@ -111,6 +129,32 @@ namespace Beam
             foreach (var part in full.Substring(root.Length).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries))
                 if (part.StartsWith(".")) return "a folder whose name starts with \".\" can't be shared";
             return null;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern uint GetFinalPathNameByHandleW(IntPtr file, System.Text.StringBuilder path, uint length, uint flags);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr h);
+
+        // (1.23) A folder's real path, links and subst drives followed (\\server\share\… for a network one), or null.
+        static string FinalPath(string folder)
+        {
+            const uint ReadAttributes = 0x80, ShareAll = 7, OpenExisting = 3, BackupSemantics = 0x02000000;
+            IntPtr h = CreateFileW(folder, ReadAttributes, ShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+            if (h == IntPtr.Zero || h == new IntPtr(-1)) return null;
+            try
+            {
+                var sb = new System.Text.StringBuilder(1024);
+                uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+                if (n == 0 || n >= sb.Capacity) return null;
+                string s = sb.ToString();
+                if (s.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + s.Substring(8).TrimEnd('\\');
+                if (s.StartsWith(@"\\?\")) s = s.Substring(4);
+                return s.TrimEnd('\\');
+            }
+            finally { CloseHandle(h); }
         }
 
         // ------------------------------------------------------------------ what's in a folder
