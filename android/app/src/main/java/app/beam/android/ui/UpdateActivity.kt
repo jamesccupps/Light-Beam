@@ -34,6 +34,9 @@ class UpdateActivity : BaseActivity() {
     private var waitingForPermission = false
     private var installing = false
 
+    /** The message on screen (kept across a re-creation, so it never turns into another install). */
+    private var shownMessage: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Notifier.cancel(this, Notifier.ID_UPDATE)
@@ -44,7 +47,26 @@ class UpdateActivity : BaseActivity() {
                 app.updates.installStatus.collect(::onStatus)
             }
         }
-        lifecycleScope.launch { prepare() }
+        // (1.16, the review's Low) A re-creation (a turn, the look, coming back after Android closed it) shows what was on
+        // screen; it used to start a new install every time, even after Cancel.
+        val saved = savedInstanceState
+        when {
+            saved == null -> lifecycleScope.launch { prepare() }
+            saved.getBoolean(K_INSTALLING) -> {
+                installing = true
+                showProgress(getString(R.string.update_installing, app.updates.readyVersion().orEmpty()))
+            }
+            saved.getBoolean(K_PERMISSION) -> waitingForPermission = true // onResume carries on
+            saved.getString(K_MESSAGE) != null -> showMessage(saved.getString(K_MESSAGE).orEmpty())
+            else -> lifecycleScope.launch { prepare() } // still checking: nothing was started
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(K_INSTALLING, installing)
+        outState.putBoolean(K_PERMISSION, waitingForPermission)
+        outState.putString(K_MESSAGE, shownMessage)
     }
 
     private suspend fun prepare() {
@@ -144,6 +166,7 @@ class UpdateActivity : BaseActivity() {
     }
 
     private fun showProgress(message: String) {
+        shownMessage = null
         dialog?.dismiss()
         val pad = (24 * resources.displayMetrics.density).toInt()
         val content = LinearLayout(this).apply {
@@ -161,6 +184,7 @@ class UpdateActivity : BaseActivity() {
     }
 
     private fun showMessage(message: String) {
+        shownMessage = message
         dialog?.dismiss()
         dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.update_title)
@@ -177,6 +201,10 @@ class UpdateActivity : BaseActivity() {
     }
 
     companion object {
+        private const val K_INSTALLING = "installing"
+        private const val K_PERMISSION = "waitingForPermission"
+        private const val K_MESSAGE = "message"
+
         fun intent(ctx: Context): Intent = Intent(ctx, UpdateActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 }

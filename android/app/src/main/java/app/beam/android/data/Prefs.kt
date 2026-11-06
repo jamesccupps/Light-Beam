@@ -289,8 +289,22 @@ class Prefs(context: Context, private val box: SecretBox = KeystoreBox()) {
      * crash or a lost network left, revoked at the next chance (so none stays valid for good).
      */
     var remotePageTokens: Set<String>
-        get() = sp.getStringSet("remotePageTokens", null)?.toSet().orEmpty()
-        set(v) = sp.edit { if (v.isEmpty()) remove("remotePageTokens") else putStringSet("remotePageTokens", HashSet(v)) }
+        // (1.16, the review's Low) Sealed like the app's own sign-in (a token kept in clear by 1.15 is read as it is, sealed
+        // at the next change; where the Keystore doesn't work it stays as it was).
+        get() = sp.getStringSet("remotePageTokens", null).orEmpty().mapNotNullTo(HashSet()) {
+            if (it.startsWith(sealedEntry)) box.open(it.removePrefix(sealedEntry)) else it
+        }
+        set(v) = sp.edit {
+            if (v.isEmpty()) remove("remotePageTokens")
+            else putStringSet("remotePageTokens", v.mapTo(HashSet()) { t -> box.seal(t)?.let { sealedEntry + it } ?: t })
+        }
+
+    /** (1.16, the review's Low) The alarm volume from before this phone rang, while it rings (-1: none); see Ringer.recover. */
+    var ringVolumeToRestore: Int
+        get() = sp.getInt("ringVolumeToRestore", -1)
+        set(v) = sp.edit(commit = true) { if (v < 0) remove("ringVolumeToRestore") else putInt("ringVolumeToRestore", v) }
+
+    private val sealedEntry = "sealed:"
 
     /** The viewer page has run in this phone's WebView (so there may be something to forget there). */
     var remoteUsed: Boolean

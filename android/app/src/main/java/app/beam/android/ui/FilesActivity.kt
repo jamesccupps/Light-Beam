@@ -47,6 +47,7 @@ import okhttp3.HttpUrl
  * `sharedBack()`), then leaves; the page's own Close leaves too, and the page's sign-in is revoked as it goes.
  */
 class FilesActivity : BaseActivity() {
+    override val followsLookAtOnce = false // (1.16) the page and where it was stay (its page follows the look itself)
     private lateinit var b: ActivityFilesBinding
     private var web: WebView? = null
     private var device = ""
@@ -67,6 +68,8 @@ class FilesActivity : BaseActivity() {
             finish()
             return
         }
+        // (1.16, the review's Low) The PC's files aren't kept as the recent-apps snapshot (as the remote control's screen).
+        if (android.os.Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(false)
         device = id
         b = ActivityFilesBinding.inflate(layoutInflater)
         setContentView(b.root)

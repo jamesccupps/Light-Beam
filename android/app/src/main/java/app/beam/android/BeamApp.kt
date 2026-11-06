@@ -135,7 +135,7 @@ class BeamApp : Application() {
         signIns = SignIns(this)
         updates = AppUpdater(this).also { it.start() }
         status = StatusReporter(this).also { it.start() }
-        ringer = Ringer(this)
+        ringer = Ringer(this).also { it.recover() }
         alerts = Alerts(this)
         phone = PhoneNotifications(this)
         remote = RemoteControl(this)
@@ -358,6 +358,7 @@ class BeamApp : Application() {
         backups.forget()
         Thumbs.forgetAll(this)
         for (dir in listOf("outgoing", "camera")) discard(File(cacheDir, dir)) // copies waiting to be sent
+        discard(File(filesDir, "outgoing")) // (1.16) Beam's own copies of files waiting to go
         Notifier.cancelAll(this)
         Shortcuts.removeAll(this)
     }

@@ -13,6 +13,9 @@ class TransferCancelledException : Exception("Cancelled")
  */
 class TransferPausedException : Exception("Paused")
 
+/** (1.16) Getting a file ready to send would leave this phone too little free space. Not retried. */
+class NoRoomException : IOException("Not enough free space on this phone to get the file ready.")
+
 /** Something that can be uploaded: must know its size up front and be re-openable at any offset. */
 interface UploadSource {
     val name: String
@@ -157,7 +160,7 @@ class Uploader(
                         input = source.open(start)
                         inputPos = start
                     }
-                    val body = ChunkBody(input, len) { listener.onProgress(start + it, source.size) }
+                    val body = ChunkBody(input, len, last = start + len == source.size) { listener.onProgress(start + it, source.size) }
                     inputPos = -1 // unknown until the chunk went through
                     val t0 = System.nanoTime()
                     val result = api.putChunk(id, start, body, holder)

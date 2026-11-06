@@ -1,8 +1,11 @@
 package app.beam.android.data
 
+import android.annotation.SuppressLint
 import android.app.Notification
+import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
+import androidx.annotation.VisibleForTesting
 import androidx.core.net.toUri
 import app.beam.android.BeamApp
 import app.beam.android.core.BeamException
@@ -10,6 +13,8 @@ import app.beam.android.core.Conversations
 import app.beam.android.core.Downloader
 import app.beam.android.core.Format
 import app.beam.android.core.Item
+import app.beam.android.core.NoRoomException
+import app.beam.android.core.SourceChangedException
 import app.beam.android.core.TransferCancelledException
 import app.beam.android.core.TransferPausedException
 import app.beam.android.core.UploadSource
@@ -26,6 +31,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.IOException
 import java.util.Collections
 import java.util.UUID
@@ -71,12 +77,18 @@ class TransferManager(private val app: BeamApp) {
         val serverId: String? = null,
         /** Failed for lack of a connection: tried again by itself after the next reconnect. */
         val retryable: Boolean = false,
+        /**
+         * (1.16) Beam's own copy of the file (`files/outgoing/<localId>`), sent instead of [uri]: made when the app that
+         * shared it didn't say its size, or (the review's M7) when the upload has to wait while Beam may read the file
+         * only for now (a share's access ends with the transfer service).
+         */
+        val copy: String? = null,
     ) {
         val active get() = status != Status.FAILED && status != Status.PAUSED
 
         fun toJson(): JSONObject = JSONObject().put("localId", localId).put("uri", uri.toString()).put("name", name)
             .put("size", size).put("mime", mime).put("to", JSONArray(to)).put("status", status.name)
-            .put("error", error).put("createdAt", createdAt).put("serverId", serverId).put("retryable", retryable)
+            .put("error", error).put("createdAt", createdAt).put("serverId", serverId).put("retryable", retryable).put("copy", copy)
 
         companion object {
             fun parse(o: JSONObject): Upload? {
@@ -97,6 +109,7 @@ class TransferManager(private val app: BeamApp) {
                     createdAt = o.optLong("createdAt"),
                     serverId = o.optString("serverId").takeIf { it.isNotEmpty() && it != "null" },
                     retryable = o.optBoolean("retryable"),
+                    copy = o.optString("copy").takeIf { it.isNotEmpty() && it != "null" },
                 )
             }
         }
@@ -109,6 +122,8 @@ class TransferManager(private val app: BeamApp) {
         val received: Long = 0,
         val status: Status = Status.QUEUED,
         val error: String? = null,
+        /** (1.16, the review's M9) Paused until the phone is on Wi-Fi again: it came by itself and "Wi-Fi only" is on. */
+        val wifi: Boolean = false,
     ) {
         val active get() = status != Status.FAILED && status != Status.PAUSED
     }
@@ -140,6 +155,15 @@ class TransferManager(private val app: BeamApp) {
     private val downloaders = ConcurrentHashMap<String, Downloader>()
     private val cancelledUploads: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val pausedUploads: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * (1.16, the review's M6) Uploads whose run has begun: a Cancel or a pause before their uploader exists (while a copy
+     * or the picture's size is made) is left for that run to see.
+     */
+    private val started: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Failures in a row before an upload gives up (tests make it 0). */
+    @VisibleForTesting internal var maxUploadFailures = 25
     private val dlTasks = ConcurrentHashMap<String, DlTask>()
     private var lastNotify = 0L
 
@@ -147,6 +171,8 @@ class TransferManager(private val app: BeamApp) {
         val reasons: MutableSet<Reason> = Collections.synchronizedSet(HashSet())
         @Volatile var cancelled = false
         @Volatile var paused = false
+        /** (1.16, M9) Paused by "Wi-Fi only" (the network is metered), not by Android's limit or the user. */
+        @Volatile var wifiWait = false
     }
 
     init {
@@ -155,6 +181,9 @@ class TransferManager(private val app: BeamApp) {
         restore()
         // The network changed: running transfers drop their stalled request and resume over the new one.
         app.network.addListener { available, switched -> if (available && switched) kickAll() }
+        // (1.16, the review's M9) "Wi-Fi only": downloads that came by themselves wait while the network is metered.
+        app.network.addMeteredListener { metered -> onMeteredChanged(metered) }
+        app.scope.launch(Dispatchers.IO) { sweepCopies() }
     }
 
     // ---------------------------------------------------------------- persistence
@@ -167,7 +196,7 @@ class TransferManager(private val app: BeamApp) {
             if (task.cancelled) continue
             // After a restart nobody is left to open or share it: say when it's saved instead.
             val reasons = task.reasons.map { if (it == Reason.OPEN || it == Reason.SHARE || it == Reason.SAVE || it == Reason.GROUP) Reason.NOTIFY else it }.toSet()
-            downs.put(JSONObject().put("item", task.item.toJson()).put("reasons", JSONArray(reasons.map { it.name })).put("paused", d.status == Status.PAUSED))
+            downs.put(JSONObject().put("item", task.item.toJson()).put("reasons", JSONArray(reasons.map { it.name })).put("paused", d.status == Status.PAUSED && !task.wifiWait))
         }
         app.prefs.saveArray(Prefs.K_TRANSFERS, JSONArray().put(JSONObject().put("uploads", ups).put("downloads", downs)))
     }
@@ -206,6 +235,7 @@ class TransferManager(private val app: BeamApp) {
             app.reportSent(to)
             try {
                 for (uri in uris) {
+                    keepAccess(uri)
                     val meta = Files.meta(app, uri)
                     val up = Upload(UUID.randomUUID().toString(), uri, meta.name, meta.size, meta.mime, to)
                     _uploads.update { it + up }
@@ -239,15 +269,26 @@ class TransferManager(private val app: BeamApp) {
         val running = uploaders[localId]
         if (running != null) {
             running.cancel()
-        } else {
-            _uploads.update { list -> list.filterNot { it.localId == localId } }
-            cancelledUploads -= localId
-            val serverId = up.serverId
-            if (serverId != null) app.scope.launch(Dispatchers.IO) { runCatching { app.api?.cancelUpload(serverId) } }
+            return
+        }
+        _uploads.update { list -> list.filterNot { it.localId == localId } }
+        if (localId in started) {
+            // (1.16, the review's M6) Still getting ready (a copy, the picture's size): its run sees the cancel and stops
+            // there. This used to forget the cancel, and the file went anyway, with no row or notification.
             saveState()
             recount()
             notifyProgress(force = true)
+            return
         }
+        cancelledUploads -= localId
+        val serverId = up.serverId
+        app.scope.launch(Dispatchers.IO) {
+            if (serverId != null) runCatching { app.api?.cancelUpload(serverId) }
+            forget(localId)
+        }
+        saveState()
+        recount()
+        notifyProgress(force = true)
     }
 
     private fun runUpload(localId: String) {
@@ -259,24 +300,34 @@ class TransferManager(private val app: BeamApp) {
             recount()
             return
         }
-        var temp: File? = null
+        started += localId
+        var ran = false
+        var again = false
         try {
-            var source: UploadSource = UriSource(app, up.uri, up.name, up.size, up.mime)
-            if (up.size <= 0) {
-                // The app that shared this didn't say how big it is (or said 0, which a stream also gets: an empty file
-                // costs nothing to read); resumable uploads need the size.
-                updateUpload(localId) { copy(status = Status.PREPARING) }
-                val copy = copyToCache(up)
-                temp = copy
-                source = FileSource(copy, up.name, up.mime)
-                updateUpload(localId) { copy(size = copy.length()) }
+            val kept = up.copy?.let(::File)?.takeIf { it.isFile && (up.size <= 0 || it.length() == up.size) }
+            val source: UploadSource = when {
+                kept != null -> FileSource(kept, up.name, up.mime)
+                up.size <= 0 -> {
+                    // The app that shared this didn't say how big it is (or said 0, which a stream also gets: an empty file
+                    // costs nothing to read); resumable uploads need the size.
+                    updateUpload(localId) { copy(status = Status.PREPARING) }
+                    val made = copyLocal(up)
+                    updateUpload(localId) { copy(size = made.length(), copy = made.path) }
+                    saveState()
+                    FileSource(made, up.name, up.mime)
+                }
+                else -> UriSource(app, up.uri, up.name, up.size, up.mime)
             }
+            stopIfAsked(localId)
             updateUpload(localId) { copy(status = Status.RUNNING, error = null, retryable = false) }
+            // What's read for the picture's size and preview: Beam's own copy when there is one.
+            val readable = (source as? FileSource)?.let { Uri.fromFile(it.file) } ?: up.uri
             val visual = up.mime.startsWith("image/") || up.mime.startsWith("video/")
-            val pictureSize = if (visual) Thumbs.pictureSize(app, up.uri, up.mime) else null
+            val pictureSize = if (visual) Thumbs.pictureSize(app, readable, up.mime) else null
+            stopIfAsked(localId)
             val last = AtomicLong(0)
             val bigChunks = app.repo.state.value.info?.lists("big-chunks") == true
-            val uploader = Uploader(api, source, up.to, size = pictureSize, bigChunks = bigChunks, listener = object : Uploader.Listener {
+            val uploader = Uploader(api, source, up.to, maxFailures = maxUploadFailures, size = pictureSize, bigChunks = bigChunks, listener = object : Uploader.Listener {
                 override fun onStarted(uploadId: String) {
                     updateUpload(localId) { copy(serverId = uploadId) }
                     saveState() // from now on a restart resumes this session
@@ -299,41 +350,72 @@ class TransferManager(private val app: BeamApp) {
             uploaders[localId] = uploader
             if (localId in cancelledUploads) uploader.cancel()
             if (localId in pausedUploads) uploader.pause()
-            val item = uploader.run(_uploads.value.firstOrNull { it.localId == localId }?.serverId ?: up.serverId)
+            ran = true
+            val item = try {
+                uploader.run(_uploads.value.firstOrNull { it.localId == localId }?.serverId ?: up.serverId)
+            } finally {
+                uploaders.remove(localId) // a Cancel from now on is this run's to see (started)
+            }
             app.repo.upsert(item)
-            if (visual) saveOwnThumbnail(item, up)
+            if (visual) saveOwnThumbnail(item, readable, up.mime)
             _uploads.update { list -> list.filterNot { it.localId == localId } }
         } catch (_: TransferCancelledException) {
             _uploads.update { list -> list.filterNot { it.localId == localId } }
+            // Cancelled before its uploader ran (an uploader cancels its own): a session from before a restart goes too.
+            if (!ran) up.serverId?.let { id -> runCatching { api.cancelUpload(id) } }
         } catch (_: TransferPausedException) {
             updateUpload(localId) { copy(status = Status.PAUSED, error = null) }
         } catch (e: Exception) {
-            if (localId in cancelledUploads) {
-                _uploads.update { list -> list.filterNot { it.localId == localId } }
-            } else {
-                val message = Format.error(e)
-                val offline = e is IOException && e !is java.io.FileNotFoundException && e !is app.beam.android.core.SourceChangedException
-                updateUpload(localId) { copy(status = Status.FAILED, error = message, retryable = offline) }
-                if (app.visibleConversation == null && !offline) Notifier.uploadFailed(app, up.name, message, conversationFor(up.to))
+            val now = _uploads.value.firstOrNull { it.localId == localId }
+            when {
+                localId in cancelledUploads || now == null -> _uploads.update { list -> list.filterNot { it.localId == localId } }
+                // (1.16, the review's M10) The file wasn't the size its app said (longer or shorter), or it changed while it
+                // went: once more, as a new upload, from a copy of its own that's measured.
+                e is SourceChangedException && now.copy == null -> {
+                    now.serverId?.let { id -> runCatching { api.cancelUpload(id) } }
+                    updateUpload(localId) { copy(size = -1, sent = 0, serverId = null, status = Status.QUEUED, error = null) }
+                    again = true
+                }
+                else -> {
+                    val message = Format.error(e)
+                    val offline = e is IOException && e !is FileNotFoundException && e !is SourceChangedException &&
+                        e !is NoRoomException && !Format.noSpace(e)
+                    // (1.16, the review's M7) It waits for a connection: a copy of its own while Beam may still read the file.
+                    if (offline) keepACopy(localId)
+                    if (localId in cancelledUploads) {
+                        _uploads.update { list -> list.filterNot { it.localId == localId } }
+                    } else {
+                        updateUpload(localId) { copy(status = Status.FAILED, error = message, retryable = offline) }
+                        if (app.visibleConversation == null && !offline) Notifier.uploadFailed(app, up.name, message, conversationFor(up.to))
+                    }
+                }
             }
         } finally {
             uploaders.remove(localId)
+            started.remove(localId)
             cancelledUploads.remove(localId)
             pausedUploads.remove(localId)
-            temp?.delete()
+            if (_uploads.value.none { it.localId == localId }) forget(localId) // sent or cancelled: its copy goes
             saveState()
             recount()
             notifyProgress(force = true)
+            if (again) uploadQueue.trySend(localId)
         }
+    }
+
+    /** (1.16, M6) A Cancel or a pause that came while the upload was getting ready. */
+    private fun stopIfAsked(localId: String) {
+        if (localId in cancelledUploads) throw TransferCancelledException()
+        if (localId in pausedUploads) throw TransferPausedException()
     }
 
     /**
      * A preview of a photo or video this phone sent, made from the original: kept here (so it isn't
      * downloaded again to show it) and given to the server (API v3), so other devices needn't fetch the file.
      */
-    private fun saveOwnThumbnail(item: Item, up: Upload) {
+    private fun saveOwnThumbnail(item: Item, uri: Uri, mime: String) {
         try {
-            val bmp = Thumbs.preview(app, up.uri, up.mime) ?: return
+            val bmp = Thumbs.preview(app, uri, mime) ?: return
             Thumbs.saveOwn(app, item.id, bmp)
             if (app.repo.state.value.info?.has("thumbnails") == true) {
                 Thumbs.serverThumb(bmp)?.let { app.api?.putThumb(item.id, it) }
@@ -342,12 +424,99 @@ class TransferManager(private val app: BeamApp) {
         }
     }
 
-    private fun copyToCache(up: Upload): File {
-        val dir = File(app.cacheDir, "outgoing").apply { mkdirs() }
+    // ---------------------------------------------------------------- Beam's own copies (1.16)
+
+    private fun outgoingDir() = File(app.filesDir, "outgoing").apply { mkdirs() }
+
+    /**
+     * Beam's own copy of [up]'s file, `files/outgoing/<localId>`, kept until the upload is gone. It stops at a Cancel or a
+     * pause, and before the phone would be left with less than [reserve] (a copy it can't send without: [NEEDED_FREE];
+     * one only for later: [keepFree]).
+     */
+    @SuppressLint("UsableSpace") // the space free now, never counting caches Android might clear for it
+    private fun copyLocal(up: Upload, reserve: Long = NEEDED_FREE): File {
+        val dir = outgoingDir()
         val file = File(dir, up.localId)
-        app.contentResolver.openInputStream(up.uri)?.use { input -> file.outputStream().use { input.copyTo(it, 256 * 1024) } }
-            ?: throw java.io.FileNotFoundException("Can't open ${up.name}")
-        return file
+        try {
+            val input = app.contentResolver.openInputStream(up.uri) ?: throw FileNotFoundException("Can't open ${up.name}")
+            input.use { inp ->
+                file.outputStream().use { out ->
+                    val buf = ByteArray(256 * 1024)
+                    var copied = 0L
+                    var checkedAt = 0L
+                    while (true) {
+                        val n = inp.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        copied += n
+                        if (copied - checkedAt >= ROOM_CHECK_EVERY) {
+                            checkedAt = copied
+                            if (dir.usableSpace < reserve) throw NoRoomException()
+                        }
+                        stopIfAsked(up.localId)
+                    }
+                }
+            }
+            return file
+        } catch (e: Throwable) {
+            file.delete()
+            throw e
+        }
+    }
+
+    /**
+     * (1.16, the review's M7) An upload that has to wait for a connection, of a file Beam may read only for now (a share:
+     * its access ends when the transfer service stops, and retrying, Resume and a restart then failed with "Beam no longer
+     * has access to that file"): Beam keeps a copy of its own while it still can, when there's room (at most
+     * [KEEP_COPY_MAX], leaving [keepFree]). Files picked in Beam's own picker stay readable (a lasting permission).
+     */
+    @SuppressLint("UsableSpace") // the space free now, never counting caches Android might clear for it
+    private fun keepACopy(localId: String) {
+        val up = _uploads.value.firstOrNull { it.localId == localId } ?: return
+        if (up.copy != null || up.size <= 0 || lasting(up)) return
+        val dir = outgoingDir()
+        if (up.size > KEEP_COPY_MAX || dir.usableSpace - up.size < keepFree(dir)) return
+        try {
+            val made = copyLocal(up, keepFree(dir))
+            if (made.length() != up.size) {
+                made.delete() // it changed meanwhile: the next try finds out and starts again
+                return
+            }
+            updateUpload(localId) { copy(copy = made.path) }
+        } catch (_: Exception) {
+        }
+    }
+
+    /** A share's read permission lasts only while the transfer service runs: a lasting one is taken where Android allows it. */
+    private fun keepAccess(uri: Uri) {
+        if (uri.scheme != "content" || lastingAccessForTest == false) return
+        try {
+            app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** (tests) Whether Android keeps Beam's read permission for a shared file (Robolectric keeps every one asked for). */
+    @VisibleForTesting internal var lastingAccessForTest: Boolean? = null
+
+    private fun lasting(up: Upload): Boolean = lastingAccessForTest ?: (up.uri.authority == "${app.packageName}.files") || try {
+        app.contentResolver.persistedUriPermissions.any { it.uri == up.uri && it.isReadPermission }
+    } catch (_: Exception) {
+        false
+    }
+
+    /** An upload is gone: Beam's copy of its file goes too. */
+    private fun forget(localId: String) {
+        File(File(app.filesDir, "outgoing"), localId).delete()
+    }
+
+    /** Copies no upload has any more (one removed while Beam was stopped), and 1.15's in the cache, go. */
+    private fun sweepCopies() {
+        try {
+            File(app.cacheDir, "outgoing").deleteRecursively()
+            File(app.filesDir, "outgoing").listFiles()?.forEach { f -> if (_uploads.value.none { it.localId == f.name }) f.delete() }
+        } catch (_: Exception) {
+        }
     }
 
     private fun updateUpload(localId: String, change: Upload.() -> Upload) =
@@ -384,8 +553,13 @@ class TransferManager(private val app: BeamApp) {
     }
 
     private fun resumeDownload(task: DlTask) {
-        task.paused = false
-        updateDownload(task.item.id) { copy(status = Status.QUEUED, error = null) }
+        synchronized(dlTasks) {
+            // (1.16) Once: Wi-Fi coming back and a catch-up asking for the same download queued it twice.
+            if (!task.paused) return
+            task.paused = false
+            task.wifiWait = false
+        }
+        updateDownload(task.item.id) { copy(status = Status.QUEUED, error = null, wifi = false) }
         saveState()
         recount()
         downloadQueue.trySend(task)
@@ -418,6 +592,17 @@ class TransferManager(private val app: BeamApp) {
             if (Reason.AUTO in task.reasons) app.inbox.onDownloadFailed(item, TransferCancelledException(), permanent = true)
             saveState()
             recount()
+            return
+        }
+        if (waitsForWifi(task)) {
+            // (1.16, the review's M9) It came by itself and "Wi-Fi only" is on: it waits (after a restart too) for Wi-Fi.
+            task.wifiWait = true
+            task.paused = true
+            updateDownload(item.id) { copy(status = Status.PAUSED, error = null, wifi = true) }
+            if (Reason.AUTO in task.reasons) app.inbox.onDownloadPaused(item)
+            saveState()
+            recount()
+            notifyProgress(force = true)
             return
         }
         val sink = MediaStoreSink(app, item)
@@ -453,7 +638,7 @@ class TransferManager(private val app: BeamApp) {
             }
             for (r in reasons) finished(Finished(item, r, uri), name)
         } catch (_: TransferPausedException) {
-            updateDownload(item.id) { copy(status = Status.PAUSED, error = null) }
+            updateDownload(item.id) { copy(status = Status.PAUSED, error = null, wifi = task.wifiWait) }
             if (Reason.AUTO in task.reasons) app.inbox.onDownloadPaused(item)
         } catch (e: TransferCancelledException) {
             sink.discard()
@@ -528,7 +713,9 @@ class TransferManager(private val app: BeamApp) {
         var any = false
         for (up in _uploads.value) {
             when {
-                uploaders[up.localId] != null -> {
+                // (1.16, the review's M6) Running, or still getting ready: that run stops and keeps it paused (setting the
+                // status alone was undone when it went on to send).
+                uploaders[up.localId] != null || up.localId in started -> {
                     pausedUploads += up.localId
                     uploaders[up.localId]?.pause()
                     any = true
@@ -553,13 +740,52 @@ class TransferManager(private val app: BeamApp) {
     /** "Resume" on the paused notification (or in a conversation): carry on where everything stopped. */
     fun resumeAll() {
         for (up in _uploads.value.filter { it.status == Status.PAUSED }) retryUpload(up.localId)
-        for (task in dlTasks.values.filter { it.paused }) resumeDownload(task)
+        for (task in dlTasks.values.filter { it.paused && !it.wifiWait }) resumeDownload(task) // (Wi-Fi's own come with Wi-Fi)
         Notifier.cancel(app, Notifier.ID_PAUSED)
         TransferService.keepAlive(app)
         notifyProgress(force = true)
     }
 
-    val hasPaused: Boolean get() = _uploads.value.any { it.status == Status.PAUSED } || dlTasks.values.any { it.paused }
+    val hasPaused: Boolean get() = _uploads.value.any { it.status == Status.PAUSED } || dlTasks.values.any { it.paused && !it.wifiWait }
+
+    // ---------------------------------------------------------------- "Wi-Fi only" (1.16, the review's M9)
+
+    /** Came by itself (nobody asked for it in a conversation or a notification), so "Wi-Fi only" holds for it. */
+    private fun autoOnly(task: DlTask) = synchronized(task.reasons) { task.reasons.isNotEmpty() && task.reasons.all { it == Reason.AUTO } }
+
+    private fun waitsForWifi(task: DlTask) = app.prefs.wifiOnlyDownloads && autoOnly(task) && app.network.metered
+
+    /** The download of [itemId] waits for Wi-Fi ("Resume" on it then means: now, on this network). */
+    fun waitingForWifi(itemId: String): Boolean = dlTasks[itemId]?.wifiWait == true
+
+    /**
+     * The network turned metered or not. It was checked only when a download started, so one that began on Wi-Fi went on
+     * over mobile data (and a network change even resumed it there). Metered: automatic downloads pause, keeping what
+     * arrived; Wi-Fi again: they carry on.
+     */
+    internal fun onMeteredChanged(metered: Boolean) {
+        if (metered) {
+            if (!app.prefs.wifiOnlyDownloads) return
+            var any = false
+            for (task in dlTasks.values) {
+                if (task.cancelled || task.paused || !autoOnly(task)) continue
+                task.wifiWait = true
+                task.paused = true
+                downloaders[task.item.id]?.pause() ?: updateDownload(task.item.id) { copy(status = Status.PAUSED, wifi = true) }
+                any = true
+            }
+            if (!any) return
+            saveState()
+            recount()
+            notifyProgress(force = true)
+        } else {
+            val waiting = dlTasks.values.filter { it.wifiWait && it.paused && !it.cancelled }
+            if (waiting.isEmpty()) return
+            waiting.forEach(::resumeDownload)
+            TransferService.keepAlive(app)
+            notifyProgress(force = true)
+        }
+    }
 
     /** Back online: uploads that failed for lack of a connection try again by themselves. */
     fun onConnected() {
@@ -613,5 +839,17 @@ class TransferManager(private val app: BeamApp) {
     companion object {
         /** From this size on, transfers get Android 16's progress-centric ("Live Update") notification. */
         const val BIG_TRANSFER = 50L * 1024 * 1024
+
+        /** (1.16, M7) The largest file Beam keeps a copy of while its upload waits. */
+        const val KEEP_COPY_MAX = 4L * 1024 * 1024 * 1024
+
+        /** Free space a copy the upload needs (its app didn't say the size) leaves on the phone. */
+        private const val NEEDED_FREE = 1L * 1024 * 1024 * 1024
+
+        /** How often a copy being made looks at the free space. */
+        private const val ROOM_CHECK_EVERY = 64L * 1024 * 1024
+
+        /** Free space a copy of Beam's own always leaves on the phone: 2 GB or 5 %, whichever is more. */
+        fun keepFree(dir: File): Long = maxOf(2L * 1024 * 1024 * 1024, dir.totalSpace / 20)
     }
 }

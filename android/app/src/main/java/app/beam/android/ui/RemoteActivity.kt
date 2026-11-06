@@ -67,6 +67,7 @@ import okhttp3.HttpUrl
  * own (see [RemoteControl]), may only stay on Beam's server, and gets nothing of the app's (no JavaScript bridge).
  */
 class RemoteActivity : BaseActivity() {
+    override val followsLookAtOnce = false // (1.16) an accent change from another device ended the session
     private lateinit var b: ActivityRemoteBinding
     private var web: WebView? = null
     private var device = ""

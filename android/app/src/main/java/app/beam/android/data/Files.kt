@@ -73,11 +73,14 @@ object Files {
             if (name == null) name = f.name
             if (size < 0 && f.exists()) size = f.length()
         }
-        if (size < 0) {
-            try {
-                resolver.openFileDescriptor(uri, "r")?.use { if (it.statSize >= 0) size = it.statSize }
-            } catch (_: Exception) {
+        // (1.16, the review's M10) The file's own size wins over the provider's list: a gallery app may still list the size
+        // from before an edit, and exactly that many bytes would have gone (a cut-off photo or video, and no error).
+        try {
+            resolver.openFileDescriptor(uri, "r")?.use {
+                val stat = it.statSize
+                if (stat > 0) size = stat else if (size < 0 && stat == 0L) size = 0
             }
+        } catch (_: Exception) {
         }
         val type = try {
             resolver.getType(uri)
@@ -130,7 +133,7 @@ class UriSource(
 }
 
 /** A local file (used when a provider doesn't report the size, so we copied it first). */
-class FileSource(private val file: File, override val name: String, override val mime: String) : UploadSource {
+class FileSource(val file: File, override val name: String, override val mime: String) : UploadSource {
     override val size: Long = file.length()
     override fun open(offset: Long): InputStream = FileInputStream(file).also { it.channel.position(offset) }
 }

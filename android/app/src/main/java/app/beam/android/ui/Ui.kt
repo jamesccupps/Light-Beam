@@ -47,6 +47,12 @@ abstract class BaseActivity : AppCompatActivity() {
     /** (1.14) The accent this screen was drawn in ([Look.shownAccent]; null: Beam's own). */
     private var accent: String? = null
 
+    /**
+     * (1.16, the review's Low) Re-made at once when the accent changes (from any device). A screen that holds a live page
+     * (remote control, shared folders) takes the new one the next time it opens: re-making it ended the session.
+     */
+    protected open val followsLookAtOnce = true
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // (1.14) The look's accent goes on before anything is drawn; light or dark is AppCompat's night mode (Looks).
         accent = app.looks.look.value.shownAccent
@@ -59,7 +65,7 @@ abstract class BaseActivity : AppCompatActivity() {
         if (overlay != 0) theme.applyStyle(overlay, true)
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                app.looks.look.collect { if (it.shownAccent != accent) recreate() }
+                app.looks.look.collect { if (followsLookAtOnce && it.shownAccent != accent) recreate() }
             }
         }
     }
@@ -334,7 +340,8 @@ object Drops {
             val item = clip.getItemAt(i)
             val uri = item.uri
             if (uri != null) {
-                uris += uri
+                // (1.16, the review's Low) content:// only, as for shares: a file:// one could name Beam's own files.
+                if (uri.scheme == "content") uris += uri
             } else {
                 val text = (item.text ?: item.coerceToText(activity))?.toString()
                 if (!text.isNullOrBlank()) texts += text

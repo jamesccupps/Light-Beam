@@ -98,6 +98,11 @@ object Format {
         }
     }
 
+    /** (1.16) The phone's storage is full (ENOSPC somewhere in the chain). */
+    fun noSpace(e: Throwable): Boolean = generateSequence(e) { it.cause }.take(6).any { t ->
+        t.message.orEmpty().let { "ENOSPC" in it || "No space left" in it }
+    }
+
     /** A plain-language description of a failure, for toasts and snackbars. */
     fun error(e: Throwable): String = when (e) {
         is BeamException -> when (e.status) {
@@ -118,8 +123,10 @@ object Format {
         is IllegalArgumentException -> e.message ?: "That doesn't look right."
         is SourceChangedException -> e.message ?: "The file changed while it was being sent."
         is SecurityException -> "Beam no longer has access to that file."
-        is java.io.FileNotFoundException -> "The file couldn't be opened."
-        is java.io.IOException -> "Connection problem. Check your network and try again."
+        is NoRoomException -> e.message ?: "Not enough free space on this phone."
+        is java.io.FileNotFoundException -> if (noSpace(e)) "Not enough free space on this phone." else "The file couldn't be opened."
+        // (1.16, the review's Low) A full phone was "Connection problem".
+        is java.io.IOException -> if (noSpace(e)) "Not enough free space on this phone." else "Connection problem. Check your network and try again."
         else -> e.message ?: "Something went wrong."
     }
 }

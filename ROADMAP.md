@@ -70,6 +70,12 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   hardware encoder as Parsec does, decoding on the phone with WebCodecs, full-colour text, sound.
 - **The shared mouse and keyboard, further:** dragging files between the PCs, and the phone as a trackpad and keyboard
   for a PC without the picture (next to screen sharing, not instead of it).
+- **Commands on a PC:** run a PowerShell, cmd or Linux shell command on one of your computers from another device and see
+  its output while it runs; off until it's turned on at that computer, only from approved sign-ins, as its own signed-in
+  user (never as administrator or a service), every run logged; later a real terminal.
+- **Alerts from your other programs:** a send-only key and an ntfy-style address, so the tools you already run (stock
+  and network watchers, weather stations, printers, Home Assistant) post their alerts into Beam, each as its own
+  conversation you can mute; camera live views and a network path monitor later.
 - **Linux, further:** an always-on Pi waking the PCs on its own network, the Apps page for Linux (.deb files, apt), a
   script you allowed there run on request; a terminal on it from Beam; its screen directly between the two devices
   where they can reach each other (WebRTC) rather than through Beam; later a desktop app with a tray icon.

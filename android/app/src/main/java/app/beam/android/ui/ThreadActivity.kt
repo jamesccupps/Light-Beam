@@ -140,7 +140,8 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         // Pictures from the keyboard (Gboard clipboard, GIFs) and pasted files go out as files.
         ViewCompat.setOnReceiveContentListener(b.input, arrayOf("image/*", "video/*", "application/*", "audio/*")) { _, payload ->
             val split = payload.partition { it.uri != null }
-            val uris = split.first?.let { c -> (0 until c.clip.itemCount).mapNotNull { c.clip.getItemAt(it).uri } }.orEmpty()
+            // (1.16, the review's Low) content:// only, as for shares: a file:// one could name Beam's own files.
+            val uris = split.first?.let { c -> (0 until c.clip.itemCount).mapNotNull { c.clip.getItemAt(it).uri } }.orEmpty().filter { it.scheme == "content" }
             if (uris.isNotEmpty()) sendFiles(uris, persist = false)
             split.second
         }
@@ -724,7 +725,9 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
     override fun cancelDownload(item: Item) = app.transfers.cancelDownload(item.id)
 
     override fun retryDownload(item: Item) {
-        if (app.transfers.downloads.value[item.id]?.status == TransferManager.Status.PAUSED) app.transfers.resumeAll()
+        // (1.16) "Resume" on one waiting for Wi-Fi: now, on this network (a Save: "Wi-Fi only" no longer holds it back).
+        val paused = app.transfers.downloads.value[item.id]?.status == TransferManager.Status.PAUSED
+        if (paused && !app.transfers.waitingForWifi(item.id)) app.transfers.resumeAll()
         else app.transfers.download(item, TransferManager.Reason.SAVE)
     }
 

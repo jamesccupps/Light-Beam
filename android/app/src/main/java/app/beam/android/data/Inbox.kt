@@ -27,6 +27,19 @@ class Inbox(private val app: BeamApp) {
         app.network.addListener { available, _ ->
             if (available && waitingForWifi.isNotEmpty() && !app.network.metered) catchUp()
         }
+        // (1.16, the review's M9) Behind Tailscale, mobile data to Wi-Fi is the same network: only "metered" changes.
+        app.network.addMeteredListener { metered -> if (!metered && waitingForWifi.isNotEmpty()) catchUp() }
+    }
+
+    /**
+     * (1.16, the review's M2, as the Windows app since 1.23) Copied or downloaded by itself only when it comes from an
+     * approved device (`trusted`; a server from before 1.25 doesn't say, which counts as yes). The rest still notify,
+     * with Copy or Download.
+     */
+    fun actsOn(item: Item): Boolean {
+        val from = item.from ?: return false
+        if (from == app.repo.me) return true
+        return app.repo.state.value.devicesById[from]?.let { it.trusted != false } == true
     }
 
     /** After every (re)connect: handle whatever arrived while we were away. */
@@ -63,6 +76,7 @@ class Inbox(private val app: BeamApp) {
             val conv = conversationOf(item)
             val sender = senderName(item)
             val muted = item.from != null && item.from in app.prefs.mutedDevices
+            val acts = actsOn(item)
             if (item.isText) {
                 var text = item.text.orEmpty()
                 if (item.truncated) {
@@ -71,20 +85,21 @@ class Inbox(private val app: BeamApp) {
                     } catch (_: Exception) {
                     }
                 }
-                val copy = app.prefs.autoCopy || (item.from != null && item.from in app.prefs.autoCopyDevices)
+                val copy = acts && (app.prefs.autoCopy || (item.from != null && item.from in app.prefs.autoCopyDevices))
                 val copied = copy && Clip.copy(app, text)
                 if (app.visibleConversation != conv) Notifier.textReceived(app, item, text, sender, conv, copied, muted)
                 done(item)
             } else {
                 val limit = app.prefs.maxDownloadMb * 1024 * 1024
                 val fits = limit <= 0 || item.size <= limit
+                val auto = acts && app.prefs.autoDownload && fits
                 when {
-                    app.prefs.autoDownload && fits && app.prefs.wifiOnlyDownloads && app.network.metered -> {
+                    auto && app.prefs.wifiOnlyDownloads && app.network.metered -> {
                         // Stays unhandled: the next catch-up on Wi-Fi downloads it.
                         if (waitingForWifi.add(item.id)) Notifier.fileOffer(app, item, sender, conv, muted, waitingForWifi = true)
                         inFlight.remove(item.id)
                     }
-                    app.prefs.autoDownload && fits -> {
+                    auto -> {
                         waitingForWifi.remove(item.id)
                         // Stays "in flight" until onDownloaded / onDownloadFailed.
                         app.transfers.download(item, TransferManager.Reason.AUTO)

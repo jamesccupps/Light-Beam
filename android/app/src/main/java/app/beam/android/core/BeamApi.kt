@@ -597,10 +597,15 @@ class BeamApi(
     }
 }
 
-/** Streams exactly [length] bytes from [input] as an upload chunk. Never retried by OkHttp. */
+/**
+ * Streams exactly [length] bytes from [input] as an upload chunk. Never retried by OkHttp. (1.16, the review's M10) The
+ * file's [last] chunk holds back its final byte until a read past it finds the end: a file longer than its app said
+ * would otherwise arrive cut short, the upload "finished", with no error anywhere.
+ */
 class ChunkBody(
     private val input: InputStream,
     private val length: Long,
+    private val last: Boolean = false,
     private val onWritten: (Long) -> Unit,
 ) : RequestBody() {
     override fun contentType() = BeamApi.OCTET
@@ -610,15 +615,24 @@ class ChunkBody(
     override fun writeTo(sink: BufferedSink) {
         val buf = ByteArray(64 * 1024)
         var written = 0L
-        while (written < length) {
-            val n = input.read(buf, 0, minOf(buf.size.toLong(), length - written).toInt())
+        val upTo = if (last && length > 0) length - 1 else length
+        while (written < upTo) {
+            val n = input.read(buf, 0, minOf(buf.size.toLong(), upTo - written).toInt())
             if (n < 0) throw SourceChangedException()
             sink.write(buf, 0, n)
             written += n
             onWritten(written)
         }
+        if (upTo < length) {
+            val b = input.read()
+            if (b < 0) throw SourceChangedException()
+            if (input.read() >= 0) throw SourceChangedException() // more than it said: never sent cut short
+            sink.writeByte(b)
+            written++
+            onWritten(written)
+        }
     }
 }
 
-/** The file being sent got shorter than it was when the upload started. Not retried. */
+/** The file being sent isn't the size it was when the upload started (shorter, or longer: 1.16). Not retried as is. */
 class SourceChangedException : IOException("The file changed while it was being sent")

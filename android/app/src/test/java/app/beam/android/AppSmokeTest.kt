@@ -349,13 +349,37 @@ class TestFiles : ContentProvider() {
 
         /** (1.14.1) The size its query says, when not the file's own (Google Photos' share says 0). */
         @Volatile var reportedSize: Long? = null
+
+        /** (1.16) The type it says (else a binary file). */
+        @Volatile var type: String? = null
+
+        /** (1.16) From the [gateFrom]th open on, an open waits for [gate]: an upload caught while it gets ready. */
+        @Volatile var gate: java.util.concurrent.CountDownLatch? = null
+        @Volatile var gateFrom = Int.MAX_VALUE
+        val opens = java.util.concurrent.atomic.AtomicInteger()
+
+        /** (1.16) Beam may no longer read it (a share's access ended with the transfer service). */
+        @Volatile var denied = false
+
+        fun reset() {
+            reportedSize = null
+            type = null
+            gate = null
+            gateFrom = Int.MAX_VALUE
+            opens.set(0)
+            denied = false
+        }
     }
 
     override fun onCreate() = true
-    override fun getType(uri: Uri) = "application/octet-stream"
+    override fun getType(uri: Uri) = type ?: "application/octet-stream"
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, args: Array<out String>?, sort: String?): Cursor =
         MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)).apply { addRow(arrayOf<Any>(uri.lastPathSegment!!, reportedSize ?: file.length())) }
-    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
+        if (denied) throw SecurityException("Permission Denial: reading $uri")
+        if (opens.incrementAndGet() >= gateFrom) gate?.await(30, java.util.concurrent.TimeUnit.SECONDS)
+        return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+    }
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, args: Array<out String>?) = 0
     override fun update(uri: Uri, values: ContentValues?, selection: String?, args: Array<out String>?) = 0

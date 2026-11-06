@@ -460,6 +460,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
             running && d.status == TransferManager.Status.RETRYING -> ctx.getString(R.string.transfer_retrying)
             running && d.status == TransferManager.Status.QUEUED -> ctx.getString(R.string.transfer_waiting_download)
             running -> ctx.getString(R.string.transfer_of, Format.size(d.received), Format.size(item.size))
+            paused && d.wifi -> ctx.getString(R.string.transfer_waiting_wifi, Format.size(d.received), Format.size(item.size))
             paused -> ctx.getString(R.string.transfer_paused, Format.size(d.received), Format.size(item.size))
             failed -> ctx.getString(R.string.transfer_download_failed, d.error.orEmpty())
             row.local != null -> ctx.getString(R.string.file_saved_meta, Format.size(item.size))

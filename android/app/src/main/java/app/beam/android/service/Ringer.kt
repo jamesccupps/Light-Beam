@@ -79,6 +79,7 @@ class Ringer(private val app: BeamApp) {
         val audio = app.getSystemService(AudioManager::class.java)
         if (audio != null) {
             savedAlarmVolume = audio.getStreamVolume(AudioManager.STREAM_ALARM)
+            app.prefs.ringVolumeToRestore = savedAlarmVolume // put back at the next start if Beam ends while ringing
             try {
                 audio.setStreamVolume(AudioManager.STREAM_ALARM, audio.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
             } catch (_: Exception) {
@@ -124,9 +125,27 @@ class Ringer(private val app: BeamApp) {
         }
         focus = null
         savedAlarmVolume = -1
+        app.prefs.ringVolumeToRestore = -1
         if (tellServer) {
             val me = app.repo.me
             app.scope.launch(Dispatchers.IO) { runCatching { app.api?.ring(me, stop = true) } }
+        }
+    }
+
+    /**
+     * (1.16, the review's Low) Beam ended while this phone rang (its process stopped): the alarm volume it turned up to the
+     * top is put back at the next start, unless someone has changed it since.
+     */
+    fun recover() {
+        val saved = app.prefs.ringVolumeToRestore
+        if (saved < 0 || _ringing.value) return
+        app.prefs.ringVolumeToRestore = -1
+        val audio = app.getSystemService(AudioManager::class.java) ?: return
+        try {
+            if (audio.getStreamVolume(AudioManager.STREAM_ALARM) == audio.getStreamMaxVolume(AudioManager.STREAM_ALARM)) {
+                audio.setStreamVolume(AudioManager.STREAM_ALARM, saved, 0)
+            }
+        } catch (_: Exception) {
         }
     }
 

@@ -138,7 +138,8 @@ class SettingsBackups(private val app: BeamApp) {
         val list = fetch("me", here = true).filter { it.install != app.prefs.installId }.toMutableList()
         val s = app.repo.state.value
         for (d in s.devices.sortedByDescending { it.backupAt ?: 0L }) {
-            if (d.id == s.me || d.platform != "android" || d.backupAt == null) continue
+            // (1.16, the review's M2) Approved phones only: any sign-in may keep a backup for itself.
+            if (d.id == s.me || d.platform != "android" || d.backupAt == null || d.trusted == false) continue
             runCatching { fetch(d.id, here = false).firstOrNull() }.getOrNull()?.let(list::add)
         }
         return list.take(MAX_CHOICES)
@@ -151,7 +152,10 @@ class SettingsBackups(private val app: BeamApp) {
      */
     fun apply(c: Choice): Boolean {
         val s = c.settings
-        applyTo(app.prefs, s, setOf(app.prefs.deviceId, app.repo.me))
+        // (1.16, the review's M2) The tile's device and the devices copied from by themselves: approved ones only (a backup
+        // can name any device, and one that isn't approved got every tap of the tile: the phone's clipboard).
+        val known = app.repo.state.value.devicesById
+        applyTo(app.prefs, s, setOf(app.prefs.deviceId, app.repo.me)) { id -> known[id]?.let { it.trusted != false } == true }
         strings(s, "sharedApps")?.let { want ->
             val have = app.prefs.sharedApps
             for (pkg in have - want) app.phone.setAppShared(pkg, false)
@@ -185,15 +189,15 @@ class SettingsBackups(private val app: BeamApp) {
             .put("sharedApps", JSONArray(p.sharedApps.sorted().take(MAX_LIST)))
 
         /** Puts [s] into [p], all but the name and the shared apps (those go through the app). [mine]: this phone's ids. */
-        fun applyTo(p: Prefs, s: JSONObject, mine: Set<String>) {
+        fun applyTo(p: Prefs, s: JSONObject, mine: Set<String>, approved: (String) -> Boolean = { true }) {
             (s.opt("stayConnected") as? Boolean)?.let { p.stayConnected = it }
             (s.opt("autoCopy") as? Boolean)?.let { p.autoCopy = it }
             (s.opt("autoDownload") as? Boolean)?.let { p.autoDownload = it }
             (s.opt("wifiOnlyDownloads") as? Boolean)?.let { p.wifiOnlyDownloads = it }
             (s.opt("maxDownloadMb") as? Number)?.toLong()?.takeIf { it >= 0 }?.let { p.maxDownloadMb = it }
-            if (s.has("tileTarget")) p.tileTarget = (s.opt("tileTarget") as? String)?.takeIf { it.isNotEmpty() && it !in mine }
+            if (s.has("tileTarget")) p.tileTarget = (s.opt("tileTarget") as? String)?.takeIf { it.isNotEmpty() && it !in mine && approved(it) }
             strings(s, "mutedDevices")?.let { p.mutedDevices = it - mine }
-            strings(s, "autoCopyDevices")?.let { p.autoCopyDevices = it - mine }
+            strings(s, "autoCopyDevices")?.let { p.autoCopyDevices = (it - mine).filterTo(HashSet(), approved) }
         }
 
         fun strings(s: JSONObject, key: String): Set<String>? =

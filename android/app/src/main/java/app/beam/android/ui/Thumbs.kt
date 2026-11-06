@@ -13,6 +13,7 @@ import app.beam.android.BeamApp
 import app.beam.android.R
 import app.beam.android.core.Item
 import java.io.File
+import java.nio.ByteBuffer
 import java.util.Collections
 import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
@@ -60,6 +61,8 @@ object Thumbs {
                 load()
             } catch (_: Exception) {
                 null
+            } catch (_: OutOfMemoryError) {
+                null // (1.16, the review's M8) a picture too big for memory is shown as a file, never a crash
             }
             if (bmp != null) cache.put(key, bmp) else failed[key] = System.currentTimeMillis()
             withContext(Dispatchers.Main) {
@@ -190,12 +193,14 @@ object Thumbs {
             }
         }
         val thumb = thumbFile(ctx, item.id)
-        if (thumb.exists()) BitmapFactory.decodeFile(touched(thumb).path)?.let { return it }
+        // (1.16, the review's M8) A thumbnail from the server is decoded at most [MAX_PX] a side, like every other picture
+        // here: one whose header said 8000 × 8000 took hundreds of MB and crashed the app each time it was shown.
+        if (thumb.exists()) bounded { ImageDecoder.createSource(ByteBuffer.wrap(touched(thumb).readBytes())) }?.let { return it } // (small: at most 256 KB)
         val app = BeamApp.from(ctx)
         val api = app.api ?: return null
         if (item.thumb) {
             val bytes = api.thumb(item.id)
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val bmp = bounded { ImageDecoder.createSource(ByteBuffer.wrap(bytes)) } ?: return null
             writeWhole(thumb) { it.write(bytes) }
             return bmp
         }
@@ -309,6 +314,15 @@ object Thumbs {
     private class StopDecoding : RuntimeException()
 
     fun loadUri(ctx: Context, uri: Uri): Bitmap? = decode(ImageDecoder.createSource(ctx.contentResolver, uri))
+
+    /** (1.16, M8) [decode], or null for a picture that can't be read (or wouldn't fit in memory). */
+    private inline fun bounded(source: () -> ImageDecoder.Source): Bitmap? = try {
+        decode(source())
+    } catch (_: Exception) {
+        null
+    } catch (_: OutOfMemoryError) {
+        null
+    }
 
     private fun decode(source: ImageDecoder.Source): Bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
         val w = info.size.width

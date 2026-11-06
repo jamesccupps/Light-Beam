@@ -9,7 +9,27 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 | Android app | `android/app/build.gradle.kts` (`versionName`; `versionCode` always goes up) |
 | Beam for Linux / the `beam` command | `cli/beam.js` (`VERSION`) |
 
-Each release is tagged with the server's version (`v1.29.5`). An entry says which other parts moved.
+Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
+(`android-v1.16.0`). An entry says which other parts moved.
+
+## Android 1.16.0 (2026-11-06): a review's fixes, the Android app
+
+**Versions:** Android app 1.16.0; server 1.30.1, Windows app 1.23.0, Beam for Linux 1.5.1 (all unchanged).
+
+- **Only approved devices make the phone act by itself:** texts are copied and files downloaded automatically only
+  from approved devices (the others still notify, with Copy and Download). Restore settings lists only approved phones'
+  backups, and never points the Quick Settings tile or automatic copying at a device that isn't approved.
+- **Sending files:** Cancel and pause work while a file is still being prepared (it went anyway). A file is measured
+  itself, not by the size its app lists (an edited photo went cut short), and one that turns out longer than it said
+  goes again, whole. A shared file that has to wait for a connection is kept by Beam when there's room, so the retry no
+  longer fails with "Beam no longer has access to that file".
+- **"Wi-Fi only" follows the network:** an automatic download pauses on mobile data and carries on on Wi-Fi (also
+  behind Tailscale, where the network doesn't seem to change); one restarted after Beam was stopped waits too.
+- **Smaller:** a picture preview from the server can't crash the app however large it says it is; dropped or pasted
+  `file://` links are refused, like shared ones; the update screen never starts a second install when it's turned or
+  made again; the alarm volume comes back if Beam stopped while ringing; another device's accent change no longer ends
+  a remote control session or reloads Shared folders, which isn't kept as a recent-apps snapshot; the viewer pages'
+  sign-ins are kept sealed; a full phone is reported as such, not as a connection problem.
 
 ## 1.30.1 (2026-11-05): a review's fixes, the Windows app
 
