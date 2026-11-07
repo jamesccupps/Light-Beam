@@ -86,6 +86,7 @@ class MainActivity : BaseActivity() {
                 // (1.12) Inside Beam, in a Custom Tab: the browser's engine, so its sign-in and notifications (Web Push)
                 // work as in the browser; the browser itself when it can't show one.
                 R.id.action_family -> app.repo.state.value.info?.family?.let { FileActions.openInApp(this, it) }
+                R.id.action_sites -> startActivity(Intent(this, SitesActivity::class.java)) // (1.17)
             }
             true
         }
@@ -93,6 +94,14 @@ class MainActivity : BaseActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 app.repo.state.map { it.info?.family }.distinctUntilChanged().collect { url ->
                     b.toolbar.menu.findItem(R.id.action_family)?.isVisible = url != null
+                }
+            }
+        }
+        // (1.17) Sites, from a server that has them (Beam 1.31)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.repo.state.map { it.info?.lists("sites") == true }.distinctUntilChanged().collect { has ->
+                    b.toolbar.menu.findItem(R.id.action_sites)?.isVisible = has
                 }
             }
         }

@@ -128,6 +128,10 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
      * and each `PUT /api/devices/{id}/trust` (device id to the value asked for).
      */
     @Volatile var meTrusted: Boolean? = true
+
+    /** (1.17, with "sites") What `GET /api/sites` answers, and every change asked of it ("METHOD /path body"). */
+    @Volatile var sites: JSONObject = JSONObject().put("sites", JSONArray()).put("checking", false)
+    val siteCalls = CopyOnWriteArrayList<String>()
     val trustCalls = CopyOnWriteArrayList<Pair<String, Boolean>>()
 
     /**
@@ -394,6 +398,15 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
             path == "/api/read" -> json(ex, 200, JSONObject().put("read", JSONObject()))
             path == "/api/devices/me/status" -> json(ex, 204, "")
             path == "/api/updates" -> json(ex, 200, JSONObject())
+            path == "/api/sites" && method == "GET" && "sites" in features -> json(ex, 200, sites)
+            path.startsWith("/api/sites") && "sites" in features -> {
+                siteCalls += "$method $path ${ex.requestBody.readBytes().decodeToString()}".trim()
+                when {
+                    path == "/api/sites/check" -> json(ex, 202, JSONObject().put("checking", true))
+                    method == "DELETE" -> json(ex, 204, "")
+                    else -> json(ex, 200, JSONObject().put("site", JSONObject().put("id", "x").put("url", "http://x/").put("name", "Pi").put("up", true)))
+                }
+            }
             else -> json(ex, 404, JSONObject().put("error", "Not found"))
         }
     }

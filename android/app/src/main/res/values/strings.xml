@@ -82,6 +82,35 @@
 
     <!-- App updates -->
     <string name="family">Beam Family</string>
+    <!-- (1.17, server 1.31) Sites: the web pages on the tailnet -->
+    <string name="sites">Sites</string>
+    <string name="sites_add">Add a site</string>
+    <string name="sites_check">Check again</string>
+    <string name="sites_checking">Checking each site…</string>
+    <string name="sites_checked_at">Checked at %1$s</string>
+    <string name="sites_empty">No sites yet. Beam for Windows lists the web pages each PC serves on Tailscale by itself. Tap + to add others, like a Raspberry Pi\'s. Touch and hold a site for more.</string>
+    <string name="sites_failed">Couldn\'t get the sites: %1$s</string>
+    <string name="sites_address_hint">Address, like http://my-pi:8080</string>
+    <string name="sites_name">Name</string>
+    <string name="sites_added">%1$s added</string>
+    <string name="sites_added_down">%1$s added (it isn\'t answering yet)</string>
+    <string name="sites_on">%1$s · on %2$s</string>
+    <string name="sites_added_here">%1$s · added</string>
+    <string name="sites_hidden_suffix">%1$s · hidden</string>
+    <string name="sites_answering">Answering</string>
+    <string name="sites_not_answering">Not answering: %1$s</string>
+    <string name="sites_not_checked">Not checked yet</string>
+    <string name="sites_open">Open</string>
+    <string name="sites_copy">Copy address</string>
+    <string name="sites_copied">Address copied</string>
+    <string name="sites_rename">Rename</string>
+    <string name="sites_use_title">Use the page\'s own title</string>
+    <string name="sites_hide">Hide</string>
+    <string name="sites_show">Show it again</string>
+    <string name="sites_remove">Remove</string>
+    <string name="sites_remove_q">Remove %1$s from Sites?</string>
+    <string name="sites_no_browser">No app here opens %1$s</string>
+    <string name="sites_change_failed">Couldn\'t change it: %1$s</string>
     <string name="update_title">Beam update</string>
     <string name="update_ready">Beam update ready (v%1$s)</string>
     <string name="update_tap">Tap to install</string>

@@ -92,6 +92,7 @@ function connect() {
   on('ring', onRingEvent);
   on('alert', onAlertEvent);
   on('apps', onAppsEvent); // (1.21: Settings → Apps reads the list again)
+  on('sites', onSitesEvent); // (1.31: the Sites list reads it again while open)
   on('rc-sessions', onRcSessions); // (who controls which PC, for Settings; the viewer has its own stream: remote.js)
   on('notification', onPhoneNotification);
   on('notification-removed', onPhoneNotificationRemoved);
@@ -356,6 +357,7 @@ function applyMe(m) {
   if (m.read && mergeReadMarks(m.read)) renderSidebar();
   me.temporary = Boolean(m.auth?.session || m.temporary);
   if (typeof m.auth?.trusted === 'boolean') me.trusted = m.auth.trusted; // (1.25: may approve other devices)
+  updateSitesButton(); // (1.31) the Sites list is for approved sign-ins
   if (me.temporary && !cacheDisabled) disableOfflineCache(); // a borrowed computer keeps nothing
 }
 

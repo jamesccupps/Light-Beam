@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- (1.17) A site's state on the Sites screen: tinted in code (answering, not answering, not checked yet). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="@android:color/white" />
+    <size android:width="10dp" android:height="10dp" />
+</shape>

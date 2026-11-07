@@ -17,6 +17,12 @@
         android:title="@string/settings"
         app:showAsAction="ifRoom" />
     <item
+        android:id="@+id/action_sites"
+        android:icon="@drawable/ic_globe"
+        android:title="@string/sites"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_family"
         android:title="@string/family"
         android:visible="false"

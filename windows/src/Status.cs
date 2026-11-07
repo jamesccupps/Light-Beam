@@ -124,6 +124,7 @@ namespace Beam
             if (!Equals(Val(last, "os"), Val(body, "os")) || !Equals(Val(last, "remoteDesktop"), Val(body, "remoteDesktop"))) return true;
             if (!Equals(Val(last, "remoteControl"), Val(body, "remoteControl")) || !Equals(Val(last, "locked"), Val(body, "locked"))) return true;
             if (!Equals(Val(last, "startsWithWindows"), Val(body, "startsWithWindows")) || !Equals(Val(last, "startWanted"), Val(body, "startWanted"))) return true;
+            if (SiteFinder.Signature(Val(last, "sites")) != SiteFinder.Signature(Val(body, "sites"))) return true; // (1.24)
             return string.Join(",", (string[])last["macs"]) != string.Join(",", (string[])body["macs"]);
         }
 
@@ -154,6 +155,8 @@ namespace Beam
                 // (1.23, Beam 1.30.1, the review's M28) Windows shows its prompts (UAC) on the normal screen here
                 // ("Answer Windows' prompts"): any program on this PC could answer them. Device info says so.
                 if (app.ServerHas("uac-status")) body["uacOnScreen"] = AdminHelper.PromptsOnScreen();
+                // (1.24, Beam 1.31) the web pages this PC serves to the tailnet, for Beam's Sites list (Sites.cs)
+                if (app.ServerHas("sites")) body["sites"] = await Task.Run(() => SiteFinder.Find());
                 if (!force && !Changed(body)) return;
                 bool gone = !body.ContainsKey("battery") && Part(last, "battery") != null;
                 if (gone) body["battery"] = null; // it went away (a UPS unplugged)

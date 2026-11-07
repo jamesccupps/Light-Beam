@@ -543,4 +543,50 @@ export default function register(test) {
     eq(await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].map(b => b.textContent)`), ['More lines', 'Refresh']);
     await page.evaluate(`$('#genDlg').close()`);
   });
+
+  test('1.31 Sites: the globe opens the list; a site added by address is checked and named by its title; rename, remove with Undo; a found one says its PC and is hidden, not removed', async ctx => {
+    const page = await ctx.signedIn();
+    const http = await import('node:http');
+    const pages = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end('<title>Garden Pi</title>'); });
+    await new Promise(r => pages.listen(0, '127.0.0.1', r));
+    const port = pages.address().port;
+    const pickMenu = label => page.evaluate(`(() => { const b = [...$('#menu').querySelectorAll('.menu-item')].find(x => x.textContent.trim() === ${JSON.stringify(label)}); if (b) b.click(); return Boolean(b); })()`);
+    try {
+      await page.waitFor(`!$('#sitesBtn').hidden`, 8000, 'the globe (an approved sign-in)');
+      await page.evaluate(`$('#sitesBtn').click(); true`);
+      await page.waitFor(`sitesOpen() && /No sites yet/.test($('#sitesList').textContent)`, 8000, 'an empty list');
+      await page.evaluate(`(() => { $('#siteAddress').value = '127.0.0.1:${port}'; $('.site-add').requestSubmit(); return true; })()`);
+      await page.waitFor(`$$('#sitesList .site-row').length === 1 && $('#sitesList .site-name').textContent === 'Garden Pi'`, 8000, 'added, named by its title');
+      eq(await page.evaluate(`[$('#sitesList .site-row').classList.contains('up'), $('#sitesList .site-link').getAttribute('href'), $('#sitesList .site-link').target, $('#siteAddress').value]`),
+        [true, `http://127.0.0.1:${port}/`, '_blank', ''], 'answering; it opens in a tab of its own; the box is empty again');
+
+      // Rename in place (Enter saves); Remove goes at once, with Undo.
+      await page.evaluate(`siteMenu(sitesState.sites[0], $('#sitesList .site-row .icon-btn')); true`);
+      assert(await pickMenu('Rename'), 'Rename in the menu');
+      await page.waitFor(`Boolean($('#sitesList .site-name-input'))`, 3000, 'the name box');
+      await page.evaluate(`(() => { $('#sitesList .site-name-input').value = 'Greenhouse'; $('#sitesList .site-rename').requestSubmit(); return true; })()`);
+      await page.waitFor(`$('#sitesList .site-name')?.textContent === 'Greenhouse'`, 8000, 'renamed');
+      await page.evaluate(`siteMenu(sitesState.sites[0], $('#sitesList .site-row .icon-btn')); true`);
+      eq(await page.evaluate(`[...$('#menu').querySelectorAll('.menu-item')].map(b => b.textContent.trim())`), ['Open', 'Copy address', 'Rename', 'Use the page’s own title', 'Remove']);
+      assert(await pickMenu('Remove'), 'Remove');
+      await page.waitFor(`/No sites yet/.test($('#sitesList').textContent)`, 8000, 'removed');
+      await page.evaluate(`$('#toastAction').click(); true`);
+      await page.waitFor(`$$('#sitesList .site-row').length === 1 && $('#sitesList .site-name').textContent === 'Greenhouse'`, 8000, 'back with Undo, its name too');
+
+      // Found ones, as the server lists them: the PC they're on, why one isn't answering, Hide (not Remove), the hidden folded away.
+      await page.evaluate(`(() => { sitesState.sites.push(
+        { id: 'shoppc000001.8000', kind: 'found', url: 'http://shop-pc.tail1234.ts.net:8000/', host: 'shop-pc:8000', name: 'Trends', deviceName: 'Shop PC', up: false, problem: 'it didn’t answer in time' },
+        { id: 'shoppc000001.9000', kind: 'found', url: 'http://shop-pc.tail1234.ts.net:9000/', host: 'shop-pc:9000', name: 'Old tool', deviceName: 'Shop PC', hidden: true }); renderSites(); return true; })()`);
+      eq(await page.evaluate(`$$('#sitesList .site-row .site-text').map(t => [...t.children].map(c => c.textContent))`),
+        [['Greenhouse', `127.0.0.1:${port} · added`], ['Trends', 'shop-pc:8000 · on Shop PC', 'Not answering: it didn’t answer in time']]);
+      eq(await page.evaluate(`[$('#sitesHidden summary')?.textContent, $$('#sitesHidden .site-name').map(n => n.textContent), $('#sitesList .site-row.down .site-dot').getAttribute('aria-label')]`),
+        ['Hidden (1)', ['Old tool'], 'Not answering: it didn’t answer in time']);
+      await page.evaluate(`siteMenu(sitesState.sites[1], $$('#sitesList .site-row .icon-btn')[1]); true`);
+      eq(await page.evaluate(`[...$('#menu').querySelectorAll('.menu-item')].map(b => b.textContent.trim())`), ['Open', 'Copy address', 'Rename', 'Hide']);
+      await page.evaluate(`closeMenu(); $('#genDlg').close(); true`);
+      eq(page.errors, [], 'no page errors');
+    } finally {
+      await new Promise(r => pages.close(r));
+    }
+  });
 }

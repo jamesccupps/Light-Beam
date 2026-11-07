@@ -5896,6 +5896,111 @@ test('2026-11-05 review, round E: a GitHub app’s chosen file with a version in
   assert.equal(appsLib.pickAsset(two, 'tool', 'Tool-1.0-a.zip').asset, null, 'two that look the same: none (never a guess)');
 });
 
+test('1.31 Sites: a PC’s own pages at its Tailscale name, checked (title, icon, a sign-in redirect, one that’s down); add, rename, hide, show, remove; kept across a restart and in an export', async () => {
+  // Made-up pages: a trend viewer with an icon, a camera whose / redirects to its sign-in page, and a closed port.
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 7)]);
+  const pages = http.createServer((req, res) => {
+    if (req.url === '/i.png') { res.writeHead(200, { 'Content-Type': 'image/png' }); return res.end(PNG); }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><head><title>Shop &amp; Trends</title><link rel="icon" type="image/png" href="/i.png"></head><body>hi</body></html>');
+  });
+  const camera = http.createServer((req, res) => {
+    if (req.url === '/') { res.writeHead(302, { Location: '/login' }); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<title>Sign in · Camera</title>');
+  });
+  await new Promise(r => pages.listen(8796, '127.0.0.1', r));
+  await new Promise(r => camera.listen(8797, '127.0.0.1', r));
+  // The PC's Tailscale name is "localhost" here, so its found page is this test's own.
+  const ts = await fakeTailscale({ peers: [{ name: 'shop-pc', ips: ['100.64.70.1'], dns: 'localhost.' }] });
+  const env = { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket };
+  const s = await startServer('sites131', 8791, { env });
+  try {
+    const K = s.key;
+    const phone = app(K, 'phone00s131', 'Phone', 'android');
+    const pairKey = (await s.req('GET', '/api/pair', { headers: phone })).json.key;
+    const pc = app(pairKey, 'shoppc00s131', 'Shop PC', 'windows', from('100.64.70.1'));
+    assert.equal((await s.req('GET', '/api/me', { headers: pc })).status, 200);
+    assert.ok((await s.req('GET', '/api/info', { headers: phone })).json.features.includes('sites'));
+    const ev = await openEvents(s.port, phone);
+    await ev.wait('hello');
+
+    // The PC reports what it serves (bad reports are refused).
+    const status = body => s.req('PUT', '/api/devices/me/status', { headers: json(pc), body: JSON.stringify(body) });
+    for (const bad of [[{ port: 0, title: 'x' }], [{ port: 8796, title: '' }], [{ port: 8796, title: 'x', path: '/' }], 'x']) {
+      assert.equal((await status({ sites: bad })).status, 400, JSON.stringify(bad));
+    }
+    assert.equal((await status({ sites: [{ port: 8796, title: 'Shop Trends' }] })).status, 204);
+    await ev.wait('sites');
+    const list = async () => (await s.req('GET', '/api/sites', { headers: phone })).json;
+    const checked = async () => waitFor(async () => { const l = await list(); return !l.checking && l.sites.every(x => x.up !== undefined) && l; }, 8000);
+    let l = await checked();
+    let found = l.sites.find(x => x.kind === 'found');
+    assert.deepEqual(pick(found, ['id', 'url', 'host', 'name', 'deviceName', 'up']),
+      { id: 'shoppc00s131.8796', url: 'http://localhost:8796/', host: 'localhost:8796', name: 'Shop Trends', deviceName: 'Shop PC', up: true });
+    assert.equal(found.icon, `data:image/png;base64,${PNG.toString('base64')}`, 'its icon, from the page');
+    assert.equal((await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(d => d.id === 'shoppc00s131').status.sites, undefined, 'not in the device list');
+
+    // Added by hand: "localhost:8797" means http; its title is the sign-in page's (one redirect followed).
+    let r = await post(s, '/api/sites', { url: 'localhost:8797' }, phone);
+    assert.equal(r.status, 201, r.body);
+    const cam = r.json.site;
+    assert.deepEqual(pick(cam, ['kind', 'url', 'name', 'up']), { kind: 'added', url: 'http://localhost:8797/', name: 'Sign in · Camera', up: true });
+    for (const [body, code] of [[{ url: 'http://localhost:8797' }, 409], [{ url: 'http://localhost:8796/' }, 409], [{ url: 'ftp://pi/' }, 400], [{ url: 'http://me:secret@pi/' }, 400], [{}, 400], [{ url: 'http://pi/', name: 5 }, 400]]) {
+      r = await post(s, '/api/sites', body, phone);
+      assert.equal(r.status, code, `${JSON.stringify(body)}: ${r.body}`);
+    }
+    r = await post(s, '/api/sites', { url: 'http://127.0.0.1:8798/', name: 'Old printer' }, phone);
+    assert.equal(r.status, 201, r.body);
+    const down = r.json.site;
+    assert.deepEqual(pick(down, ['name', 'up', 'problem']), { name: 'Old printer', up: false, problem: 'nothing answers on that port' });
+
+    // Rename (null: the page's own title again), hide and show a found one; an added one is removed, not hidden.
+    const patch = (id, body) => s.req('PATCH', `/api/sites/${id}`, { headers: json(phone), body: JSON.stringify(body) });
+    r = await patch(found.id, { name: '  Trends‮ ' });
+    assert.deepEqual([r.status, r.json.site.name, r.json.site.renamed], [200, 'Trends', true]);
+    r = await patch(found.id, { name: null });
+    assert.deepEqual([r.json.site.name, r.json.site.renamed], ['Shop Trends', undefined]);
+    r = await patch(found.id, { hidden: true });
+    assert.equal(r.json.site.hidden, true);
+    assert.equal((await s.req('DELETE', `/api/sites/${found.id}`, { headers: phone })).status, 400, 'a found one is hidden, not removed');
+    assert.equal((await patch(found.id, { url: 'http://x/' })).status, 400, 'a found one keeps its address');
+    assert.equal((await patch(cam.id, { hidden: true })).status, 400);
+    assert.equal((await patch('zzzzzzzz', { name: 'x' })).status, 404);
+    r = await post(s, '/api/sites', { url: 'http://localhost:8796/' }, phone);
+    assert.deepEqual([r.status, r.json.site.kind, r.json.site.hidden], [200, 'found', undefined], 'adding its address shows it again');
+    r = await patch(cam.id, { name: 'Front door' });
+    assert.equal(r.json.site.name, 'Front door');
+    assert.equal((await s.req('DELETE', `/api/sites/${down.id}`, { headers: phone })).status, 204);
+    l = await list();
+    assert.deepEqual(l.sites.map(x => x.name), ['Front door', 'Shop Trends'], 'by name');
+    assert.equal((await s.req('POST', '/api/sites/check', { headers: phone })).status, 202);
+
+    // A PC that stops serving: its page leaves the list.
+    assert.equal((await status({ sites: [] })).status, 204);
+    assert.deepEqual((await list()).sites.map(x => x.name), ['Front door']);
+    assert.equal((await status({ sites: [{ port: 8796, title: 'Shop Trends' }] })).status, 204);
+    await patch(found.id, { name: 'Trends' });
+
+    // Kept: the added one and the found one's name, after a restart and in an export.
+    await waitFor(() => { try { return fs.readFileSync(path.join(s.data, 'sites.json'), 'utf8').includes('"Trends"'); } catch { return false; } }, 3000); // (stop kills it)
+    await s.stop();
+    const again = await startServer('sites131', 8791, { keep: true, env });
+    try {
+      l = (await again.req('GET', '/api/sites', { headers: phone })).json;
+      assert.deepEqual(l.sites.map(x => [x.kind, x.name]), [['added', 'Front door'], ['found', 'Trends']], JSON.stringify(l.sites.map(x => pick(x, ['kind', 'name', 'url']))));
+      const exp = await again.req('GET', '/api/admin/export', { headers: phone, raw: true });
+      assert.equal(exp.status, 200);
+      assert.ok(tarNames(exp.body).includes('sites.json'));
+    } finally { await again.stop(); }
+  } finally {
+    await s.stop();
+    await ts.close();
+    await new Promise(r => pages.close(r));
+    await new Promise(r => camera.close(r));
+  }
+});
+
 test('2026-11-05 review: no taking a device that has a sign-in; automatic sign-ins and wakes limited; a rebound page can’t sign in; a removed device’s links stop', async () => {
   const ts = await fakeTailscale({ whois: {
     '100.64.31.10': { login: 'alice@example.com', node: 'alice-laptop' },
@@ -6718,6 +6823,11 @@ test('1.25 trusted sign-ins (R-1/R-2): an automatic sign-in naming any app contr
     await refused('the first password', 'POST', '/api/password', { password: 'a password of mine' });
     await refused('signing the others out', 'POST', '/api/security/sign-out-others', {});
     await refused('removing a device', 'DELETE', '/api/devices/rclaptop001');
+    await refused('the sites', 'GET', '/api/sites'); // (1.31)
+    await refused('adding a site', 'POST', '/api/sites', { url: 'http://pi:8080/' });
+    // (1.31) its own reported pages aren't listed: a found site needs a trusted sign-in on that device
+    assert.equal((await s.req('PUT', '/api/devices/me/status', { headers: json(win), body: JSON.stringify({ sites: [{ port: 8080, title: 'Totally the bank' }] }) })).status, 204);
+    assert.deepEqual((await s.req('GET', '/api/sites', { headers: t.laptop })).json.sites, []);
     await refused('moving Beam', 'POST', '/api/move', { to: 'https://elsewhere.example' });
     await refused('approving a device', 'PUT', `/api/devices/${android.you}/trust`, { trusted: true });
     // (1.25.4, the user's audit of 2026-10-14) nor the owner's tools: a Windows build to every PC (also by turning "one PC

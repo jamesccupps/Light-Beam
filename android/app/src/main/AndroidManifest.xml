@@ -95,6 +95,11 @@
             android:exported="false" />
 
         <activity
+            android:name=".ui.SitesActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
             android:name=".ui.SearchActivity"
             android:exported="false"
             android:parentActivityName=".ui.MainActivity"

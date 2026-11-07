@@ -368,6 +368,46 @@ data class ServerInfo(
     }
 }
 
+// ---------------------------------------------------------------- sites (server 1.31)
+
+/** (1.17, server 1.31) A web page on the tailnet: found by a PC's Beam for Windows ([found]), or added by address. */
+data class Site(
+    val id: String,
+    val kind: String,
+    val url: String,
+    val host: String,
+    val name: String,
+    val deviceName: String?,
+    /** Whether it answered the server's last check; null: not checked yet. */
+    val up: Boolean?,
+    val problem: String?,
+    val hidden: Boolean,
+    val renamed: Boolean,
+    /** Its icon as a data: URL (PNG, ICO, GIF, JPEG or WebP), when the page has one. */
+    val icon: String?,
+) {
+    val found get() = kind == "found"
+
+    companion object {
+        fun parse(o: JSONObject) = Site(
+            id = o.optString("id"), kind = o.optString("kind"), url = o.optString("url"), host = o.optString("host"),
+            name = o.str("name") ?: o.optString("host"), deviceName = o.str("deviceName"), up = o.optBool("up"),
+            problem = o.str("problem"), hidden = o.optBoolean("hidden"), renamed = o.optBoolean("renamed"), icon = o.str("icon"),
+        )
+    }
+}
+
+/** `GET /api/sites`: the list, whether a check is running, and when the last one finished. */
+data class SitesResult(val sites: List<Site>, val checking: Boolean, val checkedAt: Long) {
+    companion object {
+        fun parse(o: JSONObject): SitesResult {
+            val a = o.optJSONArray("sites")
+            val sites = if (a == null) emptyList() else (0 until a.length()).mapNotNull { a.optJSONObject(it)?.let(Site::parse) }.filter { it.id.isNotEmpty() && it.url.isNotEmpty() }
+            return SitesResult(sites, o.optBoolean("checking"), o.optLong("checkedAt"))
+        }
+    }
+}
+
 // ---------------------------------------------------------------- JSON helpers
 
 /** org.json's optString turns JSON null into the string "null"; this returns a real null. */

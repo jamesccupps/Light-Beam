@@ -12,6 +12,19 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.31.0 (2026-11-06): Sites
+
+**Versions:** server 1.31.0, Windows app 1.24.0, Android app 1.17.0.
+
+- **Sites:** the web pages your machines serve over Tailscale, in one list on every device: the globe at the top of
+  the web app (and the Windows app's window), Sites in the Android app's menu. Each PC's Beam app finds the pages that
+  PC serves to the tailnet (programs listening on every address or the Tailscale one, on the ports web pages use,
+  whose front page is a web page), listed at its Tailscale name. Pages on machines without the Windows app are added
+  by address. When the list opens, the server checks each one: whether it answers (with the reason when it doesn't),
+  its title and its icon. A site can be renamed; a found one hidden, an added one removed. Approved devices only.
+  `GET/POST /api/sites`, `PATCH/DELETE /api/sites/{id}`, `POST /api/sites/check`, the `sites` event, status `sites`
+  (docs/API.md "Sites").
+
 ## 1.30.2 (2026-11-06): a review's last rounds, Beam for Linux, speed, polish and CI
 
 **Versions:** server 1.30.2 (Beam Family with it), Windows app 1.23.1, Android app 1.16.1, Beam for Linux 1.6.0.

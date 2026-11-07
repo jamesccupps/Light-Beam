@@ -617,6 +617,31 @@ html.files-mode .shared-stage img { max-height: 70vh; }
 .device-list li:last-child { border-bottom: 0; }
 .dev-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 /* (1.21) Settings → Apps */
+/* (1.31) Sites: the web pages on the tailnet (sites.js) */
+.sites-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 0 0 4px; }
+.sites-error { flex-basis: 100%; margin: 0; }
+.site-list { list-style: none; margin: 0 -8px; padding: 0; }
+.site-row { display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 0; border-radius: 10px; }
+.site-row:hover { background: var(--surface-2); }
+.site-link { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 8px; color: inherit; text-decoration: none; border-radius: 10px; }
+.site-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.site-icon { flex: none; width: 32px; height: 32px; border-radius: 8px; object-fit: contain; background: var(--surface-2); }
+.site-icon.letter { display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.site-text { min-width: 0; display: flex; flex-direction: column; }
+.site-text > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-text .warn { white-space: normal; }
+.site-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: #8a919c; }
+.site-dot.up { background: var(--ok); }
+.site-dot.down { background: var(--danger); }
+.site-row.down .site-icon { opacity: .6; }
+.site-empty { padding: 12px 8px; list-style: none; }
+.site-rename { flex: 1; display: flex; gap: 6px; align-items: center; padding: 6px 8px; }
+.site-rename input { flex: 1; min-width: 0; }
+.sites-hidden { margin: 8px 0 0; }
+.sites-hidden summary { cursor: pointer; color: var(--muted); font-size: 0.8438rem; padding: 4px 0; }
+.sites-add { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.sites-add .field-label { margin: 0 0 6px; }
+.sites-add .muted { margin: 6px 0 0; }
 .app-list { list-style: none; margin: 8px 0; padding: 0; }
 .app-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
 .app-row:last-child { border-bottom: 0; }

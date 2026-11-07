@@ -580,6 +580,8 @@ their last value, and `null` clears one. Unknown fields or bad values are `400`.
   PC's normal screen instead of its secure one (`PromptOnSecureDesktop` 0: Settings → Security → "Answer Windows’
   prompts (UAC) from other devices"). Then your devices can answer them through remote control, and so could any program
   on that PC: Device info shows it as a warning. The app sends it only to a server that lists the feature.
+- **(1.31, Windows app 1.24, feature `sites`)** `sites`: the web pages this PC serves to the tailnet, `[{ "port", "title"
+  (1 to 80 characters), "https"? }]`, 24 at most (see Sites). Not in the device list.
 - Others see `status` (without the MACs), `tailscale` and `can` in the device list; the `devices` event goes out at
   most every 5 s for status changes. Low battery or storage, and (1.22) a hot or under-powered Pi can raise alerts
   (see Alerts).
@@ -837,6 +839,34 @@ Events: `apps { at }` (to every stream: read the list again), `app-install { id,
 (only to that PC's streams). GitHub releases are looked for 3 minutes after a start and every 6 hours (`BEAM_GITHUB_API`
 points the server at a stand-in for tests); downloads only from github.com and its download hosts, at every redirect.
 
+### Sites (1.31)
+Feature `sites`. The web pages the user's machines serve over Tailscale, in one list on every device (the web app's
+globe, Android's Sites). **Found** ones: each Beam for Windows (1.24) reports the pages its own PC serves to the tailnet
+(status `sites`, below), listed at that PC's Tailscale name (`http://<its MagicDNS name>:<port>/`); only a device with a
+trusted sign-in of its own counts. **Added** ones: an address the user typed (a Raspberry Pi's page, a NAS's), at most
+50. The server checks each site that isn't hidden when the list is read and the last check is over 2 minutes old (all at
+once, 5 s each; nothing runs while nobody looks): whether it answers (any HTTP answer under 500), its `<title>` (one
+redirect on the same machine followed: a sign-in page's title), and its icon (a PNG, ICO, GIF, JPEG or WebP it links,
+or `/favicon.ico`; 32 KB at most, never SVG; kept 6 hours). The check sends no cookies or sign-ins. Reading and changing
+need a trusted sign-in (`403 { reason: "trusted" }`: the list is a map of the tailnet's services); changing needs one for
+good (`403 { reason: "temporary" }`). `data/sites.json` holds the added ones and found ones' names and hiding (in
+exports and backups); a removed device's go with it.
+
+Site: `{ id, kind: "found" | "added", url, host (what to show: "shop-pc:8000"), name (the user's, else the page's title,
+else host), renamed?, title?, hidden? (found only), alsoFound? (added, and a PC lists it too), device?, deviceName?,
+deviceOnline? (found: its PC's Beam), up? (true/false once checked), status?, problem? (why it didn't answer, in words),
+ms?, checkedAt?, icon? (a data: URL) }`. A found one's id is `<device id>.<port>`, an added one's 8 hex characters.
+
+| Method & path | Result |
+|---|---|
+| `GET /api/sites` | `{ "sites": [Site...], "checking", "checkedAt" }`, by name (hidden ones last). Starts a check when the last one is over 2 minutes old |
+| `POST /api/sites/check` | `202 { checking }`: every site again now (at most every 10 s) |
+| `POST /api/sites` | `{ "url", "name"? }` → `201 { site }` once it's been checked. `url` is http(s) (`my-pi:8080` means `http://my-pi:8080/`), no user name or password; `409` when it's in the list already or there are 50; a hidden found one with that address is shown again (`200`) |
+| `PATCH /api/sites/{id}` | `{ "name"? (null or "": the page's title again), "url"? (added only), "hidden"? (found only) }` → `{ site }` |
+| `DELETE /api/sites/{id}` | an added one: `204`. A found one is hidden instead (`400`) |
+
+Events: `sites { at }` (to every stream) when the list changed or a check finished: read it again.
+
 ### Items
 | Method & path | Result |
 |---|---|
@@ -980,6 +1010,7 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `ring` | **(1.3)** `{ "device", "by", "from", "stop", "at" }`: ring (or stop ringing) the device `device`; everyone else ignores it |
 | `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk`, `tailscaleKey` (1.17) and `powerLoss` (1.18) |
 | `speed-test` | **(1.18)** `{ "id" }`, to the asked device's own streams only (at once): run a speed test (see Speed tests) and send the result with this `id` |
+| `sites` | **(1.31)** `{ "at" }`: the Sites list changed or a check finished (see Sites) |
 | `log-request` | **(1.20)** `{ "id" }`, to the asked PC's own streams only (at once): send the end of its log with this `id` (see A PC's log) |
 | `files-request`, `files-copy` | **(1.26)** `{ "id", "by", "byName", "share", "path" }` (+ `"names"` for a copy), to the asked PC's own streams only (at once): answer with this `id` if `by` is one of the folder's devices (see Shared folders) |
 | `files-icons`, `files-thumbs`, `files-preview`, `files-search` | **(1.28)** the same, with `"exts"`, `"names"` + `"px"`, `"name"` or `"q"`: to a PC with Beam for Windows 1.20 or later only |

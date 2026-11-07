@@ -82,6 +82,10 @@ class Repository(private val app: BeamApp) {
         if (cacheRead.count > 0L) cacheRead.await()
     }
 
+    /** (1.17, server 1.31) Bumped by each `sites` event: the Sites screen reads the list again. */
+    private val _sitesChanged = MutableStateFlow(0L)
+    val sitesChanged: StateFlow<Long> = _sitesChanged
+
     val state: StateFlow<State>
         get() {
             awaitCache()
@@ -323,6 +327,7 @@ class Repository(private val app: BeamApp) {
             // Server 1.3: "ring this device" (only the device it's for rings) and alerts.
             "ring" -> app.ringer.onEvent(o)
             "alert" -> app.alerts.onEvent(o)
+            "sites" -> _sitesChanged.value++ // (1.17, server 1.31)
         }
         return null
     }

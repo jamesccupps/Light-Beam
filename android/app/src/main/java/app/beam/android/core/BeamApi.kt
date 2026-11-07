@@ -454,6 +454,25 @@ class BeamApi(
         return if (raw.startsWith("[")) Alert.parseList(JSONArray(raw)) else Alert.parseList(JSONObject(raw.ifEmpty { "{}" }).optJSONArray("alerts"))
     }
 
+    // (1.17, server 1.31) Sites: the web pages on the tailnet (docs/API.md "Sites").
+    fun sites(): SitesResult = SitesResult.parse(json(request(url("/api/sites")).get().build()))
+
+    fun addSite(address: String): Site =
+        Site.parse(json(request(url("/api/sites")).post(JSONObject().put("url", address).toString().toRequestBody(JSON)).build()).optJSONObject("site") ?: JSONObject())
+
+    /** [change]: `name` (JSON null: the page's own title again), `hidden` (a found one), `url` (an added one). */
+    fun editSite(id: String, change: JSONObject): Site =
+        Site.parse(json(request(url("/api/sites/$id")).patch(change.toString().toRequestBody(JSON)).build()).optJSONObject("site") ?: JSONObject())
+
+    fun deleteSite(id: String) {
+        execute(request(url("/api/sites/$id")).delete().build()).close()
+    }
+
+    /** Every site checked again now; the `sites` event says when it's done. */
+    fun checkSites() {
+        execute(request(url("/api/sites/check")).post(ByteArray(0).toRequestBody(null)).build()).close()
+    }
+
     /** `GET /api/settings`. */
     fun settings(): JSONObject = json(request(url("/api/settings")).get().build())
 

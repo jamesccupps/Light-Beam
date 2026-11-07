@@ -31,6 +31,7 @@ const winevents = require('./lib/winevents');
 const winsetup = require('./lib/winsetup');
 const appsLib = require('./lib/apps');
 const sharesLib = require('./lib/shares');
+const sitesLib = require('./lib/sites'); // (1.31)
 const ws = require('./lib/websocket');
 const { version: VERSION } = require('./package.json');
 
@@ -85,6 +86,7 @@ const FILE = {
   alerts: path.join(DATA_DIR, 'alerts.json'),
   history: path.join(DATA_DIR, 'history.json'), // (1.18) each device's history
   apps: path.join(DATA_DIR, 'apps.json'), // (1.21) the user's apps, and where each is installed
+  sites: path.join(DATA_DIR, 'sites.json'), // (1.31) the sites the user added, and found ones' names and hiding
   alive: path.join(DATA_DIR, 'alive.json'), // (1.27.2) when Beam last ran, and whether it stopped on purpose
   importing: path.join(DATA_DIR, 'importing'), // (1.27.2) an import writing the data folder: Beam doesn't start meanwhile
 };
@@ -411,6 +413,7 @@ let alerts = []; // newest first, at most MAX_ALERTS (data/alerts.json)
 // offlineFrom? } (data/history.json)
 let history = {};
 let apps = []; // (1.21) the user's apps (data/apps.json; see "apps on every PC")
+let sites = { added: [], found: {} }; // (1.31) data/sites.json (see "sites")
 const uploads = new Map(); // id -> upload session (see createUpload)
 let dataHealth = { itemsSource: 'new' };
 
@@ -426,7 +429,8 @@ const persistPassword = jsonWriter(FILE.password, () => password, { log });
 const persistAlerts = jsonWriter(FILE.alerts, () => alerts, { log });
 const persistHistory = jsonWriter(FILE.history, () => history, { log, delay: FAST_TIMEOUTS ? 100 : 2000 });
 const persistApps = jsonWriter(FILE.apps, () => apps, { log });
-const WRITERS = [persist, persistDevices, persistAliases, persistTokens, persistRead, persistSettings, persistPassword, persistAlerts, persistHistory, persistApps];
+const persistSites = jsonWriter(FILE.sites, () => sites, { log });
+const WRITERS = [persist, persistDevices, persistAliases, persistTokens, persistRead, persistSettings, persistPassword, persistAlerts, persistHistory, persistApps, persistSites];
 
 function flushAll(timeoutMs = 5000) {
   return Promise.race([Promise.all(WRITERS.map(w => w.flush())), sleep(timeoutMs)]);
@@ -663,6 +667,7 @@ function openData() {
   alerts = loadState(FILE.alerts, { fallback: [], validate: validateAlerts, log }).value;
   history = loadState(FILE.history, { fallback: {}, validate: validateHistory, log }).value;
   apps = loadState(FILE.apps, { fallback: [], validate: validateApps, log }).value; // (1.21)
+  sites = loadState(FILE.sites, { fallback: { added: [], found: {} }, validate: validateSites, log }).value; // (1.31)
   grandfatherTrust(); // (1.25)
   indexTokens();
   if (itemsNeedSave || loaded.source === 'tmp' || loaded.source === 'bak') persist();
@@ -1769,6 +1774,7 @@ function forgetDeviceNow(id, reason) {
   if (readMarks[id]) { delete readMarks[id]; persistRead(); }
   if (history[id]) { delete history[id]; persistHistory(); } // (1.18)
   if (apps.some(a => a.on[id])) { for (const a of apps) delete a.on[id]; persistApps(); } // (1.21)
+  forgetSitesOf(id); // (1.31)
   if (settings.alerts?.offline?.includes(id)) {
     settings.alerts.offline = settings.alerts.offline.filter(d => d !== id);
     persistSettings();
@@ -2004,6 +2010,254 @@ async function logStatus() {
   for (const [key, at] of badKeyLogged) if (now() - at > 3600e3) badKeyLogged.delete(key);
 }
 
+// ---------------------------------------------------------------- sites (1.31)
+// The web pages the user's machines serve over Tailscale (the user, 2026-11-06: every Tailscale site they have,
+// listed in Beam). Found: each Beam for Windows (1.24) reports the
+// pages its PC serves to the tailnet (status `sites`: a port and the page's title), listed at that PC's Tailscale name;
+// only a device with a trusted sign-in counts. Added: an address the user typed (a Raspberry Pi's page, a NAS's).
+// data/sites.json keeps the added ones and how found ones are named or hidden. The server checks each site when someone
+// looks at the list, at most every SITES_FRESH_MS (does it answer, its title, its icon: lib/sites.js); nothing runs
+// while nobody looks. Trusted sign-ins only: the list is a map of the tailnet's services.
+const SITES_MAX = 50; // added by hand
+const SITES_REPORTED_MAX = 24; // a PC's own
+const SITES_FRESH_MS = FAST_TIMEOUTS ? 1500 : 2 * 60e3;
+const SITES_ASK_MS = FAST_TIMEOUTS ? 200 : 10e3; // Refresh, at most this often
+const SITE_TIMEOUT_MS = FAST_TIMEOUTS ? 2000 : 5000;
+const SITE_ICON_MS = 6 * 3600e3; // an icon is fetched again after this
+const SITE_ID = /^[a-f0-9]{8}$/;
+const FOUND_KEY = /^([A-Za-z0-9_-]{8,64}):(\d{1,5})$/;
+const FOUND_ID = /^([A-Za-z0-9_-]{8,64})\.(\d{1,5})$/;
+const siteChecks = new Map(); // url -> { up, status?, title?, problem?, ms, at, iconUrl?, icon?, iconAt? }
+let sitesChecking = null; // the running check (a promise)
+let sitesCheckedAt = 0;
+let sitesAskedAt = 0;
+const broadcastSites = () => broadcast('sites', { at: now() });
+
+function validateSites(v) {
+  const out = { added: [], found: {} };
+  if (!isPlainObject(v)) return out;
+  for (const s of Array.isArray(v.added) ? v.added : []) {
+    const url = sitesLib.parseSiteUrl(s?.url);
+    if (!url || !SITE_ID.test(s.id) || out.added.some(a => a.id === s.id || a.url === url)) continue;
+    out.added.push({ id: s.id, url, name: sitesLib.siteName(s.name), by: typeof s.by === 'string' && DEVICE_ID.test(s.by) ? s.by : null, at: Number.isFinite(s.at) ? s.at : 0 });
+    if (out.added.length >= SITES_MAX) break;
+  }
+  for (const [k, o] of Object.entries(isPlainObject(v.found) ? v.found : {})) {
+    if (!FOUND_KEY.test(k) || !isPlainObject(o)) continue;
+    const e = {};
+    const name = sitesLib.siteName(o.name);
+    if (name) e.name = name;
+    if (o.hidden === true) e.hidden = true;
+    if (Object.keys(e).length) out.found[k] = e;
+  }
+  return out;
+}
+
+// The PCs' own sites: [{ key, device, port, title, url }], at each PC's Tailscale name (MagicDNS: works from every
+// device on the tailnet, a phone's browser too).
+function foundSites() {
+  const trusted = trustedDevices();
+  const out = [];
+  for (const d of Object.values(devices)) {
+    const list = d.status?.sites;
+    if (!Array.isArray(list) || !list.length || d.temporary || !trusted.has(`${d.id}|${d.platform}`)) continue;
+    const ts = tailscaleOf(d);
+    const host = String(ts?.dns || '').replace(/\.$/, '') || (ts?.ip && net.isIPv4(ts.ip) ? ts.ip : '');
+    if (!host) continue;
+    for (const s of list) {
+      const plain = (s.https && s.port === 443) || (!s.https && s.port === 80);
+      out.push({ key: `${d.id}:${s.port}`, device: d, port: s.port, title: s.title, url: `${s.https ? 'https' : 'http'}://${host}${plain ? '' : `:${s.port}`}/` });
+    }
+  }
+  return out;
+}
+
+// What the last check said, for the list.
+const checkFields = c => (c ? {
+  up: c.up, checkedAt: c.at, ms: c.ms,
+  ...(c.status && { status: c.status }), ...(c.problem && { problem: c.problem }), ...(c.icon && { icon: c.icon }),
+} : {});
+
+// GET /api/sites's list: found ones (hidden ones too, marked) and added ones, by name.
+function siteList() {
+  const list = [];
+  for (const f of foundSites()) {
+    const o = sites.found[f.key] || {};
+    const host = sitesLib.shortHost(f.url);
+    list.push({
+      id: `${f.device.id}.${f.port}`, kind: 'found', url: f.url, host, name: o.name || f.title || host, title: f.title,
+      ...(o.name && { renamed: true }), ...(o.hidden && { hidden: true }),
+      device: f.device.id, deviceName: f.device.name, deviceOnline: isOnline(f.device.id),
+      ...checkFields(siteChecks.get(f.url)),
+    });
+  }
+  const foundUrls = new Set(list.map(s => s.url));
+  for (const a of sites.added) {
+    const c = siteChecks.get(a.url);
+    const host = sitesLib.shortHost(a.url);
+    list.push({
+      id: a.id, kind: 'added', url: a.url, host, name: a.name || c?.title || host,
+      ...(a.name && { renamed: true }), ...(c?.title && { title: c.title }), ...(foundUrls.has(a.url) && { alsoFound: true }),
+      ...checkFields(c),
+    });
+  }
+  return list.sort((x, y) => (Boolean(x.hidden) - Boolean(y.hidden)) || x.name.localeCompare(y.name, undefined, { sensitivity: 'base' }) || x.url.localeCompare(y.url));
+}
+
+async function checkOneSite(url) {
+  const r = await sitesLib.checkSite(outbound.request, url, { timeout: SITE_TIMEOUT_MS });
+  const before = siteChecks.get(url);
+  const { iconUrl, ...entry } = r;
+  entry.at = now();
+  if (iconUrl && before?.iconUrl === iconUrl && now() - (before.iconAt || 0) < SITE_ICON_MS) Object.assign(entry, { iconUrl, icon: before.icon, iconAt: before.iconAt });
+  else if (iconUrl) Object.assign(entry, { iconUrl, icon: await sitesLib.fetchIcon(outbound.request, iconUrl, { timeout: SITE_TIMEOUT_MS }), iconAt: now() });
+  else if (!r.up && before?.icon) Object.assign(entry, { iconUrl: before.iconUrl, icon: before.icon, iconAt: before.iconAt }); // down: it keeps its icon
+  if (!entry.icon) delete entry.icon;
+  siteChecks.set(url, entry);
+  return entry;
+}
+
+// Checks every site that isn't hidden (all at once), unless the last check is recent. Resolves when done; the `sites`
+// event tells the lists.
+function checkSitesSoon(force = false) {
+  if (sitesChecking) return sitesChecking;
+  if (!force && now() - sitesCheckedAt < SITES_FRESH_MS) return null;
+  const list = siteList();
+  const urls = [...new Set(list.filter(s => !s.hidden).map(s => s.url))];
+  const keep = new Set(list.map(s => s.url));
+  for (const u of siteChecks.keys()) if (!keep.has(u)) siteChecks.delete(u);
+  if (!urls.length) { sitesCheckedAt = now(); return null; }
+  sitesChecking = Promise.all(urls.map(u => checkOneSite(u).catch(() => {})))
+    .finally(() => { sitesChecking = null; sitesCheckedAt = now(); broadcastSites(); });
+  return sitesChecking;
+}
+
+function sitesCaller(req, url, change = false) {
+  if (!isTrusted(authOf(req))) throw notTrusted(change ? 'change your sites' : 'see your sites');
+  if (change) requireLasting(req, url, 'change your sites');
+  return resolveAlias(deviceIdOf(req, url) || '');
+}
+
+// GET /api/sites: { sites, checking, checkedAt }. A check starts when the last one is older than SITES_FRESH_MS.
+async function getSites(req, res, _m, url) {
+  sitesCaller(req, url);
+  await refreshTailnet(); // the PCs' Tailscale names (cached 15 s)
+  checkSitesSoon();
+  send(res, 200, { sites: siteList(), checking: Boolean(sitesChecking), checkedAt: sitesCheckedAt || null }, { 'Cache-Control': 'no-store' });
+}
+
+// POST /api/sites/check: every site again now (Refresh). 202; the `sites` event says when it's done.
+async function checkSitesNow(req, res, _m, url) {
+  sitesCaller(req, url);
+  await refreshTailnet();
+  if (now() - sitesAskedAt >= SITES_ASK_MS) { sitesAskedAt = now(); checkSitesSoon(true); }
+  send(res, 202, { checking: Boolean(sitesChecking) });
+}
+
+const siteNameOf = (body, what = 'name') => {
+  if (body[what] === null) return '';
+  if (typeof body[what] !== 'string') throw httpError(400, `${what} must be text (or null for the page's own title)`);
+  return sitesLib.siteName(body[what]);
+};
+
+// POST /api/sites { url, name? }: 201 { site }, checked first (a few seconds at most). A hidden found site with that
+// address comes back instead (200).
+async function addSite(req, res, _m, url) {
+  const me = sitesCaller(req, url, true);
+  await refreshTailnet();
+  const body = await readJson(req);
+  const href = sitesLib.parseSiteUrl(body.url);
+  if (!href) throw httpError(400, 'url must be a web address, like http://my-pi:8080');
+  const name = body.name === undefined ? '' : siteNameOf(body);
+  const found = foundSites().find(f => f.url === href);
+  if (found) {
+    if (!sites.found[found.key]?.hidden) throw httpError(409, `That site is in the list already (found on ${found.device.name})`);
+    delete sites.found[found.key].hidden;
+    if (name) sites.found[found.key].name = name;
+    if (!Object.keys(sites.found[found.key]).length) delete sites.found[found.key];
+    persistSites();
+    broadcastSites();
+    return send(res, 200, { site: siteList().find(s => s.url === href && s.kind === 'found') });
+  }
+  if (sites.added.some(a => a.url === href)) throw httpError(409, 'That site is in the list already');
+  if (sites.added.length >= SITES_MAX) throw httpError(409, `Beam keeps ${SITES_MAX} sites you add at most`);
+  let id;
+  do id = crypto.randomBytes(4).toString('hex'); while (sites.added.some(a => a.id === id));
+  sites.added.push({ id, url: href, name, by: me || null, at: now() });
+  persistSites();
+  log.info(`${whoName(me, 'A device')} added the site ${name || sitesLib.shortHost(href)}`);
+  await checkOneSite(href).catch(() => {});
+  broadcastSites();
+  send(res, 201, { site: siteList().find(s => s.id === id) });
+}
+
+// PATCH /api/sites/{id} { name?, url?, hidden? }: an added site's name and address; a found one's name and whether it's
+// hidden. name null (or empty): the page's own title again.
+async function editSite(req, res, [id], url) {
+  const me = sitesCaller(req, url, true);
+  await refreshTailnet();
+  const body = await readJson(req);
+  const unknown = Object.keys(body).filter(k => !['name', 'url', 'hidden'].includes(k));
+  if (unknown.length) throw httpError(400, `Can't change ${unknown.join(', ')} here`);
+  const site = siteList().find(s => s.id === id);
+  if (!site) throw httpError(404, 'No such site');
+  let recheck = null;
+  if (site.kind === 'added') {
+    if (body.hidden !== undefined) throw httpError(400, 'A site you added is removed, not hidden');
+    const a = sites.added.find(x => x.id === id);
+    if (body.url !== undefined) {
+      const href = sitesLib.parseSiteUrl(body.url);
+      if (!href) throw httpError(400, 'url must be a web address, like http://my-pi:8080');
+      if (href !== a.url && (sites.added.some(x => x.url === href) || foundSites().some(f => f.url === href))) throw httpError(409, 'That site is in the list already');
+      if (href !== a.url) { a.url = href; recheck = href; }
+    }
+    if (body.name !== undefined) a.name = siteNameOf(body);
+  } else {
+    if (body.url !== undefined) throw httpError(400, 'A site found on a PC keeps its address');
+    const key = `${site.device}:${id.split('.')[1]}`;
+    const o = { ...(sites.found[key] || {}) };
+    if (body.name !== undefined) {
+      const name = siteNameOf(body);
+      if (name) o.name = name; else delete o.name;
+    }
+    if (body.hidden !== undefined) {
+      if (typeof body.hidden !== 'boolean') throw httpError(400, 'hidden must be true or false');
+      if (body.hidden) o.hidden = true; else delete o.hidden;
+      if (!body.hidden) recheck = site.url;
+    }
+    if (Object.keys(o).length) sites.found[key] = o; else delete sites.found[key];
+  }
+  persistSites();
+  if (body.hidden !== undefined) log.info(`${whoName(me, 'A device')} ${body.hidden ? 'hid' : 'showed'} the site ${site.name}`);
+  if (recheck) await checkOneSite(recheck).catch(() => {});
+  broadcastSites();
+  send(res, 200, { site: siteList().find(s => s.id === id) });
+}
+
+// DELETE /api/sites/{id}: a site you added goes (a found one is hidden instead: PATCH { hidden: true }).
+async function deleteSite(req, res, [id], url) {
+  const me = sitesCaller(req, url, true);
+  await refreshTailnet();
+  const a = sites.added.find(x => x.id === id);
+  if (!a) {
+    if (FOUND_ID.test(id) && siteList().some(s => s.id === id)) throw httpError(400, 'A site found on a PC is hidden, not removed (PATCH {"hidden": true})');
+    throw httpError(404, 'No such site');
+  }
+  sites.added = sites.added.filter(x => x !== a);
+  siteChecks.delete(a.url);
+  persistSites();
+  log.info(`${whoName(me, 'A device')} removed the site ${a.name || sitesLib.shortHost(a.url)}`);
+  broadcastSites();
+  send(res, 204);
+}
+
+// A removed device's names and hiding go with it.
+function forgetSitesOf(id) {
+  let changed = false;
+  for (const k of Object.keys(sites.found)) if (k.startsWith(`${id}:`)) { delete sites.found[k]; changed = true; }
+  if (changed) persistSites();
+}
+
 // ---------------------------------------------------------------- device status, ring, Wake-on-LAN, Remote Desktop
 // Apps report their battery, free storage, OS, network adapters (for Wake-on-LAN) and whether Remote Desktop is on.
 // MAC addresses stay on the server: they are used to wake a PC and sent to no client but (1.24) the Beam for Linux
@@ -2012,7 +2266,7 @@ async function logStatus() {
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
 // (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
 const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted',
-  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen']);
+  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites']);
 // (1.22) What a Raspberry Pi's firmware says about its power and speed (vcgencmd get_throttled), now and since it started.
 const THROTTLE_FLAGS = new Set(['undervoltage', 'capped', 'throttled', 'softLimit']);
 const HOT_C = 80; // a Pi 4 or 5 slows itself down from 80 °C
@@ -2082,6 +2336,19 @@ function parseStatus(body) {
     } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked' || key === 'startsWithWindows' || key === 'startWanted' || key === 'uacOnScreen') {
       if (typeof value !== 'boolean') throw bad(`${key} must be true or false`);
       out[key] = value;
+    } else if (key === 'sites') {
+      // (1.31, Windows 1.24) the web pages this PC serves to the tailnet: [{ port, title, https? }]
+      const shape = `sites must be a list of up to ${SITES_REPORTED_MAX} {"port": 1-65535, "title": "1 to 80 characters", "https": true|false}`;
+      if (!Array.isArray(value) || value.length > SITES_REPORTED_MAX) throw bad(shape);
+      const list = [];
+      for (const s of value) {
+        if (!isPlainObject(s) || Object.keys(s).some(k => !['port', 'title', 'https'].includes(k)) || !Number.isInteger(s.port) || s.port < 1 || s.port > 65535
+          || (s.https !== undefined && typeof s.https !== 'boolean')) throw bad(shape);
+        const title = sitesLib.oneLine(s.title, 80);
+        if (!title) throw bad(shape);
+        if (!list.some(x => x.port === s.port)) list.push({ port: s.port, title, ...(s.https && { https: true }) });
+      }
+      out.sites = list;
     } else if (key === 'update') {
       // (1.6.2) an app update that didn't install there, in the system's words
       const version = statusText(value?.version), problem = statusText(value?.problem);
@@ -2118,6 +2385,7 @@ function describeStatus(status) {
   if (status.battery) parts.push(`battery ${status.battery.level}%${status.battery.charging ? ' (charging)' : ''}`);
   if (status.storage) parts.push(`${formatSize(status.storage.free)} free of ${formatSize(status.storage.total)}`);
   if (status.remoteDesktop !== undefined) parts.push(`Remote Desktop ${status.remoteDesktop ? 'on' : 'off'}`);
+  if (status.sites?.length) parts.push(`${status.sites.length} site${status.sites.length === 1 ? '' : 's'} on the tailnet`); // (1.31)
   if (status.remoteControl !== undefined) parts.push(`remote control ${status.remoteControl ? 'allowed' : 'off'}`);
   if (status.locked) parts.push('locked');
   if (status.macs?.length) parts.push(`${status.macs.length} network adapter${status.macs.length > 1 ? 's' : ''} for Wake-on-LAN`);
@@ -2203,6 +2471,7 @@ async function putStatus(req, res, _m, url) {
     log.warn(`${device.name} couldn't install Beam ${update.version}: ${update.problem}`);
     pilotProblem(device, update); // (1.19) on the PC trying it first: it goes no further
   }
+  const sitesChanged = changes.sites !== undefined && JSON.stringify(changes.sites) !== JSON.stringify(device.status?.sites ?? null); // (1.31)
   const status = { ...(device.status || {}) };
   for (const [key, value] of Object.entries(changes)) {
     if (value === null) delete status[key];
@@ -2216,6 +2485,7 @@ async function putStatus(req, res, _m, url) {
   checkStatusAlerts(device);
   persistDevices();
   broadcastDevicesThrottled();
+  if (sitesChanged) broadcastSites();
   send(res, 204);
 }
 
@@ -6966,6 +7236,7 @@ const FEATURES = [
   'shared-folders-page', // (1.28.1: index.html#files=<PC id>, a PC's shared folders alone: the Android app's Shared folders)
   'text-size', // (1.29.0: appearance.text, the web app's text size: small, normal, large, larger)
   'uac-status', // (1.30.1: status `uacOnScreen`, a PC whose UAC prompts any program there could answer; the review's M28)
+  'sites', // (1.31.0: GET/POST /api/sites, PATCH/DELETE /api/sites/{id}, POST /api/sites/check, the `sites` event, status `sites`)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)
@@ -7945,7 +8216,7 @@ function helloProof(url) {
 
 // ---------------------------------------------------------------- export / import
 
-const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|apps\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|app-files\/[a-f0-9]{8}\/[A-Za-z0-9_()+-][A-Za-z0-9._ ()+-]{0,99}|apps\/(Beam\.exe|beam\.apk|beam-linux\.js)(\.json)?)$/;
+const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|apps\.json|sites\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|app-files\/[a-f0-9]{8}\/[A-Za-z0-9_()+-][A-Za-z0-9._ ()+-]{0,99}|apps\/(Beam\.exe|beam\.apk|beam-linux\.js)(\.json)?)$/;
 
 // Everything a Beam is, as a .tar.gz: the key, server id, settings, sign-ins, devices, items and their files.
 // Leaves out unfinished uploads, logs and temporary files. items.json comes last and lists only the items whose
@@ -7968,6 +8239,7 @@ async function writeExport(out, state, extra = {}) {
     await writer.addBuffer('read.json', JSON.stringify(state.read));
     await writer.addBuffer('alerts.json', JSON.stringify(state.alerts || []));
     await writer.addBuffer('history.json', JSON.stringify(state.history || {})); // (1.18)
+    await writer.addBuffer('sites.json', JSON.stringify(state.sites || { added: [], found: {} })); // (1.31)
     const kept = [];
     for (const item of state.items) {
       let ok = true;
@@ -8004,7 +8276,7 @@ async function addStored(writer, name, file) {
 }
 
 function snapshotState() {
-  return structuredClone({ key: KEY, serverId: SERVER_ID, settings, password, devices, aliases, tokens: tokenStore, read: readMarks, alerts, history, apps, items });
+  return structuredClone({ key: KEY, serverId: SERVER_ID, settings, password, devices, aliases, tokens: tokenStore, read: readMarks, alerts, history, apps, sites, items });
 }
 
 async function exportApi(req, res, _m, url) {
@@ -8377,6 +8649,11 @@ const routes = [
   ['POST', '/api/apps/([a-f0-9]{8})/install', installApp],
   ['POST', '/api/apps/([a-f0-9]{8})/uninstall', uninstallApp],
   ['GET', '/api/setup', getSetup],
+  ['GET', '/api/sites', getSites], // (1.31)
+  ['POST', '/api/sites', addSite],
+  ['POST', '/api/sites/check', checkSitesNow],
+  ['PATCH', '/api/sites/([A-Za-z0-9_-]{8,64}(?:\\.\\d{1,5})?)', editSite],
+  ['DELETE', '/api/sites/([A-Za-z0-9_-]{8,64}(?:\\.\\d{1,5})?)', deleteSite],
   ['GET', `/api/devices/${DEV}/backups`, getDeviceBackups],
   ['GET', '/api/backups', getBackups],
   ['POST', '/api/backups', postBackup],

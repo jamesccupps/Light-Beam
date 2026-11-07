@@ -425,6 +425,7 @@ function loadServerInfo() {
         family.hidden = !url;
         if (url) family.href = url;
       }
+      updateSitesButton(); // (1.31) a server with Sites
       return info;
     } catch {
       return server.info;

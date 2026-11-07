@@ -33,6 +33,7 @@ function bindUI() {
   $('#pasteBtn').addEventListener('click', pasteAndSend);
   // (Windows app 1.10) The ♥: Beam Family in a window of the app's own rather than the browser.
   $('#familyLink').addEventListener('click', e => { if (hostHas('family')) { e.preventDefault(); hostDo('openFamily'); } });
+  $('#sitesBtn').addEventListener('click', openSites); // (1.31) the web pages on the tailnet
 
   const thread = $('#thread');
   thread.addEventListener('scroll', onThreadScroll, { passive: true });
