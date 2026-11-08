@@ -146,6 +146,14 @@ namespace Beam
 
         // A request of Beam's own pages that widens access to Beam (or hands it over), refused while another device
         // controls this PC: what it is, for beam.log, or null. The server routes these exact paths only.
+        // (1.25, Beam 1.32) A command's requests (run, watch again, stop): they take this install's device key, as remote control's do.
+        public static bool IsCommands(string path)
+        {
+            path = path ?? "";
+            return (path.StartsWith("/api/devices/", StringComparison.Ordinal) && path.EndsWith("/commands", StringComparison.Ordinal) && path != "/api/devices/me/commands")
+                || path.StartsWith("/api/commands/", StringComparison.Ordinal);
+        }
+
         public static string WidensAccess(string method, string path)
         {
             method = (method ?? "GET").ToUpperInvariant();
@@ -159,6 +167,7 @@ namespace Beam
             if ((method == "POST" || method == "DELETE") && path == "/api/move") return "moving the server";
             if (path.StartsWith("/api/admin/", StringComparison.Ordinal)) return "the server's admin actions";
             if (method == "POST" && path == "/api/rc/sessions") return "controlling another PC from this one";
+            if (method == "POST" && path.StartsWith("/api/devices/", StringComparison.Ordinal) && path.EndsWith("/commands", StringComparison.Ordinal)) return "running a command on another PC from this one"; // (1.25)
             // (1.17.5, server 1.25) letting another device control PCs and install apps (Settings → Devices)
             if (method == "PUT" && path.StartsWith("/api/devices/", StringComparison.Ordinal) && path.EndsWith("/trust", StringComparison.Ordinal)) return "approving a device";
             return null;

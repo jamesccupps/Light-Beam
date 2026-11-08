@@ -582,6 +582,8 @@ their last value, and `null` clears one. Unknown fields or bad values are `400`.
   on that PC: Device info shows it as a warning. The app sends it only to a server that lists the feature.
 - **(1.31, Windows app 1.24, feature `sites`)** `sites`: the web pages this PC serves to the tailnet, `[{ "port", "title"
   (1 to 80 characters), "https"? }]`, 24 at most (see Sites). Not in the device list.
+- **(1.32, Windows app 1.25, feature `commands`)** `commands`: "Allow commands too" is on there (see Commands on a PC);
+  only from the PC's own app once its remote control is tied to it, like `remoteControl`.
 - Others see `status` (without the MACs), `tailscale` and `can` in the device list; the `devices` event goes out at
   most every 5 s for status changes. Low battery or storage, and (1.22) a hot or under-powered Pi can raise alerts
   (see Alerts).
@@ -838,6 +840,33 @@ connects), `asked` (waiting for someone at the PC), `installing`, `installed`, `
 Events: `apps { at }` (to every stream: read the list again), `app-install { id, update? }` and `app-uninstall { id }`
 (only to that PC's streams). GitHub releases are looked for 3 minutes after a start and every 6 hours (`BEAM_GITHUB_API`
 points the server at a stand-in for tests); downloads only from github.com and its download hosts, at every redirect.
+
+### Commands on a PC (1.32)
+Feature `commands`. A PowerShell or Command Prompt command on one of the user's PCs (Beam for Windows 1.25+), its output
+back while it runs. Who may: a device that may control that PC (remote control's rules: a sign-in for good, trusted,
+not the CLI or a Linux computer, of one of this Beam's Tailscale owners: `403 { reason }` as `POST /api/rc/sessions`,
+the Windows app's window with its device key), and only once "Allow commands too" is on at that PC (status `commands`,
+below; `can.commands`). The PC checks the asker again (its own remote control list, the Tailscale machine each device was
+pinned to) and may refuse. It runs as the PC's signed-in user, in a hidden window, never as administrator. Nothing is
+kept: the output goes to the sign-in that asked; the server's log says who ran one where and how it ended, never the
+command or its output.
+
+| Method & path | Result |
+|---|---|
+| `POST /api/devices/{id}/commands` | `{ "shell": "powershell" or "cmd", "command" }` (8000 characters at most; Command Prompt takes one line). Before it starts: `400`, `403`, `409 { reason: "off" | "not-allowed" | "old-app" | "offline" | "self" | "no-tailscale" }`, `429` (30 a minute; `reason: "busy"`: 4 running on that PC). Else `200` with `text/event-stream`: the command's own events (below), until it ends |
+| `GET /api/commands/{run}?from=<seq>` | the same sign-in watches it again from the event after `seq` (its connection dropped): the last 1 MB of events is held, a minute after the end too; `event: gap { from, to }` first when more came meanwhile. Nobody watching for a minute: the command is stopped. `404` for anyone else |
+| `POST /api/commands/{run}/stop` | `202`: the PC stops it (the whole process tree); the stream then ends with `stopped` |
+
+Its events, each with `seq` (a ping comment every 20 s): `start { id, pc: { id, name }, shell, at }`, `running {}` (the
+PC took it), `out { out: [{ s: "o" (standard output) or "e" (errors), t }] }`, then `end { code, ms, stopped?, cut? }` or
+`end { error, reason }` (refused or lost: `not-listed`, `declined`, `off`, `busy`, `no-answer`, `lost`, `revoked`,
+`server`). Closing the page's panel stops what still runs.
+
+To the PC (its own app's streams only): `command-run { id, from, by, at, shell, command, viewer: { ip, ip4, ip6, node,
+user, platform } }`, `command-stop { id }`. From the PC: `POST /api/devices/me/commands { id, seq (1, 2, … : one sent
+again is ignored), running?, out?, end?: { code, ms, stopped?, cut? }, error?, reason? }` → `{ stop }` (stop it now), or
+`404 { reason: "gone" }` (stopped, or Beam restarted: stop it). It posts at least every 30 s while one runs; 90 s of
+nothing ends it as `lost`.
 
 ### Sites (1.31)
 Feature `sites`. The web pages the user's machines serve over Tailscale, in one list on every device (the web app's

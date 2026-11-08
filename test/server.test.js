@@ -2174,8 +2174,8 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     assert.equal(d.status.macs, undefined);
     // (1.17: + Tailscale's own view of the machine: the fake says nothing about Online or a key expiry)
     assert.deepEqual(d.tailscale, { name: 'gaming-pc', dns: 'gaming-pc.tail1234.ts.net', ip: '100.64.50.1', online: false, keyExpiry: null });
-    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false, files: false, files2: false });
-    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false, files: false, files2: false });
+    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false, files: false, files2: false, commands: false });
+    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false, files: false, files2: false, commands: false });
     // a partial report keeps the rest; null clears a field
     r = await put({ battery: null });
     assert.equal(r.status, 204);
@@ -5894,6 +5894,255 @@ test('2026-11-05 review, round E: a GitHub app’s chosen file with a version in
   assert.equal(appsLib.pickAsset(next, 'tool', 'Other-1.0.zip').asset, null, 'another file: none, as before');
   const two = { assets: [asset('Tool-2.0-a.zip'), asset('Tool-2.1-a.zip')] };
   assert.equal(appsLib.pickAsset(two, 'tool', 'Tool-1.0-a.zip').asset, null, 'two that look the same: none (never a guess)');
+});
+
+// (1.32) A command's own stream: the answer to POST /api/devices/{id}/commands (or GET /api/commands/{run}); events[]
+// fills as they arrive. Not 200: { status, json } at once.
+function openCommand(port, headers, route, body) {
+  return new Promise((resolve, reject) => {
+    const events = [];
+    let ended = false;
+    const r = http.request({ host: '127.0.0.1', port, method: body === undefined ? 'GET' : 'POST', path: route, headers: body === undefined ? headers : json(headers), agent: false }, res => {
+      if (res.statusCode !== 200) {
+        let text = '';
+        res.on('data', d => { text += d; });
+        res.on('end', () => { let j = null; try { j = JSON.parse(text); } catch {} resolve({ status: res.statusCode, json: j, events }); });
+        return;
+      }
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', d => {
+        buf += d;
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          const lines = block.split('\n');
+          const event = lines.find(l => l.startsWith('event: '))?.slice(7);
+          const data = lines.find(l => l.startsWith('data: '))?.slice(6);
+          if (event) events.push({ event, data: data ? JSON.parse(data) : null });
+          else if (block.startsWith(': ping')) events.push({ event: 'ping', data: null });
+        }
+      });
+      res.on('end', () => { ended = true; });
+      res.on('close', () => { ended = true; });
+      resolve({
+        status: 200, headers: res.headers, events, get ended() { return ended; }, close: () => r.destroy(),
+        wait: (name, pred = () => true, ms = 5000) => waitFor(() => events.find(e => e.event === name && pred(e.data)), ms),
+        last: () => events.filter(e => e.event !== 'ping').at(-1),
+      });
+    });
+    r.on('error', e => (e.code === 'ECONNRESET' ? null : reject(e)));
+    r.end(body === undefined ? undefined : JSON.stringify(body));
+  });
+}
+
+test('1.32 Commands on a PC: only once on at a PC that allows remote control (app 1.25+); the command reaches only that PC, its output only the sign-in that asked; posts sent again count once; nothing of it in the log', async () => {
+  const t = await rcSetup('commands');
+  try {
+    const { s, laptop, phone, status } = t;
+    const pc = { ...t.pc, 'X-Beam-App-Version': '1.25.0' };
+    const dev = async id => (await s.req('GET', '/api/devices', { headers: laptop })).json.devices.find(d => d.id === id);
+    const out = (h, body) => s.req('POST', '/api/devices/me/commands', { headers: json(h), body: JSON.stringify(body) });
+    assert.ok((await s.req('GET', '/api/info', { headers: laptop })).json.features.includes('commands'));
+    assert.equal((await status(pc, { commands: 'yes' })).status, 400);
+    assert.equal((await status(pc, { remoteControl: true, locked: false })).status, 204);
+    assert.equal((await dev('rcdesk00001')).can.commands, false, 'off until the PC says so');
+    let r = await openCommand(s.port, laptop, '/api/devices/rcdesk00001/commands', { shell: 'powershell', command: 'Get-Date' });
+    assert.deepEqual([r.status, r.json.reason], [409, 'off']);
+    assert.match(r.json.error, /Commands are off on Desktop/);
+    await status(pc, { commands: true });
+    assert.deepEqual([(await dev('rcdesk00001')).can.commands, (await dev('rcdesk00001')).status.commands], [true, true]);
+    assert.match(s.out, /Desktop runs commands from the devices that may control it now/);
+    // Its app isn't connected yet: offline.
+    r = await openCommand(s.port, laptop, '/api/devices/rcdesk00001/commands', { shell: 'powershell', command: 'Get-Date' });
+    assert.deepEqual([r.status, r.json.reason], [409, 'offline']);
+    const pcEv = await openEvents(s.port, pc, '/api/events?mode=background');
+    const phoneEv = await openEvents(s.port, phone);
+    await pcEv.wait('hello');
+    await phoneEv.wait('hello');
+    // What's asked is checked first.
+    for (const [body, why] of [
+      [{ shell: 'bash', command: 'ls' }, /Expected/], [{ shell: 'powershell' }, /Expected/], [{ shell: 'powershell', command: '  \n ' }, /empty/],
+      [{ shell: 'powershell', command: 'x'.repeat(8001) }, /at most 8000/], [{ shell: 'cmd', command: 'dir\ncd ..' }, /one line/],
+    ]) {
+      r = await openCommand(s.port, laptop, '/api/devices/rcdesk00001/commands', body);
+      assert.equal(r.status, 400, JSON.stringify(body));
+      assert.match(r.json.error, why);
+    }
+    r = await openCommand(s.port, pc, '/api/devices/rcdesk00001/commands', { shell: 'cmd', command: 'ver' });
+    assert.deepEqual([r.status, r.json.reason], [409, 'self']);
+    // A whole command: the PC hears it (and only the PC), its word comes back on the asker's own stream.
+    const secret = 'Set-Secret -Value "hunter2-not-real"';
+    const run = await openCommand(s.port, laptop, '/api/devices/rcdesk00001/commands', { shell: 'powershell', command: `Get-Date\r\n${secret}` });
+    assert.equal(run.status, 200);
+    assert.match(run.headers['content-type'], /^text\/event-stream/);
+    assert.equal(run.headers['cache-control'], 'no-store, no-transform');
+    const start = (await run.wait('start')).data;
+    assert.match(start.id, /^[a-f0-9]{16}$/);
+    assert.deepEqual({ ...start, at: 0 }, { seq: 1, id: start.id, pc: { id: 'rcdesk00001', name: 'Desktop' }, shell: 'powershell', at: 0 });
+    const asked = (await pcEv.wait('command-run', d => d.id === start.id, 1500)).data;
+    assert.deepEqual({ ...asked, at: 0 }, {
+      id: start.id, from: 'rclaptop001', by: 'Robin Laptop', at: 0, shell: 'powershell', command: `Get-Date\n${secret}`,
+      viewer: { ip: RC_NET.laptop.ip4, ip4: RC_NET.laptop.ip4, ip6: RC_NET.laptop.ip6, node: 'robin-laptop', user: RC_USER, platform: 'windows' },
+    });
+    assert.deepEqual((await out(pc, { id: start.id, seq: 1, running: true })).json, { stop: false });
+    await run.wait('running');
+    r = await out(pc, { id: start.id, seq: 2, out: [{ s: 'o', t: 'Saturday, 7 November\r\n' }, { s: 'e', t: 'Set-Secret: not recognized\r\n' }, { s: 'o', t: '' }] });
+    assert.equal(r.status, 200);
+    assert.equal((await out(pc, { id: start.id, seq: 2, out: [{ s: 'o', t: 'again' }] })).status, 200, 'a post sent again');
+    assert.equal((await out(pc, { id: start.id, seq: 3, out: [{ s: 'x', t: 'bad' }] })).status, 400);
+    assert.equal((await out(pc, { id: start.id, seq: 3, end: { code: 'zero' } })).status, 400);
+    assert.equal((await out(phone, { id: start.id, seq: 3, end: { code: 0 } })).status, 404, 'not the PC');
+    const elsewhere = { ...pc, 'X-Forwarded-For': RC_NET.other.ip4 };
+    assert.deepEqual([(await out(elsewhere, { id: start.id, seq: 3, end: { code: 0 } })).status], [403], 'the PC’s id from another machine');
+    assert.equal((await out(pc, { id: start.id, seq: 3, end: { code: 0, ms: 420 } })).status, 200);
+    await waitFor(() => run.ended, 2000);
+    assert.deepEqual(run.events.filter(e => e.event !== 'ping').map(e => [e.event, e.data.seq]), [['start', 1], ['running', 2], ['out', 3], ['end', 4]]);
+    assert.deepEqual(run.events.find(e => e.event === 'out').data.out, [{ s: 'o', t: 'Saturday, 7 November\r\n' }, { s: 'e', t: 'Set-Secret: not recognized\r\n' }]);
+    assert.deepEqual(run.last().data, { seq: 4, code: 0, ms: 420 });
+    assert.equal((await out(pc, { id: start.id, seq: 4, out: [{ s: 'o', t: 'late' }] })).json.reason, 'gone', 'it ended');
+    await sleep(300);
+    assert.ok(!phoneEv.events.some(e => /^command/.test(e.event)), 'nobody else heard of it');
+    assert.match(s.out, /Robin Laptop runs a PowerShell command on Desktop \(from robin-laptop, 100\.64\.91\.2, robin@example\.com\)/);
+    assert.match(s.out, /A command from Robin Laptop on Desktop ended \(exit code 0, [\d.]+ s, \d+ B of output\)/);
+    assert.ok(!/Get-Date|hunter2|Saturday|not recognized/.test(s.out), 'the log never has a command or its output');
+    assert.ok(!fs.readdirSync(s.data).some(f => /command/i.test(f)), 'nothing kept on disk');
+    const m = (await s.req('GET', '/api/metrics', { headers: laptop })).json.commands;
+    assert.deepEqual([m.running, m.started, m.ended], [0, 1, 1]);
+    // The PC refuses (it isn't on its list there, say): the stream says why.
+    const refused = await openCommand(s.port, phone, '/api/devices/rcdesk00001/commands', { shell: 'cmd', command: 'whoami' });
+    const id2 = (await refused.wait('start')).data.id;
+    await pcEv.wait('command-run', d => d.id === id2 && d.command === 'whoami' && d.viewer.platform === 'android');
+    assert.equal((await out(pc, { id: id2, seq: 1, error: 'Pixel isn’t one of the devices that may control this PC', reason: 'not-listed' })).status, 200);
+    await waitFor(() => refused.ended, 2000);
+    assert.deepEqual(refused.last().data, { seq: 2, error: 'Pixel isn’t one of the devices that may control this PC', reason: 'not-listed' });
+    // An old app can't run them; nor once remote control is off there.
+    await status({ ...pc, 'X-Beam-App-Version': '1.24.0' }, { commands: true });
+    assert.equal((await dev('rcdesk00001')).can.commands, false, 'a 1.24 app');
+    await status(pc, { commands: true });
+    for (const e of [pcEv, phoneEv]) e.close();
+  } finally { await t.stop(); }
+});
+
+test('1.32 Commands on a PC: Stop, a watcher that comes back (from where it left), one that doesn’t (stopped after a while), a PC that never answers or goes quiet, four at once, switched off while running', async () => {
+  const t = await rcSetup('commands-life');
+  try {
+    const { s, laptop, phone, status } = t;
+    const pc = { ...t.pc, 'X-Beam-App-Version': '1.25.0' };
+    const out = (body, h = pc) => s.req('POST', '/api/devices/me/commands', { headers: json(h), body: JSON.stringify(body) });
+    await status(pc, { remoteControl: true, locked: false, commands: true });
+    const pcEv = await openEvents(s.port, pc, '/api/events?mode=background');
+    await pcEv.wait('hello');
+    const begin = async (h = laptop, command = 'ping -t 127.0.0.1') => {
+      const run = await openCommand(s.port, h, '/api/devices/rcdesk00001/commands', { shell: 'powershell', command });
+      assert.equal(run.status, 200, JSON.stringify(run.json));
+      run.id = (await run.wait('start')).data.id;
+      await pcEv.wait('command-run', d => d.id === run.id, 1500);
+      return run;
+    };
+    // Stop: the PC hears command-stop, its next post says so too; it ends the command as stopped.
+    let run = await begin();
+    await out({ id: run.id, seq: 1, running: true });
+    assert.equal((await s.req('POST', `/api/commands/${run.id}/stop`, { headers: json(phone), body: '{}' })).status, 404, 'not the sign-in that started it');
+    assert.equal((await s.req('POST', `/api/commands/${run.id}/stop`, { headers: json(laptop), body: '{}' })).status, 202);
+    await pcEv.wait('command-stop', d => d.id === run.id, 1500);
+    assert.deepEqual((await out({ id: run.id, seq: 2, out: [{ s: 'o', t: 'Reply from 127.0.0.1\r\n' }] })).json, { stop: true });
+    await out({ id: run.id, seq: 3, end: { code: -1, stopped: true } });
+    await waitFor(() => run.ended, 2000);
+    assert.deepEqual({ ...run.last().data, ms: 0 }, { seq: 4, code: -1, ms: 0, stopped: true });
+    assert.match(s.out, /A command from Robin Laptop on Desktop was stopped \(exit code -1/);
+    // The watcher's connection drops: it comes back for what came meanwhile, from where it left off.
+    run = await begin();
+    await out({ id: run.id, seq: 1, running: true });
+    const seen = (await run.wait('running')).data.seq;
+    run.close();
+    await sleep(200);
+    await out({ id: run.id, seq: 2, out: [{ s: 'o', t: 'one\n' }] });
+    await out({ id: run.id, seq: 3, out: [{ s: 'e', t: 'two\n' }] });
+    assert.equal((await openCommand(s.port, phone, `/api/commands/${run.id}?from=${seen}`)).status, 404, 'only the sign-in that started it');
+    let back = await openCommand(s.port, laptop, `/api/commands/${run.id}?from=${seen}`);
+    assert.equal(back.status, 200);
+    await back.wait('out', d => d.out[0].t === 'two\n');
+    assert.deepEqual(back.events.filter(e => e.event === 'out').map(e => e.data.out[0].t), ['one\n', 'two\n'], 'nothing it had already');
+    await out({ id: run.id, seq: 4, end: { code: 0 } });
+    await waitFor(() => back.ended, 2000);
+    assert.equal(back.last().event, 'end');
+    back = await openCommand(s.port, laptop, `/api/commands/${run.id}?from=0`);
+    await waitFor(() => back.ended, 2000);
+    assert.deepEqual(back.events.map(e => e.event), ['start', 'running', 'out', 'out', 'end'], 'an ended one is replayed whole for a while');
+    // Nobody comes back: after a while (3 s in tests) the PC is told to stop it.
+    run = await begin();
+    await out({ id: run.id, seq: 1, running: true });
+    run.close();
+    await pcEv.wait('command-stop', d => d.id === run.id, 6000);
+    assert.match(s.out, /is being stopped: nothing watched its output for 3 s/);
+    await out({ id: run.id, seq: 2, end: { code: 1, stopped: true } });
+    // A PC that never takes it (3 s in tests), and one that goes quiet (4 s).
+    run = await begin();
+    await run.wait('end', d => d.reason === 'no-answer', 6000);
+    assert.match(run.last().data.error, /Desktop didn’t take the command/);
+    run = await begin();
+    await out({ id: run.id, seq: 1, running: true });
+    await run.wait('end', d => d.reason === 'lost', 8000);
+    assert.equal((await out({ id: run.id, seq: 2, out: [{ s: 'o', t: 'too late' }] })).json.reason, 'gone');
+    // Four at once on one PC, then 429; switching commands off there ends them all.
+    const four = [];
+    for (let i = 0; i < 4; i++) four.push(await begin(i % 2 ? phone : laptop));
+    for (const r of four) await out({ id: r.id, seq: 1, running: true });
+    const fifth = await openCommand(s.port, laptop, '/api/devices/rcdesk00001/commands', { shell: 'cmd', command: 'ver' });
+    assert.deepEqual([fifth.status, fifth.json.reason], [429, 'busy']);
+    await status(pc, { commands: false });
+    for (const r of four) {
+      await waitFor(() => r.ended, 2000);
+      assert.deepEqual(r.last().data.reason, 'off');
+      await pcEv.wait('command-stop', d => d.id === r.id, 1000);
+    }
+    assert.match(s.out, /Desktop no longer runs commands/);
+    // Remote control off there (from another device: rc/disable) stops them too, and commands go with it.
+    await status(pc, { commands: true });
+    run = await begin();
+    await out({ id: run.id, seq: 1, running: true });
+    assert.equal((await t.rc('POST', 'disable', phone, { device: 'rcdesk00001' })).status, 202);
+    await status(pc, { remoteControl: false, commands: false });
+    await waitFor(() => run.ended, 2000);
+    assert.equal(run.last().data.reason, 'off');
+    pcEv.close();
+  } finally { await t.stop(); }
+});
+
+test('1.32 Commands on a PC: an automatic sign-in that isn’t approved runs none; a device removed, or Beam stopping, stops its commands; the stream pings while it waits', async () => {
+  const t = await rcSetup('commands-trust', { env: { BEAM_TAILSCALE_OWNERS: RC_USER } });
+  try {
+    const { s, laptop, status } = t;
+    const pc = { ...t.pc, 'X-Beam-App-Version': '1.25.0' };
+    const out = body => s.req('POST', '/api/devices/me/commands', { headers: json(pc), body: JSON.stringify(body) });
+    await status(pc, { remoteControl: true, locked: false, commands: true });
+    const pcEv = await openEvents(s.port, pc, '/api/events?mode=background');
+    await pcEv.wait('hello');
+    let r = await post(s, '/api/autopair', { client: 'app', name: 'Fresh phone', platform: 'android' }, viaServe(RC_NET.phone.ip4, RC_USER));
+    assert.equal(r.status, 200, r.body);
+    const fresh = { Authorization: `Bearer ${r.json.key}`, 'X-Beam-Device-Id': r.json.you, 'X-Beam-Platform': 'android', 'X-Beam-Profile': 'e5e5e5e5e5e5e5e5', 'X-Beam-App-Version': '1.6.0', ...from(RC_NET.phone.ip4) };
+    r = await openCommand(s.port, fresh, '/api/devices/rcdesk00001/commands', { shell: 'cmd', command: 'ver' });
+    assert.deepEqual([r.status, r.json.reason], [403, 'trusted']);
+    assert.match(r.json.error, /can’t run commands on PCs until it’s approved/);
+    // A removed asker: its command stops.
+    const run = await openCommand(s.port, laptop, '/api/devices/rcdesk00001/commands', { shell: 'powershell', command: 'Start-Sleep 600' });
+    const id = (await run.wait('start')).data.id;
+    await out({ id, seq: 1, running: true });
+    await run.wait('ping', () => true, 3000);
+    assert.equal((await s.req('DELETE', '/api/devices/rclaptop001', { headers: t.phone })).status, 204);
+    await pcEv.wait('command-stop', d => d.id === id, 2000);
+    await waitFor(() => run.ended, 2000);
+    assert.equal(run.last().data.reason, 'revoked');
+    // Beam stopping ends what still runs, saying so.
+    const run2 = await openCommand(s.port, t.phone, '/api/devices/rcdesk00001/commands', { shell: 'powershell', command: 'Start-Sleep 600' });
+    const id2 = (await run2.wait('start')).data.id;
+    await out({ id: id2, seq: 1, running: true });
+    await s.stop();
+    await waitFor(() => run2.ended, 3000);
+    pcEv.close();
+  } finally { await t.stop(); }
 });
 
 test('1.31 Sites: a PC’s own pages at its Tailscale name, checked (title, icon, a sign-in redirect, one that’s down); add, rename, hide, show, remove; kept across a restart and in an export', async () => {

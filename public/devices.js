@@ -106,6 +106,8 @@ function deviceActions(d) {
   if (can.log && d.online && d.id !== me.id && serverHas('device-logs')) acts.push({ label: 'Beam log', icon: 'file', action: () => showDeviceLog(d) });
   // (1.26) the folders it shares with this device (Beam for Windows 1.18+; chosen there): files.js
   if (canBrowseShared(d)) acts.push({ label: 'Shared folders', icon: 'folder', action: () => openSharedFolders(d) });
+  // (1.32) a command on it (Beam for Windows 1.25+, "Allow commands too" on there): commands.js
+  if (canRunCommandsOn(d)) acts.push({ label: 'Run a command', icon: 'terminal', action: () => openCommands(d) });
   return acts;
 }
 
@@ -243,6 +245,8 @@ function openDeviceInfo(d, { refresh = false } = {}) {
     typeof s.startsWithWindows === 'boolean' && ['Starts with Windows', s.startsWithWindows ? 'Yes' : s.startWanted === false ? 'No (turned off in its settings)' : 'No', !s.startsWithWindows && s.startWanted !== false],
     // (1.30.1, the user's review M28) "Answer Windows' prompts" is on there: a warning, not a fault
     s.uacOnScreen === true && ['Windows’ prompts (UAC)', 'On its normal screen: your devices can answer them, and so could any program on that PC', true],
+    // (1.32) "Allow commands too" there (turned on only at that PC)
+    typeof s.commands === 'boolean' && s.remoteControl === true && ['Commands', s.commands ? 'Allowed, for the devices that may control it' : 'Off (turned on at that PC: “Allow commands too”)'],
     beamVersionOf(d) && ['Beam', beamVersionOf(d)],
     (d.tailscale?.dns || d.tailscale?.ip) && ['Tailscale', d.tailscale.dns || d.tailscale.ip],
     key && ['Tailscale sign-in', key.text, key.low],

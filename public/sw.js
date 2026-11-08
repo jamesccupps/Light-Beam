@@ -7,7 +7,7 @@ const SHARE_CACHE = 'beam-share';
 const SCOPE = self.registration.scope;
 const ROOT = new URL('./', SCOPE).href;
 const SHELL = ['./', 'style.css', 'theme.js', 'core.js', 'cache.js', 'model.js', 'host.js', 'thread.js', 'send.js', 'live.js', 'signin.js',
-  'settings.js', 'devices.js', 'files.js', 'apps.js', 'phone.js', 'extras.js', 'gallery.js', 'sites.js', 'app.js', 'icon.svg', 'icon-192.png', 'manifest.webmanifest'].map(p => new URL(p, SCOPE).href);
+  'settings.js', 'devices.js', 'files.js', 'apps.js', 'phone.js', 'extras.js', 'gallery.js', 'sites.js', 'commands.js', 'app.js', 'icon.svg', 'icon-192.png', 'manifest.webmanifest'].map(p => new URL(p, SCOPE).href);
 // (the audit of 2026-10-29: not icon-180.png, 24 KB that only an iPhone's "Add to Home Screen" asks for)
 const EXTRA = ['icon-192.png'].map(p => new URL(p, SCOPE).href); // not named by the page, but needed offline (notifications)
 const TIMEOUT_MS = 3000;

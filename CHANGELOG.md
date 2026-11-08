@@ -12,6 +12,19 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.32.0 (2026-11-07): Commands on a PC
+
+**Versions:** server 1.32.0, Windows app 1.25.0, Android app 1.18.0.
+
+- **Commands on a PC:** Device info → Run a command (the web app, the Windows app's window, the Android app): a
+  PowerShell or Command Prompt command on one of your PCs, its output (errors in their own colour) while it runs, Stop
+  (the whole process tree), the exit code, Copy, recent commands kept in that browser. Only the devices that may
+  control that PC can, and only once "Allow commands too" is on at that PC (its tray menu or Settings → Security);
+  turning remote control off turns it off too. It runs as the PC's signed-in user in a hidden window, never as
+  administrator; PowerShell gets the command on its input (never on its command line). The logs say who ran one and
+  how it ended, never the command or its output. `POST /api/devices/{id}/commands` (answered with an event stream),
+  `GET /api/commands/{run}`, `POST /api/commands/{run}/stop`, status `commands` (docs/API.md "Commands on a PC").
+
 ## 1.31.0 (2026-11-06): Sites
 
 **Versions:** server 1.31.0, Windows app 1.24.0, Android app 1.17.0.

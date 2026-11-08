@@ -18,7 +18,7 @@ namespace Beam
     {
         // The chat window: these only (most of its traffic never passes through here).
         static readonly string[] Watched = { "*/api/rc/*", "*/api/pair*", "*/api/qr*", "*/api/login-requests/*", "*/api/password*",
-            "*/api/settings*", "*/api/security/*", "*/api/move*", "*/api/admin/*" };
+            "*/api/settings*", "*/api/security/*", "*/api/move*", "*/api/admin/*", "*/api/devices/*/commands", "*/api/commands/*" };
 
         public static void Attach(CoreWebView2 core, App app, Func<string> origin, bool everyApi)
         {
@@ -49,7 +49,7 @@ namespace Beam
                 Log.Write("Remote control: refused " + what + " from the page while another device controls this PC");
                 return;
             }
-            if (DeviceKey.Value != null && (everyApi || path.StartsWith("/api/rc/", StringComparison.Ordinal)))
+            if (DeviceKey.Value != null && (everyApi || path.StartsWith("/api/rc/", StringComparison.Ordinal) || RcPolicy.IsCommands(path)))
             {
                 try { e.Request.Headers.SetHeader("X-Beam-Device-Key", DeviceKey.Value); }
                 catch (Exception ex) { Log.Error("The device key for a page request", ex); }

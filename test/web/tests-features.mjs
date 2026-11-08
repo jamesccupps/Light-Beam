@@ -544,6 +544,138 @@ export default function register(test) {
     await page.evaluate(`$('#genDlg').close()`);
   });
 
+  test('1.32 Commands: Device info runs one on a PC that allows it; its output streams in (errors apart), the exit code; Stop; recent ones; Command Prompt takes one line; the panel alone at #commands=', async ctx => {
+    const page = await ctx.signedIn();
+    // The PC's side: its app's requests (from a Tailscale address of its own), its stream, its answers to command-run.
+    const fakeCmdPc = cfg => {
+      const H = { Authorization: `Bearer ${cfg.key}`, 'X-Beam-Device-Id': cfg.id, 'X-Beam-Device': encodeURIComponent(cfg.name), 'X-Beam-Platform': 'windows', 'X-Beam-App-Version': '1.25.0', 'X-Beam-Profile': 'b1c2d3e4f5a60718' };
+      const f = window.fakeCmd = { runs: [], stops: [] };
+      const api = (method, p, body) => fetch(p, { method, headers: { ...H, ...(body !== undefined && { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) });
+      const post = (id, seq, body) => api('POST', '/api/devices/me/commands', { id, seq, ...body }).then(r => r.json().catch(() => ({})));
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+      f.status = fields => api('PUT', '/api/devices/me/status', fields).then(r => r.status);
+      f.me = () => api('GET', '/api/me').then(r => r.status);
+      async function answer(d) {
+        f.runs.push({ id: d.id, shell: d.shell, command: d.command, by: d.by });
+        let seq = 0;
+        await post(d.id, ++seq, { running: true });
+        if (d.command.startsWith('long')) {
+          await post(d.id, ++seq, { out: [{ s: 'o', t: 'working\n' }] });
+          for (let i = 0; i < 150 && !f.stops.includes(d.id); i++) await wait(100);
+          await post(d.id, ++seq, { end: { code: -1, stopped: true, ms: 1234 } });
+          return;
+        }
+        await post(d.id, ++seq, { out: [{ s: 'o', t: `ran: ${d.command}\n` }] });
+        await wait(600);
+        await post(d.id, ++seq, { out: [{ s: 'e', t: 'a warning\n' }, { s: 'o', t: 'done\n' }] });
+        await post(d.id, ++seq, { end: { code: d.command.includes('fail') ? 2 : 0, ms: 900 } });
+      }
+      f.open = () => new Promise(resolve => {
+        fetch(`/api/events?device=${encodeURIComponent(cfg.id)}&platform=windows&name=${encodeURIComponent(cfg.name)}&version=1.25.0`, { headers: H }).then(async res => {
+          resolve(res.status);
+          const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buf = '';
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += value;
+            let i;
+            while ((i = buf.indexOf('\n\n')) >= 0) {
+              const lines = buf.slice(0, i).split('\n');
+              buf = buf.slice(i + 2);
+              const ev = lines.find(l => l.startsWith('event: '))?.slice(7);
+              const data = lines.find(l => l.startsWith('data: '))?.slice(6);
+              if (ev === 'command-run') answer(JSON.parse(data));
+              if (ev === 'command-stop') f.stops.push(JSON.parse(data).id);
+            }
+          }
+        }).catch(() => resolve(0));
+      });
+    };
+    const id = `cmdpc${ctx.uid()}${ctx.uid()}`.slice(0, 18);
+    const pc = await ctx.browser.newPage({ xff: ctx.nextIp() });
+    await pc.goto(`${ctx.srv.base}/manifest.webmanifest`);
+    await pc.evaluate(`(${fakeCmdPc})(${JSON.stringify({ id, name: 'Cmd PC', key: ctx.srv.key })}); true`);
+    eq(await pc.evaluate('fakeCmd.me()'), 200, 'the PC signs in');
+    eq(await pc.evaluate(`fakeCmd.status({ remoteControl: true, locked: false, commands: false })`), 204);
+    eq(await pc.evaluate('fakeCmd.open()'), 200, 'the PC’s app stream');
+    // Off there: Device info says how it's turned on, and has no Run a command.
+    await page.waitFor(`deviceById('${id}')?.online && deviceById('${id}')?.status?.commands === false`, 8000, 'the PC with commands off');
+    await page.evaluate(`openDeviceInfo(deviceById('${id}')); true`);
+    const info = await page.evaluate(`[$('#genBody .facts').textContent, [...$('#genFoot').querySelectorAll('button')].map(b => b.textContent.trim())]`);
+    assert(/CommandsOff \(turned on at that PC/.test(info[0]) && !info[1].includes('Run a command'), JSON.stringify(info));
+    eq(await pc.evaluate(`fakeCmd.status({ commands: true })`), 204);
+    await page.waitFor(`deviceById('${id}')?.can?.commands === true`, 8000, 'the PC allows commands now');
+    await page.evaluate(`openDeviceInfo(deviceById('${id}')); true`);
+    await page.evaluate(`[...$('#genFoot').querySelectorAll('button')].find(b => b.textContent.trim() === 'Run a command').click(); true`);
+    await page.waitFor(`commandsOpen() && $('#genTitle').textContent === 'Run a command on Cmd PC'`, 8000, 'the panel').catch(async err => { throw new Error(`${err.message} ${await page.evaluate(`JSON.stringify([$('#genTitle').textContent, [...$('#genFoot').querySelectorAll('button')].map(b => b.textContent.trim()), typeof openCommands, typeof commandsOpen])`)} ${JSON.stringify(page.errors)}`); });
+    eq(await page.evaluate(`[$('#cmdShell').value, $('#cmdRunBtn').disabled, $('#cmdStopBtn').hidden, $('#cmdOut').hidden]`), ['powershell', true, true, true], 'PowerShell first; Run waits for a command');
+    // A command: Enter runs it; its output comes as it's printed, errors in their own colour, then the exit code.
+    await page.evaluate(`(() => { const t = $('#cmdText'); t.value = 'Get-Date'; t.dispatchEvent(new Event('input')); t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); return true; })()`);
+    await page.waitFor(`/ran: Get-Date/.test($('#cmdOut').textContent) && !$('#cmdStopBtn').hidden`, 5000, 'its first output, while it runs');
+    await page.evaluate(`refreshDeviceInfo(); true`); // (a device update while it runs: the panel stays, not Device info)
+    assert(await page.evaluate(`commandsOpen() && Boolean($('#cmdOut'))`), 'the panel stays through a device update');
+    assert(/Running on Cmd PC/.test(await page.evaluate(`$('#cmdStatus').textContent`)), 'says it runs');
+    await page.waitFor(`/Exit code 0/.test($('#cmdStatus').textContent)`, 5000, 'its end');
+    eq(await page.evaluate(`[$('#cmdOut .cmd-head').textContent, $('#cmdOut .cmd-err').textContent, /done/.test($('#cmdOut').textContent), $('#cmdStatus').textContent, $('#cmdRunBtn').hidden]`),
+      ['PS> Get-Date\n', 'a warning\n', true, 'Exit code 0 · 0.9 s', false]);
+    eq(await pc.evaluate('fakeCmd.runs.map(r => [r.shell, r.command])'), [['powershell', 'Get-Date']], 'the PC got it as typed');
+    if (process.env.BEAM_CMD_SHOTS) await page.screenshot(`${ctx.SHOTS}/commands-desktop.png`); // (a look, on request)
+    // Shift+Enter is a new line in PowerShell; a failing one says its code.
+    await page.evaluate(`(() => { const t = $('#cmdText'); t.value = 'Get-Item nope'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true })); return true; })()`);
+    eq(await pc.evaluate('fakeCmd.runs.length'), 1, 'Shift+Enter didn’t run it');
+    await page.evaluate(`$('#cmdText').value = '$x = 1\\nWrite-Output fail'; $('#cmdRunBtn').click(); true`);
+    await page.waitFor(`/Exit code 2/.test($('#cmdStatus').textContent)`, 5000, 'a failing one');
+    eq(await page.evaluate(`[$$('#cmdOut .cmd-head').length, $$('#cmdOut .cmd-head')[1].textContent, $('#cmdStatus').classList.contains('err')]`), [2, 'PS> $x = 1 …\n', true]);
+    // Stop: the PC is told; the end says stopped.
+    await page.evaluate(`$('#cmdText').value = 'long-one'; $('#cmdRunBtn').click(); true`);
+    await page.waitFor(`/working/.test($('#cmdOut').textContent)`, 5000, 'the long one runs');
+    await page.evaluate(`$('#cmdStopBtn').click(); true`);
+    await page.waitFor(`/^Stopped \\(exit code -1\\) · 1\\.2 s$/.test($('#cmdStatus').textContent)`, 8000, 'stopped');
+    eq(await pc.evaluate('fakeCmd.stops.length'), 1, 'the PC heard the stop');
+    // Command Prompt takes one line (nothing is sent); one line runs.
+    await page.evaluate(`(() => { $('#cmdShell').value = 'cmd'; $('#cmdShell').dispatchEvent(new Event('change')); $('#cmdText').value = 'dir\\ncd ..'; $('#cmdRunBtn').click(); return true; })()`);
+    assert(/takes one line/.test(await page.evaluate(`$('#cmdStatus').textContent`)), 'one line');
+    eq(await pc.evaluate('fakeCmd.runs.length'), 3);
+    await page.evaluate(`$('#cmdText').value = 'ver'; $('#cmdRunBtn').click(); true`);
+    await page.waitFor(`/Exit code 0/.test($('#cmdStatus').textContent) && $$('#cmdOut .cmd-head').length === 4`, 5000, 'Command Prompt');
+    eq(await page.evaluate(`$$('#cmdOut .cmd-head')[3].textContent`), '> ver\n');
+    // Recent ones, newest first: one click puts it back (its shell too); they can be forgotten.
+    eq(await page.evaluate(`$$('#cmdRecent .cmd-recent-item').map(b => b.textContent)`), ['cmdver', 'PSlong-one', 'PS$x = 1', 'PSGet-Date']);
+    await page.evaluate(`$$('#cmdRecent .cmd-recent-item')[3].click(); true`);
+    eq(await page.evaluate(`[$('#cmdShell').value, $('#cmdText').value]`), ['powershell', 'Get-Date']);
+    // Copy and Clear.
+    await page.evaluate(`$('#cmdClearBtn').click(); true`);
+    eq(await page.evaluate(`[$('#cmdOut').hidden, $('#cmdOut').textContent, $('#cmdStatus').textContent]`), [true, '', '']);
+    // Closing the panel while one runs stops it.
+    await page.evaluate(`$('#cmdText').value = 'long-two'; $('#cmdRunBtn').click(); true`);
+    await page.waitFor(`/working/.test($('#cmdOut').textContent)`, 5000, 'another long one');
+    await page.evaluate(`$('#genDlg').close(); true`);
+    await pc.waitFor('fakeCmd.stops.length === 2', 5000, 'closing it stopped it');
+    // The page of its own (#commands=): the panel alone; Close leaves it.
+    await page.goto('about:blank');
+    await page.goto(`${ctx.srv.base}/#commands=${id}`);
+    await page.waitFor(`typeof commandsOpen === 'function' && commandsOpen() && document.documentElement.classList.contains('commands-mode')`, 8000, 'the panel alone');
+    eq(await page.evaluate(`$$('#cmdRecent .cmd-recent-item').length`), 5, 'its recent ones (this browser)');
+    await page.evaluate(`(() => { const t = $('#cmdText'); t.value = 'hostname'; t.dispatchEvent(new Event('input')); $('#cmdRunBtn').click(); return true; })()`);
+    await page.waitFor(`/Exit code 0/.test($('#cmdStatus').textContent)`, 5000, 'runs from the page of its own').catch(async err => { throw new Error(`${err.message} ${await page.evaluate(`JSON.stringify([$('#cmdStatus').textContent, $('#cmdOut').textContent.slice(0, 200), me.id])`)} ${JSON.stringify(page.errors)}`); });
+    if (process.env.BEAM_CMD_SHOTS) {
+      const phone = await ctx.signedIn({ width: 412, height: 860, mobile: true });
+      await phone.evaluate(`localStorage.setItem('beam.commands.${id}', localStorage.getItem('beam.commands.${id}') || '[]'); true`);
+      await phone.goto('about:blank');
+      await phone.goto(`${ctx.srv.base}/#commands=${id}`);
+      await phone.waitFor(`typeof commandsOpen === 'function' && commandsOpen()`, 8000, 'the phone page').catch(async err => { throw new Error(`${err.message} ${await phone.evaluate(`JSON.stringify([$('#genTitle')?.textContent, $('#genBody')?.textContent, location.hash])`)}`); });
+      await phone.evaluate(`(() => { document.documentElement.dataset.theme = 'dark'; const t = $('#cmdText'); t.value = 'Get-Date'; t.dispatchEvent(new Event('input')); $('#cmdRunBtn').click(); return true; })()`);
+      await phone.waitFor(`/Exit code 0/.test($('#cmdStatus').textContent)`, 5000, 'its end');
+      await phone.evaluate(`document.activeElement.blur(); true`);
+      await phone.screenshot(`${ctx.SHOTS}/commands-phone-dark.png`);
+    }
+    eq(await page.evaluate('commandsBack()'), false, 'Back: the app closes it');
+    await page.evaluate(`$$('#cmdRecent .btn').find(b => b.textContent === 'Forget them').click(); true`);
+    eq(await page.evaluate(`[$('#cmdRecent').textContent, localStorage.getItem('beam.commands.${id}')]`), ['', null], 'forgotten');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: 'commands' });
+
   test('1.31 Sites: the globe opens the list; a site added by address is checked and named by its title; rename, remove with Undo; a found one says its PC and is hidden, not removed', async ctx => {
     const page = await ctx.signedIn();
     const http = await import('node:http');

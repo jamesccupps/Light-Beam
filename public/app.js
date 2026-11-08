@@ -277,6 +277,8 @@ const RC_ID = (/^#remote=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] |
 const VNC_ID = (/^#vnc=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
 // (1.28.1) index.html#files=<PC id>: only that PC's shared folders, full screen (files.js; the Android app's screen).
 const FILES_ID = (/^#files=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
+// (1.32) index.html#commands=<PC id>: only the panel that runs commands on that PC (commands.js; the Android app's screen).
+const CMDS_ID = (/^#commands=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
 
 function loadVnc() {
   document.documentElement.classList.add('remote-mode');
@@ -311,6 +313,7 @@ async function init() {
   if (RC_ID) return loadViewer();
   if (VNC_ID) return loadVnc(); // (1.23: a Linux computer's screen)
   if (FILES_ID) return startSharedPage(FILES_ID); // (1.28.1: a PC's shared folders alone)
+  if (CMDS_ID) return startCommandsPage(CMDS_ID); // (1.32: commands on a PC, alone)
   document.documentElement.classList.toggle('host', Boolean(HOST));
   const params = new URLSearchParams(location.search);
   const handoff = takeHandoff();

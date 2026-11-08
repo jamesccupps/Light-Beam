@@ -46,6 +46,7 @@ namespace Beam
         public bool RestoreChecked;            // ...and an earlier install's backup was looked for (offered once)
         public List<RcAllowed> RemoteControlDevices = new List<RcAllowed>(); // ...and the devices that may (pinned to their Tailscale node)
         public bool AppsAllowed;               // Beam 1.21 (app 1.16) "Let Beam install apps": off until someone at this PC allows it
+        public bool CommandsAllowed;           // Beam 1.32 (app 1.25) "Allow commands too": off until someone at this PC allows it
         public List<InstalledApp> InstalledApps = new List<InstalledApp>(); // ...and what Beam installed here
         public List<SharedFolder> SharedFolders = new List<SharedFolder>(); // app 1.18 (Beam 1.26): folders other devices may copy from (chosen here)
         public string TestWinget;              // tests (custom --config only, 1.16): a stand-in for winget (an .exe or .cmd)
@@ -71,6 +72,7 @@ namespace Beam
         public string TestHistoryEvents;       // tests (custom --config only, 1.13): Windows' records from this JSON file instead
         public string TestAdminHelper;         // tests (custom --config only, 1.22): this input helper (records), as if set up
         public string TestAdminHelperRoot;     // tests (custom --config only, 1.22): the setup's "Program Files", store and policy as files here
+        public bool TestNoWarmHost;            // tests (custom --config only, 1.25): no capture host kept warm for remote control
         public int WebViewReleaseSec = 180;    // the hidden messenger window's web view is released after this
         public string BadUpdateVersion;        // an update that failed its health check; skipped until a newer one
         public bool AutostartInitialized;      // "start with Windows" was set up once; the user owns it from then on
@@ -245,6 +247,7 @@ namespace Beam
                         if (a != null && !c.RemoteControlDevices.Any(x => x.Id == a.Id)) c.RemoteControlDevices.Add(a);
                     }
                 c.AppsAllowed = Json.Bool(d, "appsAllowed", false);
+                c.CommandsAllowed = Json.Bool(d, "commandsAllowed", false) && c.AllowRemoteControl; // (1.25)
                 // (1.18) a folder that can't be shared (moved, or written in by hand) is left out, and said why
                 var shareList = Json.Get(d, "sharedFolders") as object[];
                 if (shareList != null)
@@ -285,6 +288,7 @@ namespace Beam
                     c.TestWinget = Json.Str(d, "testWinget");
                     c.TestAdminHelper = Json.Str(d, "testAdminHelper");
                     c.TestAdminHelperRoot = Json.Str(d, "testAdminHelperRoot");
+                    c.TestNoWarmHost = Json.Bool(d, "testNoWarmHost", false);
                 }
                 c.WebViewReleaseSec = (int)Math.Max(5, Json.Long(d, "webViewReleaseSec", 180));
                 c.BadUpdateVersion = Json.Str(d, "badUpdateVersion");
@@ -414,6 +418,7 @@ namespace Beam
                 d["restoreChecked"] = RestoreChecked;
                 d["remoteControlDevices"] = RemoteControlDevices.Select(x => (object)x.ToJson()).ToArray();
                 if (AppsAllowed) d["appsAllowed"] = true; else d.Remove("appsAllowed");
+                if (CommandsAllowed) d["commandsAllowed"] = true; else d.Remove("commandsAllowed");
                 if (InstalledApps.Count > 0) d["installedApps"] = InstalledApps.Select(x => (object)x.ToJson()).ToArray(); else d.Remove("installedApps");
                 if (SharedFolders.Count > 0) d["sharedFolders"] = SharedFolders.Select(x => (object)x.ToJson()).ToArray(); else d.Remove("sharedFolders");
                 d["autoSave"] = AutoSave;

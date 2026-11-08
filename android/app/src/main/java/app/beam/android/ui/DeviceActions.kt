@@ -56,6 +56,11 @@ object DeviceActions {
                 activity.startActivity(FilesActivity.intent(activity, d.id))
             }
         }
+        if (canRunCommands(app, d)) {
+            list += ActionSheet.Entry(R.drawable.ic_terminal, activity.getString(R.string.device_run_command)) {
+                activity.startActivity(FilesActivity.commandsIntent(activity, d.id))
+            }
+        }
         if (app.remote.available && d.status?.remoteControl == true) {
             list += ActionSheet.Entry(R.drawable.ic_power, activity.getString(R.string.remote_turn_off)) { turnOffControl(activity, d, anchor) }
         }
@@ -93,6 +98,11 @@ object DeviceActions {
     /** (1.15) Shared folders: a PC online that shares folders (Beam for Windows 1.18+), on a server with their page (1.28.1). */
     fun canBrowseFiles(app: BeamApp, d: Device): Boolean =
         d.can.files && d.online && d.id != app.repo.me && app.repo.state.value.info?.lists(FilesActivity.FEATURE) == true
+
+    /** (1.18) Run a command: a PC online that runs them from this phone's kind of device (Beam for Windows 1.25+, "Allow
+     * commands too" on there), on a server with them (1.32). The PC itself checks this phone is on its list. */
+    fun canRunCommands(app: BeamApp, d: Device): Boolean =
+        d.can.commands && d.online && d.id != app.repo.me && app.repo.state.value.info?.lists(FilesActivity.COMMANDS_FEATURE) == true
 
     /** Rings [d] (or stops it). Shows the result as a snackbar on [anchor]. */
     fun ring(activity: AppCompatActivity, d: Device, stop: Boolean, anchor: View) {

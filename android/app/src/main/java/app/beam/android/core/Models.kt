@@ -117,16 +117,21 @@ data class DeviceStatus(
 
 /**
  * `can` in `GET /api/devices` (server 1.3; `remoteControl` 1.6: a Windows PC with Beam 1.6+, its switch on, unlocked;
- * `files` 1.26: a Windows PC with Beam 1.18+, which shares folders chosen there).
+ * `files` 1.26: a Windows PC with Beam 1.18+, which shares folders chosen there; `commands` 1.32: a Windows PC with Beam
+ * 1.25+ that runs commands from the devices that may control it, "Allow commands too" on there).
  */
-data class DeviceCan(val ring: Boolean = false, val wake: Boolean = false, val remoteDesktop: Boolean = false, val remoteControl: Boolean = false, val files: Boolean = false) {
+data class DeviceCan(
+    val ring: Boolean = false, val wake: Boolean = false, val remoteDesktop: Boolean = false, val remoteControl: Boolean = false, val files: Boolean = false,
+    val commands: Boolean = false,
+) {
     fun toJson(): JSONObject = JSONObject().put("ring", ring).put("wake", wake).put("remoteDesktop", remoteDesktop).put("remoteControl", remoteControl).put("files", files)
+        .put("commands", commands)
 
     companion object {
         fun parse(o: JSONObject?) = if (o == null) {
             DeviceCan()
         } else {
-            DeviceCan(o.optBoolean("ring"), o.optBoolean("wake"), o.optBoolean("remoteDesktop"), o.optBoolean("remoteControl"), o.optBoolean("files"))
+            DeviceCan(o.optBoolean("ring"), o.optBoolean("wake"), o.optBoolean("remoteDesktop"), o.optBoolean("remoteControl"), o.optBoolean("files"), o.optBoolean("commands"))
         }
     }
 }

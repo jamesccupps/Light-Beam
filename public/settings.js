@@ -784,13 +784,20 @@ function thisDeviceCard() {
       if (!hostHas('allowRemoteControl')) { renderSettings(); return toast('Turn it on in Beam’s menu in the taskbar corner (Beam 1.19.1 for Windows switches it here)', { ms: 7000 }); }
       after(await hostDo('allowRemoteControl'));
     }, { hint: s.allowRemoteControl ? 'Your devices can see and control this PC; a banner shows while they do.' : 'Your devices could see and control this PC. Turning it on asks here which devices may.' });
+    // (1.32, Windows 1.25) the devices that may control this PC may run commands on it: on through Beam's question here
+    const cmds = typeof s.commandsAllowed === 'boolean' && s.allowRemoteControl === true && switchRow('Allow commands too', s.commandsAllowed, async on => {
+      if (!on) return after(await hostDo('setSettings', { settings: { commandsAllowed: false } }));
+      if (!hostHas('allowCommands')) { renderSettings(); return; }
+      after(await hostDo('allowCommands'));
+    }, { hint: s.commandsAllowed ? `The devices that may control this PC can also run PowerShell and Command Prompt commands here, as you, never as administrator${s.commandsRunning ? ` (${s.commandsRunning} running now)` : ''}.`
+      : 'The devices that may control this PC could also run PowerShell and Command Prompt commands here, without seeing the screen. Turning it on asks here.' });
     const apps = typeof s.appsAllowed === 'boolean' && switchRow('Let Beam install apps', s.appsAllowed, async on => {
       if (!on) return after(await hostDo('setSettings', { settings: { appsAllowed: false } }));
       if (!hostHas('allowApps')) { renderSettings(); return; }
       after(await hostDo('allowApps'));
     }, { hint: 'Apps you install from Beam’s Apps page go onto this PC without asking each time.' });
     const admin = s.adminHelper?.available && hostHas('adminHelper') ? adminHelperRows(s.adminHelper) : null;
-    return rc || apps || admin ? card('This PC', rc, apps, admin) : null;
+    return rc || apps || admin ? card('This PC', rc, cmds, apps, admin) : null;
   }
   // Beam for Linux's window (its page is that computer's sign-in): the agent does it, as `beam control on` would.
   const d = deviceById(me.id);

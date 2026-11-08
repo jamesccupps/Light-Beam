@@ -364,6 +364,11 @@
     <string name="files_load_failed">Couldn\'t load the shared folders.</string>
     <string name="files_stopped">The shared folders stopped here.</string>
     <string name="files_remote_open">Close remote control first: it and Shared folders take turns.</string>
+    <string name="device_run_command">Run a command</string>
+    <string name="commands_sign_in_failed">Couldn\'t open the command panel: %1$s</string>
+    <string name="commands_load_failed">Couldn\'t load the command panel.</string>
+    <string name="commands_stopped">The command panel stopped here.</string>
+    <string name="commands_remote_open">Close remote control first: it and the command panel take turns.</string>
     <string name="remote_leave_title">Disconnect?</string>
     <string name="remote_leave_text">Remote control of this PC ends.</string>
     <string name="remote_disconnect">Disconnect</string>

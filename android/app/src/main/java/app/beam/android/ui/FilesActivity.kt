@@ -45,12 +45,16 @@ import okhttp3.HttpUrl
  * [RemoteControl]; one page of Beam's at a time, so never over an open viewer), may only stay on Beam's server, and
  * gets nothing of the app's. Back steps back inside the page (a file looked at, a search, a subfolder: its
  * `sharedBack()`), then leaves; the page's own Close leaves too, and the page's sign-in is revoked as it goes.
+ *
+ * (1.18, server 1.32) The same screen hosts the panel that runs commands on a PC (`#commands=<PC id>`,
+ * [commandsIntent]): Back leaves it at once (its `commandsBack()` stops what still runs first).
  */
 class FilesActivity : BaseActivity() {
     override val followsLookAtOnce = false // (1.16) the page and where it was stay (its page follows the look itself)
     private lateinit var b: ActivityFilesBinding
     private var web: WebView? = null
     private var device = ""
+    private var page = PAGE_FILES // (1.18) or PAGE_COMMANDS
     private var base: HttpUrl? = null
     private var ticket: Int? = null
     private var leaving = false
@@ -62,9 +66,10 @@ class FilesActivity : BaseActivity() {
             finish()
             return
         }
+        page = if (intent.getStringExtra(EXTRA_PAGE) == PAGE_COMMANDS) PAGE_COMMANDS else PAGE_FILES
         // The viewer holds the page sign-in: closing it first keeps its session (they share one, one page at a time).
         if (app.remote.pageOpen) {
-            toast(getString(R.string.files_remote_open))
+            toast(getString(if (page == PAGE_COMMANDS) R.string.commands_remote_open else R.string.files_remote_open))
             finish()
             return
         }
@@ -103,8 +108,8 @@ class FilesActivity : BaseActivity() {
                     setCookie(api.base.toString(), cookie)
                     flush()
                 }
-                webView().loadUrl(RemoteControl.filesUrl(api.base, device))
-            }.onFailure { problem(getString(R.string.files_sign_in_failed, Format.error(it))) }
+                webView().loadUrl(if (page == PAGE_COMMANDS) RemoteControl.commandsUrl(api.base, device) else RemoteControl.filesUrl(api.base, device))
+            }.onFailure { problem(getString(if (page == PAGE_COMMANDS) R.string.commands_sign_in_failed else R.string.files_sign_in_failed, Format.error(it))) }
         }
     }
 
@@ -162,7 +167,8 @@ class FilesActivity : BaseActivity() {
     private fun back() {
         val w = web
         if (w == null || leaving) return leave()
-        w.evaluateJavascript("typeof sharedBack === 'function' && sharedBack() === true") { answer ->
+        val js = if (page == PAGE_COMMANDS) "typeof commandsBack === 'function' && commandsBack() === true" else "typeof sharedBack === 'function' && sharedBack() === true"
+        w.evaluateJavascript(js) { answer ->
             if (answer != "true" && web === w) leave()
         }
     }
@@ -176,10 +182,12 @@ class FilesActivity : BaseActivity() {
 
     private fun sameServer(u: Uri): Boolean = base?.let { RemoteControl.onBeam(it, u) } == true
 
-    /** On Beam's server and on this PC's folders. */
+    private fun loadFailed(): Int = if (page == PAGE_COMMANDS) R.string.commands_load_failed else R.string.files_load_failed
+
+    /** On Beam's server and on this PC's folders (or its command panel). */
     private fun isFiles(url: String?): Boolean {
         val u = url?.toUri() ?: return false
-        return sameServer(u) && u.fragment == "files=$device"
+        return sameServer(u) && u.fragment == "$page=$device"
     }
 
     private inner class Client : WebViewClient() {
@@ -206,11 +214,11 @@ class FilesActivity : BaseActivity() {
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-            if (request.isForMainFrame && web === view) problem(getString(R.string.files_load_failed))
+            if (request.isForMainFrame && web === view) problem(getString(loadFailed()))
         }
 
         override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
-            if (request.isForMainFrame && web === view) problem(getString(R.string.files_load_failed))
+            if (request.isForMainFrame && web === view) problem(getString(loadFailed()))
         }
 
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
@@ -219,7 +227,7 @@ class FilesActivity : BaseActivity() {
                 web = null
                 b.page.removeView(view)
                 view.destroy()
-                problem(getString(R.string.files_stopped))
+                problem(getString(if (page == PAGE_COMMANDS) R.string.commands_stopped else R.string.files_stopped))
             } else {
                 view.destroy()
             }
@@ -261,10 +269,17 @@ class FilesActivity : BaseActivity() {
 
     companion object {
         private const val EXTRA_DEVICE = "device"
+        private const val EXTRA_PAGE = "page"
+        private const val PAGE_FILES = "files"
+        private const val PAGE_COMMANDS = "commands"
         private val DEVICE_ID = Regex("^[A-Za-z0-9_-]{8,64}$")
         const val FEATURE = "shared-folders-page" // (server 1.28.1: index.html#files=<PC id>)
+        const val COMMANDS_FEATURE = "commands" // (server 1.32: index.html#commands=<PC id>)
 
         /** PC [device]'s shared folders (one that [DeviceActions.canBrowseFiles]). */
         fun intent(ctx: Context, device: String): Intent = Intent(ctx, FilesActivity::class.java).putExtra(EXTRA_DEVICE, device)
+
+        /** (1.18) The panel that runs commands on PC [device] (one that [DeviceActions.canRunCommands]). */
+        fun commandsIntent(ctx: Context, device: String): Intent = intent(ctx, device).putExtra(EXTRA_PAGE, PAGE_COMMANDS)
     }
 }

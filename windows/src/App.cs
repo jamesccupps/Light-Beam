@@ -82,6 +82,7 @@ namespace Beam
         public SettingsBackups Backups;   // Beam 1.8.1: this PC's settings kept on the server too, and put back
         public PcHistory History;         // Beam 1.18 (app 1.13): Windows' record of restarts, power losses and crashes, sent
         public AppInstaller Apps;         // Beam 1.21 (app 1.16): the user's apps, installed here when asked (once allowed here)
+        public CommandRunner Commands;    // Beam 1.32 (app 1.25): commands from the devices that may control this PC (once allowed here)
         bool appsReported;                // ...what's installed told to the server on this stream
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
         FamilyWindow family;                     // (1.10) Beam Family in a window of its own
@@ -172,6 +173,7 @@ namespace Beam
             Backups = new SettingsBackups(this);
             History = new PcHistory(this);
             Apps = new AppInstaller(this);
+            Commands = new CommandRunner(this);
 
             up = new Uploader(() => Api, j => { var s = j.State; Post(() => OnUploadChanged(j, s)); }, j => { });
             down = new Downloader(() => Api, j => { var s = j.State; Post(() => OnDownloadChanged(j, s)); }, OnDownloadProgress);
@@ -749,6 +751,10 @@ namespace Beam
                     break;
                 case "app-uninstall":
                     Apps.OnUninstall(d);
+                    break;
+                case "command-run": // Beam 1.32: a command from a device that may control this PC (once allowed here)
+                case "command-stop":
+                    Commands.OnEvent(name, d);
                     break;
                 case "files-request": // Beam 1.26: another device looks in this PC's shared folders (chosen here)
                     Shares.OnRequest(this, d);
@@ -1546,10 +1552,11 @@ namespace Beam
         {
             var u = pendingUpdate;
             if (u == null || updating || quitting || Api == null) return;
-            if (TransfersBusy() || Rc.HoldsUpdate || Kvm.Away || remoteViews.Count > 0)
+            if (TransfersBusy() || Rc.HoldsUpdate || Kvm.Away || remoteViews.Count > 0 || Commands.Running > 0)
             {
                 Log.Write("Update " + u.Version + " waits until " + (Rc.HoldsUpdate ? (Rc.Kvm ? "the keyboard and mouse of " + Rc.ViewerName + " go back to it" : "the remote control session ends")
-                    : Kvm.Away ? "this PC's keyboard and mouse are back from the PC beside it" : remoteViews.Count > 0 ? "the remote control windows close" : "transfers finish"));
+                    : Kvm.Away ? "this PC's keyboard and mouse are back from the PC beside it" : remoteViews.Count > 0 ? "the remote control windows close"
+                    : Commands.Running > 0 ? "the commands from other devices end" : "transfers finish"));
                 SetUpdateState("waiting", u.Version, null);
                 updateRetryTimer.Interval = 30000;
                 updateRetryTimer.Start();
@@ -1571,7 +1578,7 @@ namespace Beam
             {
                 Log.Write("Downloading update " + u.Version);
                 await Updater.Download(Api, u, exe, CancellationToken.None);
-                if (TransfersBusy() || Rc.HoldsUpdate || Kvm.Away || remoteViews.Count > 0) { updating = false; SetUpdateState("waiting", u.Version, null); updateRetryTimer.Interval = 30000; updateRetryTimer.Start(); return; }
+                if (TransfersBusy() || Rc.HoldsUpdate || Kvm.Away || remoteViews.Count > 0 || Commands.Running > 0) { updating = false; SetUpdateState("waiting", u.Version, null); updateRetryTimer.Interval = 30000; updateRetryTimer.Start(); return; }
                 string error;
                 if (!Updater.Swap(exe, out error)) throw new IOException("the new version couldn't be put in place (" + error + ")");
                 Log.Write("Update " + u.Version + " verified and in place; handing over");
@@ -2608,6 +2615,9 @@ namespace Beam
             s["adminHelper"] = ServerHas("remote-control") ? AdminHelper.StatusObject() : null;
             // Beam 1.21 (null: the server has no apps). As for remote control: the page can turn it off, never on.
             s["appsAllowed"] = ServerHas("apps") ? (object)Cfg.AppsAllowed : null;
+            // Beam 1.32 (app 1.25; null: the server has no commands). As for remote control: the page can turn it off, never on.
+            s["commandsAllowed"] = ServerHas("commands") ? (object)Cfg.CommandsAllowed : null;
+            s["commandsRunning"] = Commands != null ? Commands.Running : 0;
             // (1.18, Beam 1.26; null: the server has none) The folders shared from here and who sees each: read-only (the
             // page opens SharedFoldersForm, bridge `sharedFolders`).
             s["sharedFolders"] = ServerHas("shared-folders") ? (object)Cfg.SharedFolders.Select(f =>
@@ -2695,6 +2705,14 @@ namespace Beam
                 if (!(v is bool) || (bool)v) return AppInstaller.OnlyHere;
                 appsOff = true;
             }
+            bool commandsOff = false;
+            if (s.ContainsKey("commandsAllowed"))
+            {
+                // (1.25) Only off from here: on at this PC (the tray menu's or Settings' confirmation).
+                var v = Json.Get(s, "commandsAllowed");
+                if (!(v is bool) || (bool)v) return CommandRunner.OnlyHere;
+                commandsOff = true;
+            }
             if (s.ContainsKey("deviceName"))
             {
                 string n = (Json.Str(s, "deviceName") ?? "").Trim();
@@ -2750,6 +2768,7 @@ namespace Beam
             if (phoneOn.HasValue) SetPhoneNotifications(phoneOn.Value, "settings");
             if (rcOff && Cfg.AllowRemoteControl) Rc.SetOff("settings");
             if (appsOff) Apps.SetAllowed(false, "settings");
+            if (commandsOff) Commands.SetAllowed(false, "settings");
             if (SettingsChanged != null) SettingsChanged();
             if (Backups != null) Backups.Changed();
             MarkChanged();
@@ -2768,6 +2787,14 @@ namespace Beam
         }
 
         public void StatusNow(string why) { status.Now(why); }
+
+        // (1.25) "Allow commands too" changed, or a command started or ended: the server (the switch), the page and the tray.
+        public void CommandsChanged(string what)
+        {
+            if (what != null) status.Now("commands " + what);
+            if (SettingsChanged != null) SettingsChanged();
+            MarkChanged();
+        }
 
         // "Allow remote control" in the tray menu or Settings → This PC: on only through the native confirmation, which
         // lists the devices (ticked: all of them but this PC and session-only sign-ins); off at once.
@@ -3472,6 +3499,15 @@ namespace Beam
                 allow.Tag = "rc";
                 menu.Items.Add(allow);
                 if (Cfg.AllowRemoteControl) menu.Items.Add("Remote control devices…", null, (s, e) => ShowRcAllow(null));
+                if (Cfg.AllowRemoteControl && ServerHas("commands"))
+                {
+                    // (1.25, Beam 1.32) the devices that may control this PC may run commands on it: on through a confirmation
+                    int running = Commands.Running;
+                    var cmds = new ToolStripMenuItem(Cfg.CommandsAllowed ? "Allow commands too" + (running > 0 ? " (" + running + " running)" : "") : "Allow commands too…", null, (s, e) => Commands.Toggle("tray menu"));
+                    cmds.Checked = Cfg.CommandsAllowed;
+                    cmds.Tag = "commands";
+                    menu.Items.Add(cmds);
+                }
                 if (Rc.Active && Rc.Kvm)
                 {
                     // (1.12) Another PC's keyboard and mouse can reach this one: back to it, the banner, Stop.
@@ -3560,6 +3596,8 @@ namespace Beam
                 if (main != null && !main.IsDisposed) main.SaveBounds();
                 ringer.Stop("quitting");
                 Kvm.Quit();
+                Commands.StopAll("Beam is quitting"); // (1.25: their output would have nowhere to go)
+                Commands.WaitIdle(3000); // (...and the askers hear that they were stopped)
                 Rc.Quit();
                 foreach (var w in remoteViews.Values.ToList()) { try { w.CloseForGood(); } catch { } }
                 status.Stop();

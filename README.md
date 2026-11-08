@@ -204,6 +204,10 @@ address, so the browser becomes part of that device instead of a separate entry.
   wrong: the servers start when Windows does, Tailscale runs unattended, devices come in over https, backups are
   recent, there's room on the disk, every PC runs the latest Beam and starts it with Windows, no Tailscale sign-in runs
   out soon. Each line says what to do when it's wrong (`BEAM_SETUP_CHECK=off` turns the automatic look off).
+- **Commands on a PC** (Beam 1.32, the Windows app 1.25, the Android app 1.18): run a PowerShell or Command Prompt
+  command on one of your PCs from another device (Device info → Run a command) and see what it prints while it runs,
+  with Stop and its exit code. Only for the devices that may control that PC, and only once "Allow commands too" is
+  on at that PC; it runs as that PC's signed-in user, never as administrator.
 - **Sites** (Beam 1.31, the Windows app 1.24, the Android app 1.17): the web pages your machines serve over Tailscale, in
   one list on every device (the globe at the top of the web app; Sites in the Android app's menu). Each PC's Beam app
   finds the pages that PC serves to your tailnet by itself (it asks only the ports web pages use); add others by

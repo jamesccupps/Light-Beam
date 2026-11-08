@@ -106,6 +106,7 @@ namespace Beam
         public const string KillKeys = "Ctrl+Alt+Shift+F12";
         public const string OnlyHere = "Remote control is turned on, and its devices chosen, only at this PC: Beam's tray menu (Allow remote control) or its Settings on this PC";
         const string NotListed = "it isn't on this PC's list of devices that may control it";
+        public const string NotListedText = NotListed; // (1.25: Commands.cs says "not-listed" for it)
         readonly App app;
         RcSession current;
         readonly HashSet<string> finished = new HashSet<string>();   // sessions handled here (the server may repeat a request)
@@ -259,6 +260,7 @@ namespace Beam
             app.Cfg.AllowRemoteControl = false;
             app.Cfg.RemoteControlDevices = new List<RcAllowed>();
             app.Cfg.Save();
+            if (app.Commands != null) app.Commands.SetAllowed(false, "remote control was turned off (" + from + ")"); // (1.25: they go with it)
             if (current != null) End(current, "stopped", "remote control was turned off (" + from + ")");
             if (was) Log.Write("Remote control: turned off on this PC (" + from + ")");
             app.RcChanged("turned off");
@@ -322,6 +324,45 @@ namespace Beam
         }
 
         bool Listed(string id) { return id != null && ListEntry(id) != null; }
+
+        // (1.25, Beam 1.32) A command from another device (Commands.cs): the same checks as a session's request (Request),
+        // locked or busy aside (a command runs in this session either way): on this PC's list, from the Tailscale machine it
+        // was pinned to (this PC's own whois of the address the server vouched for), of this PC's Tailscale owner. Pinned
+        // now if it wasn't yet. Null when it may; else why not.
+        public async Task<string> Vouch(string from, Dictionary<string, object> viewer)
+        {
+            var dev = app.DeviceById(from);
+            string ip4 = Json.Str(viewer, "ip4"), ip6 = Json.Str(viewer, "ip6"), fromIp = Json.Str(viewer, "ip");
+            var facts = new RcFacts();
+            facts.ServerFeature = app.ServerHas("remote-control");
+            facts.Allowed = Allowed;
+            facts.Me = app.Me;
+            facts.ViewerId = from;
+            facts.ViewerKnown = dev != null;
+            facts.ViewerTemporary = dev != null && dev.Temporary;
+            facts.ViewerUser = dev != null ? dev.User : null;
+            facts.Ip4 = RcPolicy.IsTailscaleIp(ip4) ? ip4 : null;
+            facts.Ip6 = RcPolicy.IsTailscaleIp(ip6) ? ip6 : null;
+            string why = RcPolicy.Refusal(facts);
+            if (why == null && !Listed(from)) why = NotListed;
+            if (why != null) return why;
+            string ip = RcPolicy.IsTailscaleIp(fromIp) && (RcPolicy.SameIp(fromIp, facts.Ip4) || RcPolicy.SameIp(fromIp, facts.Ip6)) ? fromIp : facts.Ip4 ?? facts.Ip6;
+            var check = await tailnet.Check(ip);
+            why = check.Refusal;
+            var entry = ListEntry(from);
+            if (why == null && entry == null) why = NotListed; // taken off the list meanwhile
+            if (why == null && entry.Node != null && entry.Node != check.StableId)
+                why = "it asked from another Tailscale machine (" + check.Name + ") than the one it was allowed on (" + (entry.Machine ?? entry.Node) + ")";
+            if (why != null) return why;
+            if (entry.Node == null)
+            {
+                entry.Node = check.StableId;
+                entry.Machine = check.Name;
+                app.Cfg.Save();
+                Log.Write("Remote control: " + entry.Name + " is pinned to the Tailscale machine " + check.Name + " (its first command)");
+            }
+            return null;
+        }
 
         // ------------------------------------------------------------------ events from the server
 
@@ -591,7 +632,7 @@ namespace Beam
         // until a session).
         void WarmHost(string why, bool again = false)
         {
-            if (!app.Cfg.AllowRemoteControl || current != null || closing) return;
+            if (!app.Cfg.AllowRemoteControl || current != null || closing || app.Cfg.TestNoWarmHost) return;
             var layout = DesktopLayout.Current();
             var primary = layout.Primary;
             var warming = RcHost.Warm(app.Cfg, layout.SourceName(primary != null ? primary.Id : 0), app.DevTools);
@@ -1772,6 +1813,7 @@ namespace Beam
                 case "devices": SetDevices((arg ?? "").Split(',').Where(x => x.Length > 0).ToList(), null, "test"); break;
                 case "repin": SetDevices(app.Cfg.RemoteControlDevices.Select(a => a.Id).ToList(), new List<string> { arg }, "test"); break;
                 case "off": SetOff("test"); break;
+                case "commands": app.Commands.SetAllowed(arg == "on", "test"); break; // (1.25) commands:on|off, without the confirmation
                 case "lock": TestLock(arg == "on"); break;
                 case "kill": KillSwitch("test"); break;
                 case "helper": // (1.22) the input helper without a whole session: begin, in:<the viewer's `in`/`mv` JSON>, end

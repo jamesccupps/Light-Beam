@@ -483,6 +483,28 @@ html.files-mode #genDlg { width: 100%; height: 100%; max-width: 100%; max-height
 html.files-mode #genDlg[open] { display: flex; flex-direction: column; }
 html.files-mode #genDlg::backdrop { background: var(--surface); }
 html.files-mode #genBody { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+/* (1.32) Run a command: the panel (Device info), or the page of its own (#commands=, html.commands-mode) */
+.cmd-who { margin: 0 0 8px; }
+.cmd-input { display: flex; flex-direction: column; gap: 6px; }
+.cmd-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cmd-shell { flex: 1 1 10rem; min-width: 0; height: 40px; padding: 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: inherit; font: inherit; font-size: max(16px, 1rem); }
+.cmd-text { width: 100%; box-sizing: border-box; resize: vertical; min-height: 4.5rem; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: inherit; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: max(16px, 0.9375rem); }
+.cmd-text:focus, .cmd-shell:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.cmd-status-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.cmd-status { min-height: 1.25rem; overflow-wrap: anywhere; }
+.cmd-tools { display: flex; gap: 4px; margin-left: auto; }
+.cmd-out { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.8125rem; line-height: 1.45; max-height: 55vh; min-height: 6rem; }
+.cmd-out .cmd-err { color: var(--danger); }
+.cmd-out .cmd-head { color: var(--muted); font-weight: 600; }
+.cmd-out .cmd-note { color: var(--muted); font-style: italic; }
+.cmd-recent { margin-top: 10px; }
+.cmd-recent-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cmd-recent-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.cmd-recent-item { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; padding: 4px 6px; color: inherit; cursor: pointer; font: inherit; min-width: 0; }
+.cmd-recent-item:hover, .cmd-recent-item:focus-visible { background: var(--bg); }
+.cmd-recent-item code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.8125rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cmd-recent-shell { color: var(--muted); font-size: 0.75rem; flex: none; width: 2.2em; }
+html.commands-mode .cmd-out { flex: 1; max-height: none; }
 html.files-mode #genBody .shared-list { flex: 1 1 auto; max-height: none; min-height: 120px; }
 html.files-mode #genBody .shared-list:has(> .shared-row) { flex: 0 1 auto; min-height: 0; } /* (the list of folders: as tall as it is) */
 html.files-mode .shared-stage img { max-height: 70vh; }

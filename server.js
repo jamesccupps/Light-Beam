@@ -2266,7 +2266,7 @@ function forgetSitesOf(id) {
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
 // (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
 const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted',
-  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites']);
+  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites', 'commands']);
 // (1.22) What a Raspberry Pi's firmware says about its power and speed (vcgencmd get_throttled), now and since it started.
 const THROTTLE_FLAGS = new Set(['undervoltage', 'capped', 'throttled', 'softLimit']);
 const HOT_C = 80; // a Pi 4 or 5 slows itself down from 80 °C
@@ -2333,7 +2333,7 @@ function parseStatus(body) {
       const macs = Array.isArray(value) && value.length <= 8 ? value.map(normalizeMac) : [null];
       if (macs.some(m => !m)) throw bad('macs must be a list of up to 8 addresses like aa:bb:cc:dd:ee:ff');
       out.macs = [...new Set(macs)];
-    } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked' || key === 'startsWithWindows' || key === 'startWanted' || key === 'uacOnScreen') {
+    } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked' || key === 'startsWithWindows' || key === 'startWanted' || key === 'uacOnScreen' || key === 'commands') {
       if (typeof value !== 'boolean') throw bad(`${key} must be true or false`);
       out[key] = value;
     } else if (key === 'sites') {
@@ -2364,7 +2364,7 @@ function parseStatus(body) {
 
 // What other devices see of a status report (no MAC addresses).
 function publicStatus(status) {
-  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, uacOnScreen, at } = status;
+  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, uacOnScreen, commands, at } = status;
   return {
     ...(battery && { battery }), ...(storage && { storage }), ...(os && { os }),
     ...(remoteControl !== undefined && { remoteControl }), ...(locked !== undefined && { locked }), ...(update && { update }),
@@ -2372,6 +2372,7 @@ function publicStatus(status) {
     ...(model && { model }), ...(bootedAt && { bootedAt }), ...(temperature !== undefined && { temperature }), ...(throttled && { throttled }), // (1.22)
     ...(controlProblem && { controlProblem }), // (1.27.1) Beam for Linux: why its remote control can't be on
     ...(uacOnScreen !== undefined && { uacOnScreen }), // (1.30.1) Windows shows its prompts (UAC) on the normal screen there
+    ...(commands !== undefined && { commands }), // (1.32) "Allow commands too" there
     at: at || 0,
   };
 }
@@ -2438,6 +2439,7 @@ function capabilitiesOf(device, ts = tailscaleOf(device)) {
     apps: canInstallApps(device), // (1.21) its Beam app installs Beam's apps (once allowed there)
     files: canShareFiles(device), // (1.26) its Beam app shares folders chosen there (shared folders)
     files2: canShareMore(device), // (1.28) ...with icons, thumbnails, previews, search and whole folders
+    commands: canRunCommands(device), // (1.32) its Beam app runs commands from the devices that may control it (on there)
   };
 }
 
@@ -2466,6 +2468,7 @@ async function putStatus(req, res, _m, url) {
   await rcStatusFrom(device, req, url, changes);
   const first = !device.status;
   const allowed = device.status?.remoteControl === true;
+  const commandsWere = device.status?.commands === true; // (1.32)
   const { update } = changes;
   if (update && (update.version !== device.status?.update?.version || update.problem !== device.status?.update?.problem)) {
     log.warn(`${device.name} couldn't install Beam ${update.version}: ${update.problem}`);
@@ -2482,6 +2485,10 @@ async function putStatus(req, res, _m, url) {
   if (first) log.info(`${device.name} reports its status: ${describeStatus(status)}`);
   if (changes.remoteControl === true && !device.rcMachine) await rcBind(device, req, url);
   if (changes.remoteControl !== undefined) rcSwitchReported(device, allowed);
+  if (changes.commands !== undefined && (changes.commands === true) !== commandsWere) { // (1.32)
+    log.info(`${device.name} ${changes.commands === true ? 'runs commands from the devices that may control it now' : 'no longer runs commands'}`);
+    if (changes.commands !== true) cmdStopOf(r => r.pc === device.id, `Commands were turned off on ${device.name}`, 'off');
+  }
   checkStatusAlerts(device);
   persistDevices();
   broadcastDevicesThrottled();
@@ -3322,6 +3329,319 @@ async function postDeviceLog(req, res, _m, url) {
   const text = body.text.length > LOG_MAX_BYTES ? body.text.slice(-LOG_MAX_BYTES) : body.text;
   ask.done({ name: statusText(body.name).slice(0, 80) || 'beam.log', text, size: Buffer.byteLength(text), at: now() });
   send(res, 204);
+}
+
+// ---------------------------------------------------------------- commands on a PC (1.32)
+// The user, 2026-11-06: "being able to remotely run powershell or other commands through beam". A PowerShell or Command
+// Prompt command on one of the user's PCs (Beam for Windows 1.25+), its output back while it runs. Who may: the
+// devices that may control that PC (the same sign-ins as remote control: trusted, lasting, never the CLI or a Linux
+// computer, of one of this Beam's Tailscale owners; the PC checks its own list again, each device pinned to its
+// Tailscale machine), and only once "Commands too" is on at that PC itself. Commands give no more than remote control
+// already does (a PowerShell window there). It runs as the PC's signed-in user, never as administrator or a service.
+// Nothing is kept here: the output goes straight to the sign-in that asked (the answer to its POST is an event stream
+// of its own), with the last CMD_BUFFER of it held for a minute should that connection drop (GET /api/commands/{run}
+// ?from=<seq> picks it up again; nobody back by then: the command is stopped). The log says who ran one where and how
+// it ended, never the command or its output (commands can hold passwords). (Beam-dev\plan\commands.md)
+
+const CMD_APP_MIN = '1.25.0';
+const CMD_SHELLS = { powershell: 'PowerShell', cmd: 'Command Prompt' };
+const CMD_MAX_CHARS = 8000;
+const CMD_RUNNING_MAX = 4; // commands running on one PC at once
+const CMD_BUFFER = 1024 * 1024; // output held for a watcher that comes back
+const CMD_STALL = 4 * CMD_BUFFER; // a watcher that stopped reading is dropped (it can come back for what's held)
+const CMD_CHUNK_MAX = 256 * 1024; // characters in one post from the PC
+const CMD_GRACE_MS = FAST_TIMEOUTS ? 3000 : 60_000; // the watcher gone: how long the command waits for it
+const CMD_QUIET_MS = FAST_TIMEOUTS ? 4000 : 90_000; // nothing from the PC (it posts every 30 s while one runs): lost
+const CMD_ANSWER_MS = FAST_TIMEOUTS ? 3000 : 20_000; // the PC's first word (running, or refused)
+const CMD_KEEP_MS = FAST_TIMEOUTS ? 3000 : 60_000; // an ended command, for a watcher that comes back late
+const CMD_PING_MS = FAST_TIMEOUTS ? 1000 : 20_000;
+const CMD_REASON = /^[a-z][a-z-]{0,29}$/;
+const cmdStarts = new Limiter(30, 60_000); // per asking device
+const cmdRuns = new Map(); // run id -> the command, in memory only
+const cmdStats = { started: 0, refused: 0, ended: 0, stopped: 0, lost: 0 };
+let cmdPinger = null;
+
+const commandsApp = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, CMD_APP_MIN);
+const canRunCommands = d => commandsApp(d) && rcAllowed(d) && d.status?.commands === true;
+const cmdOpen = run => run.state !== 'ended';
+
+function commandsOff(pc) {
+  if (pc.platform !== 'windows') return `${pc.name} can’t run commands (only PCs with the Beam app for Windows can)`;
+  if (!commandsApp(pc)) return `${pc.name} needs the Beam app ${CMD_APP_MIN} or later to run commands`;
+  if (!rcAllowed(pc)) return `Remote control is off on ${pc.name}: commands go only to the devices that may control it (both are turned on at that PC)`;
+  return `Commands are off on ${pc.name} (“Allow commands too” is turned on at that PC: Beam’s menu in its taskbar corner, or Settings → Security there)`;
+}
+
+function cmdRefused(me, pc, reason, message, status = 409) {
+  cmdStats.refused++;
+  logOnce(`cmd-refused ${reason} ${me} ${pc.id}`, `Refused a command on ${pc.name} for ${whoName(me)}: ${message}`,
+    n => `Refused ${n} more command${n === 1 ? '' : 's'} on ${pc.name} for ${whoName(me)} (${reason})`);
+  return httpError(status, message, { reason });
+}
+
+const CMD_INELIGIBLE = {
+  'sign-in': 'To run commands on PCs from here, sign in to Beam on this device with a pairing link, an approval from another device or the password',
+  trusted: 'This device can’t run commands on PCs until it’s approved: in Beam on your phone or one of your PCs, open Settings → Devices and let it (“Can control PCs and install apps”)',
+  linux: 'A computer with Beam for Linux doesn’t run commands on other devices',
+};
+
+// The command asked for: its text (line breaks as \n), checked for its shell.
+function commandText(body) {
+  if (!Object.hasOwn(CMD_SHELLS, body.shell) || typeof body.command !== 'string') {
+    throw httpError(400, 'Expected {"shell": "powershell" or "cmd", "command": "<the command>"}');
+  }
+  const text = body.command.toWellFormed().replace(/\r\n?/g, '\n');
+  if (!text.trim()) throw httpError(400, 'The command is empty');
+  if (text.length > CMD_MAX_CHARS) throw httpError(400, `A command can be at most ${CMD_MAX_CHARS} characters`);
+  if (text.includes('\0')) throw httpError(400, 'A command can’t hold a NUL character');
+  if (body.shell === 'cmd' && text.trim().includes('\n')) {
+    throw httpError(400, 'Command Prompt takes one line (chain commands with &, or pick PowerShell for more lines)', { reason: 'one-line' });
+  }
+  return body.shell === 'cmd' ? text.trim() : text;
+}
+
+const cmdEventText = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+// An event of the command's own stream: held (the newest CMD_BUFFER of them) and written to whoever watches now.
+function cmdEmit(run, event, data) {
+  const seq = ++run.seq;
+  const text = cmdEventText(event, { seq, ...data });
+  run.held.push({ seq, text });
+  run.heldChars += text.length;
+  while (run.heldChars > CMD_BUFFER && run.held.length > 1) {
+    const gone = run.held.shift();
+    run.heldChars -= gone.text.length;
+    run.dropped = gone.seq;
+  }
+  cmdWrite(run, text);
+}
+
+function cmdWrite(run, text) {
+  const res = run.watcher;
+  if (!res || res.writableEnded || res.destroyed) return;
+  if (res.writableLength > CMD_STALL) return void res.destroy(); // (it comes back for what's held)
+  res.write(text);
+}
+
+// This answer watches the command from event `from` on (0: from its start). The newest watcher wins.
+function cmdWatch(run, req, res, from) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-store, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  req.socket.setNoDelay(true);
+  const old = run.watcher;
+  run.watcher = null;
+  if (old && !old.writableEnded) old.end();
+  clearTimeout(run.grace);
+  run.grace = null;
+  if (from > 0 && run.dropped > from) res.write(cmdEventText('gap', { from: from + 1, to: run.dropped }));
+  const replay = run.held.filter(x => x.seq > from).map(x => x.text).join('');
+  if (replay) res.write(replay);
+  if (!cmdOpen(run)) return void res.end();
+  run.watcher = res;
+  res.on('close', () => cmdWatcherGone(run, res));
+  cmdPinger ||= setInterval(() => { for (const r of cmdRuns.values()) if (r.watcher) cmdWrite(r, ': ping\n\n'); }, CMD_PING_MS).unref();
+}
+
+function cmdWatcherGone(run, res) {
+  if (run.watcher !== res) return;
+  run.watcher = null;
+  if (!cmdOpen(run)) return;
+  clearTimeout(run.grace);
+  run.grace = setTimeout(() => {
+    run.grace = null;
+    if (run.watcher || !cmdOpen(run)) return;
+    log.info(`A command from ${whoName(run.by)} on ${nameOf(run.pc)} is being stopped: nothing watched its output for ${Math.round(CMD_GRACE_MS / 1000)} s`);
+    cmdAskStop(run, 'gone');
+  }, CMD_GRACE_MS);
+}
+
+function cmdAskStop(run, why) {
+  run.stopAsked ||= why;
+  sendToPc(run.pc, 'command-stop', { id: run.id });
+}
+
+// Nothing from the PC for CMD_QUIET_MS (it posts every 30 s while a command runs): it's gone.
+function cmdHeard(run) {
+  clearTimeout(run.quiet);
+  run.quiet = setTimeout(() => {
+    cmdStats.lost++;
+    cmdEnd(run, { error: `${nameOf(run.pc)} stopped answering, so the command’s end isn’t known`, reason: 'lost' });
+  }, CMD_QUIET_MS);
+}
+
+function cmdEnd(run, end) {
+  if (!cmdOpen(run)) return;
+  run.state = 'ended';
+  for (const t of ['answer', 'quiet', 'grace']) { clearTimeout(run[t]); run[t] = null; }
+  cmdEmit(run, 'end', end);
+  const res = run.watcher;
+  run.watcher = null;
+  if (res && !res.writableEnded) res.end();
+  cmdStats.ended++;
+  if (end.stopped) cmdStats.stopped++;
+  const pc = nameOf(run.pc);
+  const secs = ((now() - run.at) / 1000).toFixed(1);
+  log.info(end.error ? `A command from ${whoName(run.by)} on ${pc} ended without running to its end: ${end.error}`
+    : `A command from ${whoName(run.by)} on ${pc} ${end.stopped ? 'was stopped' : 'ended'} (exit code ${end.code ?? 'unknown'}, ${secs} s, ${formatSize(run.outChars)} of output${end.cut ? ', cut' : ''})`);
+  setTimeout(() => cmdRuns.delete(run.id), CMD_KEEP_MS).unref();
+}
+
+// Stops (and ends here at once) the commands that match: their device removed or signed out, its trust taken away,
+// Beam stopping or moving.
+function cmdStopOf(match, error, reason) {
+  for (const run of [...cmdRuns.values()]) {
+    if (!cmdOpen(run) || !match(run)) continue;
+    cmdAskStop(run, reason);
+    cmdEnd(run, { error, reason });
+  }
+}
+
+function cmdRunOf(id, req, url, me) {
+  const run = cmdRuns.get(id);
+  if (!run || run.by !== me || run.key !== rcCredKey(authOf(req), machineOf(req), profileOf(req, url))) throw httpError(404, 'No such command');
+  return run;
+}
+
+// POST /api/devices/{id}/commands { shell, command }: runs it on that PC. The answer is the command's own event
+// stream: start, running (the PC took it), out { out: [{ s: 'o'|'e', t }] }, end { code, ms, stopped?, cut? } or
+// end { error, reason }; each with its seq, and a ping every 20 s.
+async function runCommand(req, res, [id], url) {
+  const me = rcCaller(req, url);
+  const why = rcViewerIneligible(req, url, me);
+  if (why) throw httpError(403, CMD_INELIGIBLE[why] || RC_INELIGIBLE[why], { reason: why });
+  if (cmdStarts.blocked(me)) {
+    throw Object.assign(httpError(429, 'Too many commands; try again in a minute'), { headers: { 'Retry-After': String(cmdStarts.retryAfter(me)) } });
+  }
+  cmdStarts.hit(me);
+  const body = await readJson(req, { limit: CMD_MAX_CHARS * 6 + 1024 });
+  const command = commandText(body);
+  const pc = targetDevice(id);
+  const viewer = devices[me];
+  const auth = authOf(req);
+  const key = KEY;
+  const check = () => {
+    if (pc.id === me) throw httpError(409, 'That’s this device: run it here', { reason: 'self' });
+    if (!canRunCommands(pc)) throw cmdRefused(me, pc, !commandsApp(pc) ? 'old-app' : !rcAllowed(pc) ? 'not-allowed' : 'off', commandsOff(pc));
+    if (!appOnline(pc.id)) throw cmdRefused(me, pc, 'offline', `${pc.name} isn’t connected to Beam right now`);
+    if ([...cmdRuns.values()].filter(r => r.pc === pc.id && cmdOpen(r)).length >= CMD_RUNNING_MAX) {
+      throw cmdRefused(me, pc, 'busy', `${pc.name} is already running ${CMD_RUNNING_MAX} commands: wait for one to end, or stop one`, 429);
+    }
+  };
+  check();
+  const machine = machineOf(req);
+  const you = await tailnetIdentity(machine);
+  // Things may have changed while whois answered: the asker removed, merged away or signed out; the PC too.
+  if (devices[me] !== viewer || (auth.via === 'token' ? !tokenStore.tokens[auth.hash] : KEY !== key)) {
+    throw httpError(401, 'This device was signed out or removed meanwhile');
+  }
+  if (devices[pc.id] !== pc) throw httpError(404, 'No such device');
+  check();
+  const stillWhy = rcViewerIneligible(req, url, me);
+  if (stillWhy) throw httpError(403, CMD_INELIGIBLE[stillWhy] || RC_INELIGIBLE[stillWhy], { reason: stillWhy });
+  if (!you) throw cmdRefused(me, pc, 'no-tailscale', 'This device has no Tailscale address the server knows: connect to Beam through Tailscale');
+  if (!rcOwnerOk(you.user)) throw cmdRefused(me, pc, 'not-owner', `This device's Tailscale account (${you.user}) isn't one of this Beam's owners`, 403);
+  if (res.destroyed || req.socket.destroyed) return; // (the asker went away meanwhile: nothing runs; req.destroyed is true once its body is read)
+  const runId = crypto.randomBytes(8).toString('hex');
+  const ip = clientIp(req);
+  const run = {
+    id: runId, pc: pc.id, by: me, key: rcCredKey(auth, machine, profileOf(req, url)), shell: body.shell, at: now(), state: 'asked',
+    seq: 0, held: [], heldChars: 0, dropped: 0, watcher: null, pcSeq: 0, outChars: 0, stopAsked: null,
+    answer: null, quiet: null, grace: null,
+  };
+  cmdRuns.set(runId, run);
+  cmdStats.started++;
+  const request = {
+    id: runId, from: me, by: nameOf(me), at: run.at, shell: body.shell, command,
+    viewer: { ip: tailscale.isTailscaleIp(ip) ? ip : you.ip4 || you.ip6, ip4: you.ip4, ip6: you.ip6, node: you.node, user: you.user, platform: viewer.platform || null },
+  };
+  cmdWatch(run, req, res, 0);
+  cmdEmit(run, 'start', { id: runId, pc: { id: pc.id, name: pc.name }, shell: body.shell, at: run.at });
+  run.answer = setTimeout(() => {
+    if (run.state === 'asked') cmdEnd(run, { error: `${pc.name} didn’t take the command (its Beam app didn’t answer)`, reason: 'no-answer' });
+  }, CMD_ANSWER_MS);
+  cmdHeard(run);
+  sendToPc(pc.id, 'command-run', request);
+  log.info(`${whoName(me)} runs a ${CMD_SHELLS[body.shell]} command on ${pc.name} (from ${you.node || 'a Tailscale machine'}, ${request.viewer.ip}${you.user ? `, ${you.user}` : ''})`);
+}
+
+// GET /api/commands/{run}?from=<seq>: the same sign-in watches its command again (its connection dropped), from the
+// event after `from`; a `gap` event first when more came meanwhile than was held.
+function watchCommand(req, res, [id], url) {
+  const me = rcCaller(req, url);
+  const run = cmdRunOf(id, req, url, me);
+  const from = Number.parseInt(url.searchParams.get('from') || '0', 10);
+  cmdWatch(run, req, res, Number.isSafeInteger(from) && from > 0 ? from : 0);
+}
+
+// POST /api/commands/{run}/stop: the PC stops it (its whole process tree); the stream then ends with stopped.
+async function stopCommand(req, res, [id], url) {
+  const me = rcCaller(req, url);
+  const run = cmdRunOf(id, req, url, me);
+  await readJson(req, { optional: true });
+  if (cmdOpen(run)) cmdAskStop(run, 'asked');
+  send(res, 202, {});
+}
+
+// POST /api/devices/me/commands { id, seq, running?, out?, end?, error?, reason? }: the PC's word on a command it was
+// sent (its own app only), the posts counted from 1 (one sent again is ignored). → { stop } (stop it now); 404 with
+// reason "gone": nobody wants it any more (stopped, or ended here): stop it.
+async function postCommandOutput(req, res, _m, url) {
+  const d = devices[deviceIdOf(req, url)];
+  if (!d) throw httpError(400, 'X-Beam-Device-Id is required');
+  const body = await readJson(req, { limit: CMD_CHUNK_MAX * 6 + 4096 });
+  const gone = () => httpError(404, 'No such command (it was stopped, or it ended)', { reason: 'gone' });
+  const run = typeof body.id === 'string' ? cmdRuns.get(body.id) : null;
+  if (!run || run.pc !== d.id || !cmdOpen(run)) throw gone();
+  if (!(await rcFromPc(d, req, url))) throw rcNotFromPc(d, req);
+  if (!cmdOpen(run)) throw gone();
+  if (!Number.isSafeInteger(body.seq) || body.seq < 1) throw httpError(400, 'seq must count the posts from 1');
+  if (body.seq <= run.pcSeq) return send(res, 200, { stop: Boolean(run.stopAsked) });
+  const out = [];
+  if (body.out !== undefined) {
+    const bad = () => httpError(400, `out must be a list of {"s": "o" or "e", "t": "<text>"}, at most ${CMD_CHUNK_MAX} characters in all`);
+    if (!Array.isArray(body.out) || body.out.length > 2000) throw bad();
+    let chars = 0;
+    for (const part of body.out) {
+      if (!isPlainObject(part) || (part.s !== 'o' && part.s !== 'e') || typeof part.t !== 'string') throw bad();
+      chars += part.t.length;
+      if (chars > CMD_CHUNK_MAX) throw bad();
+      if (part.t) out.push({ s: part.s, t: part.t.toWellFormed() });
+    }
+  }
+  let end = null;
+  if (body.error !== undefined) {
+    const error = statusText(body.error).slice(0, 300);
+    if (!error) throw httpError(400, 'error must be a reason, in words');
+    end = { error, reason: typeof body.reason === 'string' && CMD_REASON.test(body.reason) ? body.reason : 'refused' };
+  } else if (body.end !== undefined) {
+    const e = body.end;
+    if (!isPlainObject(e) || (e.code !== null && !Number.isSafeInteger(e.code)) || (e.ms !== undefined && !(Number.isSafeInteger(e.ms) && e.ms >= 0))
+      || (e.stopped !== undefined && typeof e.stopped !== 'boolean') || (e.cut !== undefined && typeof e.cut !== 'boolean')) {
+      throw httpError(400, 'end must be {"code": <exit code> or null, "ms"?, "stopped"?, "cut"?}');
+    }
+    end = { code: e.code, ms: e.ms ?? now() - run.at, ...(e.stopped && { stopped: true }), ...(e.cut && { cut: true }) };
+  }
+  run.pcSeq = body.seq;
+  cmdHeard(run);
+  if (run.state === 'asked' && (body.running === true || out.length || end?.code !== undefined)) {
+    run.state = 'running';
+    clearTimeout(run.answer);
+    run.answer = null;
+    cmdEmit(run, 'running', {});
+  }
+  if (out.length) {
+    for (const part of out) run.outChars += part.t.length;
+    cmdEmit(run, 'out', { out });
+  }
+  if (end) {
+    if (end.error) cmdStats.refused++;
+    cmdEnd(run, end);
+  }
+  send(res, 200, { stop: Boolean(run.stopAsked) });
 }
 
 // ---------------------------------------------------------------- shared folders (1.26)
@@ -4669,10 +4989,12 @@ function endRcSession(session, reason, by = null, detail = '') {
 function endRcSessionsOf(ids, reason, by = null) {
   const set = new Set(ids);
   for (const x of [...rcSessions.values()]) if (set.has(x.host) || set.has(x.viewer)) endRcSession(x, reason, by);
+  cmdStopOf(r => set.has(r.pc) || set.has(r.by), 'Its device was removed or signed out', 'revoked'); // (1.32)
 }
 
 function endAllRcSessions(reason, by = null) {
   for (const x of [...rcSessions.values()]) endRcSession(x, reason, by);
+  cmdStopOf(() => true, 'Beam stopped or moved, so the command was stopped', 'server'); // (1.32)
 }
 
 // Sign-ins revoked one by one (signed out, expired) end only the sessions they take part in: as the viewer, the
@@ -4684,6 +5006,7 @@ function endRcSessionsOfTokens(hashes, records) {
   for (const x of [...rcSessions.values()]) {
     if (keys.has(x.viewerKey) || (x.hostKey ? keys.has(x.hostKey) : pcs.has(x.host))) endRcSession(x, 'revoked');
   }
+  cmdStopOf(r => keys.has(r.key) || pcs.has(r.pc), 'A sign-in it needs was revoked', 'revoked'); // (1.32)
 }
 
 // The PC accepted (its first lease or signal).
@@ -4702,6 +5025,7 @@ function rcSwitchReported(device, was) {
   if (!on) {
     delete device.rcDisable;
     for (const x of [...rcSessions.values()]) if (x.host === device.id) endRcSession(x, 'revoked', device.id);
+    cmdStopOf(r => r.pc === device.id, `Remote control was turned off on ${device.name}`, 'off'); // (1.32)
   } else if (device.rcDisable) {
     sendTo(new Set([device.id]), 'rc-disable', { from: device.rcDisable.from, by: whoName(device.rcDisable.from) });
   }
@@ -4711,7 +5035,7 @@ function rcSwitchReported(device, was) {
 // PUT /api/devices/me/status with remoteControl or locked: only the PC's own app may change them once remote
 // control is tied to it, and its first "on" ties it.
 async function rcStatusFrom(device, req, url, changes) {
-  if (changes.remoteControl === undefined && changes.locked === undefined) return;
+  if (changes.remoteControl === undefined && changes.locked === undefined && changes.commands === undefined) return; // (1.32: commands too)
   if (device.rcMachine && !(await rcFromPc(device, req, url))) throw rcNotFromPc(device, req);
 }
 
@@ -5552,7 +5876,7 @@ function sweep() {
   }
   if (pruned) persistTokens();
   for (const [value, exp] of usedHandoffs) if (exp < now()) usedHandoffs.delete(value);
-  for (const limiter of [passwordIp, passwordGlobal, badSecrets, loginRequestRate, notePuts, noteAsks, rcStarts, rcDisables]) limiter.prune();
+  for (const limiter of [passwordIp, passwordGlobal, badSecrets, loginRequestRate, notePuts, noteAsks, rcStarts, rcDisables, cmdStarts]) limiter.prune();
 }
 
 // Session sign-ins (borrowed computers) end after 12 h without use; their temporary devices are forgotten. (Also
@@ -5891,6 +6215,7 @@ async function putDeviceTrust(req, res, [id], url) {
       dropPairingsBy(target.id); // (2026-11-05, M21)
       const keys = new Set(changed.map(h => `t:${h}`));
       for (const x of [...rcSessions.values()]) if (keys.has(x.viewerKey)) endRcSession(x, 'revoked');
+      cmdStopOf(r => keys.has(r.key), `${target.name} may no longer run commands on PCs`, 'revoked'); // (1.32)
     }
     const by = whoName(resolveAlias(deviceIdOf(req, url) || ''), 'A device');
     log.info(body.trusted ? `${by} let ${target.name} control PCs, install apps and see the phone's notifications` : `${by} took away ${target.name}'s right to control PCs, install apps and see the phone's notifications`);
@@ -7237,6 +7562,7 @@ const FEATURES = [
   'text-size', // (1.29.0: appearance.text, the web app's text size: small, normal, large, larger)
   'uac-status', // (1.30.1: status `uacOnScreen`, a PC whose UAC prompts any program there could answer; the review's M28)
   'sites', // (1.31.0: GET/POST /api/sites, PATCH/DELETE /api/sites/{id}, POST /api/sites/check, the `sites` event, status `sites`)
+  'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];
 
 // A pairing link for another device: a single-use token that becomes that device's own token (15 minutes). (1.25)
@@ -8537,7 +8863,7 @@ function requestDone(req, socket, started) {
   socket.beamWritten = socket.bytesWritten;
   socket.beamRead = socket.bytesRead;
   const name = req.routeName || 'other';
-  if (name === 'events') return; // streams have their own numbers
+  if (name === 'events' || name === 'runCommand' || name === 'watchCommand') return; // streams have their own numbers
   const ms = performance.now() - started;
   let r = routeStats.get(name);
   if (!r) routeStats.set(name, (r = { count: 0, bytes: 0, bytesIn: 0, hist: new Uint32Array(BUCKETS) }));
@@ -8608,6 +8934,7 @@ function getMetrics(req, res) {
       sessions: rcSessions.size, live: [...rcSessions.values()].filter(x => x.state === 'live').length,
       started: rcStats.started, refused: rcStats.refused, ended: { ...rcStats.ended },
     },
+    commands: { running: [...cmdRuns.values()].filter(cmdOpen).length, ...cmdStats }, // (1.32)
   });
 }
 
@@ -8630,6 +8957,10 @@ const routes = [
   ['GET', `/api/devices/${DEV}/history`, getHistory],
   ['POST', '/api/devices/me/log', postDeviceLog],
   ['POST', `/api/devices/${DEV}/log`, askDeviceLog],
+  ['POST', '/api/devices/me/commands', postCommandOutput], // (1.32) commands on a PC
+  ['POST', `/api/devices/${DEV}/commands`, runCommand],
+  ['GET', `/api/commands/${ID}`, watchCommand],
+  ['POST', `/api/commands/${ID}/stop`, stopCommand],
   ['POST', '/api/devices/me/files', postDeviceFiles], // (1.26) shared folders
   ['POST', `/api/devices/${DEV}/files`, askDeviceFiles],
   ['POST', `/api/devices/${DEV}/files/copy`, askDeviceFilesCopy],
