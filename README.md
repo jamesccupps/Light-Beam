@@ -17,12 +17,14 @@ There are no accounts and no third-party cloud. Your devices reach your Beam pri
 | Device | How it runs Beam |
 |---|---|
 | **Anything with a browser** (iPhone, Android, Mac, Linux, Chromebook, Windows) | The web app, which installs to the home screen like an app |
-| **Windows** | Optional tray app `Beam.exe`: one self-updating file; its chat window is the same web app (WebView2) |
-| **Android** | Optional native app `beam.apk` (share sheet, phone notifications on your PCs, ringing, remote control) |
+| **Windows** | Optional tray app `Beam.exe`, built from source: one self-updating file; its chat window is the same web app (WebView2) |
+| **Android** | Optional native app `beam.apk`, built from source (share sheet, phone notifications on your PCs, ringing, remote control) |
 | **Scripts / terminal** | The `beam` command-line tool, or plain HTTP ([docs/API.md](docs/API.md)) |
 
-The browser is all you need to start: the native apps add system integration, and you build them yourself (see
-[Building the apps](docs/BUILDING.md#building-the-apps)).
+The browser is all you need to start: the native apps add system integration. **There are no downloads of them**,
+here or on the releases page: you build them from source ([Building the apps](docs/BUILDING.md#building-the-apps)),
+and your Beam then hands them to your devices. Each build carries its builder's own update and signing keys, so your
+devices only ever take updates you built.
 
 > **Status:** a personal project, now open source. It is developed and used every day on Windows 11 PCs, an Android
 > phone and a Raspberry Pi (Beam for Linux). The server is plain Node.js and its tests run on Linux (Ubuntu) as well as
@@ -80,7 +82,7 @@ Every device needs the **Tailscale app**, signed in to the same account. Then:
 - **Any browser:** open `https://<your-computer>.<your-tailnet>.ts.net`.
 - **Android:** once you've built the app, get `beam.apk` from **Add device → Get the app** on a signed-in device
   and install it. Chrome will ask you to allow installing apps from it.
-- **Windows:** download `Beam.exe` the same way and run it from anywhere. It finds your Beam over Tailscale by
+- **Windows:** once you've built it, download `Beam.exe` the same way and run it from anywhere. It finds your Beam over Tailscale by
   itself, and can start with Windows (its Settings).
 
 ### Signing in
