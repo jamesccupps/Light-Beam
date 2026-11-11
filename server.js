@@ -32,6 +32,7 @@ const winsetup = require('./lib/winsetup');
 const appsLib = require('./lib/apps');
 const sharesLib = require('./lib/shares');
 const sitesLib = require('./lib/sites'); // (1.31)
+const inboxLib = require('./lib/inbox'); // (1.33) what apps post to the alerts inbox
 const ws = require('./lib/websocket');
 const { version: VERSION } = require('./package.json');
 
@@ -87,6 +88,7 @@ const FILE = {
   history: path.join(DATA_DIR, 'history.json'), // (1.18) each device's history
   apps: path.join(DATA_DIR, 'apps.json'), // (1.21) the user's apps, and where each is installed
   sites: path.join(DATA_DIR, 'sites.json'), // (1.31) the sites the user added, and found ones' names and hiding
+  inbox: path.join(DATA_DIR, 'inbox.json'), // (1.33) the alerts inbox: the apps that send alerts, their alerts, what each device read
   alive: path.join(DATA_DIR, 'alive.json'), // (1.27.2) when Beam last ran, and whether it stopped on purpose
   importing: path.join(DATA_DIR, 'importing'), // (1.27.2) an import writing the data folder: Beam doesn't start meanwhile
 };
@@ -414,6 +416,7 @@ let alerts = []; // newest first, at most MAX_ALERTS (data/alerts.json)
 let history = {};
 let apps = []; // (1.21) the user's apps (data/apps.json; see "apps on every PC")
 let sites = { added: [], found: {} }; // (1.31) data/sites.json (see "sites")
+let inbox = { senders: [], alerts: [], read: {} }; // (1.33) data/inbox.json (see "the alerts inbox")
 const uploads = new Map(); // id -> upload session (see createUpload)
 let dataHealth = { itemsSource: 'new' };
 
@@ -430,7 +433,8 @@ const persistAlerts = jsonWriter(FILE.alerts, () => alerts, { log });
 const persistHistory = jsonWriter(FILE.history, () => history, { log, delay: FAST_TIMEOUTS ? 100 : 2000 });
 const persistApps = jsonWriter(FILE.apps, () => apps, { log });
 const persistSites = jsonWriter(FILE.sites, () => sites, { log });
-const WRITERS = [persist, persistDevices, persistAliases, persistTokens, persistRead, persistSettings, persistPassword, persistAlerts, persistHistory, persistApps, persistSites];
+const persistInbox = jsonWriter(FILE.inbox, () => inbox, { log, delay: FAST_TIMEOUTS ? 100 : 1000 }); // (1.33)
+const WRITERS = [persist, persistDevices, persistAliases, persistTokens, persistRead, persistSettings, persistPassword, persistAlerts, persistHistory, persistApps, persistSites, persistInbox];
 
 function flushAll(timeoutMs = 5000) {
   return Promise.race([Promise.all(WRITERS.map(w => w.flush())), sleep(timeoutMs)]);
@@ -668,6 +672,8 @@ function openData() {
   history = loadState(FILE.history, { fallback: {}, validate: validateHistory, log }).value;
   apps = loadState(FILE.apps, { fallback: [], validate: validateApps, log }).value; // (1.21)
   sites = loadState(FILE.sites, { fallback: { added: [], found: {} }, validate: validateSites, log }).value; // (1.31)
+  inbox = loadState(FILE.inbox, { fallback: { senders: [], alerts: [], read: {} }, validate: validateInbox, log }).value; // (1.33)
+  indexInbox();
   grandfatherTrust(); // (1.25)
   indexTokens();
   if (itemsNeedSave || loaded.source === 'tmp' || loaded.source === 'bak') persist();
@@ -1775,6 +1781,7 @@ function forgetDeviceNow(id, reason) {
   if (history[id]) { delete history[id]; persistHistory(); } // (1.18)
   if (apps.some(a => a.on[id])) { for (const a of apps) delete a.on[id]; persistApps(); } // (1.21)
   forgetSitesOf(id); // (1.31)
+  if (inbox.read[id]) { delete inbox.read[id]; persistInbox(); } // (1.33)
   if (settings.alerts?.offline?.includes(id)) {
     settings.alerts.offline = settings.alerts.offline.filter(d => d !== id);
     persistSettings();
@@ -2713,6 +2720,7 @@ function raiseAlert(kind, deviceId, level, text) {
   if (alerts.length > MAX_ALERTS) alerts.length = MAX_ALERTS;
   persistAlerts();
   broadcast('alert', alert);
+  inboxFromBeam(alert); // (1.33) in the alerts inbox too, as "Beam"
   (level === 'warn' ? log.warn : log.info)(`Alert: ${text}`);
   ntfyPost({ title: level === 'warn' ? 'Beam alert' : 'Beam', message: text, tags: [level === 'warn' ? 'warning' : 'information_source'], priority: level === 'warn' ? 4 : 3 });
   return alert;
@@ -3642,6 +3650,303 @@ async function postCommandOutput(req, res, _m, url) {
     cmdEnd(run, end);
   }
   send(res, 200, { stop: Boolean(run.stopAsked) });
+}
+
+// ---------------------------------------------------------------- the alerts inbox (1.33)
+// The user, 2026-11-10: "yeah lets do the alerts inbox" (IDEAS "One inbox for every app's alerts"): the programs that
+// reach the phone their own way (ntfy, webhooks, Home Assistant) post to Beam instead, and every device has them in one
+// place, the sidebar's Alerts. Beam is an ntfy server for them (lib/inbox.js reads what they send): the server is
+// `<Beam>/notify` and the topic the app's own key, made in Settings → Alerts by a trusted sign-in made to last (shown
+// once, kept hashed; it can post alerts and nothing else). Beam's own alerts are there too (sender "beam", without a
+// second pop-up). An app can be muted or snoozed; priority 1-2 only lists (ntfy: no sound), 3+ pops up on every
+// device. Only trusted sign-ins see the list and hear the events. data/inbox.json (in exports and backups): 30 days,
+// 300 an app, 2000 in all. Never in the log: an alert's words (only that an app posted, and from where).
+// (Beam-dev\plan\alerts-inbox.md)
+
+const INBOX_SENDERS_MAX = 50;
+const INBOX_PER_SENDER = 300;
+const INBOX_MAX = 2000;
+const INBOX_KEEP_MS = 30 * 86400e3;
+const INBOX_LIST = 500; // alerts in GET /api/inbox, newest first
+const INBOX_BODY_MAX = 64 * 1024;
+const INBOX_SNOOZE_MAX = 7 * 86400e3;
+const INBOX_KEY = /^bn_[A-Za-z0-9_-]{32}$/;
+const BEAM_SENDER = 'beam';
+const inboxPosts = new Limiter(60, 60_000); // per app (ntfy's default: a burst of 60)
+const inboxBadKeys = new Limiter(20, 10 * 60_000); // per address: keys that aren't one
+let inboxKeys = new Map(); // sha256(key) -> sender
+
+function indexInbox() { inboxKeys = new Map(inbox.senders.map(s => [s.keyHash, s])); }
+
+function validateInbox(v) {
+  if (!isPlainObject(v)) return null;
+  const senders = (Array.isArray(v.senders) ? v.senders : []).filter(s => isPlainObject(s) && /^[a-f0-9]{8}$/.test(s.id) && typeof s.name === 'string' && /^[a-f0-9]{64}$/.test(s.keyHash || ''));
+  const ids = new Set([BEAM_SENDER, ...senders.map(s => s.id)]);
+  const alertsIn = (Array.isArray(v.alerts) ? v.alerts : []).filter(a => isPlainObject(a) && /^[a-f0-9]{16}$/.test(a.id) && ids.has(a.sender) && Number.isFinite(a.at) && typeof a.text === 'string');
+  const read = {};
+  if (isPlainObject(v.read)) for (const [k, at] of Object.entries(v.read)) if (DEVICE_ID.test(k) && Number.isFinite(at)) read[k] = at;
+  return { senders, alerts: alertsIn, read };
+}
+
+const senderPublic = s => ({
+  id: s.id, name: s.name, at: s.at, ...(s.by && { by: whoName(s.by, null) }), muted: Boolean(s.muted), snoozeUntil: s.snoozeUntil > now() ? s.snoozeUntil : 0,
+  lastAt: s.lastAt || 0, count: s.count || 0, ...(s.lastFrom && { lastFrom: s.lastFrom }),
+});
+const BEAM_SENDER_PUBLIC = () => ({ id: BEAM_SENDER, name: 'Beam', builtIn: true, muted: false, snoozeUntil: 0, lastAt: inbox.alerts.find(a => a.sender === BEAM_SENDER)?.at || 0 });
+const inboxQuiet = s => Boolean(s.muted) || (s.snoozeUntil || 0) > now();
+const inboxChanged = () => broadcast('inbox-changed', { at: now() }, null, c => c.trusted && !c.temporary);
+
+// Oldest first out: past 30 days, past 300 of one app, past 2000 in all.
+function trimInbox() {
+  const cutoff = now() - INBOX_KEEP_MS;
+  const per = new Map();
+  inbox.alerts = inbox.alerts.filter(a => {
+    if (a.at < cutoff) return false;
+    const n = (per.get(a.sender) || 0) + 1;
+    per.set(a.sender, n);
+    return n <= INBOX_PER_SENDER;
+  }).slice(0, INBOX_MAX);
+}
+
+// An alert in: kept, and to every trusted stream (urgent, a pop-up, when `notify`).
+function addInboxAlert(senderId, a, from = null) {
+  const sender = senderId === BEAM_SENDER ? null : inbox.senders.find(s => s.id === senderId);
+  const alert = {
+    id: crypto.randomBytes(8).toString('hex'), sender: senderId, at: now(), ...(a.title && { title: a.title }), text: a.text, priority: a.priority,
+    ...(a.emojis && { emojis: a.emojis }), ...(a.tags && { tags: a.tags }), ...(a.click && { click: a.click }), ...(a.actions && { actions: a.actions }),
+    ...(a.attach && { attach: a.attach }), ...(from && { from }),
+  };
+  inbox.alerts.unshift(alert);
+  trimInbox();
+  if (sender) {
+    sender.lastAt = alert.at;
+    sender.count = (sender.count || 0) + 1;
+    if (from) sender.lastFrom = from; else delete sender.lastFrom;
+  }
+  persistInbox();
+  const notify = Boolean(sender) && alert.priority >= 3 && !inboxQuiet(sender);
+  broadcast('inbox', { alert, notify, sender: sender ? senderPublic(sender) : BEAM_SENDER_PUBLIC() }, () => notify, c => c.trusted && !c.temporary);
+  return alert;
+}
+
+// Beam's own alerts (raiseAlert) are in the inbox too, as "Beam" (they pop up as before: `alert`).
+function inboxFromBeam(alert) {
+  try {
+    addInboxAlert(BEAM_SENDER, { title: '', text: inboxLib.multiline(alert.text), priority: alert.level === 'warn' ? 4 : 3, ...(alert.level === 'warn' && { emojis: '⚠️' }) });
+  } catch (err) { log.warn(`The inbox didn't take Beam's alert: ${err.message}`); }
+}
+
+// The key: the topic, else Authorization (Bearer <key>, or Basic with the key as the password) or ?auth= (base64 of
+// such a header), as ntfy takes an access token.
+function inboxKeyOf(topic, req, url) {
+  if (INBOX_KEY.test(topic || '')) return topic;
+  let auth = String(req.headers.authorization || '');
+  const q = url.searchParams.get('auth');
+  if (!auth && q) { try { auth = Buffer.from(q, 'base64').toString('utf8'); } catch {} }
+  const bearer = /^Bearer\s+(\S+)$/i.exec(auth);
+  if (bearer && INBOX_KEY.test(bearer[1])) return bearer[1];
+  const basic = /^Basic\s+(\S+)$/i.exec(auth);
+  if (basic) {
+    const pass = Buffer.from(basic[1], 'base64').toString('utf8').split(':').slice(1).join(':');
+    if (INBOX_KEY.test(pass)) return pass;
+  }
+  return null;
+}
+
+// Where a post came from, for the list: this PC, or the Tailscale machine's name.
+function inboxFrom(req) {
+  if (machineOf(req) === 'host') return os.hostname().slice(0, 60) || null;
+  return tsIndex.get(clientIp(req))?.name || null;
+}
+
+// /notify[/<topic>[/publish|send|trigger]]: an app posting an alert, the ntfy way (or a webhook's JSON). No Beam sign-in:
+// the key is the topic (or ntfy's access token). Answers as ntfy does.
+async function handleNotify(req, res, url) {
+  req.routeName = 'notify';
+  const reply = (status, body, headers = {}) => send(res, status, body, { 'Cache-Control': 'no-store', ...headers });
+  const fail = (status, code, error, headers) => reply(status, inboxLib.ntfyError(status, code, error), headers);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const topic = parts[1] || '';
+  const verb = parts[2] || '';
+  if (parts.length > 3 || (verb && !['publish', 'send', 'trigger'].includes(verb)) || (topic && !/^[-_A-Za-z0-9]{1,64}$/.test(topic))) return fail(404, 40401, 'page not found');
+  const ip = clientIp(req);
+  if (inboxBadKeys.blocked(ip)) return fail(429, 42901, 'too many requests from this address', { 'Retry-After': String(inboxBadKeys.retryAfter(ip)) });
+  const isGet = req.method === 'GET' || req.method === 'HEAD';
+  if (isGet && !(verb && topic)) return fail(405, 40501, 'this Beam takes alerts only (they show in Beam: nothing to subscribe to here)');
+  if (!isGet && req.method !== 'POST' && req.method !== 'PUT') return fail(405, 40501, 'method not allowed');
+  let body;
+  try { body = isGet ? Buffer.alloc(0) : await readBody(req, INBOX_BODY_MAX); } catch { return fail(413, 41301, 'message too large'); }
+  // What it is: ntfy's JSON at the root (the topic in it), a webhook's JSON, or ntfy's text and headers.
+  let given = topic;
+  let read;
+  const text = body.toString('utf8');
+  const asJson = () => { try { return JSON.parse(text); } catch { return undefined; } };
+  if (!topic) {
+    const o = asJson();
+    if (!isPlainObject(o)) return fail(400, 40024, 'invalid JSON (publishing as JSON goes to the root, with its topic in it)');
+    given = typeof o.topic === 'string' ? o.topic : '';
+    read = () => inboxLib.fromNtfyJson(o);
+  } else if (!isGet && (isJsonType(req) || /^\s*[{[]/.test(text.slice(0, 64)))) {
+    const o = asJson();
+    read = o !== undefined && typeof o === 'object' && o !== null ? () => inboxLib.fromWebhook(o) : () => inboxLib.fromNtfy({ headers: req.headers, query: url.searchParams, body });
+  } else {
+    read = () => inboxLib.fromNtfy({ headers: req.headers, query: url.searchParams, body });
+  }
+  const key = inboxKeyOf(given, req, url);
+  const sender = key ? inboxKeys.get(sha256hex(key)) : null;
+  if (!sender) {
+    inboxBadKeys.hit(ip);
+    logOnce(`inbox-key ${ip}`, `Refused an alert from ${describeWhereSync(req)}: not the key of one of this Beam's apps (Settings → Alerts)`,
+      n => `Refused ${n} more alerts from ${describeWhereSync(req)} without one of this Beam's keys`);
+    return fail(403, 40301, 'forbidden: not the key of one of this Beam\'s apps (Beam: Settings → Alerts)');
+  }
+  if (inboxPosts.blocked(sender.id)) return fail(429, 42908, `too many alerts from ${sender.name} (60 a minute)`, { 'Retry-After': String(inboxPosts.retryAfter(sender.id)) });
+  inboxPosts.hit(sender.id);
+  let parsed;
+  try { parsed = read(); } catch (err) {
+    if (err instanceof inboxLib.InboxError) return fail(err.status, err.code, err.message);
+    throw err;
+  }
+  const from = inboxFrom(req);
+  const alert = addInboxAlert(sender.id, parsed, from);
+  logOnce(`inbox-post ${sender.id}`, `${sender.name} posted an alert${from ? ` (from ${from})` : ''}`, n => `${sender.name} posted ${n} more alert${n === 1 ? '' : 's'}`);
+  reply(200, inboxLib.ntfyAnswer(alert, given || topic));
+}
+
+function inboxCaller(req, url, what, { change = false } = {}) {
+  if (!isTrusted(authOf(req))) throw notTrusted(what);
+  if (change) requireLasting(req, url, what);
+  const me = resolveAlias(deviceIdOf(req, url) || '');
+  return me && devices[me] ? me : null;
+}
+
+// GET /api/inbox → { senders (Beam first), alerts (newest first), read (when this device last looked) }.
+function getInbox(req, res, _m, url) {
+  const me = inboxCaller(req, url, 'see the alerts');
+  send(res, 200, {
+    senders: [BEAM_SENDER_PUBLIC(), ...inbox.senders.map(senderPublic)],
+    alerts: inbox.alerts.slice(0, INBOX_LIST),
+    read: (me && inbox.read[me]) || 0,
+  }, { 'Cache-Control': 'no-store' });
+}
+
+// PUT /api/inbox/read { at }: this device has looked at the alerts up to `at` (its other windows hear it).
+async function putInboxRead(req, res, _m, url) {
+  const me = inboxCaller(req, url, 'see the alerts');
+  const body = await readJson(req);
+  if (!Number.isFinite(body.at) || body.at < 0) throw httpError(400, 'Expected {"at": <time in ms>}');
+  if (!me) throw httpError(400, 'X-Beam-Device-Id is required');
+  const at = Math.min(body.at, now());
+  if (at > (inbox.read[me] || 0)) {
+    inbox.read[me] = at;
+    persistInbox();
+    sendTo(new Set([me]), 'inbox-read', { at }, { trustedOnly: true });
+  }
+  send(res, 200, { read: inbox.read[me] || 0 });
+}
+
+// The addresses an app posts to: Beam's tailnet address (https: SHOPTrend takes no other), and this PC's own.
+async function inboxAddresses(key) {
+  const base = (await publicBase()) || lanBase();
+  const local = `http://127.0.0.1:${PORT}`;
+  return { server: base ? `${base}/notify` : null, url: base ? `${base}/notify/${key}` : null, localServer: `${local}/notify`, localUrl: `${local}/notify/${key}`, topic: key };
+}
+
+const newInboxKey = () => `bn_${crypto.randomBytes(24).toString('base64url')}`;
+const inboxName = v => inboxLib.oneLine(v, 60);
+
+// POST /api/inbox/senders { name } → 201 { sender, key, server, url, localServer, localUrl, topic } (the key only now).
+async function addInboxSender(req, res, _m, url) {
+  const me = inboxCaller(req, url, 'add an app that sends alerts', { change: true });
+  const body = await readJson(req);
+  const name = inboxName(body.name);
+  if (!name) throw httpError(400, 'Expected {"name": "<the app\'s name>"}');
+  if (inbox.senders.length >= INBOX_SENDERS_MAX) throw httpError(409, `This Beam has ${INBOX_SENDERS_MAX} apps that send alerts: remove one first`);
+  if (inbox.senders.some(s => s.name.toLowerCase() === name.toLowerCase())) throw httpError(409, `There's an app called ${name} already`, { reason: 'exists' });
+  const key = newInboxKey();
+  let id;
+  do id = crypto.randomBytes(4).toString('hex'); while (inbox.senders.some(s => s.id === id));
+  const sender = { id, name, keyHash: sha256hex(key), at: now(), by: me, muted: false, snoozeUntil: 0, lastAt: 0, count: 0 };
+  inbox.senders.push(sender);
+  indexInbox();
+  persistInbox();
+  inboxChanged();
+  log.info(`${whoName(me, 'A browser')} added ${name} to the apps that send alerts`);
+  send(res, 201, { sender: senderPublic(sender), key, ...(await inboxAddresses(key)) }, { 'Cache-Control': 'no-store' });
+}
+
+function inboxSenderOf(id) {
+  const s = inbox.senders.find(x => x.id === id);
+  if (!s) throw httpError(404, 'No such app');
+  return s;
+}
+
+// PATCH /api/inbox/senders/{id} { name?, muted?, snoozeUntil? (0: not snoozed) }
+async function patchInboxSender(req, res, [id], url) {
+  const me = inboxCaller(req, url, 'change the apps that send alerts', { change: true });
+  const s = inboxSenderOf(id);
+  const body = await readJson(req);
+  const unknown = Object.keys(body).filter(k => !['name', 'muted', 'snoozeUntil'].includes(k));
+  if (unknown.length) throw httpError(400, `Can't change ${unknown.join(', ')}`);
+  if (body.name !== undefined) {
+    const name = inboxName(body.name);
+    if (!name) throw httpError(400, 'name must be 1 to 60 characters');
+    if (inbox.senders.some(x => x !== s && x.name.toLowerCase() === name.toLowerCase())) throw httpError(409, `There's an app called ${name} already`, { reason: 'exists' });
+    s.name = name;
+  }
+  if (body.muted !== undefined) {
+    if (typeof body.muted !== 'boolean') throw httpError(400, 'muted must be true or false');
+    s.muted = body.muted;
+  }
+  if (body.snoozeUntil !== undefined) {
+    const until = body.snoozeUntil === null ? 0 : body.snoozeUntil;
+    if (!Number.isFinite(until) || until < 0 || until > now() + INBOX_SNOOZE_MAX) throw httpError(400, 'snoozeUntil must be a time within 7 days (0: not snoozed)');
+    s.snoozeUntil = until > now() ? Math.round(until) : 0;
+  }
+  persistInbox();
+  inboxChanged();
+  log.info(`${whoName(me, 'A browser')} changed ${s.name} (alerts${s.muted ? ', muted' : ''}${s.snoozeUntil ? ', snoozed' : ''})`);
+  send(res, 200, { sender: senderPublic(s) });
+}
+
+// POST /api/inbox/senders/{id}/key: a new key for it (the old one stops working at once).
+async function newInboxSenderKey(req, res, [id], url) {
+  const me = inboxCaller(req, url, 'change the apps that send alerts', { change: true });
+  const s = inboxSenderOf(id);
+  await readJson(req, { optional: true });
+  const key = newInboxKey();
+  s.keyHash = sha256hex(key);
+  indexInbox();
+  persistInbox();
+  log.info(`${whoName(me, 'A browser')} made a new key for ${s.name} (the old one stops working)`);
+  send(res, 200, { sender: senderPublic(s), key, ...(await inboxAddresses(key)) }, { 'Cache-Control': 'no-store' });
+}
+
+// DELETE /api/inbox/senders/{id}: the app and its alerts go.
+function deleteInboxSender(req, res, [id], url) {
+  const me = inboxCaller(req, url, 'change the apps that send alerts', { change: true });
+  const s = inboxSenderOf(id);
+  inbox.senders = inbox.senders.filter(x => x !== s);
+  inbox.alerts = inbox.alerts.filter(a => a.sender !== s.id);
+  indexInbox();
+  persistInbox();
+  inboxChanged();
+  log.info(`${whoName(me, 'A browser')} removed ${s.name} from the apps that send alerts`);
+  send(res, 204);
+}
+
+// DELETE /api/inbox/alerts/{id}: one alert. DELETE /api/inbox/alerts?sender=<id>: all of an app's ("beam": Beam's own).
+function deleteInboxAlerts(req, res, m, url) {
+  inboxCaller(req, url, 'delete alerts', { change: true });
+  const id = m?.[0];
+  const sender = url.searchParams.get('sender');
+  if (!id && !sender) throw httpError(400, 'Name the alert, or ?sender=<the app>');
+  const before = inbox.alerts.length;
+  inbox.alerts = inbox.alerts.filter(a => (id ? a.id !== id : a.sender !== sender));
+  const gone = before - inbox.alerts.length;
+  if (id && !gone) throw httpError(404, 'No such alert');
+  if (gone) { persistInbox(); inboxChanged(); }
+  send(res, 200, { deleted: gone });
 }
 
 // ---------------------------------------------------------------- shared folders (1.26)
@@ -7562,6 +7867,7 @@ const FEATURES = [
   'text-size', // (1.29.0: appearance.text, the web app's text size: small, normal, large, larger)
   'uac-status', // (1.30.1: status `uacOnScreen`, a PC whose UAC prompts any program there could answer; the review's M28)
   'sites', // (1.31.0: GET/POST /api/sites, PATCH/DELETE /api/sites/{id}, POST /api/sites/check, the `sites` event, status `sites`)
+  'inbox', // (1.33.0: the alerts inbox: /notify (ntfy's publishing), GET /api/inbox, /api/inbox/senders, /api/inbox/alerts, PUT /api/inbox/read, the `inbox`, `inbox-changed` and `inbox-read` events)
   'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];
 
@@ -8542,7 +8848,7 @@ function helloProof(url) {
 
 // ---------------------------------------------------------------- export / import
 
-const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|apps\.json|sites\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|app-files\/[a-f0-9]{8}\/[A-Za-z0-9_()+-][A-Za-z0-9._ ()+-]{0,99}|apps\/(Beam\.exe|beam\.apk|beam-linux\.js)(\.json)?)$/;
+const EXPORT_NAME = /^(beam-export\.json|key|server-id|settings\.json|password\.json|devices\.json|aliases\.json|tokens\.json|read\.json|alerts\.json|history\.json|apps\.json|sites\.json|inbox\.json|items\.json|files\/[a-f0-9]{16}|texts\/[a-f0-9]{16}\.txt|thumbs\/[a-f0-9]{16}|app-files\/[a-f0-9]{8}\/[A-Za-z0-9_()+-][A-Za-z0-9._ ()+-]{0,99}|apps\/(Beam\.exe|beam\.apk|beam-linux\.js)(\.json)?)$/;
 
 // Everything a Beam is, as a .tar.gz: the key, server id, settings, sign-ins, devices, items and their files.
 // Leaves out unfinished uploads, logs and temporary files. items.json comes last and lists only the items whose
@@ -8566,6 +8872,7 @@ async function writeExport(out, state, extra = {}) {
     await writer.addBuffer('alerts.json', JSON.stringify(state.alerts || []));
     await writer.addBuffer('history.json', JSON.stringify(state.history || {})); // (1.18)
     await writer.addBuffer('sites.json', JSON.stringify(state.sites || { added: [], found: {} })); // (1.31)
+    await writer.addBuffer('inbox.json', JSON.stringify(state.inbox || { senders: [], alerts: [], read: {} })); // (1.33)
     const kept = [];
     for (const item of state.items) {
       let ok = true;
@@ -8602,7 +8909,7 @@ async function addStored(writer, name, file) {
 }
 
 function snapshotState() {
-  return structuredClone({ key: KEY, serverId: SERVER_ID, settings, password, devices, aliases, tokens: tokenStore, read: readMarks, alerts, history, apps, sites, items });
+  return structuredClone({ key: KEY, serverId: SERVER_ID, settings, password, devices, aliases, tokens: tokenStore, read: readMarks, alerts, history, apps, sites, inbox, items });
 }
 
 async function exportApi(req, res, _m, url) {
@@ -8935,6 +9242,7 @@ function getMetrics(req, res) {
       started: rcStats.started, refused: rcStats.refused, ended: { ...rcStats.ended },
     },
     commands: { running: [...cmdRuns.values()].filter(cmdOpen).length, ...cmdStats }, // (1.32)
+    inbox: { senders: inbox.senders.length, alerts: inbox.alerts.length }, // (1.33)
   });
 }
 
@@ -8957,6 +9265,14 @@ const routes = [
   ['GET', `/api/devices/${DEV}/history`, getHistory],
   ['POST', '/api/devices/me/log', postDeviceLog],
   ['POST', `/api/devices/${DEV}/log`, askDeviceLog],
+  ['GET', '/api/inbox', getInbox], // (1.33) the alerts inbox
+  ['PUT', '/api/inbox/read', putInboxRead],
+  ['POST', '/api/inbox/senders', addInboxSender],
+  ['PATCH', '/api/inbox/senders/([a-f0-9]{8})', patchInboxSender],
+  ['DELETE', '/api/inbox/senders/([a-f0-9]{8})', deleteInboxSender],
+  ['POST', '/api/inbox/senders/([a-f0-9]{8})/key', newInboxSenderKey],
+  ['DELETE', `/api/inbox/alerts/${ID}`, deleteInboxAlerts],
+  ['DELETE', '/api/inbox/alerts', deleteInboxAlerts],
   ['POST', '/api/devices/me/commands', postCommandOutput], // (1.32) commands on a PC
   ['POST', `/api/devices/${DEV}/commands`, runCommand],
   ['GET', `/api/commands/${ID}`, watchCommand],
@@ -9231,6 +9547,8 @@ async function handle(req, res) {
   const url = new URL(req.url, 'http://beam');
   const { pathname } = url;
   if (setting('movedTo')) return handleMoved(req, res, url);
+  // (1.33) an app posting to the alerts inbox, the ntfy way: its key is its sign-in
+  if (pathname === '/notify' || pathname.startsWith('/notify/')) return handleNotify(req, res, url);
   const isApi = pathname.startsWith('/api/') || pathname.startsWith('/download/');
 
   if (!isApi) {

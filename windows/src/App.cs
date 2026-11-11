@@ -740,6 +740,9 @@ namespace Beam
                 case "alert":
                     OnAlert(d);
                     break;
+                case "inbox": // Beam 1.33: an alert in the alerts inbox (a notification when the server says it pops up)
+                    OnInbox(d);
+                    break;
                 case "speed-test": // Beam 1.18: another device asked this PC for a speed test (Settings → Connections)
                     SpeedTest.Run(this, Json.Str(d, "id"));
                     break;
@@ -1160,6 +1163,39 @@ namespace Beam
             bool warn = Json.Str(d, "level") == "warn";
             string conv = device != null && device != Me && DeviceById(device) != null ? device : null;
             notifier.Show(warn ? "Beam alert" : "Beam", text, () => ShowMain(conv, null), "alert " + kind, warn ? ToolTipIcon.Warning : ToolTipIcon.Info);
+        }
+
+        // (1.26, Beam 1.33) An alert from one of the user's apps (the alerts inbox): a notification when the server says it
+        // pops up (priority 3 and up, the app neither muted nor snoozed; Beam's own pop up as `alert`), unless the window
+        // shows the Alerts list. A click opens it there. beam.log names the app, never the alert's words.
+        readonly HashSet<string> inboxShown = new HashSet<string>();
+        void OnInbox(Dictionary<string, object> d)
+        {
+            if (!Json.Bool(d, "notify", false)) return;
+            var a = Json.Obj(Json.Get(d, "alert"));
+            var s = Json.Obj(Json.Get(d, "sender"));
+            string id = a != null ? Json.Str(a, "id") : null, text = a != null ? Json.Str(a, "text") : null;
+            if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(text)) return;
+            if (inboxShown.Count > 500) inboxShown.Clear();
+            if (!inboxShown.Add(id)) return;
+            if (WatchingAlerts()) return;
+            string app = (s != null ? Json.Str(s, "name") : null) ?? "An app";
+            string head = ((Json.Str(a, "emojis") ?? "") + " " + (Json.Str(a, "title") ?? "")).Trim();
+            bool high = Json.Long(a, "priority", 3) >= 4;
+            notifier.Show(head.Length > 0 ? app + ": " + head : app, text, () => OpenAlerts(), "alert from " + app, high ? ToolTipIcon.Warning : ToolTipIcon.Info);
+        }
+
+        // The page's Alerts list is on screen (it says `viewing { conversation: "alerts" }`).
+        public bool WatchingAlerts()
+        {
+            return main != null && !main.IsDisposed && main.IsShowing(new List<string> { "alerts" });
+        }
+
+        // An alert's notification was clicked: the window, on the Alerts list.
+        void OpenAlerts()
+        {
+            ShowMain(null, null);
+            if (main != null && !main.IsDisposed) main.OpenPanel("alerts");
         }
 
         // The page's "Remote Desktop" action (bridge remoteDesktop): Windows' own client for that computer.

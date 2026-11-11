@@ -6145,6 +6145,182 @@ test('1.32 Commands on a PC: an automatic sign-in that isn’t approved runs non
   } finally { await t.stop(); }
 });
 
+test('1.33 Alerts inbox: an app’s key (made by a trusted sign-in, shown once); alerts posted the ntfy ways (JSON at the root, text and headers, GET …/trigger, an access token) and as a webhook’s JSON; what pops up and what only lists; mute, snooze, read, a new key, delete, remove; Beam’s own alerts in it; kept across a restart; never in the log', async () => {
+  const roomy = `${500 * 1024 ** 3},${1000 * 1024 ** 3}`;
+  const s = await startServer('inbox', 8791, { env: { BEAM_TEST_DISK: roomy } });
+  try {
+    const K = s.key;
+    const desk = app(K, 'inboxdesk001', 'Desktop', 'windows', from('100.64.93.1'));
+    const phone = app(K, 'inboxphone01', 'Pixel', 'android', from('100.64.93.2'));
+    for (const h of [desk, phone]) await s.req('GET', '/api/me', { headers: h });
+    const api = (method, route, h = desk, body) => s.req(method, route, { headers: json(h), ...(body !== undefined && { body: JSON.stringify(body) }) });
+    const notify = (route, { method = 'POST', body, headers = {} } = {}) => s.req(method, route, { headers: { ...from('100.64.93.9'), ...headers }, body });
+    assert.ok((await s.req('GET', '/api/info', { headers: desk })).json.features.includes('inbox'));
+    let r = await api('GET', '/api/inbox');
+    assert.deepEqual([r.status, r.json.senders.map(x => x.id), r.json.alerts, r.json.read], [200, ['beam'], [], 0]);
+    // An app's key: once, at the start.
+    r = await api('POST', '/api/inbox/senders', desk, { name: '  Stock\u0000 Watcher ' });
+    assert.equal(r.status, 201, r.body);
+    const key = r.json.key;
+    const stock = r.json.sender;
+    assert.match(key, /^bn_[A-Za-z0-9_-]{32}$/);
+    assert.deepEqual([stock.name, stock.muted, stock.count, r.json.topic, r.json.localServer, r.json.localUrl],
+      ['Stock Watcher', false, 0, key, 'http://127.0.0.1:8791/notify', `http://127.0.0.1:8791/notify/${key}`]);
+    assert.equal((await api('POST', '/api/inbox/senders', desk, { name: 'stock watcher' })).status, 409, 'the same name twice');
+    assert.ok(!JSON.stringify((await api('GET', '/api/inbox')).json).includes(key), 'the key is never listed again');
+    const fg = await openEvents(s.port, desk);
+    const bg = await openEvents(s.port, phone, '/api/events?mode=background');
+    await fg.wait('hello');
+    await bg.wait('hello');
+    await sleep(300);
+    // 1. ntfy's JSON at the root (Stock Watcher's and SHOPTrend's way): a pop-up everywhere (urgent: the phone's
+    // background stream hears it at once).
+    const before = bg.events.length;
+    r = await notify('/notify/', { body: JSON.stringify({ topic: key, title: 'Back in stock', message: 'U7 Pro\nus store', priority: 4, tags: ['package', 'star', 'u7-pro'],
+      click: 'https://store.example.com/u7', actions: [{ action: 'view', label: 'Open in the store', url: 'https://store.example.com/u7' }, { action: 'http', label: 'Buy', url: 'https://store.example.com/buy' }] }), headers: { 'Content-Type': 'application/json' } });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual({ ...r.json, id: 0, time: 0, expires: 0 }, { id: 0, time: 0, expires: 0, event: 'message', topic: key, message: 'U7 Pro\nus store', title: 'Back in stock', priority: 4, tags: ['u7-pro'], click: 'https://store.example.com/u7' });
+    let ev = (await bg.wait('inbox', d => d.alert.title === 'Back in stock', 1500)).data;
+    assert.ok(bg.events.length > before);
+    assert.deepEqual({ ...ev.alert, id: 0, at: 0 }, { id: 0, at: 0, sender: stock.id, title: 'Back in stock', text: 'U7 Pro\nus store', priority: 4, emojis: '📦\u2b50', tags: ['u7-pro'],
+      click: 'https://store.example.com/u7', actions: [{ label: 'Open in the store', url: 'https://store.example.com/u7' }] });
+    assert.deepEqual([ev.notify, ev.sender.name, ev.sender.count], [true, 'Stock Watcher', 1]);
+    // 2. ntfy's text and headers (any case, short names, RFC 2047): low priority only lists (held on a background stream).
+    r = await notify(`/notify/${key}`, { body: 'Disk at 92%', headers: { T: '=?UTF-8?B?8J+SviBEaXNr?=', 'X-PRIORITY': 'low', ta: 'warning, cd' } });
+    assert.equal(r.status, 200, r.body);
+    ev = (await fg.wait('inbox', d => d.alert.text === 'Disk at 92%', 1500)).data;
+    assert.deepEqual([ev.alert.title, ev.alert.priority, ev.alert.emojis, ev.notify], ['💾 Disk', 2, '⚠️💿', false]);
+    await sleep(300);
+    assert.ok(!bg.events.some(e => e.event === 'inbox' && e.data.alert.text === 'Disk at 92%'), 'not urgent: held until the heartbeat');
+    // 3. GET …/trigger with query parameters; an access token instead of the key as the topic (Bearer, Basic, ?auth=).
+    r = await notify(`/notify/${key}/trigger?title=Hi&message=there&p=5`, { method: 'GET' });
+    assert.deepEqual([r.status, r.json.title, r.json.message, r.json.priority], [200, 'Hi', 'there', 5]);
+    r = await notify('/notify/printer', { body: 'Bearer works', headers: { Authorization: `Bearer ${key}` } });
+    assert.equal(r.status, 200, r.body);
+    r = await notify('/notify/printer', { body: 'Basic works', headers: { Authorization: `Basic ${Buffer.from(`:${key}`).toString('base64')}` } });
+    assert.equal(r.status, 200, r.body);
+    r = await notify(`/notify/printer?auth=${Buffer.from(`Bearer ${key}`).toString('base64')}`, { body: 'auth= works' });
+    assert.equal(r.status, 200, r.body);
+    // 4. A webhook's JSON at the key's own address: PingerPlot's, the print server's.
+    r = await notify(`/notify/${key}`, { body: JSON.stringify({ app: 'PingerPlot', event: 'alert', target: 'example.com', text: 'Loss 20% at example.com', time: 1 }), headers: { 'Content-Type': 'application/json' } });
+    assert.deepEqual([r.status, r.json.message, r.json.priority], [200, 'Loss 20% at example.com', 4]);
+    r = await notify(`/notify/${key}`, { body: JSON.stringify({ title: 'Out of paper', message: '2 prints waiting' }) });
+    assert.deepEqual([r.status, r.json.title, r.json.message, r.json.priority], [200, 'Out of paper', '2 prints waiting', undefined]);
+    // 5. Refused: no key, a wrong one, a bad priority, a binary body, a subscription, a path that isn't one.
+    for (const [route, opts, status, code] of [
+      ['/notify/bn_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', { body: 'x' }, 403, 40301],
+      ['/notify/', { body: JSON.stringify({ topic: 'mytopic', message: 'x' }) }, 403, 40301],
+      ['/notify/', { body: 'not json' }, 400, 40024],
+      [`/notify/${key}`, { body: 'x', headers: { Priority: 'loud' } }, 400, 40000],
+      [`/notify/${key}`, { body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 1]) }, 400, 40000],
+      [`/notify/${key}`, { method: 'GET' }, 405, 40501],
+      [`/notify/${key}/json`, { method: 'GET' }, 404, 40401],
+      [`/notify/${key}`, { body: Buffer.alloc(70 * 1024, 65) }, 413, 41301],
+    ]) {
+      r = await notify(route, opts);
+      assert.deepEqual([r.status, r.json?.code, r.json?.http], [status, code, status], `${route} ${r.body}`);
+    }
+    // From this PC itself (no proxy in between): where it came from is this computer's name.
+    r = await s.req('POST', `/notify/${key}`, { body: 'from here' });
+    assert.deepEqual([r.status, (await fg.wait('inbox', d => d.alert.text === 'from here', 1500)).data.alert.from], [200, os.hostname()]);
+    // 6. Muted, then snoozed: listed, no pop-up. Neither for long: a snooze is at most 7 days.
+    assert.equal((await api('PATCH', `/api/inbox/senders/${stock.id}`, desk, { muted: true })).json.sender.muted, true);
+    await notify(`/notify/${key}`, { body: 'muted one', headers: { p: '5' } });
+    assert.equal((await fg.wait('inbox', d => d.alert.text === 'muted one', 1500)).data.notify, false);
+    await api('PATCH', `/api/inbox/senders/${stock.id}`, desk, { muted: false, snoozeUntil: Date.now() + 3600e3 });
+    await notify(`/notify/${key}`, { body: 'snoozed one', headers: { p: '4' } });
+    assert.equal((await fg.wait('inbox', d => d.alert.text === 'snoozed one', 1500)).data.notify, false);
+    assert.equal((await api('PATCH', `/api/inbox/senders/${stock.id}`, desk, { snoozeUntil: Date.now() + 8 * 86400e3 })).status, 400);
+    await api('PATCH', `/api/inbox/senders/${stock.id}`, desk, { snoozeUntil: 0, name: 'UniFi Stock Watcher' });
+    await fg.wait('inbox-changed');
+    // 7. Beam's own alerts are there too (no second pop-up: `alert` does that).
+    await s.req('PUT', '/api/devices/me/status', { headers: json(phone), body: JSON.stringify({ battery: { level: 40, charging: false } }) });
+    await s.req('PUT', '/api/devices/me/status', { headers: json(phone), body: JSON.stringify({ battery: { level: 12, charging: false } }) });
+    ev = (await fg.wait('inbox', d => d.alert.sender === 'beam', 2000)).data;
+    assert.deepEqual([ev.alert.priority, ev.alert.emojis, ev.notify, ev.sender.name], [4, '⚠️', false, 'Beam']);
+    assert.match(ev.alert.text, /Pixel's battery is at 12%/);
+    // 8. The list: newest first; read marks are this device's (its other streams hear them).
+    r = await api('GET', '/api/inbox');
+    assert.deepEqual(r.json.senders.map(x => [x.id === 'beam' ? 'beam' : 'app', x.name, x.count ?? null]), [['beam', 'Beam', null], ['app', 'UniFi Stock Watcher', 11]]);
+    assert.equal(r.json.alerts[0].sender, 'beam');
+    assert.equal(r.json.alerts.at(-1).title, 'Back in stock');
+    const newest = r.json.alerts[0].at;
+    r = await api('PUT', '/api/inbox/read', desk, { at: newest });
+    assert.deepEqual([r.status, r.json.read], [200, newest]);
+    await fg.wait('inbox-read', d => d.at === newest, 1500);
+    assert.equal((await api('GET', '/api/inbox', phone)).json.read, 0, 'the phone hasn’t looked yet');
+    // 9. A new key: the old one stops. Delete one alert; clear Beam's; remove the app (its alerts go too).
+    r = await api('POST', `/api/inbox/senders/${stock.id}/key`, desk, {});
+    const key2 = r.json.key;
+    assert.ok(key2 !== key && /^bn_/.test(key2));
+    assert.equal((await notify(`/notify/${key}`, { body: 'old key' })).status, 403);
+    assert.equal((await notify(`/notify/${key2}`, { body: 'new key' })).status, 200);
+    let list = (await api('GET', '/api/inbox')).json.alerts;
+    const one = list.find(a => a.text === 'new key');
+    assert.equal((await api('DELETE', `/api/inbox/alerts/${one.id}`)).json.deleted, 1);
+    assert.equal((await api('DELETE', `/api/inbox/alerts/${one.id}`)).status, 404);
+    assert.ok((await api('DELETE', '/api/inbox/alerts?sender=beam')).json.deleted >= 1);
+    list = (await api('GET', '/api/inbox')).json.alerts;
+    assert.ok(!list.some(a => a.sender === 'beam' || a.text === 'new key'));
+    // 10. Kept across a restart (the key still works); never an alert's words in the log. (A stop here is a kill: the
+    // save goes first.)
+    await waitFor(() => { try { return JSON.parse(fs.readFileSync(path.join(s.data, 'inbox.json'), 'utf8')).alerts.length === list.length; } catch { return false; } }, 3000);
+    await s.stop();
+    const s2 = await startServer('inbox', 8791, { keep: true, env: { BEAM_TEST_DISK: roomy } });
+    try {
+      r = await s2.req('GET', '/api/inbox', { headers: json(desk) });
+      assert.deepEqual([r.json.senders[1].name, r.json.alerts.length, r.json.read], ['UniFi Stock Watcher', list.length, newest]);
+      assert.equal((await s2.req('POST', `/notify/${key2}`, { headers: from('100.64.93.9'), body: 'after the restart' })).status, 200);
+      assert.equal((await s2.req('DELETE', `/api/inbox/senders/${stock.id}`, { headers: json(desk) })).status, 204);
+      r = await s2.req('GET', '/api/inbox', { headers: json(desk) });
+      assert.deepEqual([r.json.senders.length, r.json.alerts.length], [1, 0]);
+      assert.equal((await s2.req('POST', `/notify/${key2}`, { headers: from('100.64.93.9'), body: 'removed' })).status, 403);
+      const out = s.out + s2.out;
+      assert.match(out, /Desktop added Stock Watcher to the apps that send alerts/);
+      assert.match(out, /Stock Watcher posted an alert/);
+      assert.match(out, /Refused an alert from/);
+      assert.ok(!/U7 Pro|Disk at 92|Loss 20%|Out of paper|muted one|after the restart/.test(out), 'no alert’s words in the log');
+      assert.ok(!out.includes(key) && !out.includes(key2), 'no key in the log');
+    } finally { await s2.stop(); }
+    fg.close();
+    bg.close();
+  } finally { await s.stop(); }
+});
+
+test('1.33 Alerts inbox: only trusted sign-ins see it, change it or hear it; an app that isn’t one is limited (20 wrong keys from one address: 429); 60 alerts a minute an app', async () => {
+  const ts = await fakeTailscale({ whois: { '100.64.94.5': { login: 'alice@example.com', node: 'alice-tablet' } } });
+  const s = await startServer('inbox-trust', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket, BEAM_TAILSCALE_OWNERS: 'alice@example.com' } });
+  try {
+    const desk = app(s.key, 'inboxdesk002', 'Desktop', 'windows', from('100.64.94.1'));
+    await s.req('GET', '/api/me', { headers: desk });
+    let r = await post(s, '/api/autopair', { client: 'app', name: 'Tablet', platform: 'android' }, viaServe('100.64.94.5', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    const tablet = { Authorization: `Bearer ${r.json.key}`, 'X-Beam-Device-Id': r.json.you, 'X-Beam-Platform': 'android', ...from('100.64.94.5') };
+    for (const [method, route, body] of [['GET', '/api/inbox'], ['POST', '/api/inbox/senders', { name: 'Sneaky' }], ['PUT', '/api/inbox/read', { at: 1 }], ['DELETE', '/api/inbox/alerts?sender=beam']]) {
+      r = await s.req(method, route, { headers: json(tablet), ...(body && { body: JSON.stringify(body) }) });
+      assert.deepEqual([r.status, r.json?.reason], [403, 'trusted'], `${method} ${route}`);
+    }
+    const key = (await post(s, '/api/inbox/senders', { name: 'Printer' }, desk)).json.key;
+    const tabEv = await openEvents(s.port, tablet);
+    const deskEv = await openEvents(s.port, desk);
+    await tabEv.wait('hello');
+    await deskEv.wait('hello');
+    assert.equal((await s.req('POST', `/notify/${key}`, { headers: from('100.64.94.9'), body: 'for the trusted' })).status, 200);
+    await deskEv.wait('inbox', d => d.alert.text === 'for the trusted', 1500);
+    await sleep(300);
+    assert.ok(!tabEv.events.some(e => e.event.startsWith('inbox')), 'an untrusted stream hears none of it');
+    for (let i = 0; i < 60; i++) await s.req('POST', `/notify/${key}`, { headers: from('100.64.94.9'), body: `n${i}` });
+    r = await s.req('POST', `/notify/${key}`, { headers: from('100.64.94.9'), body: 'one too many' });
+    assert.deepEqual([r.status, r.json.code], [429, 42908]);
+    assert.ok(Number(r.headers['retry-after']) > 0);
+    for (let i = 0; i < 20; i++) await s.req('POST', '/notify/bn_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', { headers: from('100.64.94.8'), body: 'x' });
+    r = await s.req('POST', `/notify/${key}`, { headers: from('100.64.94.8'), body: 'right key, too late' });
+    assert.deepEqual([r.status, r.json.code], [429, 42901], 'that address is held back a while');
+    tabEv.close();
+    deskEv.close();
+  } finally { await s.stop(); await ts.close(); }
+});
+
 test('1.31 Sites: a PC’s own pages at its Tailscale name, checked (title, icon, a sign-in redirect, one that’s down); add, rename, hide, show, remove; kept across a restart and in an export', async () => {
   // Made-up pages: a trend viewer with an icon, a camera whose / redirects to its sign-in page, and a closed port.
   const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 7)]);

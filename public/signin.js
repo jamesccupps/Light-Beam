@@ -21,6 +21,7 @@ async function showApp() {
   renderBanner();
   connect();
   if (!NARROW.matches) openConv(current, { push: false });
+  openPendingInbox(); // (1.33: the Windows app asked for the Alerts list while the window started)
   const approveCode = takePendingApprove();
   if (approveCode) lookUpApproval(approveCode);
   if (location.hash === '#pair') {
@@ -215,6 +216,7 @@ async function reprobe() {
 function forgetInMemory() {
   closePhone();
   clearPhone();
+  forgetInbox(); // (1.33)
   phone.shown = false;
   // Only the in-memory copy goes: what's saved stays. Anything not saved yet is saved now (for its own Beam).
   for (const entry of outbox.values()) if (!entry.stored && !keepsNothing()) outboxStore.put(entry, { force: true });
@@ -670,6 +672,7 @@ async function forgetLocalData() {
 function forgetLocalPrefs({ machine = true } = {}) {
   closePhone();
   clearPhone(); // phone notifications were only ever in memory
+  forgetInbox(); // (1.33)
   phone.shown = false;
   for (const key of ['beam.read', 'beam.drafts', 'beam.uploads', 'beam.conv', ...(machine ? ['beam.machine'] : [])]) store.remove(key);
   readMarks = null;

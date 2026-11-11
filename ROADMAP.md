@@ -72,9 +72,8 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
   for a PC without the picture (next to screen sharing, not instead of it).
 - **Commands on a PC, further** (1.32 runs PowerShell and Command Prompt commands on Windows PCs): the same on Beam for
   Linux, one command on several PCs at once, saved commands, and later a real terminal for programs that ask questions.
-- **Alerts from your other programs:** a send-only key and an ntfy-style address, so the tools you already run (stock
-  and network watchers, weather stations, printers, Home Assistant) post their alerts into Beam, each as its own
-  conversation you can mute; camera live views and a network path monitor later.
+- **Alerts, further** (1.33 takes your programs' alerts the ntfy way): attachments and pictures, Markdown, actions
+  that call back; camera live views and a network path monitor later.
 - **Linux, further:** the Apps page for Linux (.deb files, apt), a
   script you allowed there run on request; a terminal on it from Beam; its screen directly between the two devices
   where they can reach each other (WebRTC) rather than through Beam; later a desktop app with a tray icon.

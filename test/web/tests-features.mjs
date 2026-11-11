@@ -544,6 +544,85 @@ export default function register(test) {
     await page.evaluate(`$('#genDlg').close()`);
   });
 
+  test('1.33 Alerts inbox: an app added in Settings (its key once), alerts posted the ntfy way: the Alerts row with its count, the list in place of a conversation (newest first, chips, Open, High, new ones marked), a toast with Show when it’s closed (none for a quiet one), delete, mute; the list alone at #alerts', async ctx => {
+    const page = await ctx.signedIn();
+    const shot = name => process.env.BEAM_INBOX_SHOTS ? page.screenshot(`${ctx.SHOTS}/${name}.png`) : null;
+    await page.waitFor(`serverHas('inbox') && me.trusted === true`, 8000, 'an approved sign-in on a Beam with the inbox');
+    // (The suite's server has run other tests: Beam's own alerts from them go, and everything so far counts as read.)
+    await page.evaluate(`(async () => { await api('api/inbox/alerts?sender=beam', { method: 'DELETE' }); await api('api/inbox/read', jsonBody({ at: Date.now() }, 'PUT')); await loadInbox(); return true; })()`);
+    await page.waitFor(`alertsBox.loaded && !alertsBox.list.length && alertsBox.read > 0`, 5000, 'a clean start');
+    // Settings → Alerts: add an app; its key and addresses are shown once.
+    await page.evaluate(`openSettings('alerts'); true`);
+    await page.waitFor(`Boolean($('.inbox-add input'))`, 8000, 'the add box');
+    await page.evaluate(`(() => { const f = $('.inbox-add'); f.querySelector('input').value = 'Stock Watcher'; f.requestSubmit(); return true; })()`);
+    await page.waitFor(`Boolean($('.inbox-made'))`, 8000, 'the key, once');
+    const made = await page.evaluate(`({ key: alertsBox.made.key, labels: $$('.inbox-made .set-label').map(x => x.textContent), values: $$('.inbox-made-value').map(x => x.textContent) })`);
+    assert(/^bn_[A-Za-z0-9_-]{32}$/.test(made.key), made.key);
+    eq(made.labels.includes('Topic') && made.labels.includes('Try it'), true, made.labels.join());
+    assert(made.values.includes(made.key) && made.values.some(v => v.endsWith(`/notify/${made.key}`)), made.values.join(' | '));
+    await shot('inbox-settings');
+    await page.evaluate(`[...$$('.inbox-made .btn')].find(b => b.textContent.trim() === 'Done').click(); true`);
+    await page.waitFor(`!$('.inbox-made') && $$('.inbox-app-row').length === 1`, 3000, 'the key hidden; the app listed').catch(async err => {
+      throw new Error(`${err.message} ${await page.evaluate(`JSON.stringify([Boolean($('.inbox-made')), $$('.inbox-app-row').length, alertsBox.loaded, [...alertsBox.senders.keys()], $("#settingsDlg").open, settingsSection])`)}`);
+    });
+    await page.evaluate(`$('#settingsDlg').close(); true`);
+    // Two alerts the ntfy way (JSON at the root, as Stock Watcher and SHOPTrend send them).
+    const post = body => fetch(`${ctx.srv.base}/notify/`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic: made.key, ...body }) }).then(r => r.status);
+    eq(await post({ title: 'Back in stock', message: 'UniFi U7 Pro, us store', priority: 4, tags: ['package'], click: 'https://store.example.com/u7' }), 200);
+    eq(await post({ title: 'Price drop', message: 'Dream Router 7: $279 (was $299)', priority: 3, tags: ['chart_with_downwards_trend'] }), 200);
+    await page.waitFor(`Boolean($('.inbox-row')) && $('.inbox-row .badge').textContent === '2'`, 8000, 'the Alerts row with 2 new');
+    eq(await page.evaluate(`$('.inbox-row .conv-preview').textContent`), 'Stock Watcher: 📉 Price drop');
+    // Open: newest first, in place of a conversation; looked at (the count goes); the toast stays away while it's open.
+    await page.evaluate(`$('.inbox-row').click(); true`);
+    await page.waitFor(`inboxOpen() && $$('#inboxPanel .inbox-alert').length === 2`, 5000, 'the list');
+    eq(await page.evaluate(`[$('#threadName').textContent, $('#app').classList.contains('inbox-open'), getComputedStyle($('#thread')).display, getComputedStyle($('#composer')).display]`), ['Alerts', true, 'none', 'none']);
+    eq(await page.evaluate(`$$('#inboxPanel .inbox-alert').map(c => [c.querySelector('.inbox-title').textContent, c.classList.contains('new'), c.querySelector('.inbox-prio')?.textContent || ''])`),
+      [['📉 Price drop', true, ''], ['📦 Back in stock', true, 'High']]);
+    eq(await page.evaluate(`[...$$('#inboxPanel .inbox-alert')[1].querySelectorAll('.inbox-actions .btn')].map(b => b.textContent.trim())`), ['Open']);
+    await page.waitFor(`$('.inbox-row .badge').hidden && alertsBox.read === alertsBox.list[0].at`, 3000, 'read');
+    await page.waitFor(`fetch('api/inbox', { headers: idHeaders() }).then(r => r.json()).then(j => j.read === alertsBox.read)`, 3000, 'the server knows');
+    eq(await page.evaluate(`$$('#inboxPanel .inbox-chips .chip').map(c => c.textContent)`), ['All', 'Stock Watcher']);
+    await shot('inbox-panel');
+    eq(await post({ message: 'Third one', priority: 4 }), 200);
+    await page.waitFor(`$$('#inboxPanel .inbox-alert').length === 3 && $('#inboxPanel .inbox-alert .inbox-text').textContent === 'Third one'`, 5000, 'a new one on top');
+    eq(await page.evaluate(`$('#toast')?.classList.contains('show') && /Third one/.test($('#toast').textContent) ? 'toast' : 'none'`), 'none', 'no toast while the list is open');
+    // A chip narrows it; the app's bar has its menu (Mute).
+    await page.evaluate(`$$('#inboxPanel .inbox-chips .chip')[1].click(); true`);
+    await page.waitFor(`alertsBox.filter !== '' && Boolean($('#inboxPanel .inbox-sender'))`, 3000, 'one app');
+    await page.evaluate(`$('#inboxPanel .inbox-sender .icon-btn').click(); true`);
+    await page.waitFor(`$('#menu') && !$('#menu').hidden`, 3000, 'its menu');
+    eq(await page.evaluate(`[...$('#menu').querySelectorAll('.menu-item')].map(b => b.textContent.trim())`),
+      ['Mute', 'Snooze for an hour', 'Snooze for 8 hours', 'Snooze until tomorrow 8:00', 'Rename', 'New key…', 'Clear its alerts', 'Remove the app…']);
+    await page.evaluate(`[...$('#menu').querySelectorAll('.menu-item')].find(b => b.textContent.trim() === 'Mute').click(); true`);
+    await page.waitFor(`/Muted/.test($('#inboxPanel .inbox-sender').textContent)`, 5000, 'muted');
+    await page.evaluate(`patchSender(alertsBox.senders.get(alertsBox.filter), { muted: false }); true`);
+    // Delete one.
+    await page.evaluate(`$('#inboxPanel .inbox-alert .inbox-del').click(); true`);
+    await page.waitFor(`$$('#inboxPanel .inbox-alert').length === 2`, 3000, 'deleted');
+    // Closed (a conversation open): a toast with Show; a quiet one (priority 2) only lists.
+    await page.evaluate(`openConv('all'); true`);
+    await page.waitFor(`!inboxOpen() && getComputedStyle($('#thread')).display !== 'none'`, 3000, 'back to a conversation');
+    eq(await post({ message: 'Morning check-in: all quiet', priority: 2 }), 200);
+    await page.waitFor(`$('.inbox-row .badge').textContent === '1'`, 5000, 'counted');
+    await new Promise(r => setTimeout(r, 400));
+    eq(await page.evaluate(`/all quiet/.test($('#toast')?.textContent || '') && $('#toast').classList.contains('show') ? 'toast' : 'none'`), 'none', 'a quiet one doesn’t pop up');
+    eq(await post({ title: 'Controller dark', message: 'AHU-3 hasn’t answered for 10 minutes', priority: 5 }), 200);
+    await page.waitFor(`/Stock Watcher: Controller dark/.test($('#toast')?.textContent || '')`, 5000, 'a toast');
+    await page.evaluate(`$('#toastAction').click(); true`);
+    await page.waitFor(`inboxOpen() && alertsBox.filter !== ''`, 3000, 'Show opens its app’s alerts');
+    // The list alone (#alerts: the phone's screen), its own stream keeping it up to date; Back clears the chip first.
+    await page.goto('about:blank');
+    await page.goto(`${ctx.srv.base}/#alerts`);
+    await page.waitFor(`document.documentElement.classList.contains('alerts-mode') && $$('#inboxPage .inbox-alert').length === 4`, 8000, 'the page of its own');
+    eq(await page.evaluate(`[$('#genTitle').textContent, Boolean($('#inboxPage .inbox-bar .btn'))]`), ['Alerts', false], 'no Apps… there');
+    eq(await post({ message: 'Live on the page', priority: 3 }), 200);
+    await page.waitFor(`$('#inboxPage .inbox-alert .inbox-text')?.textContent === 'Live on the page'`, 5000, 'its stream');
+    await page.evaluate(`$$('#inboxPage .inbox-chips .chip')[1].click(); true`);
+    eq(await page.evaluate('alertsBack()'), true, 'Back: all of them again');
+    eq(await page.evaluate('alertsBack()'), false, 'then the app closes it');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: 'inbox' });
+
   test('1.32 Commands: Device info runs one on a PC that allows it; its output streams in (errors apart), the exit code; Stop; recent ones; Command Prompt takes one line; the panel alone at #commands=', async ctx => {
     const page = await ctx.signedIn();
     // The PC's side: its app's requests (from a Tailscale address of its own), its stream, its answers to command-run.

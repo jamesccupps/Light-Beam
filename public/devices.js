@@ -425,6 +425,7 @@ function sectionAlerts() {
   }
   return [
     intro('Alerts show up here and on your devices (and through ntfy, if the server has it set up).'),
+    typeof inboxSendersCard === 'function' && inboxSendersCard(), // (1.33) the apps that send their alerts to Beam (first: it has things to do)
     card('Tell me when',
       switchRow('A device’s battery is low', a.battery, v => setAlerts({ battery: v }), { hint: '15% or less and not charging.' }),
       switchRow('A device is running out of storage', a.storage, v => setAlerts({ storage: v }), { hint: 'Less than 2 GB (or 5%) free.' }),

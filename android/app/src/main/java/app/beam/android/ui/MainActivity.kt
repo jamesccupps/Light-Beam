@@ -26,6 +26,7 @@ import app.beam.android.R
 import app.beam.android.core.Conversations
 import app.beam.android.core.Format
 import app.beam.android.core.Pairing
+import app.beam.android.data.AppAlerts
 import app.beam.android.data.AppUpdater
 import app.beam.android.data.Repository
 import app.beam.android.databinding.ActivityMainBinding
@@ -87,6 +88,7 @@ class MainActivity : BaseActivity() {
                 // work as in the browser; the browser itself when it can't show one.
                 R.id.action_family -> app.repo.state.value.info?.family?.let { FileActions.openInApp(this, it) }
                 R.id.action_sites -> startActivity(Intent(this, SitesActivity::class.java)) // (1.17)
+                R.id.action_alerts -> startActivity(FilesActivity.alertsIntent(this)) // (1.19)
             }
             true
         }
@@ -102,6 +104,14 @@ class MainActivity : BaseActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 app.repo.state.map { it.info?.lists("sites") == true }.distinctUntilChanged().collect { has ->
                     b.toolbar.menu.findItem(R.id.action_sites)?.isVisible = has
+                }
+            }
+        }
+        // (1.19) The alerts inbox, from a server that has it (Beam 1.33)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.repo.state.map { it.info?.lists(AppAlerts.FEATURE) == true }.distinctUntilChanged().collect { has ->
+                    b.toolbar.menu.findItem(R.id.action_alerts)?.isVisible = has
                 }
             }
         }

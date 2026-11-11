@@ -259,6 +259,9 @@ class RemoteControl(private val app: BeamApp) {
         /** (1.18, server 1.32) The panel that runs commands on PC [device], alone (`#commands=<PC id>`). */
         fun commandsUrl(base: HttpUrl, device: String): String = base.beamPath("/").newBuilder().fragment("commands=$device").build().toString()
 
+        /** (1.19, server 1.33) The alerts inbox, alone (`#alerts`). */
+        fun alertsUrl(base: HttpUrl): String = base.beamPath("/").newBuilder().fragment("alerts").build().toString()
+
         /** On Beam's server at [base]: its scheme, host and port, and under its path (a server may share its host). */
         fun onBeam(base: HttpUrl, u: Uri): Boolean {
             val port = if (u.port != -1) u.port else if (u.scheme == "https") 443 else 80

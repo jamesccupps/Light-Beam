@@ -163,7 +163,7 @@ function bindUI() {
 let clockTimer = null;
 function runClocks() {
   clearInterval(clockTimer);
-  clockTimer = document.hidden ? null : setInterval(() => { if (paired) { renderSidebar(); renderHeader(); if (phone.open) renderPhone(); } }, 60000);
+  clockTimer = document.hidden ? null : setInterval(() => { if (paired) { renderSidebar(); renderHeader(); if (phone.open) renderPhone(); if (inboxOpen()) renderInbox(); } }, 60000);
 }
 
 function onThreadScroll() {
@@ -279,6 +279,8 @@ const VNC_ID = (/^#vnc=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || 
 const FILES_ID = (/^#files=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
 // (1.32) index.html#commands=<PC id>: only the panel that runs commands on that PC (commands.js; the Android app's screen).
 const CMDS_ID = (/^#commands=([A-Za-z0-9_-]{8,64})$/.exec(location.hash) || [])[1] || '';
+// (1.33) index.html#alerts: only the alerts (inbox.js; the Android app's screen).
+const ALERTS_PAGE = location.hash === '#alerts';
 
 function loadVnc() {
   document.documentElement.classList.add('remote-mode');
@@ -314,6 +316,7 @@ async function init() {
   if (VNC_ID) return loadVnc(); // (1.23: a Linux computer's screen)
   if (FILES_ID) return startSharedPage(FILES_ID); // (1.28.1: a PC's shared folders alone)
   if (CMDS_ID) return startCommandsPage(CMDS_ID); // (1.32: commands on a PC, alone)
+  if (ALERTS_PAGE) return startAlertsPage(); // (1.33: the alerts, alone)
   document.documentElement.classList.toggle('host', Boolean(HOST));
   const params = new URLSearchParams(location.search);
   const handoff = takeHandoff();

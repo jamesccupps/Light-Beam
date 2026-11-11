@@ -13,6 +13,7 @@ import app.beam.android.core.Pairing
 import app.beam.android.core.SignInClient
 import app.beam.android.core.ServerInfo
 import app.beam.android.data.Alerts
+import app.beam.android.data.AppAlerts
 import app.beam.android.data.AppUpdater
 import app.beam.android.data.Connection
 import app.beam.android.data.Inbox
@@ -81,6 +82,7 @@ class BeamApp : Application() {
     lateinit var ringer: Ringer
         private set
     lateinit var alerts: Alerts
+    lateinit var appAlerts: AppAlerts // (1.19) the alerts inbox
         private set
     lateinit var phone: PhoneNotifications
         private set
@@ -137,6 +139,7 @@ class BeamApp : Application() {
         status = StatusReporter(this).also { it.start() }
         ringer = Ringer(this).also { it.recover() }
         alerts = Alerts(this)
+        appAlerts = AppAlerts(this) // (1.19)
         phone = PhoneNotifications(this)
         remote = RemoteControl(this)
         backups = SettingsBackups(this).also { it.start() }
@@ -252,6 +255,7 @@ class BeamApp : Application() {
                 }
             }
             step { alerts.catchUp() }
+            step { appAlerts.catchUp() } // (1.19, server 1.33)
             step { phone.onConnected() }
             step { remote.onConnected() }
             step { backups.onConnected() }

@@ -378,6 +378,11 @@ class Prefs(context: Context, private val box: SecretBox = KeystoreBox()) {
         get() = sp.getLong(K_ALERTS_SEEN, 0L)
         set(v) = sp.edit { putLong(K_ALERTS_SEEN, v) }
 
+    /** (1.19) When this server's alerts inbox was first looked at (0: not yet; older alerts aren't shown then). */
+    var inboxSeenUntil: Long
+        get() = sp.getLong(K_INBOX_SEEN, 0L)
+        set(v) = sp.edit { putLong(K_INBOX_SEEN, v) }
+
     /** Remembers a server alert as shown (the last 100). False if it was shown before. */
     @Synchronized
     fun markAlertShown(id: String): Boolean {
@@ -543,6 +548,7 @@ class Prefs(context: Context, private val box: SecretBox = KeystoreBox()) {
         private const val K_SERVER_INFO = "serverInfo"
         private const val K_DRAFTS = "drafts"
         private const val K_ALERTS_SEEN = "alertsSeenUntil"
+        private const val K_INBOX_SEEN = "inboxSeenUntil"
         private const val K_ALERTS_SHOWN = "alertsShown"
         private const val K_LAST_STATUS = "lastStatus"
         private const val K_SIGNED_OUT_FROM = "signedOutFrom"

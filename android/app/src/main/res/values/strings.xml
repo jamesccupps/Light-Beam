@@ -84,6 +84,7 @@
     <string name="family">Beam Family</string>
     <!-- (1.17, server 1.31) Sites: the web pages on the tailnet -->
     <string name="sites">Sites</string>
+    <string name="alerts">Alerts</string>
     <string name="sites_add">Add a site</string>
     <string name="sites_check">Check again</string>
     <string name="sites_checking">Checking each site…</string>
@@ -365,6 +366,16 @@
     <string name="files_stopped">The shared folders stopped here.</string>
     <string name="files_remote_open">Close remote control first: it and Shared folders take turns.</string>
     <string name="device_run_command">Run a command</string>
+    <string name="alerts_sign_in_failed">Couldn\'t open the alerts: %1$s</string>
+    <string name="alerts_load_failed">Couldn\'t load the alerts.</string>
+    <string name="alerts_stopped">The alerts stopped here.</string>
+    <string name="alerts_remote_open">Close remote control first: it and the alerts take turns.</string>
+    <string name="channel_app_alerts">Alerts from your apps</string>
+    <string name="channel_app_alerts_desc">What your other programs send to Beam (Settings → Alerts on a PC)</string>
+    <string name="channel_app_alerts_urgent">Urgent alerts from your apps</string>
+    <string name="channel_app_alerts_urgent_desc">Your other programs\' high and urgent alerts</string>
+    <string name="inbox_open">Open</string>
+    <string name="inbox_some_app">An app</string>
     <string name="commands_sign_in_failed">Couldn\'t open the command panel: %1$s</string>
     <string name="commands_load_failed">Couldn\'t load the command panel.</string>
     <string name="commands_stopped">The command panel stopped here.</string>

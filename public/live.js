@@ -93,6 +93,10 @@ function connect() {
   on('alert', onAlertEvent);
   on('apps', onAppsEvent); // (1.21: Settings → Apps reads the list again)
   on('sites', onSitesEvent); // (1.31: the Sites list reads it again while open)
+  on('inbox', onInboxEvent); // (1.33) the alerts inbox
+  on('inbox-changed', onInboxChanged);
+  on('inbox-read', onInboxRead);
+  on('hello', () => { if (alertsBox.loaded) loadInbox(); }); // (what came while the stream was away)
   on('rc-sessions', onRcSessions); // (who controls which PC, for Settings; the viewer has its own stream: remote.js)
   on('notification', onPhoneNotification);
   on('notification-removed', onPhoneNotificationRemoved);
@@ -358,6 +362,8 @@ function applyMe(m) {
   me.temporary = Boolean(m.auth?.session || m.temporary);
   if (typeof m.auth?.trusted === 'boolean') me.trusted = m.auth.trusted; // (1.25: may approve other devices)
   updateSitesButton(); // (1.31) the Sites list is for approved sign-ins
+  if (!alertsBox.loaded && inboxFeature()) loadInbox(); // (1.33) the Alerts row's count
+  openPendingInbox(); // (1.33: asked for while the app started)
   if (me.temporary && !cacheDisabled) disableOfflineCache(); // a borrowed computer keeps nothing
 }
 

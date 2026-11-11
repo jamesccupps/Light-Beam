@@ -34,7 +34,7 @@ const pick = { on: false, ids: new Set(), last: '' };
 // The conversation's photos, videos and files, shown in place of the thread (gallery.js, 1.12).
 const gallery = { open: false, tab: 'media', key: '', conv: null, nodes: new Map(), scroll: null };
 
-const threadVisible = () => !document.hidden && !$('#app').hidden && !phonePanelOpen() && !gallery.open && (!NARROW.matches || $('#app').classList.contains('in-thread'));
+const threadVisible = () => !document.hidden && !$('#app').hidden && !panelOpen() && !gallery.open && (!NARROW.matches || $('#app').classList.contains('in-thread'));
 const threadItems = () => (view.pinnedOnly ? itemsIn(current).filter(i => i.pinned) : itemsIn(current));
 
 // ---------------------------------------------------------------- hidden pages render nothing
@@ -158,10 +158,10 @@ function renderSidebar() {
   for (const conv of order) {
     let row = rows.get(conv);
     if (!row) { row = makeRow(conv, c => openConv(c)); rows.set(conv, row); }
-    patchRow(row, conv, { active: conv === current && !phonePanelOpen() });
+    patchRow(row, conv, { active: conv === current && !panelOpen() });
     if (row.li === cursor) cursor = cursor.nextElementSibling;
     else list.insertBefore(row.li, cursor);
-    if (conv === 'all') cursor = placePhoneRow(list, cursor); // pinned under All devices
+    if (conv === 'all') cursor = placeInboxRow(list, placePhoneRow(list, cursor)); // pinned under All devices (1.33: and Alerts)
   }
   // First start with nothing saved: say the devices are on their way instead of showing "All devices" alone.
   if (devicesKnown) { sidebarLoading?.remove(); sidebarLoading = null; }
@@ -184,6 +184,7 @@ function updateTitle() {
 function renderHeader() {
   if (renderingPaused()) { hiddenWork.all = true; return; }
   if (phonePanelOpen()) { renderPhoneHeader(); return; }
+  if (inboxOpen()) { renderInboxHeader(); return; } // (1.33)
   const d = deviceById(current);
   const slot = $('#threadAvatar');
   const fresh = Object.assign(avatar(current), { id: 'threadAvatar' });
@@ -222,6 +223,7 @@ function renderComposerState() {
 
 function openConv(conv, { push = true, focus = true } = {}) {
   closePhone();
+  closeInbox(); // (1.33)
   closeGallery();
   if (conv !== current) endCompose(); // (1.14.0: a reply or an edit belongs to the conversation it was started in)
   if (devicesKnown && conv !== 'all' && !deviceById(conv) && !itemsIn(conv).length) conv = 'all';
@@ -298,7 +300,7 @@ function restoreAnchor(anchor) {
 
 function renderThread({ scroll = 'keep' } = {}) {
   if (renderingPaused()) { hiddenWork.all = true; return; }
-  if (phonePanelOpen()) return;
+  if (panelOpen()) return;
   // (The gallery is on screen instead: the thread catches up when it's closed.)
   if (gallery.open) { renderGallery(); return; }
   const box = $('#thread');

@@ -204,6 +204,11 @@ address, so the browser becomes part of that device instead of a separate entry.
   wrong: the servers start when Windows does, Tailscale runs unattended, devices come in over https, backups are
   recent, there's room on the disk, every PC runs the latest Beam and starts it with Windows, no Tailscale sign-in runs
   out soon. Each line says what to do when it's wrong (`BEAM_SETUP_CHECK=off` turns the automatic look off).
+- **Alerts from your other programs** (Beam 1.33, the Windows app 1.26, the Android app 1.19): anything that can
+  send to ntfy or post a webhook can send its alerts to Beam instead. Settings → Alerts gives each program its own
+  key (it can send alerts and nothing else); point the program's ntfy server at `<your Beam>/notify` with the key as
+  its topic (or post to `<your Beam>/notify/<key>`). They show up under Alerts on every device, with Beam's own:
+  newest first, one chip per program, a pop-up for the ones that matter (mute or snooze a program).
 - **Commands on a PC** (Beam 1.32, the Windows app 1.25, the Android app 1.18): run a PowerShell or Command Prompt
   command on one of your PCs from another device (Device info → Run a command) and see what it prints while it runs,
   with Stop and its exit code. Only for the devices that may control that PC, and only once "Allow commands too" is

@@ -305,7 +305,7 @@ const galleryMenuEntries = item => [
 ];
 
 function openGallery({ tab = '' } = {}) {
-  if (phonePanelOpen() || gallery.open) return;
+  if (panelOpen() || gallery.open) return;
   gallery.tab = tab || (!galleryItems('media').length && galleryItems('other').length ? 'other' : 'media');
   // Where the thread was, to come back to the same place (a hidden thread can't keep its own).
   const box = $('#thread');

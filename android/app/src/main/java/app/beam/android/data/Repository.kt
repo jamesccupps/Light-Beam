@@ -327,6 +327,7 @@ class Repository(private val app: BeamApp) {
             // Server 1.3: "ring this device" (only the device it's for rings) and alerts.
             "ring" -> app.ringer.onEvent(o)
             "alert" -> app.alerts.onEvent(o)
+            "inbox" -> app.appAlerts.onEvent(o) // (1.19, server 1.33) the alerts inbox
             "sites" -> _sitesChanged.value++ // (1.17, server 1.31)
         }
         return null

@@ -142,6 +142,7 @@ function onHostEvent(m) {
       for (const d of $$('dialog[open]')) if (d.id !== 'approveDlg') d.close();
       if (m.panel === 'pair') openPairDialog();
       else if (m.panel === 'settings') openSettings('general');
+      else if (m.panel === 'alerts') openInbox(); // (1.33, Windows 1.26: an alert's balloon was clicked)
       break;
     default:
       break; // unknown events are ignored (forward compatibility)
@@ -153,6 +154,7 @@ function hostViewing() {
   if (!HOST) return;
   // The Phone panel counts as a conversation of its own: while it's on screen the app shows no phone balloons.
   if (phonePanelOpen()) hostPost('viewing', { conversation: 'phone', visible: !document.hidden && !$('#app').hidden && (!NARROW.matches || $('#app').classList.contains('in-thread')) });
+  else if (inboxOpen()) hostPost('viewing', { conversation: 'alerts', visible: !document.hidden && inboxVisible() }); // (1.33: no alert balloons meanwhile)
   else hostPost('viewing', { conversation: current, visible: !document.hidden && threadVisible() });
 }
 

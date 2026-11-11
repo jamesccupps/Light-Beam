@@ -52,6 +52,8 @@ object Notifier {
     const val CH_UPDATES = "updates"
     const val CH_RING = "ring"
     const val CH_ALERTS = "alerts"
+    const val CH_APP_ALERTS = "app_alerts" // (1.19) the alerts inbox
+    const val CH_APP_ALERTS_URGENT = "app_alerts_urgent"
     private const val TAG_SIGNIN = "signin"
 
     const val ID_CONNECTION = 1
@@ -103,6 +105,13 @@ object Notifier {
                 },
                 NotificationChannel(CH_ALERTS, ctx.getString(R.string.channel_alerts), NotificationManager.IMPORTANCE_DEFAULT).apply {
                     description = ctx.getString(R.string.channel_alerts_desc)
+                },
+                // (1.19, server 1.33) the user's other programs' alerts: ntfy's priorities 3 and 4-5
+                NotificationChannel(CH_APP_ALERTS, ctx.getString(R.string.channel_app_alerts), NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    description = ctx.getString(R.string.channel_app_alerts_desc)
+                },
+                NotificationChannel(CH_APP_ALERTS_URGENT, ctx.getString(R.string.channel_app_alerts_urgent), NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = ctx.getString(R.string.channel_app_alerts_urgent_desc)
                 },
             ),
         )
@@ -514,6 +523,42 @@ object Notifier {
         val kind = if (alert.kind == "offline" || alert.kind == "online") "presence" else alert.kind
         post(ctx, "alert:$kind:${alert.device ?: "server"}".hashCode(), n)
     }
+
+    // ---------------------------------------------------------------- the alerts inbox (1.19, server 1.33)
+
+    /** An alert from one of the user's apps: its name and title (emojis first, as ntfy shows them), its text; a tap opens
+     *  the list, Open its link (http/https only: the server checked). One notification an alert. */
+    fun appAlert(ctx: Context, a: org.json.JSONObject, appName: String) {
+        val head = "${a.optString("emojis")} ${a.optString("title")}".trim()
+        val text = a.optString("text")
+        val urgent = a.optInt("priority", 3) >= 4
+        val id = a.optString("id")
+        val b = base(ctx, if (urgent) CH_APP_ALERTS_URGENT else CH_APP_ALERTS)
+            .setContentTitle(if (head.isNotEmpty()) "$appName: $head" else appName)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setWhen(a.optLong("at").takeIf { it > 0 } ?: System.currentTimeMillis())
+            .setShowWhen(true)
+            .setAutoCancel(true)
+            .setPriority(if (urgent) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setGroup(GROUP_APP_ALERTS)
+            .setContentIntent(alertsIntent(ctx))
+        val click = a.optString("click")
+        if (click.startsWith("https://") || click.startsWith("http://")) {
+            val view = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(click)).addCategory(Intent.CATEGORY_BROWSABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            b.addAction(0, ctx.getString(R.string.inbox_open), PendingIntent.getActivity(ctx, "inbox-open:$id".hashCode(), view, IMMUTABLE))
+        }
+        post(ctx, "inbox:$id".hashCode(), b.build())
+    }
+
+    private const val GROUP_APP_ALERTS = "app.beam.android.APP_ALERTS"
+
+    /** The alerts list (the server's `#alerts` page), with the conversation list behind it. */
+    private fun alertsIntent(ctx: Context): PendingIntent =
+        TaskStackBuilder.create(ctx)
+            .addNextIntentWithParentStack(app.beam.android.ui.FilesActivity.alertsIntent(ctx))
+            .getPendingIntent("alerts".hashCode(), IMMUTABLE)!!
 
     // ---------------------------------------------------------------- server moves
 

@@ -12,6 +12,20 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.33.0 (2026-11-10): Alerts from your other programs
+
+**Versions:** server 1.33.0, Windows app 1.26.0, Android app 1.19.0.
+
+- **The alerts inbox:** your other programs send their alerts to Beam the way they'd send them to ntfy (JSON to
+  `<Beam>/notify/`, text and headers to `<Beam>/notify/<key>`, `…/trigger` by GET, an access token), or as any webhook's
+  JSON; each program gets its own key in Settings → Alerts (shown once, kept hashed, it sends alerts and nothing else).
+  They show up under Alerts (a row in the sidebar, in place of a conversation; the Android app's menu) with Beam's own
+  alerts: newest first, a chip per program, title (with its tags' emojis), text, Open and its link buttons, High and
+  Urgent marked. Priority 3 and up pops up on every device (Windows' notifications, Android's, the browser's), 1-2
+  are only listed, and a program can be muted or snoozed. Approved devices only; never an alert's words in a log.
+  `/notify`, `/api/inbox`, `/api/inbox/senders`, `/api/inbox/alerts`, the `inbox` events (docs/API.md "The alerts
+  inbox"). The emoji names are gemoji's (MIT, Copyright (c) 2019 GitHub, Inc.: `lib/emoji.js`).
+
 ## 1.32.0 (2026-11-07): Commands on a PC
 
 **Versions:** server 1.32.0, Windows app 1.25.0, Android app 1.18.0.

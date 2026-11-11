@@ -141,6 +141,9 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     @Volatile var appearance: JSONObject? = null
     val lookCalls = CopyOnWriteArrayList<Pair<String, String>>()
 
+    /** (1.19) What `GET /api/inbox` answers (a server with "inbox"). */
+    @Volatile var inbox: JSONObject = JSONObject().put("senders", JSONArray()).put("alerts", JSONArray()).put("read", 0)
+
     private class Stream(val id: String, @Volatile var mode: String, val queue: LinkedBlockingQueue<String>)
 
     private val streams = CopyOnWriteArrayList<Stream>()
@@ -398,6 +401,7 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
             path == "/api/read" -> json(ex, 200, JSONObject().put("read", JSONObject()))
             path == "/api/devices/me/status" -> json(ex, 204, "")
             path == "/api/updates" -> json(ex, 200, JSONObject())
+            path == "/api/inbox" && method == "GET" && "inbox" in features -> json(ex, 200, inbox)
             path == "/api/sites" && method == "GET" && "sites" in features -> json(ex, 200, sites)
             path.startsWith("/api/sites") && "sites" in features -> {
                 siteCalls += "$method $path ${ex.requestBody.readBytes().decodeToString()}".trim()

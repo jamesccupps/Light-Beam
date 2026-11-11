@@ -841,6 +841,58 @@ Events: `apps { at }` (to every stream: read the list again), `app-install { id,
 (only to that PC's streams). GitHub releases are looked for 3 minutes after a start and every 6 hours (`BEAM_GITHUB_API`
 points the server at a stand-in for tests); downloads only from github.com and its download hosts, at every redirect.
 
+### The alerts inbox (1.33)
+Feature `inbox`. The user's other programs send their alerts to Beam the way they'd send them to ntfy, and every device
+has them in one place (the web app's Alerts row; Android: Alerts in the menu and notifications). Each program ("app")
+gets a key in Settings → Alerts (`bn_` and 32 base64url characters: ntfy's topic rule): it posts alerts and nothing
+else. Beam's own alerts are in it too (sender `beam`; they pop up as `alert` events, as before).
+
+**Posting (no Beam sign-in: the key), as ntfy publishes** (https://docs.ntfy.sh/publish/): the server is
+`<Beam's address>/notify`, the topic the key.
+- JSON at the root: `POST /notify/` (or `/notify`) `{ topic, message, title?, priority?, tags?, click?, actions?,
+  attach?, filename? }`.
+- Text: `POST|PUT /notify/<key>` with the message as the body, the rest in headers (`X-Title`, `Title`, `t`;
+  `X-Priority`, `Priority`, `prio`, `p`; `X-Tags`, `Tags`, `Tag`, `ta`; `X-Click`, `Click`; `X-Actions`, `Actions`,
+  `Action`; `X-Attach`, `Attach`, `a`; `X-Filename`, `Filename`, `file`, `f`; any case; raw UTF-8 or RFC 2047) or the
+  same as lowercase query parameters (`m`/`message` for the message).
+- GET `/notify/<key>/publish|send|trigger?…`: the query parameters (no body: "triggered").
+- A webhook's JSON at `/notify/<key>`: read for its title (title, subject, summary, Discord's embeds), text (message,
+  text, body, content, description), link (click, url, link, href) and priority (priority; else level, severity,
+  status, event, state words: critical → 5, alert/error/warning/down/firing → 4, info/ok/resolved/clear → 3, low/debug
+  → 2); with none of those, the JSON itself is the text.
+- The key may also come as `Authorization: Bearer <key>`, Basic with the key as the password, or `?auth=` (base64 of
+  either header), the topic then being any name.
+- Priorities 1-5 (`min`, `low`, `default`, `high`, `max`/`urgent`): 1-2 are only listed, 3 and up pop up on every
+  device (not for a muted or snoozed app). Tags that are emoji names (gemoji's, as ntfy's) become `emojis`, shown
+  before the title; the rest stay `tags`. `view` actions (3 at most, http(s)) are kept; an attachment's link is kept,
+  never fetched; icons, Markdown, delays, sequence ids, e-mail and calls aren't.
+- Limits: the message 4,096 bytes (cut, with "…"), the title 250 characters, tags 512 bytes, a body 64 KB (413); 60
+  alerts a minute an app (429 `42908`); 20 posts with a key that isn't one from an address in 10 minutes (429 `42901`).
+- Answers as ntfy: `200 { id, time, expires, event: "message", topic, message, title?, priority?, tags?, click? }`;
+  errors `{ code, http, error }` (`40301` not a key of this Beam's, `40000` bad input, `40024` bad JSON at the root,
+  `40401`, `40501`, `41301`).
+
+Alert: `{ id (16 hex), sender, at, title?, text, priority, emojis?, tags?, click?, actions? [{ label, url }], attach?
+{ url, name? }, from? (the Tailscale machine, or the server's own computer's name) }`. Sender: `{ id (8 hex, or
+"beam"), name, builtIn? (Beam's), at, by?, muted, snoozeUntil, lastAt, count, lastFrom? }` (never its key). Kept in
+`data/inbox.json` (in exports and backups): 30 days, 300 an app, 2000 in all. The log names the app that posted and
+from where, never an alert's words or a key.
+
+| Method & path | Result |
+|---|---|
+| `GET /api/inbox` | `{ senders (Beam's first), alerts (newest first, 500), read }` (`read`: when this device last looked) |
+| `PUT /api/inbox/read` | `{ at }` → `{ read }`: this device has looked up to `at` (its other streams hear `inbox-read`) |
+| `POST /api/inbox/senders` | `{ name }` (1-60 characters, its own) → `201 { sender, key, server, url, localServer, localUrl, topic }`: the key only now (kept hashed); `server`/`url` at Beam's tailnet address (https), `local…` at this PC's own (`http://127.0.0.1:<port>`); 50 apps at most |
+| `PATCH /api/inbox/senders/{id}` | `{ name?, muted?, snoozeUntil? (ms, within 7 days; 0: not) }` → `{ sender }` |
+| `POST /api/inbox/senders/{id}/key` | a new key (the old one stops at once) → as when added |
+| `DELETE /api/inbox/senders/{id}` | `204`: the app and its alerts go |
+| `DELETE /api/inbox/alerts/{id}` | `{ deleted: 1 }` |
+| `DELETE /api/inbox/alerts?sender=<id>` | all of that app's (`beam`: Beam's own) → `{ deleted }` |
+
+All need a trusted sign-in (`403 { reason: "trusted" }`); changes one made to last. Events (trusted streams only):
+`inbox { alert, notify, sender }` (urgent for a background stream when `notify`), `inbox-changed { at }` (apps added,
+changed or removed; alerts deleted: read the list again), `inbox-read { at }` (the device's own streams).
+
 ### Commands on a PC (1.32)
 Feature `commands`. A PowerShell or Command Prompt command on one of the user's PCs (Beam for Windows 1.25+), its output
 back while it runs. Who may: a device that may control that PC (remote control's rules: a sign-in for good, trusted,
@@ -1040,6 +1092,9 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `alert` | **(1.3)** `{ "id", "kind", "device", "level", "text", "at" }` (see Alerts); ignore ones where `device` is you, except `serverDisk`, `tailscaleKey` (1.17) and `powerLoss` (1.18) |
 | `speed-test` | **(1.18)** `{ "id" }`, to the asked device's own streams only (at once): run a speed test (see Speed tests) and send the result with this `id` |
 | `sites` | **(1.31)** `{ "at" }`: the Sites list changed or a check finished (see Sites) |
+| `inbox` | **(1.33)** `{ "alert", "notify", "sender" }`: an alert in the alerts inbox (trusted streams; see The alerts inbox) |
+| `inbox-changed` | **(1.33)** `{ "at" }`: its apps or alerts changed: read it again |
+| `inbox-read` | **(1.33)** `{ "at" }`: this device looked at the alerts up to `at` (its own streams) |
 | `log-request` | **(1.20)** `{ "id" }`, to the asked PC's own streams only (at once): send the end of its log with this `id` (see A PC's log) |
 | `files-request`, `files-copy` | **(1.26)** `{ "id", "by", "byName", "share", "path" }` (+ `"names"` for a copy), to the asked PC's own streams only (at once): answer with this `id` if `by` is one of the folder's devices (see Shared folders) |
 | `files-icons`, `files-thumbs`, `files-preview`, `files-search` | **(1.28)** the same, with `"exts"`, `"names"` + `"px"`, `"name"` or `"q"`: to a PC with Beam for Windows 1.20 or later only |

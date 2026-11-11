@@ -454,6 +454,9 @@ class BeamApi(
         return if (raw.startsWith("[")) Alert.parseList(JSONArray(raw)) else Alert.parseList(JSONObject(raw.ifEmpty { "{}" }).optJSONArray("alerts"))
     }
 
+    /** (1.19, server 1.33) `GET /api/inbox`: the alerts inbox (`senders`, `alerts` newest first, `read`). */
+    fun inbox(): JSONObject = json(request(url("/api/inbox")).get().build())
+
     // (1.17, server 1.31) Sites: the web pages on the tailnet (docs/API.md "Sites").
     fun sites(): SitesResult = SitesResult.parse(json(request(url("/api/sites")).get().build()))
 

@@ -36,6 +36,7 @@
   <script src="gallery.js" defer></script>
   <script src="sites.js" defer></script>
   <script src="commands.js" defer></script>
+  <script src="inbox.js" defer></script>
   <script src="app.js" defer></script>
   <!-- The remote control viewer: app.js loads it only for #remote=<PC id> (inert here: named for its version) -->
   <template id="viewerScript"><script src="remote.js"></script></template>
@@ -204,6 +205,7 @@
       <div id="thread" class="thread" role="log" aria-live="off" aria-label="Messages" tabindex="-1"></div>
       <div id="arrivals" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
       <div id="phonePanel" class="phone-panel" role="region" aria-label="Phone notifications"></div>
+      <div id="inboxPanel" class="inbox-panel" role="region" aria-label="Alerts"></div>
       <div id="galleryPanel" class="gallery-panel" role="region" aria-label="Photos and files"></div>
       <button id="newPill" class="new-pill" type="button" hidden><svg class="i" aria-hidden="true"><use href="#i-arrow-down"/></svg><span id="newPillText">New messages</span></button>
 

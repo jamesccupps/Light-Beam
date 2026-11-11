@@ -753,6 +753,45 @@ html.files-mode .shared-stage img { max-height: 70vh; }
 .phone-row .conv-name, .phone-row .conv-preview, .app.phone-open #threadName, .phone-app-name, .phone-title, .phone-conv,
 .phone-lines p, .phone-actions button, .phone-status { unicode-bidi: isolate; }
 
+/* ---------- the alerts inbox (1.33, inbox.js): a panel in place of the thread, like the phone's ---------- */
+.inbox-panel { display: none; }
+.app.inbox-open .inbox-panel, .inbox-list-page {
+  flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+  padding: 12px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
+}
+.inbox-list-page { padding: 4px 0 8px; }
+.app.inbox-open #thread, .app.inbox-open #composer, .app.inbox-open #composerNote, .app.inbox-open #newPill,
+.app.inbox-open #pinnedBtn, .app.inbox-open #galleryBtn, .app.inbox-open #threadSearchBtn, .app.inbox-open #threadMenuBtn, .app.inbox-open #threadSearch { display: none !important; }
+.avatar.alerts { background: var(--accent-soft); color: var(--accent); }
+.inbox-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.inbox-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.inbox-chips .chip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: inherit; font: inherit; font-size: 0.8125rem; cursor: pointer; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-chips .chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.inbox-sender { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; }
+.inbox-alert { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius); background: var(--surface); }
+.inbox-alert.new { border-left-color: var(--accent); }
+.inbox-alert.p4, .inbox-alert.p5 { border-left-color: var(--danger); }
+.inbox-alert-head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 0.8125rem; }
+.inbox-app { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: isolate; }
+.inbox-prio { flex: none; padding: 1px 7px; border-radius: 999px; font-size: 0.6875rem; font-weight: 700; background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.inbox-prio.quiet { background: var(--surface-2, var(--bg)); color: var(--muted); font-weight: 600; }
+.inbox-time { margin-left: auto; flex: none; }
+.inbox-del { flex: none; opacity: .55; }
+.inbox-alert:hover .inbox-del, .inbox-del:focus-visible { opacity: 1; }
+.inbox-title { overflow-wrap: anywhere; unicode-bidi: isolate; }
+.inbox-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: isolate; }
+.inbox-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.inbox-tag { padding: 0 6px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); }
+.inbox-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.inbox-empty .i.big { width: 40px; height: 40px; margin-bottom: 8px; color: var(--muted); }
+.inbox-empty-line { margin: 12px 0; }
+.inbox-row .conv-name, .inbox-row .conv-preview { unicode-bidi: isolate; }
+.inbox-made { margin: 6px 0; padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--accent-soft); }
+.inbox-made-value { flex: 1; min-width: 0; user-select: all; -webkit-user-select: all; }
+.inbox-app-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+html.alerts-mode #genBody { overflow-y: auto; }
+
 /* ---------- picking several (1.12, gallery.js): a check on each message, the bar in place of the message box ---------- */
 .pick-bar { display: none; }
 .app.picking .pick-bar {
