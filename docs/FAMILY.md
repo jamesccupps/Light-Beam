@@ -8,6 +8,56 @@ It is a **separate server** (`family/server.js`) with its own process, data, por
 change. That separation is deliberate: Beam Family can be opened from the internet (the public link), and the
 internet must never be one bug away from the server that can control your PCs.
 
+
+## Setting it up
+
+Beam Family is your family's own chat, in the spirit of Discord: a family space with channels (#general, #photos…),
+direct and group conversations, photos, videos and files, replies, reactions, @mentions, notifications, search,
+and history that's kept. It's a separate server next to Beam (Beam's device features don't change), so it can be
+opened from the internet without that ever reaching the server that controls your PCs.
+
+```bash
+node family/server.js --supervise
+tailscale serve --bg --https=8443 http://127.0.0.1:8766     # your tailnet, and people you share the machine with
+tailscale funnel --bg --https=8443 http://127.0.0.1:8766    # optional: a public link (invite + password)
+```
+
+- Open `https://<your computer>.<your tailnet>.ts.net:8443` from your own device over Tailscale: you're set up as the
+  owner. Invite the family from **People & channels** (a link, or a QR code to scan). Since 1.25.2, invites,
+  password-reset links and the other changes that let someone in ask for your Family password when you're signed in
+  by Tailscale: run `node family/server.js password` on that PC once; it prints a link that sets it.
+- On Tailscale (your tailnet, or the machine shared with them) people are signed in by Tailscale. Through the public
+  link they choose a name and a password; they don't need Tailscale.
+- It works in any browser and installs as an app on phones and computers (on an iPhone: Share → Add to Home Screen,
+  which notifications need there). Set `BEAM_FAMILY_URL` in `.env` and Beam's own apps open it: the Windows app in a
+  window of its own (the ♥, the tray's **Beam Family**), the Android app in a Chrome tab inside it (the menu's **Beam
+  Family**), the web app in a new tab. Notifications come through the browser and the phone.
+- **Fast links** (1.9): "Fast link" on any file in the chat, or "Make a fast link" (the paperclip) for a file on your
+  phone, gives a link anyone can download it with, no account needed, until it runs out (an hour, a day, a week) or
+  you switch it off. Its page fetches the file straight from your computer when it can (a direct WebRTC connection:
+  on your own Wi-Fi it stays inside the house; elsewhere it skips the public link's relay), else over https. Big
+  uploads from the app go the same direct way. On Windows, devices on your own network need one firewall rule to
+  connect directly (see [docs/FAMILY.md](FAMILY.md)).
+- **Fast links from Beam's own chat too** (1.13): "Fast link…" on a file there (browsers, the Windows app, the Android
+  app) makes the same kind of link through Beam Family on the same machine, from the file itself (no copy on the same
+  drive); its page says it's from Family's owner.
+- **Fast links that stop, or leave the location behind** (1.15): when you make one you can have it stop after one, 3
+  or 10 downloads (a download that's picked up again isn't a new one), and share a photo or video without where it was
+  taken: Beam Family makes a copy without the location and the camera's other notes (JPEG and PNG photos, and videos
+  when ffmpeg is set up), and the link only ever sends that copy (over https: never the original).
+- **Fast downloads, a gallery, several at once** (1.11): big files download from the chat over the same direct
+  connection as fast links, with progress and Stop; each conversation has a gallery of its photos, videos and files;
+  pick several messages or pictures to copy, download or delete them together.
+- **Videos that play everywhere** (1.10): a phone's HDR video can refuse to play on another phone (an iPhone, say). Like
+  Google Photos, Beam Family keeps the original and makes a copy every phone and browser plays (H.264, standard
+  color), with ffmpeg on your computer (the graphics card's encoder when it has one). The chat plays that copy, and so
+  does a fast link's page, which also offers it as "Download for any phone". Set `BEAM_FAMILY_FFMPEG` to where
+  ffmpeg is (see [docs/FAMILY.md](FAMILY.md)); without it, videos play as they are.
+
+Details, settings and the security model: [docs/FAMILY.md](FAMILY.md).
+
+## Details
+
 ### Big files from a phone (1.8.3)
 
 A message with files appears for everyone when its files are all there. Meanwhile the sender sees how far they are
