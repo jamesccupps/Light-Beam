@@ -6712,7 +6712,7 @@ test('1.6 Remote control ends when a party is removed, merged away, switches it 
     const pc2 = app(K, 'rcdesk00002', 'Desktop', 'windows', { ...from(RC_NET.pc.ip4), 'X-Beam-App-Version': '1.6.0', 'X-Beam-Profile': RC_PROFILE.pc });
     await s.req('GET', '/api/me', { headers: pc2 });
     assert.deepEqual((await phoneEv.wait('rc-end', d => d.id === id, 1000)).data.reason, 'revoked');
-    assert.match(s.out, /Linked "Desktop" to "Desktop" \(reinstalled app\)/);
+    await waitFor(() => /Linked "Desktop" to "Desktop" \(reinstalled app\)/.test(s.out), 5000);
     phoneEv.close();
   } finally { await t.stop(); }
 });
@@ -7475,7 +7475,7 @@ test('1.6 Device keys: a reinstalled app (new id, new key) keeps its own key; th
     const pairNew = (await s.req('GET', '/api/pair', { headers: phone })).json.key;
     const newApp = { ...base, Authorization: `Bearer ${pairNew}`, 'X-Beam-Device-Id': 'dknew000002', 'X-Beam-Device-Key': NEW };
     assert.equal((await s.req('GET', '/api/me', { headers: newApp })).status, 200);
-    assert.match(s.out, /Linked "Shop Desktop" to "Shop Desktop" \(reinstalled app\)/);
+    await waitFor(() => /Linked "Shop Desktop" to "Shop Desktop" \(reinstalled app\)/.test(s.out), 5000);
     const r = await s.req('GET', '/api/me', { headers: oldApp });
     assert.deepEqual([r.status, r.json.reason], [403, 'device-key'], "the old install's sign-in now names the new device, whose key it doesn't have");
     // Remote control: the new app's sign-in is key-bound; the old one (in a page, without the key) isn't.
