@@ -282,8 +282,10 @@ function itemMenuEntries(item, target, node) {
   const e = [];
   const selected = node ? selectionIn(node) : '';
   const link = target?.closest?.('a[href]');
+  // (1.34.0) a note: ticked off first
+  if (isNoteItem(item) && serverHas('notes') && itemMap.has(item.id)) e.push({ label: item.done ? 'Not done' : 'Done', icon: 'check', action: () => toggleNoteDone(item) });
   // (1.14.0) Reply first, as in any chat
-  if (serverHas('replies') && itemMap.has(item.id) && canSendTo(current)) e.push({ label: 'Reply', icon: 'reply', action: () => startReply(item) });
+  if (serverHas('replies') && itemMap.has(item.id) && canSendTo(current) && current !== 'notes') e.push({ label: 'Reply', icon: 'reply', action: () => startReply(item) });
   if (selected) e.push({ label: 'Copy', icon: 'copy', hint: 'Ctrl+C', action: () => copyText(selected) });
   if (item.kind === 'text') {
     e.push({ label: selected ? 'Copy whole message' : 'Copy', icon: 'copy', action: () => copyItem(item) });
@@ -317,11 +319,12 @@ function itemMenuEntries(item, target, node) {
   }
   e.push('sep');
   if (itemMap.has(item.id)) e.push({ label: 'Select', icon: 'check', action: () => startPicking(item.id) });
-  e.push({ label: 'Forward…', icon: 'forward', action: () => forwardPrompt(item) });
+  e.push({ label: isNoteItem(item) ? 'Send to…' : 'Forward…', icon: 'forward', action: () => forwardPrompt(item) });
+  if (!isNoteItem(item) && notesOn() && itemMap.has(item.id)) e.push({ label: 'Save to Notes', icon: 'note', action: () => saveToNotes(item) }); // (1.34.0)
   if (item.kind === 'file' && serverHas('fast-links')) e.push({ label: 'Fast link…', icon: 'link', action: () => fastLinkDialog(item) });
   if (serverHas('pin')) e.push({ label: item.pinned ? 'Unpin' : 'Pin', icon: 'pin', action: () => togglePin(item) });
   e.push('sep');
-  e.push({ label: 'Delete for everyone', icon: 'trash', danger: true, hint: 'Del', action: () => deleteItems([item.id]) });
+  e.push({ label: isNoteItem(item) ? 'Delete' : 'Delete for everyone', icon: 'trash', danger: true, hint: 'Del', action: () => deleteItems([item.id]) });
   return e;
 }
 
@@ -476,8 +479,32 @@ async function togglePin(item) {
   }
 }
 
+// (1.34.0) A note ticked off, or not (notes only; every device sees it).
+async function toggleNoteDone(item) {
+  const done = !item.done;
+  item.done = done;
+  patchMsg(item);
+  try {
+    await api(`api/items/${item.id}`, jsonBody({ done }, 'PATCH'));
+  } catch (err) {
+    item.done = !done;
+    patchMsg(item);
+    toast(friendlyError(err), { error: true });
+  }
+}
+
+// (1.34.0) Any message kept in Notes: a copy that's a note (a forward to this device).
+async function saveToNotes(item) {
+  try {
+    acceptOwnItem(await apiJson(`api/items/${item.id}/forward`, jsonBody({ to: targetsOf('notes') })));
+    toast('Saved to Notes', { action: 'Open', onAction: () => openConv('notes') });
+  } catch (err) {
+    toast(friendlyError(err), { error: true });
+  }
+}
+
 async function forwardPrompt(item) {
-  const conv = await chooseConv(item.kind === 'text' ? 'Message' : item.name, { title: 'Forward to…', exclude: [] });
+  const conv = await chooseConv(item.kind === 'text' ? 'Message' : item.name, { title: isNoteItem(item) ? 'Send to…' : 'Forward to…', exclude: [] });
   if (conv) forwardItem(item, [conv]);
 }
 
@@ -485,13 +512,15 @@ function forwardItem(item, convs) { return forwardItems([item], convs); }
 
 // Several (picked together, 1.12): oldest first, so they arrive in the order they were sent.
 async function forwardItems(list, convs) {
-  const to = convs.flatMap(targetsOf);
+  // (1.34.0) Notes gets a copy of its own: a message to this device and another is no note
+  const others = convs.filter(c => c !== 'notes').flatMap(targetsOf);
+  const tos = convs.includes('notes') ? [targetsOf('notes'), ...(others.length || convs.includes('all') ? [others] : [])] : [others];
   const where = convs.map(convName).join(', ');
   let done = 0;
   try {
     for (const item of list) {
       if (serverHas('forward')) {
-        acceptOwnItem(await apiJson(`api/items/${item.id}/forward`, jsonBody({ to })));
+        for (const to of tos) acceptOwnItem(await apiJson(`api/items/${item.id}/forward`, jsonBody({ to })));
       } else if (item.kind === 'text') {
         const text = view.fullText.get(item.id) || (item.truncated ? await (await api(`api/items/${item.id}/text`)).text() : item.text);
         for (const c of convs) await sendText(text, c);
@@ -513,7 +542,8 @@ async function clearConversation(conv = current) {
   if (!ids.length) return toast('Nothing to clear');
   const ok = await confirmDialog({
     title: `Clear ${convName(conv)}?`,
-    text: `${plural(ids.length, 'item')} ${conv === 'all' ? 'sent to all devices' : `between you and ${convName(conv)}`} will be deleted on every device.`,
+    text: conv === 'notes' ? `${plural(ids.length, 'note')} will be deleted on every device.` // (1.34.0)
+      : `${plural(ids.length, 'item')} ${conv === 'all' ? 'sent to all devices' : `between you and ${convName(conv)}`} will be deleted on every device.`,
     confirm: 'Delete them', danger: true,
   });
   if (ok) deleteItems(ids);

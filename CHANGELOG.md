@@ -12,6 +12,20 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.34.0 (2026-11-14): Notes
+
+**Versions:** server 1.34.0, Android app 1.20.0 (the Windows app and Beam for Linux are unchanged).
+
+- **Notes:** a conversation with yourself under All devices, for anything to keep for later: write, paste or drop
+  text, links, pictures and files there. A note is a message to the device it was sent from, so every device shows
+  every note and none of them buzzes or acts on one; the server keeps notes until they're deleted (the clean-ups
+  skip them, as they skip pinned items) and never pushes them to ntfy. A note's menu has Done (it's struck
+  through), Edit, Send to… and Delete; every other message has Save to Notes. On Android the share sheet and the
+  clipboard tile can save to Notes; so can `beam send --to notes "…"` and the target name `notes` in the API.
+  `note` and `done` on items, `PATCH /api/items/{id} {"done"}`, feature `notes` (docs/API.md, "Conversations").
+- **Fixed:** in the web app, the Alerts or Phone row going away from the sidebar could leave the next row with
+  nowhere to go (an error, and a sidebar drawn only partly).
+
 ## 1.33.0 (2026-11-10): Alerts from your other programs
 
 **Versions:** server 1.33.0, Windows app 1.26.0, Android app 1.19.0.

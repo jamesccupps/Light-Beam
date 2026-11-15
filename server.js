@@ -1795,7 +1795,8 @@ function forgetDeviceNow(id, reason) {
 }
 
 // Targets may be device ids (merged ids are followed) or names; returns ids. Empty = everyone.
-function resolveTargets(raw) {
+// (1.34.0) `self`: the caller's device, for the target name "notes" (a note: a message to the device you're on).
+function resolveTargets(raw, self = null) {
   if (raw === undefined || raw === null) return [];
   let list = raw;
   if (typeof list === 'string') list = list.split(',');
@@ -1808,6 +1809,11 @@ function resolveTargets(raw) {
     token = cleanName(token);
     if (!token || /^(all|everyone|\*)$/i.test(token)) continue;
     const byName = Object.values(devices).filter(d => d.name.toLowerCase() === token.toLowerCase());
+    if (!byName.length && /^notes$/i.test(token)) { // (1.34.0) unless a device is named so
+      if (!self || !devices[self]) throw httpError(400, 'Notes belong to a device: send as one of your devices');
+      ids.add(self);
+      continue;
+    }
     if (!byName.length) throw httpError(400, `Unknown device: ${token}`);
     byName.forEach(d => ids.add(d.id));
   }
@@ -1815,14 +1821,14 @@ function resolveTargets(raw) {
 }
 
 function targetsFromRequest(req, url, bodyTo) {
-  if (bodyTo !== undefined && bodyTo !== null) return resolveTargets(bodyTo);
+  if (bodyTo !== undefined && bodyTo !== null) return resolveTargets(bodyTo, deviceIdOf(req, url));
   const header = req.headers['x-beam-to'];
   if (header) {
     let value = String(header);
     try { value = decodeURIComponent(value); } catch {}
-    return resolveTargets(value);
+    return resolveTargets(value, deviceIdOf(req, url));
   }
-  return resolveTargets(url.searchParams.get('to') || '');
+  return resolveTargets(url.searchParams.get('to') || '', deviceIdOf(req, url));
 }
 
 // ---------------------------------------------------------------- owners (Tailscale sign-in)
@@ -5933,6 +5939,7 @@ function broadcastUpdate(item) {
   const out = { id: item.id, delivered: item.delivered || {}, pinned: Boolean(item.pinned), thumb: Boolean(item.thumb) };
   // (1.14.0) reactions (all of them: {} when none are left), and an edited text with its new words (cut as in lists)
   out.reactions = item.reactions || {};
+  if (isNote(item)) out.done = Boolean(item.done); // (1.34.0)
   if (item.edited) {
     out.edited = item.edited;
     if (item.kind === 'text') {
@@ -5944,7 +5951,7 @@ function broadcastUpdate(item) {
 }
 
 async function pushNtfy(item) {
-  if (!NTFY_URL || NTFY_SKIP.has(item.device.toLowerCase())) return;
+  if (!NTFY_URL || NTFY_SKIP.has(item.device.toLowerCase()) || isNote(item)) return; // (1.34.0: a note goes nowhere)
   const isText = item.kind === 'text';
   const message = isText
     ? (NTFY_PREVIEW ? item.text.slice(0, 300) : 'Tap to open Beam')
@@ -6000,6 +6007,14 @@ async function dropContent(item) {
   if (item.textFile) await rmQuiet(textPath(item.id));
   if (item.thumb) await rmQuiet(thumbPath(item.id));
 }
+
+// (1.34.0, the user: "a way to message the devicee you are on … like notes, if you just need to paste or write somethign
+// for later") A note is a message to the device it was sent from, and only to it. Sending to yourself was always
+// allowed, so older apps send notes too (the Windows app's files and clipboard, through its page) and ignore them
+// (an item is shown only when it's for a device or from it, and no app lists a conversation with itself).
+const isNote = item => Boolean(item.from) && item.to?.length === 1 && item.to[0] === item.from;
+// What the clean-ups never remove: pinned items and notes (a note counts as delivered at once: it would go first).
+const isKept = item => Boolean(item.pinned) || isNote(item);
 
 // An item counts as delivered once every target has acknowledged it (targets that were forgotten can't);
 // a broadcast once any other device has.
@@ -6103,7 +6118,9 @@ function cursorRev(cursor) {
 }
 
 function addItem(item) {
-  log.info(`${item.forwardedFrom ? 'Forwarded' : 'Sent'} ${describeItem(item)} from ${whoName(item.from, item.device)} to ${targetsText(item.to)} [${shortId(item.id)}]`);
+  log.info(isNote(item) // (1.34.0)
+    ? `Noted ${describeItem(item)} on ${whoName(item.from, item.device)} [${shortId(item.id)}]`
+    : `${item.forwardedFrom ? 'Forwarded' : 'Sent'} ${describeItem(item)} from ${whoName(item.from, item.device)} to ${targetsText(item.to)} [${shortId(item.id)}]`);
   items.unshift(item);
   if (indexedList === items) itemIndex.set(item.id, item); // (1.30.2: the index stays right)
   enforceMaxItems(item.id);
@@ -6124,14 +6141,14 @@ function removeItems(predicate) {
   return gone.length;
 }
 
-// Over the item limit, the oldest delivered, unpinned items go first; pinned items are never removed.
+// Over the item limit, the oldest delivered, unpinned items go first; pinned items and notes (1.34) are never removed.
 function enforceMaxItems(keepId) {
   const max = setting('maxItems');
   if (!(max > 0) || items.length <= max) return;
   const excess = items.length - max;
   // (audit P-1) "delivered" worked out once per item, not in the comparator (O(n log n) allocating calls at 100,000)
   const candidates = items
-    .filter(i => !i.pinned && i.id !== keepId)
+    .filter(i => !isKept(i) && i.id !== keepId)
     .map(i => ({ i, delivered: isDelivered(i) }))
     .sort((a, b) => (b.delivered - a.delivered) || (a.i.ts - b.i.ts))
     .slice(0, excess)
@@ -6147,8 +6164,8 @@ function sweep() {
   const retention = setting('retentionDays');
   if (retention > 0) {
     const day = 86400e3;
-    // Undelivered items wait up to three times longer for their device to come back; pinned ones stay.
-    const expired = items.filter(i => !i.pinned && (now() - i.ts > 3 * retention * day || (now() - i.ts > retention * day && isDelivered(i))));
+    // Undelivered items wait up to three times longer for their device to come back; pinned ones and notes stay.
+    const expired = items.filter(i => !isKept(i) && (now() - i.ts > 3 * retention * day || (now() - i.ts > retention * day && isDelivered(i))));
     if (expired.length) {
       const bytes = expired.reduce((n, i) => n + (i.kind === 'file' ? i.size || 0 : 0), 0);
       const undelivered = expired.filter(i => !isDelivered(i)).length;
@@ -6259,7 +6276,7 @@ async function fullText(item) {
 // What clients see of an item. Internal fields stay server-side.
 function publicItem(item) {
   const { textFile, thumb, lastEvent, ...rest } = item;
-  return { from: null, to: [], delivered: {}, ...rest, pinned: Boolean(item.pinned), thumb: Boolean(thumb) };
+  return { from: null, to: [], delivered: {}, ...rest, ...(isNote(item) ? { note: true, done: Boolean(item.done) } : {}), pinned: Boolean(item.pinned), thumb: Boolean(thumb) };
 }
 
 // Lists and live events cut texts to 16 KB; the full text is at /api/items/{id}/text.
@@ -6358,7 +6375,7 @@ async function roomLeft() {
 }
 
 function evictForSpace(needed, keep = null) {
-  const candidates = items.filter(i => !i.pinned && i.id !== keep && isDelivered(i) && (i.kind === 'file' || i.textFile)).sort((a, b) => a.ts - b.ts);
+  const candidates = items.filter(i => !isKept(i) && i.id !== keep && isDelivered(i) && (i.kind === 'file' || i.textFile)).sort((a, b) => a.ts - b.ts);
   const gone = new Set();
   let freed = 0;
   for (const i of candidates) {
@@ -6636,16 +6653,21 @@ async function patchItem(req, res, [id], url) {
   if (!item) return send(res, 404, { error: 'Not found' });
   // (1.14.0: a text's words too, so as much as a text may hold)
   const body = await readJson(req, { limit: MAX_TEXT + 64 * 1024 });
-  const unknown = Object.keys(body).filter(k => k !== 'pinned' && k !== 'text');
+  const unknown = Object.keys(body).filter(k => k !== 'pinned' && k !== 'text' && k !== 'done');
   if (unknown.length) throw httpError(400, `Can't change ${unknown.join(', ')}`);
-  if (!('pinned' in body) && !('text' in body)) throw httpError(400, 'Expected {"pinned": true|false} or {"text": "…"}');
+  if (!('pinned' in body) && !('text' in body) && !('done' in body)) throw httpError(400, 'Expected {"pinned": true|false}, {"done": true|false} or {"text": "…"}');
   if ('pinned' in body && typeof body.pinned !== 'boolean') throw httpError(400, 'Expected {"pinned": true|false}');
+  // (1.34.0) a note ticked off (or not): only notes
+  if ('done' in body && typeof body.done !== 'boolean') throw httpError(400, 'Expected {"done": true|false}');
+  if ('done' in body && !isNote(item)) throw httpError(400, 'Only a note can be ticked off');
   // (1.30.1, the user's review M2) a text's words: only its sender's device, or an approved sign-in (a link the phone
   // sent could be swapped for another of the same length)
   if ('text' in body && resolveAlias(item.from) !== deviceIdOf(req, url) && !isTrusted(authOf(req))) throw notTrusted('change another device’s message');
   if ('text' in body) await editText(item, body.text);
   if (body.pinned === true) item.pinned = true;
   else if (body.pinned === false) delete item.pinned;
+  if (body.done === true) item.done = true;
+  else if (body.done === false) delete item.done;
   itemChanged(item);
   broadcastUpdate(item);
   send(res, 200, summary(item));
@@ -6656,7 +6678,7 @@ async function forwardItem(req, res, [id], url) {
   const source = findItem(id);
   if (!source) return send(res, 404, { error: 'Not found' });
   const body = await readJson(req);
-  const to = resolveTargets(body.to);
+  const to = resolveTargets(body.to, deviceIdOf(req, url));
   const copy = { id: newId(), kind: source.kind, forwardedFrom: source.id };
   // (1.30.2, the review's Low) the same file under a second name counts once (storageUsed): the original's own root
   const shares = linked => { if (linked) copy.sharesFile = source.sharesFile && findItem(source.sharesFile) ? source.sharesFile : source.id; };
@@ -7868,6 +7890,7 @@ const FEATURES = [
   'uac-status', // (1.30.1: status `uacOnScreen`, a PC whose UAC prompts any program there could answer; the review's M28)
   'sites', // (1.31.0: GET/POST /api/sites, PATCH/DELETE /api/sites/{id}, POST /api/sites/check, the `sites` event, status `sites`)
   'inbox', // (1.33.0: the alerts inbox: /notify (ntfy's publishing), GET /api/inbox, /api/inbox/senders, /api/inbox/alerts, PUT /api/inbox/read, the `inbox`, `inbox-changed` and `inbox-read` events)
+  'notes', // (1.34.0: a message to the device it's sent from is a note (`note: true`, kept until deleted); the target name "notes"; PATCH /api/items/{id} {done})
   'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];
 

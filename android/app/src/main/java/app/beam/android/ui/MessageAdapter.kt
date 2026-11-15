@@ -407,14 +407,20 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
         val item = row.item
         val parts = mutableListOf(Format.time(item.ts))
         if (item.edited > 0) parts += ctx.getString(R.string.edited) // (server 1.14)
+        if (item.isNote && item.done) parts += ctx.getString(R.string.note_done) // (1.20)
         if (row.status != null) parts += row.status
         val meta = parts.joinToString(" · ")
         b.meta.text = meta
         b.imageMeta.text = meta
         val picture = pictureLike(row) && b.imageBox.isVisible
-        b.statusIcon.isVisible = row.mine && !picture
+        b.statusIcon.isVisible = row.mine && !picture && !item.isNote // (1.20: a note goes nowhere)
         b.statusIcon.setImageResource(if (row.delivered) R.drawable.ic_done_all else R.drawable.ic_check)
         b.pin.isVisible = item.pinned
+        // (1.20) a note ticked off: struck through and faded (both ways: a change of done alone comes here)
+        val done = item.isNote && item.done
+        val strike = android.graphics.Paint.STRIKE_THRU_TEXT_FLAG
+        b.text.paintFlags = if (done) b.text.paintFlags or strike else b.text.paintFlags and strike.inv()
+        b.bubble.alpha = if (done) 0.65f else 1f
         b.footer.isVisible = !picture
         b.bubble.contentDescription = listOfNotNull(
             row.sender,
@@ -645,6 +651,7 @@ class MessageAdapter(private val ctx: Context, private val actions: Actions) : L
             b.bubble.setPadding((12 * d).toInt(), (8 * d).toInt(), (12 * d).toInt(), (4 * d).toInt())
         }
         b.bubble.alpha = if (pending) 0.72f else 1f
+        b.text.paintFlags = b.text.paintFlags and android.graphics.Paint.STRIKE_THRU_TEXT_FLAG.inv() // (1.20: a done note's: bindMeta)
         val onAccent = mine && !failed && !imageOnly
         val ink = if (onAccent) mineInk else color(R.color.text)
         val muted = if (onAccent) mineMuted else color(R.color.muted)

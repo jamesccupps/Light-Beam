@@ -209,12 +209,17 @@ data class Item(
     val reactions: Map<String, List<String>> = emptyMap(),
     /** (server 1.14) When its words were last changed (0: never). */
     val edited: Long = 0,
+    /** (server 1.34) A note ticked off (notes only). */
+    val done: Boolean = false,
 ) {
     val isText get() = kind == "text"
     val isFile get() = kind == "file"
     val isImage get() = isFile && mime?.startsWith("image/") == true && mime != "image/svg+xml"
     val isVideo get() = isFile && mime?.startsWith("video/") == true
     val displayName get() = name ?: "file"
+
+    /** (1.20, server 1.34) A note: a message to the device it was sent from, and only to it (docs/API.md → Notes). */
+    val isNote get() = from != null && to.size == 1 && to[0] == from
 
     /** "An item is for me when (to is empty OR to contains my id) AND from != my id." */
     fun isFor(me: String) = (to.isEmpty() || me in to) && from != me
@@ -236,6 +241,7 @@ data class Item(
         reply?.let { o.put("reply", it.toJson()) }
         if (reactions.isNotEmpty()) o.put("reactions", JSONObject().apply { for ((e, by) in reactions) put(e, JSONArray(by)) })
         if (edited > 0) o.put("edited", edited)
+        if (done) o.put("done", true)
         return o
     }
 
@@ -261,6 +267,7 @@ data class Item(
             reply = Reply.parse(o.optJSONObject("reply")),
             reactions = reactionsOf(o.optJSONObject("reactions")),
             edited = o.optLong("edited"),
+            done = o.optBoolean("done"),
         )
 
         /** `{ "👍": ["<device>", …] }` → each emoji with its devices (none left: not there). */

@@ -269,7 +269,7 @@ class QuickWinsTest {
     @Test
     fun devicesArePublishedAsSharingShortcutsAndUseIsReported() {
         val s = app.repo.state.value
-        Shortcuts.publish(app, Conversations.summaries(s.me, s.devices, s.items, emptyMap()))
+        Shortcuts.publish(app, Conversations.summaries(s.me, s.devices, s.items, emptyMap(), s.notesOn))
         val dynamic = ShortcutManagerCompat.getDynamicShortcuts(app)
         val deskShortcut: ShortcutInfoCompat? = dynamic.firstOrNull { it.id == Shortcuts.idFor(desk) }
         assertNotNull(dynamic.map { it.id }.toString(), deskShortcut)

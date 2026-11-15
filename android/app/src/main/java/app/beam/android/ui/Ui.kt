@@ -347,7 +347,7 @@ object Drops {
                 if (!text.isNullOrBlank()) texts += text
             }
         }
-        val to = Conversations.targets(conversation)
+        val to = Conversations.targets(conversation, app.repo.me)
         if (uris.isNotEmpty()) {
             val ok = TransferService.upload(activity, uris, to)
             val message = if (ok) activity.resources.getQuantityString(R.plurals.sending_files, uris.size, uris.size) else activity.getString(R.string.send_failed_start)

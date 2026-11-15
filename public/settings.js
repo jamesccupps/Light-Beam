@@ -952,7 +952,7 @@ function sectionServer() {
     cap.addEventListener('change', () => patchServerSettings({ maxItems: clamp(Math.round(Number(cap.value) || 0), 0, 100000) }));
     parts.push(card('Messages and files',
       inlineRow('Keep items for (days, 0 = forever)', days), inlineRow('Keep at most (items, 0 = no limit)', cap),
-      cardInfo(`Pinned items are always kept. Items another device hasn’t picked up yet are kept longer.${locked.size ? ' Greyed-out values are fixed in the server’s configuration.' : ''}`)));
+      cardInfo(`Pinned items and notes are always kept. Items another device hasn’t picked up yet are kept longer.${locked.size ? ' Greyed-out values are fixed in the server’s configuration.' : ''}`)));
   } else {
     parts.push(card('Messages and files', cardInfo(retention > 0 ? `Items are deleted after ${retention} days (at most ${maxItems.toLocaleString()} are kept).` : `Items are kept until you delete them (at most ${maxItems.toLocaleString()}).`)));
   }

@@ -60,6 +60,9 @@ class Repository(private val app: BeamApp) {
     ) {
         val devicesById: Map<String, Device> by lazy { devices.associateBy { it.id } }
         fun item(id: String) = items.firstOrNull { it.id == id }
+
+        /** (1.20) This Beam keeps notes (server 1.34 `notes`) and this phone knows its own id. */
+        val notesOn get() = info?.lists("notes") == true && me.isNotEmpty()
     }
 
     /** A file on its way from another device ("incoming 35%"); becomes an item when it's complete. */
@@ -267,13 +270,14 @@ class Repository(private val app: BeamApp) {
                 val edited = if (o.has("edited")) o.optLong("edited") else null
                 val text = o.str("text")
                 val truncated = if (o.has("truncated")) o.optBoolean("truncated") else null
+                val done = if (o.has("done")) o.optBoolean("done") else null // (server 1.34, notes)
                 _state.update { s ->
                     s.copy(items = s.items.map {
                         if (it.id != id) it
                         else it.copy(
                             delivered = delivered ?: it.delivered, pinned = pinned ?: it.pinned, thumb = thumb ?: it.thumb,
                             reactions = reactions ?: it.reactions, edited = edited ?: it.edited, text = text ?: it.text,
-                            truncated = truncated ?: it.truncated,
+                            truncated = truncated ?: it.truncated, done = done ?: it.done,
                             textLength = if (o.has("textLength")) o.optInt("textLength") else if (text != null) text.length else it.textLength,
                         )
                     })
@@ -429,6 +433,14 @@ class Repository(private val app: BeamApp) {
         val api = app.api ?: throw IllegalStateException("Not paired")
         api.setPinned(item.id, pinned)
         _state.update { s -> s.copy(items = s.items.map { if (it.id == item.id) it.copy(pinned = pinned) else it }) }
+        saveSoon()
+    }
+
+    /** (1.20, server 1.34) A note ticked off, or not. */
+    suspend fun setDone(item: Item, done: Boolean) = withContext(Dispatchers.IO) {
+        val api = app.api ?: throw IllegalStateException("Not paired")
+        api.setDone(item.id, done)
+        _state.update { s -> s.copy(items = s.items.map { if (it.id == item.id) it.copy(done = done) else it }) }
         saveSoon()
     }
 

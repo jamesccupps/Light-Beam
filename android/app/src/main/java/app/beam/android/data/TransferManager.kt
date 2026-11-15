@@ -803,7 +803,8 @@ class TransferManager(private val app: BeamApp) {
         _active.value = preparing.get() + _uploads.value.count { it.active } + _downloads.value.values.count { it.active }
     }
 
-    private fun conversationFor(to: List<String>) = to.firstOrNull() ?: Conversations.ALL
+    // (1.20) a note's upload (to this phone itself) belongs to Notes
+    private fun conversationFor(to: List<String>) = if (to.size == 1 && to[0] == app.repo.me) Conversations.NOTES else to.firstOrNull() ?: Conversations.ALL
 
     @Synchronized
     private fun notifyProgress(force: Boolean = false) {

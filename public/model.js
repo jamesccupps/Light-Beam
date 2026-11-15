@@ -111,10 +111,17 @@ const isForMe = item => (item.to.length === 0 || item.to.includes(me.id)) && ite
 const nameOf = id => deviceById(id)?.name || knownNames[id] || 'Removed device';
 const senderName = item => (item.from === me.id ? 'You' : deviceById(item.from)?.name || item.device || knownNames[item.from] || 'Unknown');
 
+// (1.34.0) Notes: a message to the device it was sent from (docs/API.md → Notes). Every device shows all of them in
+// Notes, and nothing is sent anywhere. Older pages and apps ignore them (neither for them nor in any conversation).
+const isNoteItem = item => Boolean(item.from) && item.to.length === 1 && item.to[0] === item.from;
+const notesOn = () => serverHas('notes') && Boolean(me.id);
+const isFixedConv = conv => conv === 'all' || conv === 'notes'; // not a device's conversation
+
 // Which conversations an item belongs to, from this device's point of view. A broadcast shows in All devices
 // and in its sender's conversation. Conversations with devices that were removed stay (their history is
 // still on the server); they show as "Removed device" and can't be sent to.
 function convsOf(item) {
+  if (isNoteItem(item)) return ['notes']; // (1.34.0) on every device, whoever wrote it
   if (item.to.length === 0) return item.from && item.from !== me.id ? ['all', item.from] : ['all'];
   if (!item.from) return item.to.includes(me.id) ? ['all'] : [];
   if (item.from === me.id) return item.to.filter(t => t !== me.id);
@@ -138,18 +145,20 @@ function index() {
 }
 const itemsIn = conv => index().get(conv) || [];
 
-const isRemoved = conv => conv !== 'all' && !deviceById(conv);
-const convName = conv => (conv === 'all' ? 'All devices' : nameOf(conv));
-const targetsOf = conv => (conv === 'all' ? [] : [conv]);
-const canSendTo = conv => conv === 'all' || Boolean(deviceById(conv));
+const isRemoved = conv => !isFixedConv(conv) && !deviceById(conv);
+const convName = conv => (conv === 'all' ? 'All devices' : conv === 'notes' ? 'Notes' : nameOf(conv));
+// (1.34.0) Notes: this device itself, never [] (that's every device; the Windows app drops a target that isn't an id)
+const targetsOf = conv => (conv === 'all' ? [] : conv === 'notes' ? [me.id || 'notes'] : [conv]);
+const canSendTo = conv => conv === 'all' || (conv === 'notes' ? notesOn() : Boolean(deviceById(conv)));
 
 // Every conversation to list: All devices, each other device, and removed devices that still have history.
 function conversationOrder() {
   const map = index();
   const ids = new Set(devices.map(d => d.id).filter(id => id !== me.id));
-  for (const conv of map.keys()) if (conv !== 'all' && conv !== me.id && map.get(conv).length) ids.add(conv);
+  for (const conv of map.keys()) if (!isFixedConv(conv) && conv !== me.id && map.get(conv).length) ids.add(conv);
   const last = conv => (map.get(conv) || []).at(-1)?.ts || 0;
-  return ['all', ...[...ids].sort((a, b) =>
+  // (1.34.0) Notes right under All devices (and the Phone and Alerts rows placed after it)
+  return ['all', ...(notesOn() || map.get('notes')?.length ? ['notes'] : []), ...[...ids].sort((a, b) =>
     (isRemoved(a) - isRemoved(b)) || (last(b) - last(a)) || ((deviceById(b)?.online || 0) - (deviceById(a)?.online || 0)) || nameOf(a).localeCompare(nameOf(b)))];
 }
 

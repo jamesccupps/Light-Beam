@@ -111,6 +111,9 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     val reactionCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
     val edits = CopyOnWriteArrayList<Pair<String, String>>()
 
+    /** (1.20, server 1.34) Each `PATCH /api/items/{id} { done }` (item, done). */
+    val dones = CopyOnWriteArrayList<Pair<String, Boolean>>()
+
     /** The item list (newest first), its cursor, and what a `since` request returns. */
     @Volatile var items: List<JSONObject> = emptyList()
     @Volatile var cursor = "c1"
@@ -392,6 +395,7 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
                 val id = path.removePrefix("/api/items/")
                 val body = JSONObject(ex.requestBody.readBytes().decodeToString())
                 if (body.has("text")) edits += id to body.getString("text")
+                if (body.has("done")) dones += id to body.getBoolean("done")
                 val item = JSONObject(items.firstOrNull { it.optString("id") == id }?.toString() ?: "{}")
                 if (body.has("text")) item.put("text", body.getString("text")).put("edited", System.currentTimeMillis())
                 json(ex, 200, item)

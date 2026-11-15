@@ -293,6 +293,7 @@ class SettingsActivity : BaseActivity() {
     private fun tileTargetLabel(): String = when (val t = app.prefs.tileTarget) {
         null -> getString(R.string.settings_tile_ask)
         Conversations.ALL -> getString(R.string.settings_tile_to, getString(R.string.all_devices))
+        Conversations.NOTES -> getString(R.string.settings_tile_to, getString(R.string.notes)) // (1.20)
         else -> getString(R.string.settings_tile_to, app.repo.state.value.devicesById[t]?.name ?: getString(R.string.unknown_device))
     }
 
@@ -300,8 +301,11 @@ class SettingsActivity : BaseActivity() {
     private fun pickTileTarget() {
         val s = app.repo.state.value
         val devices = s.devices.filter { it.id != s.me }.sortedByDescending { it.lastSeen }
-        val keys = listOf<String?>(null, Conversations.ALL) + devices.map { it.id }
-        val labels = listOf(getString(R.string.settings_tile_ask_short), getString(R.string.all_devices)) + devices.map { it.name }
+        // (1.20) Notes too: the clipboard kept for later
+        val notes = s.notesOn || app.prefs.tileTarget == Conversations.NOTES
+        val keys = listOf<String?>(null, Conversations.ALL) + (if (notes) listOf(Conversations.NOTES) else emptyList()) + devices.map { it.id }
+        val labels = listOf(getString(R.string.settings_tile_ask_short), getString(R.string.all_devices)) +
+            (if (notes) listOf(getString(R.string.notes)) else emptyList()) + devices.map { it.name }
         val current = keys.indexOf(app.prefs.tileTarget).coerceAtLeast(0)
         val builder = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.settings_tile)

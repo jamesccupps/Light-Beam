@@ -189,7 +189,7 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
   border-radius: 50%; background: var(--surface-2); color: var(--muted);
 }
 .av-slot { display: contents; }
-.avatar.all { background: var(--accent-soft); color: var(--accent); }
+.avatar.all, .avatar.notes { background: var(--accent-soft); color: var(--accent); }
 .avatar.removed { opacity: .7; }
 .avatar .dot { position: absolute; right: 0; bottom: 0; width: 12px; height: 12px; border-radius: 50%; background: #8a919c; border: 2px solid var(--surface); }
 .avatar .dot.on { background: var(--ok); }
@@ -281,8 +281,13 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 
 .meta { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-height: 28px; margin: 2px 4px 0; font-size: 0.75rem; color: var(--muted); user-select: none; -webkit-user-select: none; }
 .meta .when { margin: 0 4px; }
-.meta .tick, .meta .pinned-mark { display: inline-flex; align-items: center; gap: 3px; margin-right: 4px; }
-.meta .tick .i, .meta .pinned-mark .i, .meta > .i { width: 14px; height: 14px; }
+.meta .tick, .meta .pinned-mark, .meta .done-mark { display: inline-flex; align-items: center; gap: 3px; margin-right: 4px; }
+.meta .tick .i, .meta .pinned-mark .i, .meta .done-mark .i, .meta > .i { width: 14px; height: 14px; }
+/* (1.34.0) a note ticked off */
+.meta .done-mark { color: var(--ok); }
+.msg.done .bubble .text { text-decoration: line-through; opacity: .65; }
+.msg.done .bubble.file { opacity: .65; }
+.mini.note-done[aria-pressed="true"] { color: var(--ok); }
 .meta .tick.done { color: var(--ok); }
 .meta .actions { display: inline-flex; align-items: center; }
 .mini {

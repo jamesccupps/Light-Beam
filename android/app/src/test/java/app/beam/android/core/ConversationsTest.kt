@@ -44,7 +44,7 @@ class ConversationsTest {
             item("z", "gone0000", listOf(me), 5, device = "Old tablet"),
             item("all", me, emptyList(), 1),
         )
-        val list = Conversations.summaries(me, devices, items, mapOf(x to 10L))
+        val list = Conversations.summaries(me, devices, items, mapOf(x to 10L), notes = false)
         assertEquals(listOf(Conversations.ALL, y, x, "gone0000"), list.map { it.key })
         assertEquals(1, list.first { it.key == x }.unread) // "a" was read, "b" wasn't
         assertEquals(1, list.first { it.key == y }.unread)
@@ -53,9 +53,33 @@ class ConversationsTest {
         assertEquals("all", list.first().last?.id)
 
         // Replying means what came before the reply was seen (e.g. a reply from the notification).
-        val replied = Conversations.summaries(me, devices, listOf(item("r", me, listOf(y), 40)) + items, mapOf(x to 10L))
+        val replied = Conversations.summaries(me, devices, listOf(item("r", me, listOf(y), 40)) + items, mapOf(x to 10L), notes = false)
         assertEquals(0, replied.first { it.key == y }.unread)
         assertEquals(1, replied.first { it.key == x }.unread)
+    }
+
+    @Test
+    fun notesAreMessagesToTheDeviceItselfOnEveryDevice() { // (1.20, server 1.34)
+        val mine = item("n1", me, listOf(me), 10)
+        val theirs = item("n2", x, listOf(x), 20)
+        assertTrue(mine.isNote && theirs.isNote)
+        assertEquals(false, item("m", me, listOf(me, x), 1).isNote) // to itself and another: a message
+        assertEquals(setOf(Conversations.NOTES), Conversations.keysOf(mine, me, byId))
+        assertEquals(setOf(Conversations.NOTES), Conversations.keysOf(theirs, me, byId))
+        val items = listOf(theirs, mine, item("b", x, listOf(me), 5))
+        val list = Conversations.summaries(me, devices, items, emptyMap(), notes = true)
+        assertEquals(listOf(Conversations.ALL, Conversations.NOTES, x, y), list.map { it.key })
+        assertEquals(0, list.first { it.isNotes }.unread)
+        assertEquals("n2", list.first { it.isNotes }.last?.id)
+        assertEquals("b", list.first { it.key == x }.last?.id) // the desk's note isn't in its conversation
+        // a Beam without notes: no row (unless some are here)
+        assertEquals(listOf(Conversations.ALL, x, y), Conversations.summaries(me, devices, listOf(item("b", x, listOf(me), 5)), emptyMap(), notes = false).map { it.key })
+        assertEquals(listOf("n1", "n2"), Conversations.thread(Conversations.NOTES, me, items, byId).map { it.id })
+        assertNull(Conversations.deliveryStatus(mine, Conversations.NOTES, me, byId))
+        assertEquals(listOf(me), Conversations.targets(Conversations.NOTES, me))
+        assertEquals("never empty (every device)", listOf("notes"), Conversations.targets(Conversations.NOTES, ""))
+        assertEquals(emptyList<String>(), Conversations.targets(Conversations.ALL, me))
+        assertEquals(listOf(x), Conversations.targets(x, me))
     }
 
     @Test

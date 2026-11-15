@@ -328,7 +328,7 @@ async function init() {
   if ([...params.keys()].length) history.replaceState(history.state, '', BASE.pathname + location.hash);
   // (1.23.5, audit) only a conversation's shape: `?conv=__proto__` put "[object Object]" in the composer
   // (2026-11-05, M11) not with ?action=paste: a link mustn't choose where the clipboard goes
-  if (convParam && !wantsPaste && (convParam === 'all' || (DEVICE_ID.test(convParam) && !Object.hasOwn(Object.prototype, convParam)))) current = convParam;
+  if (convParam && !wantsPaste && (convParam === 'all' || convParam === 'notes' || (DEVICE_ID.test(convParam) && !Object.hasOwn(Object.prototype, convParam)))) current = convParam;
 
   initIdentity();
   bindUI();

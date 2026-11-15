@@ -418,7 +418,8 @@ let phoneRow = null;
 // Called by renderSidebar right after the All devices row: puts the Phone row there (or takes it away).
 function placePhoneRow(list, cursor) {
   if (!phone.shown) {
-    if (phoneRow) { phoneRow.li.remove(); phoneRow = null; }
+    // (1.34) the cursor steps past it first: a removed node is no place to insert the next row before (Notes follows)
+    if (phoneRow) { if (phoneRow.li === cursor) cursor = cursor.nextElementSibling; phoneRow.li.remove(); phoneRow = null; }
     return cursor;
   }
   if (!phoneRow) {

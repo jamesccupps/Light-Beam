@@ -447,7 +447,7 @@ function applyDelta({ items: changedItems = [], deleted = [] }, since) {
 function renderAll() {
   // An unknown conversation falls back to All devices, but only once the device list is known (a cold start
   // would otherwise lose the conversation it was on).
-  if (devicesKnown && current !== 'all' && !deviceById(current) && !itemsIn(current).length) current = 'all';
+  if (devicesKnown && !isFixedConv(current) && !deviceById(current) && !itemsIn(current).length) current = 'all';
   renderHeader();
   renderThread({ scroll: 'keep' });
   renderSidebar();
@@ -523,7 +523,7 @@ function onEventDevices(list) {
   applyDevices(list);
   renderSidebar();
   renderHeader();
-  if (current !== 'all' && !deviceById(current)) renderThread({ scroll: 'keep' }); // removed: keep history, disable sending
+  if (!isFixedConv(current) && !deviceById(current)) renderThread({ scroll: 'keep' }); // removed: keep history, disable sending
 }
 
 function onEventRefresh(data) {

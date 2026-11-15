@@ -32,6 +32,12 @@
     with how many; each device has its own, and a click takes yours back.
   - **Edit** changes a text's words; it then says "edited". Other devices see replies, reactions and edits at once.
 - **Pin** keeps an item past the clean-up. **Forward** sends an item to another device without uploading it again.
+- **Notes** (Beam 1.34, Android app 1.20): the **Notes** row under All devices is a conversation with yourself, for
+  anything to keep for later. Write, paste or drop text, links, screenshots and files there. Nothing is sent to your
+  other devices, but each of them shows your notes (one written on another device says where), and they stay until
+  you delete them. A note's menu has **Done** (it's struck through), **Edit**, **Send to…** and **Delete**; every
+  other message has **Save to Notes**. On Android the share sheet and the clipboard tile can save to Notes too, and
+  on the command line `beam send --to notes "…"` does.
 - **Delivery:**
   - Every item shows **Sent**, then **Delivered**.
   - Big files upload in resumable chunks, pausing and carrying on through dropped connections, sleep and restarts.

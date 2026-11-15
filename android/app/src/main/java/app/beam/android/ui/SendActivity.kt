@@ -132,7 +132,8 @@ class SendActivity : BaseActivity() {
         }
     }
 
-    private fun known(key: String) = key == Conversations.ALL || app.repo.state.value.devicesById.containsKey(key)
+    private fun known(key: String) = key == Conversations.ALL || (key == Conversations.NOTES && app.repo.state.value.notesOn) ||
+        app.repo.state.value.devicesById.containsKey(key)
 
     /** Android 10+ only lets the focused app read the clipboard, so wait for focus. */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -207,7 +208,7 @@ class SendActivity : BaseActivity() {
                     val ready = (s.loaded && (known || s.fresh)) || refreshFailed
                     binding.loading.isVisible = !ready
                     binding.targets.isVisible = ready
-                    if (ready) targets.submitList(Conversations.summaries(s.me, s.devices, s.items, emptyMap()))
+                    if (ready) targets.submitList(Conversations.summaries(s.me, s.devices, s.items, emptyMap(), s.notesOn))
                     binding.progress.visibility = if (!ready || sending) View.VISIBLE else View.INVISIBLE
                 }
             }
@@ -220,7 +221,7 @@ class SendActivity : BaseActivity() {
                     refreshFailed = true
                     // Still possible: "All devices" (queued until the server answers).
                     val now = app.repo.state.value
-                    targets.submitList(Conversations.summaries(now.me, now.devices, now.items, emptyMap()))
+                    targets.submitList(Conversations.summaries(now.me, now.devices, now.items, emptyMap(), now.notesOn))
                     binding.loading.isVisible = false
                     binding.targets.isVisible = true
                     binding.progress.visibility = if (sending) View.VISIBLE else View.INVISIBLE
@@ -232,6 +233,7 @@ class SendActivity : BaseActivity() {
 
     private fun nameOf(key: String): String = when {
         key == Conversations.ALL -> getString(R.string.all_devices)
+        key == Conversations.NOTES -> getString(R.string.notes)
         else -> app.repo.state.value.devicesById[key]?.name ?: getString(R.string.unknown_device)
     }
 
@@ -242,7 +244,12 @@ class SendActivity : BaseActivity() {
     private fun sendNow(keys: List<String>, withSheet: Boolean) {
         if (sending || keys.isEmpty()) return
         val binding = sb
-        val to = if (Conversations.ALL in keys) emptyList() else keys
+        // (1.20) Notes is this phone itself, with a copy of its own (one item to this phone and others is no note)
+        val rest = keys - Conversations.NOTES
+        val groups = listOfNotNull(
+            if (Conversations.NOTES in keys) Conversations.targets(Conversations.NOTES, app.repo.me) else null,
+            if (rest.isEmpty()) null else if (Conversations.ALL in rest) emptyList() else rest,
+        )
         val names = keys.joinToString(", ") { nameOf(it) }
         sending = true
         binding?.error?.isVisible = false
@@ -251,11 +258,11 @@ class SendActivity : BaseActivity() {
             try {
                 var queued = uris.isNotEmpty()
                 if (uris.isNotEmpty()) {
-                    if (!TransferService.upload(this@SendActivity, uris, to)) throw IllegalStateException(getString(R.string.send_failed_start))
+                    for (to in groups) if (!TransferService.upload(this@SendActivity, uris, to)) throw IllegalStateException(getString(R.string.send_failed_start))
                     uris.clear() // handed over; don't send twice if a text below fails
                 }
                 while (texts.isNotEmpty()) {
-                    when (val result = app.outbox.send(texts.first(), to)) {
+                    for (to in groups) when (val result = app.outbox.send(texts.first(), to)) {
                         is Outbox.Result.Failed -> throw IllegalStateException(result.message)
                         Outbox.Result.Queued -> queued = true
                         is Outbox.Result.Sent -> Unit
@@ -334,9 +341,13 @@ class TargetAdapter(
         val s = getItem(position)
         val b = holder.b
         val ctx = b.root.context
-        b.title.text = if (s.isAll) ctx.getString(R.string.all_devices) else s.name
-        b.subtitle.text = if (s.isAll) ctx.getString(R.string.broadcast_subtitle) else Format.presence(s.online, s.lastSeen)
-        b.avatar.setImageResource(platformIcon(s.platform, s.isAll))
+        b.title.text = if (s.isAll) ctx.getString(R.string.all_devices) else if (s.isNotes) ctx.getString(R.string.notes) else s.name
+        b.subtitle.text = when {
+            s.isAll -> ctx.getString(R.string.broadcast_subtitle)
+            s.isNotes -> ctx.getString(R.string.notes_row_empty) // (1.20)
+            else -> Format.presence(s.online, s.lastSeen)
+        }
+        b.avatar.setImageResource(if (s.isNotes) R.drawable.ic_note else platformIcon(s.platform, s.isAll))
         b.onlineDot.isVisible = s.online
         b.check.isVisible = multi
         b.check.isChecked = s.key in selected

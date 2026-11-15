@@ -16,6 +16,16 @@ async function withPhone(ctx, texts = [], opts = {}) {
 }
 const key = (page, k, mods = {}) => page.evaluate(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true, ctrlKey: ${Boolean(mods.ctrl)}, altKey: ${Boolean(mods.alt)}, shiftKey: ${Boolean(mods.shift)} }))`);
 
+// (1.34) wait until the server's copy of an item passes `check` (undefined once it's gone)
+async function waitForServer(ctx, id, check, what = 'the server') {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    if (check((await serverItems(ctx.srv)).find(i => i.id === id))) return;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await ctx.sleep(100);
+  }
+}
+
 export default function register(test) {
   test('search: finds messages in every conversation (sidebar) and highlights matches in the thread', async ctx => {
     const { page, phone } = await withPhone(ctx, ['the invoice number is 4471', 'something else', 'invoice sent again']);
@@ -800,4 +810,89 @@ export default function register(test) {
       await new Promise(r => pages.close(r));
     }
   });
+
+  test('1.34 Notes: the row under All devices; a note written here (to this device, no tick, no read marker); one written on the phone shows with its name; Done both ways; Save to Notes; Send to… (Notes gets its own copy); its menu; Delete', async ctx => {
+    const page = await ctx.signedIn();
+    await page.waitFor(`notesOn()`, 8000, 'a Beam with notes');
+    const meId = await page.evaluate('me.id');
+    const phone = dev(ctx, 'Pixel');
+    await phone.me();
+    await page.waitFor(`Boolean(deviceById('${phone.id}'))`, 8000, 'phone known');
+    const order = await page.evaluate(`[...$('#convList').querySelectorAll('button.conv')].map(b => b.dataset.conv)`);
+    const at = c => order.indexOf(c);
+    assert(at('notes') > at('all') && at('notes') < at(phone.id), `Notes under All devices, before the devices (${order})`);
+    eq(await page.evaluate(`targetsOf('notes')`), [meId], 'a note goes to this device (never [], that would be every device)');
+    await page.evaluate(`openConv('notes')`);
+    eq(await page.evaluate(`[$('#threadName').textContent, $('#text').placeholder, $('#text').disabled]`), ['Notes', 'Write a note…', false]);
+    assert(await page.evaluate(`/Your notes/.test($('#thread').textContent)`), 'the empty view says what Notes is');
+
+    // a note written here: to this device, kept as a note, on the right, without a tick
+    await page.evaluate(`sendText('buy milk', 'notes')`);
+    await page.waitFor(`itemsIn('notes').some(i => i.text === 'buy milk' && !i.sending)`, 8000, 'the note');
+    const mine = await page.evaluate(`itemsIn('notes').find(i => i.text === 'buy milk')`);
+    eq([mine.note, mine.to], [true, [meId]]);
+    eq(await page.evaluate(`(() => { const m = document.querySelector('[data-id="${mine.id}"]'); return [m.classList.contains('mine'), m.querySelector('.tick') === null, m.querySelector('.sender').textContent]; })()`), [true, true, '']);
+    await page.evaluate(`checkRead()`);
+    eq(await page.evaluate(`readMarks.notes`), undefined, 'no read marker for Notes');
+    eq(await page.evaluate(`apiJson('api/me').then(m => m.read?.notes ?? null)`), null, 'none on the server either');
+
+    // one written on the phone: in Notes here too, on the right, with where it came from; nothing unread
+    const theirs = await phone.text('from the phone', [phone.id]);
+    eq(theirs.note, true);
+    await page.waitFor(`itemsIn('notes').some(i => i.id === '${theirs.id}') && document.querySelector('[data-id="${theirs.id}"]') !== null`, 8000, 'the phone’s note');
+    eq(await page.evaluate(`(() => { const m = document.querySelector('[data-id="${theirs.id}"]'); return [m.classList.contains('mine'), m.querySelector('.sender').textContent, unread('notes'), itemsIn('${phone.id}').length]; })()`), [true, 'From Pixel', 0, 0], 'not in the phone’s conversation');
+
+    // Done here (the server and the bubble), and the phone ticking its own off arrives live
+    await page.evaluate(`toggleNoteDone(itemMap.get('${mine.id}'))`);
+    await page.waitFor(`document.querySelector('[data-id="${mine.id}"]').classList.contains('done') && Boolean(document.querySelector('[data-id="${mine.id}"] .done-mark'))`, 5000, 'struck through');
+    await waitForServer(ctx, mine.id, i => i.done === true);
+    await fetch(`${ctx.srv.base}/api/items/${theirs.id}`, { method: 'PATCH', headers: { ...phone.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ done: true }) });
+    await page.waitFor(`itemMap.get('${theirs.id}').done === true && document.querySelector('[data-id="${theirs.id}"]').classList.contains('done')`, 5000, 'the phone’s tick arrived');
+
+    // its menu
+    const labels = await page.evaluate(`itemMenuEntries(itemMap.get('${mine.id}'), null, null).filter(e => e && e.label).map(e => e.label)`);
+    for (const l of ['Not done', 'Edit', 'Send to…', 'Delete']) assert(labels.includes(l), `the note's menu has ${l} (${labels})`);
+    for (const l of ['Reply', 'Save to Notes', 'Delete for everyone']) assert(!labels.includes(l), `not ${l} (${labels})`);
+
+    // Save to Notes from a conversation
+    const msg = await phone.text('keep this', [meId]);
+    await page.evaluate(`openConv('${phone.id}')`);
+    await page.waitFor(`itemMap.has('${msg.id}')`);
+    const elsewhere = await page.evaluate(`itemMenuEntries(itemMap.get('${msg.id}'), null, null).filter(e => e && e.label).map(e => e.label)`);
+    assert(elsewhere.includes('Save to Notes') && elsewhere.includes('Forward…'), elsewhere);
+    await page.evaluate(`saveToNotes(itemMap.get('${msg.id}'))`);
+    await page.waitFor(`itemsIn('notes').some(i => i.text === 'keep this' && i.forwardedFrom === '${msg.id}')`, 5000, 'saved to Notes');
+    assert(await page.evaluate(`/Saved to Notes/.test($('#toastText').textContent)`), 'toast');
+
+    if (process.env.BEAM_NOTES_SHOTS) { // (screenshots for a look: BEAM_NOTES_SHOTS=1)
+      await page.evaluate(`openConv('notes')`);
+      await ctx.sleep(500);
+      await page.screenshot(`${ctx.SHOTS}/notes-desk.png`);
+      await page.evaluate(`applyLook({ theme: 'dark' })`);
+      await ctx.sleep(500);
+      await page.screenshot(`${ctx.SHOTS}/notes-desk-dark.png`);
+      await page.evaluate(`applyLook({ theme: 'auto' })`);
+      await page.viewport(390, 844, true);
+      await ctx.sleep(300);
+      await page.evaluate(`openConv('notes')`);
+      await ctx.sleep(500);
+      await page.screenshot(`${ctx.SHOTS}/notes-phone.png`);
+      await page.evaluate(`showList()`);
+      await ctx.sleep(400);
+      await page.screenshot(`${ctx.SHOTS}/notes-phone-list.png`);
+      await page.viewport(1280, 860, false);
+      await ctx.sleep(300);
+    }
+
+    // Send to… a device and Notes at once: Notes gets a copy of its own (one item to both would be no note)
+    await page.evaluate(`forwardItems([itemMap.get('${mine.id}')], ['notes', '${phone.id}'])`);
+    await page.waitFor(`items.filter(i => i.forwardedFrom === '${mine.id}').length === 2`, 5000, 'two copies');
+    const copies = (await serverItems(ctx.srv)).filter(i => i.forwardedFrom === mine.id).map(i => [i.note || false, i.to]).sort();
+    eq(copies, [[false, [phone.id]], [true, [meId]]].sort());
+
+    // Delete
+    await page.evaluate(`openConv('notes'); deleteItems(['${mine.id}'], { undo: false })`);
+    await waitForServer(ctx, mine.id, i => !i, 'deleted');
+  }, { timeout: 60000 });
+
 }

@@ -134,7 +134,7 @@ class MainActivity : BaseActivity() {
         }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                combine(app.repo.state, app.prefs.lastRead) { s, read -> s to Conversations.summaries(s.me, s.devices, s.items, read) }
+                combine(app.repo.state, app.prefs.lastRead) { s, read -> s to Conversations.summaries(s.me, s.devices, s.items, read, s.notesOn) }
                     .flowOn(Dispatchers.Default) // the summaries go over every item: not on the main thread
                     .conflate()
                     .collect { (s, list) ->
@@ -266,7 +266,7 @@ class MainActivity : BaseActivity() {
         val entries = ArrayList<ActionSheet.Entry>()
         // Ring / Stop ringing / Wake / Remote Desktop, when the device can (server 1.3).
         app.repo.state.value.devicesById[s.key]?.let { d -> entries += DeviceActions.entries(this, d, b.root) }
-        if (!s.isAll) {
+        if (!s.isAll && !s.isNotes) {
             val muted = s.key in app.prefs.mutedDevices
             entries += ActionSheet.Entry(R.drawable.ic_mute, getString(if (muted) R.string.unmute else R.string.mute)) {
                 app.prefs.mutedDevices = if (muted) app.prefs.mutedDevices - s.key else app.prefs.mutedDevices + s.key
@@ -279,15 +279,15 @@ class MainActivity : BaseActivity() {
             }
         }
         entries += ActionSheet.Entry(R.drawable.ic_clear_all, getString(R.string.clear_conversation)) { clearConversation(s) }
-        if (!s.isAll && s.known) entries += ActionSheet.Entry(R.drawable.ic_delete, getString(R.string.forget_device)) { forgetDevice(s) }
-        ActionSheet.show(this, if (s.isAll) getString(R.string.all_devices) else s.name, entries)
+        if (!s.isAll && !s.isNotes && s.known) entries += ActionSheet.Entry(R.drawable.ic_delete, getString(R.string.forget_device)) { forgetDevice(s) }
+        ActionSheet.show(this, if (s.isAll) getString(R.string.all_devices) else if (s.isNotes) getString(R.string.notes) else s.name, entries)
     }
 
     private fun clearConversation(s: Conversations.Summary) {
         val state = app.repo.state.value
         val ids = Conversations.thread(s.key, state.me, state.items, state.devicesById).map { it.id }
         if (ids.isEmpty()) return
-        val name = if (s.isAll) getString(R.string.all_devices) else s.name
+        val name = if (s.isAll) getString(R.string.all_devices) else if (s.isNotes) getString(R.string.notes) else s.name
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.clear_conversation)
             .setMessage(resources.getQuantityString(R.plurals.clear_conversation_confirm, ids.size, ids.size, name))
@@ -357,19 +357,20 @@ class ConversationAdapter(
         val b = holder.b
         val ctx = b.root.context
         holder.key = s.key
-        b.title.text = if (s.isAll) ctx.getString(R.string.all_devices) else s.name
-        b.avatar.setImageResource(platformIcon(s.platform, s.isAll))
+        b.title.text = if (s.isAll) ctx.getString(R.string.all_devices) else if (s.isNotes) ctx.getString(R.string.notes) else s.name
+        b.avatar.setImageResource(if (s.isNotes) R.drawable.ic_note else platformIcon(s.platform, s.isAll))
         b.onlineDot.isVisible = s.online
         b.muted.isVisible = s.key in muted
         b.time.text = s.last?.let { Format.relative(it.ts) }.orEmpty()
         val last = s.last
         b.preview.text = when {
             last == null && s.isAll -> ctx.getString(R.string.broadcast_subtitle)
+            last == null && s.isNotes -> ctx.getString(R.string.notes_row_empty)
             last == null -> Format.presence(s.online, s.lastSeen)
             else -> {
                 val body = if (last.isText) last.text.orEmpty().lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().trim()
                 else ctx.getString(R.string.file_prefix, last.displayName)
-                if (last.isFrom(me)) ctx.getString(R.string.you_prefix, body) else body
+                if (last.isFrom(me) && !last.isNote) ctx.getString(R.string.you_prefix, body) else body
             }
         }
         val unread = s.unread > 0

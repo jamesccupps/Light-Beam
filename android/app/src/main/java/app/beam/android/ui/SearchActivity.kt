@@ -76,6 +76,7 @@ class SearchActivity : BaseActivity() {
                 when {
                     key == null -> from
                     key == Conversations.ALL -> getString(R.string.search_in_all, from)
+                    key == Conversations.NOTES -> getString(R.string.search_in_notes, from) // (1.20)
                     item.isFrom(s.me) -> getString(R.string.search_to, s.devicesById[key]?.name ?: key)
                     else -> from
                 }

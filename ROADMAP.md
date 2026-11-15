@@ -60,6 +60,9 @@ Where Beam is heading, roughly in order. Nothing here is promised; ideas and hel
 - **Settings remade and themes** (Beam 1.27, the Windows app 1.19): Settings one page at a time, grouped, with a search;
   Appearance: light, dark or like the device and an accent colour, for all your devices or just one (the Windows app's
   own windows follow too); Beam Family: the family's look or each person's own.
+- **Notes** (Beam 1.34, the Android app 1.20): a conversation with yourself under All devices, for anything to keep
+  for later. Every device shows your notes, nothing is sent anywhere, and they stay until you delete them: Done,
+  Edit, Send to…, Save to Notes on any message, the phone's share sheet and tile, and `beam send --to notes`.
 
 ## Next
 - **Remote control, further:** what's left of the delay is the network and the PC's capture inside Edge (a capture of

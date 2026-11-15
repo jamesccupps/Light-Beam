@@ -159,6 +159,7 @@ class GalleryActivity : BaseActivity() {
     private fun renderTitle(s: Repository.State) {
         convTitle = when {
             key == Conversations.ALL -> getString(R.string.all_devices)
+            key == Conversations.NOTES -> getString(R.string.notes)
             else -> s.devicesById[key]?.name ?: s.items.firstOrNull { it.from == key }?.device ?: getString(R.string.unknown_device)
         }
         if (picker.active) return

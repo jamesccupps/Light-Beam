@@ -92,6 +92,7 @@ function showNewPill(count) {
 
 function avatar(conv, { big = false } = {}) {
   if (conv === 'all') return el('span', { class: `avatar all${big ? ' big' : ''}` }, icon('all'));
+  if (conv === 'notes') return el('span', { class: `avatar notes${big ? ' big' : ''}` }, icon('note')); // (1.34.0)
   const d = deviceById(conv);
   const removed = !d;
   return el('span', { class: `avatar${removed ? ' removed' : ''}${big ? ' big' : ''}` },
@@ -118,7 +119,7 @@ function makeRow(conv, onPick) {
 
 function preview(item) {
   if (!item) return '';
-  const who = item.from === me.id ? 'You: ' : '';
+  const who = item.from === me.id && !isNoteItem(item) ? 'You: ' : '';
   if (item.kind === 'text') return who + item.text.replace(/\s+/g, ' ').slice(0, 90);
   return `${who}${/^image\//.test(item.mime || '') ? 'Photo' : /^video\//.test(item.mime || '') ? 'Video' : 'File'} · ${item.name}`;
 }
@@ -128,13 +129,13 @@ function patchRow(row, conv, { active }) {
   const last = list.at(-1);
   const d = deviceById(conv);
   const count = unread(conv);
-  const avKey = conv === 'all' ? 'all' : d ? `${d.platform}:${d.online}` : 'removed';
+  const avKey = conv === 'all' ? 'all' : conv === 'notes' ? 'notes' : d ? `${d.platform}:${d.online}` : 'removed';
   if (row.avKey !== avKey) { row.av.replaceChildren(avatar(conv)); row.avKey = avKey; }
   const name = convName(conv);
   if (row.name.textContent !== name) row.name.textContent = name;
   const time = last ? shortWhen(last.ts) : '';
   if (row.time.textContent !== time) row.time.textContent = time;
-  const sub = last ? preview(last) : conv === 'all' ? 'Send to every device' : !d ? 'Removed device' : d.online ? 'Online' : `Last seen ${timeAgo(d.lastSeen)}`;
+  const sub = last ? preview(last) : conv === 'all' ? 'Send to every device' : conv === 'notes' ? 'Things to keep for later' : !d ? 'Removed device' : d.online ? 'Online' : `Last seen ${timeAgo(d.lastSeen)}`;
   if (row.preview.textContent !== sub) row.preview.textContent = sub;
   row.badge.hidden = count === 0;
   if (count) {
@@ -142,7 +143,7 @@ function patchRow(row, conv, { active }) {
     row.badge.setAttribute('aria-label', `${count} unread`);
   }
   row.button.classList.toggle('active', Boolean(active));
-  row.button.classList.toggle('removed', !d && conv !== 'all');
+  row.button.classList.toggle('removed', !d && !isFixedConv(conv));
   row.button.classList.toggle('unread', count > 0);
   if (active) row.button.setAttribute('aria-current', 'true'); else row.button.removeAttribute('aria-current');
 }
@@ -193,7 +194,7 @@ function renderHeader() {
   // The info line: online / last seen · battery · free storage · Beam version · system (whatever the device reports).
   const sub = $('#threadSub');
   if (d) sub.replaceChildren(...factNodes(deviceFacts(d)));
-  else sub.textContent = current === 'all' ? 'Sent to every device' : devicesKnown ? 'Removed device · its history is kept' : '';
+  else sub.textContent = current === 'all' ? 'Sent to every device' : current === 'notes' ? 'Only for you · on all your devices · kept until you delete them' : devicesKnown ? 'Removed device · its history is kept' : '';
   sub.title = d ? deviceFacts(d, { long: true }).map(f => f.title ? `${f.title}: ${f.text}` : f.text).join('\n') : '';
   const pinned = itemsIn(current).filter(i => i.pinned).length;
   $('#pinnedBtn').hidden = !pinned && !view.pinnedOnly;
@@ -212,10 +213,11 @@ function renderComposerState() {
   box.disabled = !sendable;
   $('#attachBtn').disabled = !sendable;
   $('#pasteBtn').disabled = !sendable;
-  box.placeholder = !sendable ? 'This device was removed from Beam' : current === 'all' ? 'Message all devices…' : `Message ${convName(current)}…`;
+  box.placeholder = !sendable ? (current === 'notes' ? 'Notes need the updated Beam server' : 'This device was removed from Beam')
+    : current === 'all' ? 'Message all devices…' : current === 'notes' ? 'Write a note…' : `Message ${convName(current)}…`;
   const note = $('#composerNote');
   note.hidden = sendable;
-  if (!sendable) note.textContent = 'This device was removed from Beam. Its history stays here; it comes back if it connects again.';
+  if (!sendable) note.textContent = current === 'notes' ? 'Your notes stay here; new ones need the updated Beam server.' : 'This device was removed from Beam. Its history stays here; it comes back if it connects again.';
   $('#sendBtn').disabled = !sendable || !box.value.trim();
 }
 
@@ -226,7 +228,8 @@ function openConv(conv, { push = true, focus = true } = {}) {
   closeInbox(); // (1.33)
   closeGallery();
   if (conv !== current) endCompose(); // (1.14.0: a reply or an edit belongs to the conversation it was started in)
-  if (devicesKnown && conv !== 'all' && !deviceById(conv) && !itemsIn(conv).length) conv = 'all';
+  if (devicesKnown && !isFixedConv(conv) && !deviceById(conv) && !itemsIn(conv).length) conv = 'all';
+  if (conv === 'notes' && !notesOn() && !itemsIn('notes').length) conv = 'all'; // (1.34.0)
   const changed = conv !== view.conv;
   if (changed && view.conv !== null) saveComposerDraft(view.conv);
   current = conv;
@@ -382,6 +385,10 @@ function loadOlder() {
 
 function makeEmpty() {
   const sendable = canSendTo(current);
+  if (current === 'notes' && !view.pinnedOnly) { // (1.34.0)
+    return el('div', { class: 'thread-empty' }, el('strong', {}, 'Your notes'),
+      'Write or paste anything to keep for later: text, links, screenshots, files. Nothing is sent to your other devices, but each of them shows your notes, and they stay until you delete them.');
+  }
   return el('div', { class: 'thread-empty' },
     el('strong', {}, view.pinnedOnly ? 'No pinned messages' : current === 'all' ? 'Send to every device' : `Nothing with ${convName(current)} yet`),
     view.pinnedOnly ? 'Pin a message from its menu to keep it here (and past the retention period).'
@@ -419,6 +426,7 @@ function tick(item) {
 
 function senderLine(item) {
   const mine = item.from === me.id;
+  if (current === 'notes') return mine ? '' : `From ${senderName(item)}`; // (1.34.0) where it was written, when not here
   if (!mine && current === 'all') return senderName(item);
   if (current !== 'all' && item.to.length === 0) return mine ? 'To all devices' : `${senderName(item)} · to all devices`;
   if (mine && item.to.length > 1) return `Also to ${item.to.filter(t => t !== current).map(nameOf).join(', ')}`;
@@ -426,8 +434,8 @@ function senderLine(item) {
 }
 
 function buildMsg(item) {
-  const mine = item.from === me.id;
-  const node = el('div', { class: `msg ${mine ? 'mine' : 'theirs'}`, 'data-id': item.id, tabindex: '-1', role: 'group' });
+  const mine = item.from === me.id || (current === 'notes' && isNoteItem(item)); // (1.34.0) in Notes every note is yours
+  const node = el('div', { class: `msg ${mine ? 'mine' : 'theirs'}${isNoteItem(item) && item.done ? ' done' : ''}`, 'data-id': item.id, tabindex: '-1', role: 'group' });
   if (itemMap.has(item.id)) node.classList.add('pickable'); // (not a text still being sent)
   if (pick.ids.has(item.id)) node.classList.add('picked');
   const who = senderLine(item);
@@ -623,7 +631,8 @@ function fillMeta(meta, item) {
   const parts = [el('span', { class: 'when', title: fullWhen(item.ts) }, clock(item.ts))];
   if (item.edited) parts.push(el('span', { class: 'edited', title: `Edited ${fullWhen(item.edited)}` }, 'edited')); // (1.14.0)
   if (item.pinned) parts.push(el('span', { class: 'pinned-mark', title: 'Pinned' }, icon('pin'), 'Pinned'));
-  if (mine) parts.push(item.sending ? el('span', { class: 'tick', title: 'Sending…' }, icon('clock')) : tick(item));
+  if (isNoteItem(item) && item.done) parts.push(el('span', { class: 'done-mark', title: 'Done' }, icon('check'), 'Done')); // (1.34.0)
+  if (mine && (item.sending || !isNoteItem(item))) parts.push(item.sending ? el('span', { class: 'tick', title: 'Sending…' }, icon('clock')) : tick(item));
   if (!item.sending) parts.push(el('span', { class: 'actions' }, ...quickActions(item)));
   meta.replaceChildren(...parts);
   tameTabs(meta);
@@ -631,6 +640,7 @@ function fillMeta(meta, item) {
 
 function quickActions(item) {
   const acts = [];
+  if (isNoteItem(item) && serverHas('notes') && itemMap.has(item.id)) acts.push(noteDoneButton(item)); // (1.34.0)
   if (item.kind === 'text') {
     acts.push(mini('copy', 'Copy', () => copyItem(item), { class: 'mini hover-only' }));
   } else if (HOST) {
@@ -652,9 +662,15 @@ function patchMsg(item) {
   if (!node) return;
   if (renderingPaused()) { hiddenWork.patch.add(item.id); return; }
   fillMeta(node.querySelector('.meta'), item);
+  node.classList.toggle('done', isNoteItem(item) && Boolean(item.done)); // (1.34.0)
   const who = senderLine(item);
   const sender = node.querySelector('.sender');
   if (sender.textContent !== who) sender.textContent = who;
+}
+
+// (1.34.0) a note's tick: Done / Not done
+function noteDoneButton(item) {
+  return mini('check', item.done ? 'Not done' : 'Done', () => toggleNoteDone(item), { class: 'mini note-done', 'aria-pressed': String(Boolean(item.done)) });
 }
 
 function patchFileActions(itemId) {
@@ -748,6 +764,7 @@ function scheduleCheckRead() {
 // visible message. The web app acknowledges items once they've been seen ("Delivered").
 function checkRead() {
   if (!threadVisible() || $('#app').hidden) return;
+  if (current === 'notes') return; // (1.34.0) nothing is unread there (and the server keeps no marker for it)
   const box = $('#thread');
   const list = itemsIn(current);
   if (!list.length) return;

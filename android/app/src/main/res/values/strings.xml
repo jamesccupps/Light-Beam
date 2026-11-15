@@ -623,4 +623,15 @@
     <string name="look_summary">%1$s · %2$s</string>
     <string name="look_summary_own">%1$s · %2$s · only this phone</string>
     <string name="look_selected">Chosen</string>
+    <!-- (1.20, server 1.34) Notes: messages to this device itself, kept for later and shown on every device -->
+    <string name="notes">Notes</string>
+    <string name="notes_subtitle">Only for you · on all your devices · kept until you delete them</string>
+    <string name="notes_row_empty">Things to keep for later</string>
+    <string name="note_hint">Write a note</string>
+    <string name="note_from">From %1$s</string>
+    <string name="note_done">Done</string>
+    <string name="note_not_done">Not done</string>
+    <string name="save_to_notes">Save to Notes</string>
+    <string name="saved_to_notes">Saved to Notes</string>
+    <string name="search_in_notes">%1$s · Notes</string>
 </resources>

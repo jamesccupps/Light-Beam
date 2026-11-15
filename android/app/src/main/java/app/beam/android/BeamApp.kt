@@ -287,12 +287,12 @@ class BeamApp : Application() {
             // Settle first, then compute: the summaries go over every item.
             repo.state
                 .debounce(1500)
-                .map { s -> Conversations.summaries(s.me, s.devices, s.items, emptyMap()).map { Triple(it.key, it.name, it.platform) } to s.loaded }
+                .map { s -> Conversations.summaries(s.me, s.devices, s.items, emptyMap(), s.notesOn).map { Triple(it.key, it.name, it.platform) } to s.loaded }
                 .distinctUntilChanged()
                 .collect { (_, loaded) ->
                     if (!loaded || !prefs.paired) return@collect
                     val s = repo.state.value
-                    Shortcuts.publish(this@BeamApp, Conversations.summaries(s.me, s.devices, s.items, emptyMap()))
+                    Shortcuts.publish(this@BeamApp, Conversations.summaries(s.me, s.devices, s.items, emptyMap(), s.notesOn))
                 }
         }
     }
@@ -311,8 +311,10 @@ class BeamApp : Application() {
         val s = repo.state.value
         val names = HashMap<String, Pair<String, String?>>()
         names[Conversations.ALL] = getString(R.string.all_devices) to null
-        for (d in s.devices) names[d.id] = d.name to d.platform
-        Shortcuts.reportSent(this, to, names)
+        names[Conversations.NOTES] = getString(R.string.notes) to null // (1.20)
+        for (d in s.devices) if (d.id != s.me) names[d.id] = d.name to d.platform
+        // (1.20) a note (to this phone itself) counts for Notes, never a conversation with this phone
+        Shortcuts.reportSent(this, if (to.size == 1 && to[0] == s.me) listOf(Conversations.NOTES) else to, names)
     }
 
     fun completePairing(link: Pairing.Link, name: String, serverId: String? = null) {

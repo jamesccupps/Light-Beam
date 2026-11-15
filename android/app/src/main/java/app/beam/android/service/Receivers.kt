@@ -70,7 +70,7 @@ class ActionReceiver : BroadcastReceiver() {
                 val pending = goAsync()
                 app.scope.launch {
                     try {
-                        app.outbox.send(reply, Conversations.targets(conversation))
+                        app.outbox.send(reply, Conversations.targets(conversation, app.repo.me))
                     } finally {
                         pending.finish()
                     }

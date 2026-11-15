@@ -101,6 +101,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         b.appbar.padForSystemBars(top = true)
         b.composeBar.padForSystemBars(bottom = true, ime = true)
         setUpToolbar()
+        if (key == Conversations.NOTES) b.input.setHint(R.string.note_hint) // (1.20)
 
         adapter = MessageAdapter(this, this)
         picks = Picker(
@@ -227,8 +228,14 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         val devices = s.devicesById
         val items = Conversations.thread(key, s.me, s.items, devices)
         newestTs = items.lastOrNull()?.ts ?: 0L
-        val pending = uploads.filter { if (key == Conversations.ALL) it.to.isEmpty() else key in it.to }.sortedBy { it.createdAt }
-        val waiting = outbox.filter { Conversations.targets(key) == it.to }.sortedBy { it.createdAt }
+        val pending = uploads.filter {
+            when (key) {
+                Conversations.ALL -> it.to.isEmpty()
+                Conversations.NOTES -> it.to == listOf(s.me) // (1.20)
+                else -> key in it.to
+            }
+        }.sortedBy { it.createdAt }
+        val waiting = outbox.filter { Conversations.targets(key, s.me) == it.to }.sortedBy { it.createdAt }
         val rows = ArrayList<Row>(items.size + pending.size + waiting.size + 8)
         var lastDay = Long.MIN_VALUE
         fun day(ts: Long) {
@@ -249,8 +256,9 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
             val local = locals[item.id]
             val old = if (reuse) lastRows[item.id] else null
             val row = if (old != null && old.item === item && old.download === download && old.local?.toString() == local) old else {
-                val mine = item.isFrom(s.me)
+                val mine = item.isFrom(s.me) || (key == Conversations.NOTES && item.isNote) // (1.20) in Notes every note is yours
                 val sender = when {
+                    key == Conversations.NOTES -> if (item.isFrom(s.me)) null else getString(R.string.note_from, item.from?.let { devices[it]?.name } ?: item.device)
                     mine -> null
                     item.from == null -> getString(R.string.from_device, item.device)
                     key == Conversations.ALL -> devices[item.from]?.name ?: item.device
@@ -341,6 +349,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         val device = s.devicesById[key]
         convTitle = when {
             key == Conversations.ALL -> getString(R.string.all_devices)
+            key == Conversations.NOTES -> getString(R.string.notes)
             device != null -> device.name
             else -> s.items.firstOrNull { it.from == key }?.device ?: getString(R.string.unknown_device)
         }
@@ -351,6 +360,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
             s.conn == Repository.Conn.OFFLINE -> getString(R.string.offline)
             !s.loaded && s.conn != Repository.Conn.CONNECTED -> getString(R.string.connecting)
             key == Conversations.ALL -> getString(R.string.broadcast_subtitle)
+            key == Conversations.NOTES -> getString(R.string.notes_subtitle)
             // "Online · 85% battery · 120 GB free" (what the device last reported, server 1.3).
             device != null -> listOfNotNull(Format.presence(device.online, device.lastSeen), Format.deviceStatus(device.status)).joinToString(" · ")
             else -> getString(R.string.no_longer_registered)
@@ -404,7 +414,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
     }
 
     private fun markRead() {
-        if (newestTs > 0) app.readMarkers.markRead(key, newestTs)
+        if (newestTs > 0 && key != Conversations.NOTES) app.readMarkers.markRead(key, newestTs) // (1.20: nothing is unread in Notes)
     }
 
     // ---------------------------------------------------------------- sending
@@ -420,7 +430,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         endCompose()
         lifecycleScope.launch {
             // Queued (not lost) while offline: it shows as "Waiting to send…" and goes out on reconnect.
-            val result = app.outbox.send(text, Conversations.targets(key), reply)
+            val result = app.outbox.send(text, Conversations.targets(key, app.repo.me), reply)
             if (result is Outbox.Result.Failed) snack(result.message)
         }
     }
@@ -541,7 +551,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
                 }
             }
         }
-        if (!TransferService.upload(this, uris, Conversations.targets(key))) snack(getString(R.string.send_failed_start))
+        if (!TransferService.upload(this, uris, Conversations.targets(key, app.repo.me))) snack(getString(R.string.send_failed_start))
     }
 
     /** Sends what's on the clipboard to this conversation (text as a message, files as files). */
@@ -554,7 +564,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         if (uris.isNotEmpty()) sendFiles(uris, persist = false)
         lifecycleScope.launch {
             for (t in texts) {
-                val result = app.outbox.send(t, Conversations.targets(key))
+                val result = app.outbox.send(t, Conversations.targets(key, app.repo.me))
                 if (result is Outbox.Result.Failed) snack(result.message)
             }
         }
@@ -689,6 +699,29 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         }
     }
 
+    /** (1.20, server 1.34) A note ticked off, or not. */
+    private fun toggleDone(item: Item) {
+        lifecycleScope.launch {
+            try {
+                app.repo.setDone(item, !item.done)
+            } catch (e: Exception) {
+                snack(Format.error(e))
+            }
+        }
+    }
+
+    /** (1.20) Any message kept in Notes: the server copies it to this phone itself (a note). */
+    private fun saveToNotes(item: Item) {
+        lifecycleScope.launch {
+            try {
+                app.repo.forward(item, Conversations.targets(Conversations.NOTES, app.repo.me))
+                snack(getString(R.string.saved_to_notes))
+            } catch (e: Exception) {
+                snack(Format.error(e))
+            }
+        }
+    }
+
     private fun senderOf(item: Item): String {
         val s = app.repo.state.value
         return if (item.isFrom(s.me)) getString(R.string.you) else item.from?.let { s.devicesById[it]?.name } ?: item.device
@@ -718,8 +751,12 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         val item = row.item
         val info = app.repo.state.value.info
         val entries = ArrayList<ActionSheet.Entry>()
+        // (1.20, server 1.34) a note: ticked off first
+        if (item.isNote && info?.lists("notes") == true) {
+            entries += ActionSheet.Entry(R.drawable.ic_check, getString(if (item.done) R.string.note_not_done else R.string.note_done)) { toggleDone(item) }
+        }
         // (1.11, server 1.14) Reply first, as in any chat; Edit for a text
-        if (info?.lists("replies") == true) entries += ActionSheet.Entry(R.drawable.ic_reply, getString(R.string.reply)) { startReply(item) }
+        if (info?.lists("replies") == true && key != Conversations.NOTES) entries += ActionSheet.Entry(R.drawable.ic_reply, getString(R.string.reply)) { startReply(item) }
         if (item.isText) {
             entries += ActionSheet.Entry(R.drawable.ic_copy, getString(R.string.copy)) { copy(item) }
             if (info?.lists("edit") == true) entries += ActionSheet.Entry(R.drawable.ic_edit, getString(R.string.edit)) { startEdit(item) }
@@ -734,7 +771,8 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         entries += ActionSheet.Entry(R.drawable.ic_share, getString(R.string.share)) { share(item) }
         entries += ActionSheet.Entry(R.drawable.ic_check, getString(R.string.pick_select)) { picks.start(item.id) }
         if (item.isText || info?.has("forward") == true) {
-            entries += ActionSheet.Entry(R.drawable.ic_forward, getString(R.string.forward)) { ForwardSheet.show(this, item, b.composeBar) }
+            entries += ActionSheet.Entry(R.drawable.ic_forward, getString(if (item.isNote) R.string.send_to else R.string.forward)) { ForwardSheet.show(this, item, b.composeBar) }
+            if (!item.isNote && app.repo.state.value.notesOn) entries += ActionSheet.Entry(R.drawable.ic_note, getString(R.string.save_to_notes)) { saveToNotes(item) } // (1.20)
         }
         if (!item.isText && info?.has(FastLinks.FEATURE) == true) {
             entries += ActionSheet.Entry(R.drawable.ic_link, getString(R.string.fast_link)) { FastLinks.show(this, item, ::snack) }

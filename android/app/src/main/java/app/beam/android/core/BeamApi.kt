@@ -294,6 +294,12 @@ class BeamApi(
         execute(request(url("/api/items/$id")).patch(body).build()).close()
     }
 
+    /** `PATCH /api/items/{id} { done }` (server 1.34 `notes`): a note ticked off, or not. */
+    fun setDone(id: String, done: Boolean) {
+        val body = JSONObject().put("done", done).toString().toRequestBody(JSON)
+        execute(request(url("/api/items/$id")).patch(body).build()).close()
+    }
+
     /** `PUT|DELETE /api/items/{id}/reactions/{emoji}` (server 1.14 `reactions`): this device's reaction on or off. */
     fun react(id: String, emoji: String, on: Boolean) {
         val r = request(url("/api/items/$id/reactions").newBuilder().addPathSegment(emoji).build())

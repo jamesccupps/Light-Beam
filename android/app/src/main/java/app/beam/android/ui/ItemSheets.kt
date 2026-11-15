@@ -139,11 +139,11 @@ object ForwardSheet {
             dialog.dismiss()
             onPicked()
             activity.lifecycleScope.launch {
-                val name = if (t.isAll) activity.getString(R.string.all_devices) else t.name
+                val name = if (t.isAll) activity.getString(R.string.all_devices) else if (t.isNotes) activity.getString(R.string.notes) else t.name
                 var done = 0
                 try {
                     for (one in items.sortedBy { it.ts }) {
-                        app.repo.forward(one, Conversations.targets(t.key))
+                        app.repo.forward(one, Conversations.targets(t.key, s.me))
                         done++
                     }
                     val said = if (items.size == 1) activity.getString(R.string.forwarded_to, name)
@@ -159,7 +159,7 @@ object ForwardSheet {
         b.targets.layoutManager = LinearLayoutManager(activity)
         b.targets.adapter = targets
         // Everywhere except the conversation it's already in.
-        targets.submitList(Conversations.summaries(s.me, s.devices, s.items, emptyMap()).filter { it.key !in source && it.known })
+        targets.submitList(Conversations.summaries(s.me, s.devices, s.items, emptyMap(), s.notesOn).filter { it.key !in source && it.known })
         dialog.show()
     }
 }

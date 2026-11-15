@@ -324,7 +324,8 @@ let inboxRow = null;
 // Called by renderSidebar after the All devices row (and the phone's): the Alerts row, once there's anything to show.
 function placeInboxRow(list, cursor) {
   if (!inboxFeature() || !alertsBox.loaded || (!alertsBox.list.length && alertsBox.senders.size < 2)) {
-    if (inboxRow) { inboxRow.li.remove(); inboxRow = null; }
+    // (1.34) the cursor steps past it first: a removed node is no place to insert the next row before (Notes follows)
+    if (inboxRow) { if (inboxRow.li === cursor) cursor = cursor.nextElementSibling; inboxRow.li.remove(); inboxRow = null; }
     return cursor;
   }
   if (!inboxRow) {

@@ -36,7 +36,8 @@ object Shortcuts {
     }
 
     private fun build(ctx: Context, conversation: String, name: String, platform: String?, rank: Int): ShortcutInfoCompat {
-        val icon = icon(ctx, platform, conversation == Conversations.ALL)
+        // (1.20) Notes has its own icon
+        val icon = icon(ctx, if (conversation == Conversations.NOTES) R.drawable.ic_note else platformIcon(platform, conversation == Conversations.ALL))
         return ShortcutInfoCompat.Builder(ctx, idFor(conversation))
             .setShortLabel(name.take(24))
             .setLongLabel(name)
@@ -69,7 +70,7 @@ object Shortcuts {
             val stale = ShortcutManagerCompat.getDynamicShortcuts(ctx).map { it.id }.filter { it.startsWith(PREFIX) && it !in keep }
             if (stale.isNotEmpty()) ShortcutManagerCompat.removeDynamicShortcuts(ctx, stale)
             wanted.forEachIndexed { rank, s ->
-                val name = if (s.isAll) ctx.getString(R.string.all_devices) else s.name
+                val name = if (s.isAll) ctx.getString(R.string.all_devices) else if (s.isNotes) ctx.getString(R.string.notes) else s.name
                 ShortcutManagerCompat.pushDynamicShortcut(ctx, build(ctx, s.key, name, s.platform, rank))
             }
         } catch (_: Exception) {
@@ -103,12 +104,12 @@ object Shortcuts {
     }
 
     /** The device's platform icon on Beam's soft accent colour, as an adaptive icon. */
-    private fun icon(ctx: Context, platform: String?, isAll: Boolean): IconCompat {
+    private fun icon(ctx: Context, res: Int): IconCompat {
         val size = 216 // 108 dp at 2x; the middle 72 dp is always visible
         val bmp = createBitmap(size, size)
         val canvas = Canvas(bmp)
         canvas.drawColor(ctx.getColor(R.color.accent_soft_fixed))
-        val d = ContextCompat.getDrawable(ctx, platformIcon(platform, isAll))?.mutate()
+        val d = ContextCompat.getDrawable(ctx, res)?.mutate()
         if (d != null) {
             d.setTint(ctx.getColor(R.color.accent_fixed))
             val inset = size * 30 / 100

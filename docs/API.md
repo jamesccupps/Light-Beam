@@ -485,6 +485,8 @@ can't pass for it.
   (the first 140 characters) or `"name"` for a file; only `{ "id" }` when that item was gone already.
 - `reactions` (1.14): `{ "👍": ["<device id>", …] }`, each emoji with the devices that chose it (absent when none).
 - `edited` (1.14): when a text's words were last changed.
+- `note` **(1.34, feature `notes`)**: `true` on a note, an item whose `to` is exactly its sender's own device (see
+  Conversations → Notes); absent otherwise. `done` **(1.34)**: on notes only, whether it's ticked off.
 - **Long texts (v3):**
   - In lists and live events, texts over **16 KB** are cut short (`"truncated": true, "textLength": N`). This was
     64 KB in v2.
@@ -515,6 +517,14 @@ an **All devices** conversation for broadcasts.
   sends them to that device.
 - Items without `from` (sent by curl, iOS Shortcuts or old clients) appear in All devices when they are for me. Apps
   may instead file them under a device whose name matches the item's `device`.
+- **Notes (1.34, feature `notes`):** an item sent to the sending device itself and only to it (`to` = `[from]`) is a
+  note (`note: true`). Every device shows every note, whoever wrote it, in a **Notes** conversation of its own (under
+  All devices) and nowhere else. Nothing is unread there and no auto-action applies (a note is never "for me": it's
+  from me, or for another device), so no read markers are kept for it (`PUT /api/read` takes device ids and `all`).
+  Send into Notes with `to: [<my id>]`, or the target name `notes`; never `[]` (that's every device). Older apps show
+  none (they never list a conversation with themselves). The server keeps notes until they're deleted (the age
+  clean-up, the item limit and room under the storage limit skip them, as they skip pinned items), never pushes
+  them to ntfy, and logs "Noted …" without their words.
 
 ## Endpoints
 
@@ -956,7 +966,8 @@ Events: `sites { at }` (to every stream) when the list changed or a check finish
 | `GET /api/items/{id}` | the full Item |
 | `GET /api/items/{id}/text` | full text as `text/plain`. Sends `ETag`/`Last-Modified` (`304` with `If-None-Match`) (v3) |
 | `POST /api/items/{id}/ack` | Mark as delivered to the calling device → `{ "id", "delivered" }` |
-| `PATCH /api/items/{id}` | **(v3)** `{ "pinned": true|false }` and **(1.14, feature `edit`)** `{ "text": "…" }` (a text's new words: its sender's device, or **(1.30.1)** an approved sign-in, else `403 {reason: "trusted"}`; `edited` is set; a long one goes to data/texts as when it was sent; `400` for a file or nothing left) → the Item; event `update` |
+| `PATCH /api/items/{id}` | **(v3)** `{ "pinned": true|false }` and **(1.14, feature `edit`)** `{ "text": "…" }` (a text's new words: its sender's device, or **(1.30.1)** an approved sign-in, else `403 {reason: "trusted"}`; `edited` is set; a long one goes to data/texts as when it was sent; `400` for a file or nothing left); **(1.34, feature `notes`)** `{ "done": true|false }` (a note ticked off: notes only,
+else `400`; any device) → the Item; event `update` (a note's always carries `done`) |
 | `PUT /api/items/{id}/reactions/{emoji}`, `DELETE …` | **(1.14, feature `reactions`)** this device's reaction (one emoji, at most 16 characters, URL-encoded in the path) on or off → `200` + the Item; at most 20 kinds on an item (`409`); event `update` |
 | `POST /api/items/{id}/forward` | **(v3)** `{ "to": [...] }` → `201` + a new Item from the caller with the same content (files are hard-linked, not copied) |
 | `POST /api/items/{id}/fastlink` | **(1.13, feature `fast-links`)** `{ "hours": 1–720 }` (default 24; **1.15:** also `"maxDownloads": 1–1000` and `"removeLocation": true`, Beam Family's choices: see docs/FAMILY.md) → `201 { "link": { "id", "url", "expires", "created", "downloads", "by", "maxDownloads", "removeLocation" } }`: a link anyone can download this file with, without Beam or signing in, until it runs out. Beam Family on the same machine makes it (its local admin API, with the control.key in `BEAM_FAMILY_DATA`; docs/FAMILY.md), from the file itself: a hard link on the same drive, else a copy the link follows as it arrives. `400` not a file, or hours out of range; `404` not on the server any more; `503` Beam Family isn't set up, answering, or new enough; Family's own errors pass on (`409` no owner yet, `429` 50 links working, `507` storage full) |
@@ -999,6 +1010,8 @@ server:
   `?to=id1,id2` query.
 - **Targets may be device ids (merged-away ids are followed, v3) or device names** (matched case-insensitively). An
   unknown target returns `400`.
+- **(1.34)** The target name `notes` (any case; a device or alias of that name comes first) is the caller's own
+  device: a note. Without a device id (the master key alone) it's `400`. The same for files and forwards.
 - Up to 5 MB. **(1.7.3)** All texts on their way in together hold at most 64 MB of the server's memory; beyond that
   a sender gets `503` with `Retry-After` and tries again.
 

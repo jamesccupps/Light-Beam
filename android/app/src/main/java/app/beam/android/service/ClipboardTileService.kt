@@ -25,6 +25,7 @@ class ClipboardTileService : TileService() {
             subtitle = when (val t = app.prefs.tileTarget) {
                 null -> null
                 Conversations.ALL -> getString(R.string.all_devices)
+                Conversations.NOTES -> getString(R.string.notes) // (1.20)
                 else -> app.repo.state.value.devicesById[t]?.name
             }
             updateTile()

@@ -7711,6 +7711,125 @@ test('AUD (audit 2026-10-04): reactions can’t be object keys; a reinstall need
   } finally { await p.stop(); }
 });
 
+// ---------------------------------------------------------------- 1.34 Notes
+
+test('1.34 Notes: a message to the device you’re on is a note (also with the name "notes", a forward, a file); never pushed; done; the others see it as before', async () => {
+  const pushed = [];
+  const ntfy = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', d => { body += d; });
+    req.on('end', () => { pushed.push(JSON.parse(body)); res.end('{}'); });
+  });
+  await new Promise(r => ntfy.listen(8797, '127.0.0.1', r));
+  const s = await startServer('notes', 8791, { env: { BEAM_NTFY: 'http://127.0.0.1:8797/beam-test-topic' } });
+  try {
+    const K = s.key;
+    const desk = app(K, 'notesdesk01', 'Desktop', 'windows', from('100.64.91.1'));
+    const phone = app(K, 'notesphone1', 'Phone', 'android', from('100.64.91.2'));
+    await s.req('GET', '/api/me', { headers: phone });
+    assert.ok((await s.req('GET', '/api/info', { headers: desk })).json.features.includes('notes'));
+    const ev = await openEvents(s.port, phone);
+    await ev.wait('hello');
+
+    // to its own id: a note, seen by the other devices too (every item goes to every stream; apps pick)
+    const n1 = await sendText(s, desk, 'buy milk', ['notesdesk01']);
+    assert.equal(n1.note, true);
+    assert.equal(n1.done, false);
+    assert.deepEqual(n1.to, ['notesdesk01']);
+    const seen = await ev.wait('item', d => d.id === n1.id);
+    assert.equal(seen.data.note, true);
+    // the name "notes" (any case, in the body, the header, the query), and a forward to it
+    const n2 = await sendText(s, desk, 'second', 'Notes');
+    assert.deepEqual([n2.note, n2.to], [true, ['notesdesk01']]);
+    let r = await s.req('POST', '/api/text', { headers: { ...desk, 'Content-Type': 'text/plain', 'X-Beam-To': 'notes' }, body: 'from curl' });
+    assert.equal(r.status, 201, r.body);
+    assert.equal(r.json.note, true);
+    r = await s.req('POST', '/api/text?to=NOTES', { headers: { ...desk, 'Content-Type': 'text/plain' }, body: 'from a query' });
+    assert.equal(r.json.note, true);
+    const msg = await sendText(s, desk, 'hello phone', ['notesphone1']);
+    assert.equal(msg.note, undefined, 'a message to another device is no note');
+    r = await post(s, `/api/items/${msg.id}/forward`, { to: ['notes'] }, phone);
+    assert.equal(r.status, 201, r.body);
+    assert.deepEqual([r.json.note, r.json.from, r.json.to], [true, 'notesphone1', ['notesphone1']]);
+    const file = await upload(s, phone, 'scan.png', crypto.randomBytes(2000), { to: ['notes'] });
+    assert.equal(file.note, true);
+    // without a device there's no "you" to note to
+    r = await s.req('POST', '/api/text', { headers: { Authorization: `Bearer ${K}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'x', to: ['notes'] }) });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /Notes belong to a device/);
+    // several targets, itself among them: a message as before
+    const both = await sendText(s, desk, 'to both', ['notesdesk01', 'notesphone1']);
+    assert.equal(both.note, undefined);
+
+    // done: notes only, any device, in lists and update events
+    r = await s.req('PATCH', `/api/items/${n1.id}`, { headers: json(phone), body: JSON.stringify({ done: true }) });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.json.done, true);
+    assert.equal((await ev.wait('update', d => d.id === n1.id && d.done === true)).data.done, true);
+    assert.equal((await s.req('PATCH', `/api/items/${msg.id}`, { headers: json(desk), body: JSON.stringify({ done: true }) })).status, 400, 'only a note');
+    assert.equal((await s.req('PATCH', `/api/items/${n1.id}`, { headers: json(desk), body: JSON.stringify({ done: 'yes' }) })).status, 400);
+    r = await s.req('PATCH', `/api/items/${n1.id}`, { headers: json(desk), body: JSON.stringify({ done: false }) });
+    assert.equal(r.json.done, false);
+    const listed = (await s.req('GET', '/api/items', { headers: phone })).json.items;
+    const noteIds = listed.filter(i => i.note).map(i => i.id);
+    assert.equal(noteIds.length, 6, 'the six notes: two texts, curl, the query, the forward, the file');
+    for (const id of [n1.id, n2.id, file.id]) assert.ok(noteIds.includes(id));
+    assert.equal(listed.find(i => i.id === msg.id).note, undefined);
+    assert.equal(listed.find(i => i.id === msg.id).done, undefined, 'a message carries no done');
+
+    // pushed: the message to the phone and the one to both, never a note
+    await waitFor(() => pushed.length >= 2);
+    await sleep(300);
+    assert.equal(pushed.length, 2, JSON.stringify(pushed.map(p => p.title)));
+
+    // the log says a note was made, never its words
+    const logText = fs.readFileSync(path.join(s.data, 'logs', 'server.log'), 'utf8');
+    assert.match(logText, /Noted text \(8 characters\) on Desktop/);
+    assert.doesNotMatch(logText, /buy milk/);
+
+    // a device named "Notes" is a device first
+    await s.req('GET', '/api/me', { headers: app(K, 'notesnamed1', 'Notes', 'windows', from('100.64.91.3')) });
+    const named = await sendText(s, desk, 'to the device', ['notes']);
+    assert.deepEqual([named.to, named.note], [['notesnamed1'], undefined]);
+    ev.close();
+  } finally { await s.stop(); await new Promise(r => ntfy.close(r)); }
+});
+
+test('1.34 Notes: the age clean-up, the item limit and the storage limit keep notes as they keep pinned items', async () => {
+  const dir = path.join(TMP, 'notes-keep', 'data');
+  fs.rmSync(path.join(TMP, 'notes-keep'), { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const day = 86400e3;
+  const mk = (id, ageDays, extra = {}) => ({ id, kind: 'text', text: id, from: 'aaaaaaaa02', device: 'A', to: ['bbbbbbbb02'], delivered: { bbbbbbbb02: 1 }, ts: Date.now() - ageDays * day, ...extra });
+  fs.writeFileSync(path.join(dir, 'devices.json'), JSON.stringify({ aaaaaaaa02: { id: 'aaaaaaaa02', name: 'A', platform: 'windows', firstSeen: 1, lastSeen: Date.now() }, bbbbbbbb02: { id: 'bbbbbbbb02', name: 'B', platform: 'android', firstSeen: 1, lastSeen: Date.now() } }));
+  fs.writeFileSync(path.join(dir, 'items.json'), JSON.stringify([
+    mk('1000000000000001', 400, { to: ['aaaaaaaa02'], delivered: {} }), // a note from before 1.34 (to itself)
+    mk('1000000000000002', 400), // an old message: goes
+    mk('1000000000000003', 1, { to: ['aaaaaaaa02'], delivered: {} }),
+    mk('1000000000000004', 2),
+    mk('1000000000000005', 3),
+  ]));
+  const s = await startServer('notes-keep', 8791, { keep: true, env: { BEAM_MAX_STORAGE_GB: String(2.5 / 1024) } }); // 2.5 MB
+  try {
+    const h = app(s.key, 'aaaaaaaa02', 'A');
+    let items = (await s.req('GET', '/api/items', { headers: h })).json.items;
+    assert.deepEqual(items.map(i => i.id).sort(), ['1000000000000001', '1000000000000003', '1000000000000004', '1000000000000005'], 'the old note stayed');
+    assert.equal(items.find(i => i.id === '1000000000000001').note, true, 'an old message to itself counts as a note');
+    let r = await s.req('PATCH', '/api/settings', { headers: json(h), body: JSON.stringify({ maxItems: 2 }) });
+    assert.equal(r.status, 200);
+    await sleep(300);
+    items = (await s.req('GET', '/api/items', { headers: h })).json.items;
+    assert.deepEqual(items.map(i => i.id).sort(), ['1000000000000001', '1000000000000003'], 'over the limit the messages went, the notes stayed');
+    r = await s.req('PATCH', '/api/settings', { headers: json(h), body: JSON.stringify({ maxItems: 0 }) });
+    // a note's file isn't removed to make room (it counts as delivered at once)
+    const big = await upload(s, h, 'note.bin', crypto.randomBytes(1_500_000), { to: ['notes'] });
+    assert.equal(big.note, true);
+    r = await post(s, '/api/uploads', { name: 'two.bin', size: 1_500_000, to: ['bbbbbbbb02'] }, h);
+    assert.equal(r.status, 507, 'nothing it may remove');
+    assert.equal((await s.req('GET', `/api/items/${big.id}`, { headers: h })).status, 200);
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {
