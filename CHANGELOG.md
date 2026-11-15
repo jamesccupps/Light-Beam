@@ -12,6 +12,24 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.34.1 (2026-11-15): fixes from an outside review
+
+**Versions:** server 1.34.1 (and Beam Family), Windows app 1.26.2, Android app 1.20.1; Beam for Linux 1.6.0 unchanged.
+
+- **A sign-in for this session only stays one:** a browser signed in with "Remember me" off could trade its
+  sign-in for one that lasted. A sign-in made from a session-only one is now session-only too.
+- **Pictures that say they're huge:** Beam Family refuses previews and profile pictures whose header says more than
+  2048 pixels a side, as Beam already did for thumbnails (a small file like that takes hundreds of MB to draw). The
+  Sites list keeps a site's icon only when it's at most 512 pixels a side and comes from the site's own machine, and
+  the Android app draws site icons at the size it shows them, without holding up the list.
+- **While another device controls a PC (Windows):** "Let Beam install apps" and the question's "Always allow" can't
+  be turned on until that session ends, as with commands. A keyboard-and-mouse banner hidden by the other device's own
+  click is hidden for that session only; hidden with the PC's own mouse or keyboard, it stays hidden as before.
+- **Windows app:** it no longer follows redirects from the server, looks for Tailscale in Program Files before the
+  PATH, and ignores an item whose id isn't one.
+- **Building:** docs/BUILDING.md says what the two signing keys can do and where to keep them.
+- **Tests:** Beam Family's direct-connection tests skip, saying why, where there's no network address.
+
 ## Windows 1.26.1 (2026-11-15): out of a game that holds the mouse
 
 **Versions:** Windows app 1.26.1; server 1.34.0, Android app 1.20.0, Beam for Linux 1.6.0 (all unchanged).

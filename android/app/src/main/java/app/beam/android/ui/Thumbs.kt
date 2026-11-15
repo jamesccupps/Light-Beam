@@ -315,6 +315,32 @@ object Thumbs {
 
     fun loadUri(ctx: Context, uri: Uri): Bitmap? = decode(ImageDecoder.createSource(ctx.contentResolver, uri))
 
+    /**
+     * (1.20.1, the 2026-11-14 audit) A small picture from a `data:image/...;base64,` URL (a site's icon), at most [maxPx]
+     * a side, or null. One whose header says it's huge is decoded small, never in full. Not on the main thread.
+     */
+    fun fromDataUrl(data: String, maxPx: Int): Bitmap? {
+        val comma = data.indexOf(',')
+        if (!data.startsWith("data:image/") || comma < 0) return null
+        val bytes = try { android.util.Base64.decode(data.substring(comma + 1), android.util.Base64.DEFAULT) } catch (_: IllegalArgumentException) { return null }
+        return try {
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, info, _ ->
+                val w = info.size.width
+                val h = info.size.height
+                val longest = maxOf(w, h)
+                if (longest > maxPx) {
+                    val scale = maxPx.toDouble() / longest
+                    decoder.setTargetSize((w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1))
+                }
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } catch (_: Exception) {
+            null
+        } catch (_: OutOfMemoryError) {
+            null
+        }
+    }
+
     /** (1.16, M8) [decode], or null for a picture that can't be read (or wouldn't fit in memory). */
     private inline fun bounded(source: () -> ImageDecoder.Source): Bitmap? = try {
         decode(source())

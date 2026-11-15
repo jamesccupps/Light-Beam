@@ -452,7 +452,8 @@ and (Windows 1.12.4) `clip` (id 3, ordered: clipboard pictures; a side before it
   - **Pings:** the viewer's page pings every 500 ms (the PC's page answers at once); without an answer for 1.5 s, or
     the PC's own pings (every 2 s) missing for 6 s, the viewer takes its keyboard and mouse back.
   - **The banner** says "<viewer>'s keyboard and mouse · Hide · Stop"; Hide folds it into the PC's tray (remembered
-    there), which then shows the session (Show the banner, Back, Stop). It still counts as up.
+    there), which then shows the session (Show the banner, Back, Stop). It still counts as up. (Windows 1.26.2) Only
+    a Hide with the PC's own mouse or keyboard is remembered; one by the viewer's own input lasts the session.
   - The PC doesn't keep itself awake for a kvm session (it lasts all day): its screen sleeps as usual, and the viewer's
     input wakes it.
 - **Clipboard pictures (Windows 1.12.4, web viewer too; caps `"clipimg"` in both hellos):** with clipboard sync on and

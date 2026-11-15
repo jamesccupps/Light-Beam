@@ -32,6 +32,7 @@ const winsetup = require('./lib/winsetup');
 const appsLib = require('./lib/apps');
 const sharesLib = require('./lib/shares');
 const sitesLib = require('./lib/sites'); // (1.31)
+const { thumbDims } = require('./lib/imagesize'); // (1.34.1: shared with Beam Family)
 const inboxLib = require('./lib/inbox'); // (1.33) what apps post to the alerts inbox
 const ws = require('./lib/websocket');
 const { version: VERSION } = require('./package.json');
@@ -7406,25 +7407,7 @@ async function putThumb(req, res, [id]) {
   send(res, 204);
 }
 
-// A JPEG's or WebP's width and height from its header, or null.
-function thumbDims(b, format) {
-  if (format === 'jpeg') {
-    for (let i = 2; i + 9 < b.length;) {
-      if (b[i] !== 0xff) return null;
-      const marker = b[i + 1];
-      if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) { i += 2; continue; }
-      const len = b.readUInt16BE(i + 2);
-      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return { h: b.readUInt16BE(i + 5), w: b.readUInt16BE(i + 7) };
-      i += 2 + len;
-    }
-    return null;
-  }
-  const chunk = b.toString('ascii', 12, 16);
-  if (chunk === 'VP8 ' && b.length >= 30) return { w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff };
-  if (chunk === 'VP8L' && b.length >= 25) { const v = b.readUInt32LE(21); return { w: (v & 0x3fff) + 1, h: ((v >> 14) & 0x3fff) + 1 }; }
-  if (chunk === 'VP8X' && b.length >= 30) return { w: b.readUIntLE(24, 3) + 1, h: b.readUIntLE(27, 3) + 1 };
-  return null;
-}
+// (thumbDims: lib/imagesize.js since 1.34.1)
 
 async function getThumb(req, res, [id]) {
   const item = findItem(id);
@@ -8161,6 +8144,7 @@ async function login(req, res) {
       trusted = linked.trusted === true;
       if (linked.platform) platform = linked.platform;
       if (linked.device) device = linked.device; // a device's own token signs in as that device
+      if (linked.session) remember = false; // (1.34.1, the 2026-11-14 audit) one for this session only stays so
     }
   }
   if (!via) {
@@ -8205,7 +8189,7 @@ function linkSecret(secret, { pairingOnly = false } = {}) {
   if (pairingOnly) return null;
   const token = tokenStore.tokens[hash];
   if (token && !tokenExpired(token) && !token.scope) {
-    return { via: 'link', device: token.device && resolveAlias(token.device), origin: tokenOrigin(token), platform: tokenPlatform(token), trusted: token.trusted === true };
+    return { via: 'link', device: token.device && resolveAlias(token.device), origin: tokenOrigin(token), platform: tokenPlatform(token), trusted: token.trusted === true, session: Boolean(token.session) };
   }
   return null;
 }

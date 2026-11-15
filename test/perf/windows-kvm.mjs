@@ -381,9 +381,20 @@ try {
   rc('banner');
   const pill = await waitLog(inst.pc, /\(test\) banner (pill|full|folded) at /, n, 5000);
   check(!!pill && / banner pill at /.test(pill) && /, hide yes$/.test(pill), `Shop's banner as a pill keeps Hide (${pill ? pill.replace(/^.*\(test\) /, '') : 'no answer'})`);
+  // (1.26.2, the 2026-11-14 audit) A Hide by the viewer's own input folds it for this session only; and "Let Beam install
+  // apps" isn't turned on while the session lasts.
+  n = lines(inst.pc).length;
+  rc('banner:hide-remote');
+  check(!!(await waitLog(inst.pc, /folded into the tray \(the banner's Hide\), by the viewer's own input: for this session only/, n, 5000)), 'SHOP\'s banner: a Hide by the viewer\'s own input folds it for this session only');
+  check(readConfig(inst.pc).rcKvmBannerHidden !== true, '...and isn\'t kept for the next session');
+  forward(inst.pc, ['--test-apps', 'toggle']);
+  check(!!(await waitLog(inst.pc, /refused letting Beam install apps without asking while /, n, 5000)) && readConfig(inst.pc).appsAllowed !== true, 'SHOP: "Let Beam install apps" can\'t be turned on during the session');
+  rc('kvmbanner:show');
+  await waitLog(inst.pc, /the keyboard-and-mouse banner is shown \(test\)/, n, 5000);
+  await sleep(700); // (the click guard: it appeared again)
   n = lines(inst.pc).length;
   rc('banner:hide');
-  check(!!(await waitLog(inst.pc, /the keyboard-and-mouse banner is folded into the tray \(the banner's Hide\)/, n, 5000)), 'SHOP\'s banner: Hide folds it into the tray');
+  check(!!(await waitLog(inst.pc, /the keyboard-and-mouse banner is folded into the tray \(the banner's Hide\)$/, n, 5000)), 'SHOP\'s banner: Hide folds it into the tray');
   st = await pcState();
   check(!!st && /banner folded/.test(st) && readConfig(inst.pc).rcKvmBannerHidden === true, 'the session goes on, and SHOP remembers the choice');
 

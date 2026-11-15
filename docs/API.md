@@ -191,7 +191,8 @@ Apps should try this first when they reach Beam over its `https://…ts.net` add
 - Apps (`client: "app"`) get `200 { "key": "bt_…", "server" }`, **(1.6)** plus `you` (the device id the sign-in got).
   Browsers omit `client` and get a cookie (`204`).
 - A pairing link, pairing token, device token or the master key also works in `secret`. An app's web view signs in
-  with its own device token this way (the Android remote viewer, for one).
+  with its own device token this way (the Android remote viewer, for one). **(1.34.1)** A device token for this
+  session only gives one for this session only, whatever `remember` says.
 - Limits (v3):
   - 5 attempts per address per 5 minutes, then `429` until the lock ends, even for the right password;
   - 30 attempts in total per 10 minutes;
@@ -938,7 +939,8 @@ trusted sign-in of its own counts. **Added** ones: an address the user typed (a 
 50. The server checks each site that isn't hidden when the list is read and the last check is over 2 minutes old (all at
 once, 5 s each; nothing runs while nobody looks): whether it answers (any HTTP answer under 500), its `<title>` (one
 redirect on the same machine followed: a sign-in page's title), and its icon (a PNG, ICO, GIF, JPEG or WebP it links,
-or `/favicon.ico`; 32 KB at most, never SVG; kept 6 hours). The check sends no cookies or sign-ins. Reading and changing
+or `/favicon.ico`; 32 KB at most, never SVG; kept 6 hours; **(1.34.1)** only on the page's own machine, and at most
+512 px a side by its header). The check sends no cookies or sign-ins. Reading and changing
 need a trusted sign-in (`403 { reason: "trusted" }`: the list is a map of the tailnet's services); changing needs one for
 good (`403 { reason: "temporary" }`). `data/sites.json` holds the added ones and found ones' names and hiding (in
 exports and backups); a removed device's go with it.

@@ -9,11 +9,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { newId, isId } = require('./ids');
 const { trimEnds, isSpaceOrDot } = require('../../lib/trim');
+const { thumbDims, imageDims } = require('../../lib/imagesize');
 const { httpError, send, readJson, readBody, sendFile, contentDisposition } = require('./http');
 
 const now = () => Date.now();
 const MAX_THUMB = 256 * 1024;
 const MAX_AVATAR = 512 * 1024;
+const MAX_SIDE = 2048; // (1.34.1) a preview's or an avatar's pixels a side at most (the app makes 480 and 256)
 const MAX_PIECE = 16 * 1024 * 1024;
 const KEEP_EVERY = 2 * 1024 * 1024;
 const UNSENT_HOURS = 24;
@@ -300,6 +302,10 @@ function createFiles(ctx) {
     const looksRight = format === 'jpeg' ? data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff
       : data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP';
     if (!looksRight) throw httpError(400, `That isn’t a ${format.toUpperCase()} picture`);
+    // (1.34.1, the 2026-11-14 audit, as Beam's: review M8) its size from its header: a small file that says it's
+    // 8000×8000 takes hundreds of MB to draw, on every phone in the conversation
+    const dims = thumbDims(data, format);
+    if (!dims || !(dims.w > 0 && dims.h > 0 && dims.w <= MAX_SIDE && dims.h <= MAX_SIDE)) throw httpError(400, `A preview can be at most ${MAX_SIDE} pixels a side`);
     const w = Math.floor(Number(url.searchParams.get('w')));
     const h = Math.floor(Number(url.searchParams.get('h')));
     await fsp.writeFile(thumbPath(id), data);
@@ -355,6 +361,8 @@ function createFiles(ctx) {
       const ok = ext === 'jpg' ? data[0] === 0xff && data[1] === 0xd8 : ext === 'png' ? data.toString('latin1', 1, 4) === 'PNG'
         : data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP';
       if (!ok) throw httpError(400, 'That isn’t the picture it says it is');
+      const dims = imageDims(data); // (1.34.1, the 2026-11-14 audit: shown to everyone, as a preview is)
+      if (!dims || !(dims.w > 0 && dims.h > 0 && dims.w <= MAX_SIDE && dims.h <= MAX_SIDE)) throw httpError(400, `A picture can be at most ${MAX_SIDE} pixels a side`);
       const file = `${user.id}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
       await fsp.writeFile(path.join(dirs.avatars, file), data);
       if (user.avatar) await fsp.rm(path.join(dirs.avatars, user.avatar), { force: true });

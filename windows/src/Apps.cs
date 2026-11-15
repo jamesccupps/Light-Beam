@@ -263,6 +263,8 @@ namespace Beam
         {
             var ask = Asks.FirstOrDefault(x => x.Id == id);
             if (ask == null) return;
+            // (1.26.2, the 2026-11-14 audit) not "from now on" while another device controls this PC (it stays waiting)
+            if (choice == "always" && app.RcBlocks("letting Beam install apps without asking")) return;
             Asks.Remove(ask);
             // (answered elsewhere, as Not now in Beam's window: its question goes too)
             if (askForm != null && !askForm.IsDisposed && askForm.AskId == id && !askForm.Answered) { askForm.Answered = true; askForm.Close(); }
@@ -298,6 +300,7 @@ namespace Beam
         public void Toggle(string from)
         {
             if (Cfg.AppsAllowed) { SetAllowed(false, from); return; }
+            if (app.RcBlocks("letting Beam install apps without asking")) return; // (1.26.2, the 2026-11-14 audit: as commands)
             var r = MessageBox.Show("Let Beam install apps on this PC without asking?\n\nApps you install from Beam's Apps page on another of your devices then go onto this PC for " +
                 Environment.UserName + " at once (each one shows a notice). Beam never installs as administrator: an installer that needs that asks here.",
                 "Beam", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
@@ -1025,12 +1028,14 @@ namespace Beam
             return d != null ? d.Name : null;
         }
 
-        // Tests (custom --config only): "answer:<id>:install|always|notnow", "allow:on|off", "state".
+        // Tests (custom --config only): "answer:<id>:install|always|notnow", "allow:on|off", "toggle" (1.26.2: as the tray
+        // menu's, refused during remote control; otherwise its confirmation comes up), "state".
         public void TestCommand(string cmd)
         {
             string[] p = cmd.Split(':');
             if (p[0] == "answer" && p.Length == 3) Answer(p[1], p[2]);
             else if (p[0] == "allow" && p.Length == 2) SetAllowed(p[1] == "on", "a test");
+            else if (p[0] == "toggle") Toggle("a test");
             else if (p[0] == "state")
                 Log.Write("Apps: (test) allowed " + Cfg.AppsAllowed + "; asking " + string.Join(",", Asks.Select(a => a.Id)) + "; installed " +
                     string.Join(",", Cfg.InstalledApps.Select(a => a.Id + "=" + a.Kind + "@" + (a.Version ?? "?"))));

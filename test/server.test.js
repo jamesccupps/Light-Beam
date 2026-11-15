@@ -1349,6 +1349,15 @@ test('C6: session sign-ins end with the browser and after 12 h idle; their devic
     x = await post(s, '/api/login-requests/deny', { code: asked.code }, borrowed);
     assert.deepEqual([x.status, x.json.reason], [403, 'temporary'], 'no turning one down either (2026-11-05)');
     assert.equal((await s.req('GET', '/api/pair', { headers: app(K, 'sessadmin01') })).status, 200, 'a device signed in for good still can');
+    // (1.34.1, the 2026-11-14 audit, finding 1) Its token traded for another (as an app's page signs in) stays for this
+    // session only: never a lasting one (which would also keep this device after the session; see below).
+    x = await post(s, '/api/login', { secret: cookieValue(r), client: 'app' }, { ...sameOrigin, Cookie: 'beam_device_id=borrowed001' });
+    assert.equal(x.status, 200, x.body);
+    const traded = { Authorization: `Bearer ${x.json.key}`, 'X-Beam-Device-Id': 'borrowed001', 'X-Beam-Platform': 'web' };
+    assert.equal((await s.req('GET', '/api/logs', { headers: borrowed })).status, 403);
+    assert.equal((await s.req('GET', '/api/logs', { headers: traded })).status, 403, 'the traded one is for this session only too');
+    x = await post(s, '/api/login', { secret: x.json.key, client: 'app', remember: true }, sameOrigin);
+    assert.equal((await s.req('GET', '/api/logs', { headers: { ...traded, Authorization: `Bearer ${x.json.key}` } })).status, 403, 'even when asked to remember it');
     await sleep(500); // let devices.json be written (the test kills the server hard)
   } finally { await s.stop(); }
   const file = path.join(s.data, 'tokens.json');
@@ -4028,6 +4037,7 @@ test('1.23.2 Beam for Linux renamed from its window: the name sticks over the ap
 // viewer's and the computer's Beam for Linux's (rcSetup's fake tailnet; the relay's frames from lib/websocket.js).
 
 const wsLib = require(path.join(ROOT, 'lib', 'websocket.js'));
+const sitesLib = require(path.join(ROOT, 'lib', 'sites.js')); // (1.34.1)
 
 // A WebSocket of the test's own (a client's masked frames), answering pings: what comes in collects in `data`.
 function wsOpen(port, route, headers = {}) {
@@ -6323,7 +6333,9 @@ test('1.33 Alerts inbox: only trusted sign-ins see it, change it or hear it; an 
 
 test('1.31 Sites: a PC’s own pages at its Tailscale name, checked (title, icon, a sign-in redirect, one that’s down); add, rename, hide, show, remove; kept across a restart and in an export', async () => {
   // Made-up pages: a trend viewer with an icon, a camera whose / redirects to its sign-in page, and a closed port.
-  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 7)]);
+  const png = side => { const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(side, 0); ihdr.writeUInt32BE(side, 4); ihdr[8] = 8; ihdr[9] = 6;
+    return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from('IHDR'), ihdr, Buffer.alloc(40, 7)]); };
+  const PNG = png(32);
   const pages = http.createServer((req, res) => {
     if (req.url === '/i.png') { res.writeHead(200, { 'Content-Type': 'image/png' }); return res.end(PNG); }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -6364,6 +6376,13 @@ test('1.31 Sites: a PC’s own pages at its Tailscale name, checked (title, icon
     assert.deepEqual(pick(found, ['id', 'url', 'host', 'name', 'deviceName', 'up']),
       { id: 'shoppc00s131.8796', url: 'http://localhost:8796/', host: 'localhost:8796', name: 'Shop Trends', deviceName: 'Shop PC', up: true });
     assert.equal(found.icon, `data:image/png;base64,${PNG.toString('base64')}`, 'its icon, from the page');
+    // (1.34.1, the 2026-11-14 audit) an icon whose header says it's huge isn't kept; one on another machine isn't fetched
+    const served = body => async () => ({ status: 200, headers: {}, stream: require('node:stream').Readable.from([body]) });
+    assert.equal(await sitesLib.fetchIcon(served(png(6000)), 'http://localhost:8796/big.png'), null, 'a 6000×6000 icon');
+    assert.equal(await sitesLib.fetchIcon(served(png(512)), 'http://localhost:8796/ok.png'), `data:image/png;base64,${png(512).toString('base64')}`, '512 a side is fine');
+    assert.equal(sitesLib.iconHref('<link rel="icon" href="http://169.254.169.254/x.png">', 'http://localhost:8796/'), 'http://localhost:8796/favicon.ico', 'only its own machine');
+    assert.equal(sitesLib.iconHref('<link rel="icon" href="/a/i.png">', 'http://localhost:8796/'), 'http://localhost:8796/a/i.png');
+    assert.equal(sitesLib.iconHref('<link rel="icon" href="http://localhost:9000/i.png">', 'http://localhost:8796/'), 'http://localhost:9000/i.png', 'another port there is fine');
     assert.equal((await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(d => d.id === 'shoppc00s131').status.sites, undefined, 'not in the device list');
 
     // Added by hand: "localhost:8797" means http; its title is the sign-in page's (one redirect followed).

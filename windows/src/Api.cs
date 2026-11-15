@@ -109,7 +109,7 @@ namespace Beam
             it.Delivered = Json.LongMap(d, "delivered");
             it.Ts = Json.Long(d, "ts", 0);
             it.Edited = Json.Long(d, "edited", 0);
-            return it.Id == null ? null : it;
+            return Config.ValidId(it.Id) ? it : null; // (1.26.2, the 2026-11-14 audit: ids go into file names)
         }
     }
 
@@ -185,6 +185,8 @@ namespace Beam
         {
             var handler = new HttpClientHandler();
             handler.UseCookies = false;
+            // (1.26.2, the 2026-11-14 audit) Beam never redirects its API, and .NET would carry X-Beam-Device-Key along
+            handler.AllowAutoRedirect = false;
             // Beam 1.4 servers gzip JSON (item lists, devices) when asked; files are never compressed.
             handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
             var client = new HttpClient(handler);

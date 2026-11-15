@@ -32,11 +32,13 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlin.math.ceil
 
 /**
  * (1.17, server 1.31) Sites: the web pages your machines serve over Tailscale. Each PC's Beam for Windows finds the
@@ -63,7 +65,7 @@ class SitesActivity : BaseActivity() {
             }
             true
         }
-        adapter = SiteAdapter(::open, ::siteMenu)
+        adapter = SiteAdapter(::open, ::siteMenu, lifecycleScope)
         b.list.layoutManager = LinearLayoutManager(this)
         b.list.adapter = adapter
         b.refresh.setColorSchemeColors(themeColor(R.attr.beamAccent))
@@ -211,7 +213,8 @@ class SitesActivity : BaseActivity() {
         input.requestFocus()
     }
 
-    private class SiteAdapter(private val onOpen: (Site) -> Unit, private val onMenu: (Site) -> Unit) : ListAdapter<Site, SiteAdapter.Holder>(DIFF) {
+    private class SiteAdapter(private val onOpen: (Site) -> Unit, private val onMenu: (Site) -> Unit, private val scope: CoroutineScope) :
+        ListAdapter<Site, SiteAdapter.Holder>(DIFF) {
         var checking = false
 
         class Holder(val b: ItemSiteBinding) : RecyclerView.ViewHolder(b.root)
@@ -242,7 +245,7 @@ class SitesActivity : BaseActivity() {
                 },
             )
             b.dot.contentDescription = state
-            val bitmap = iconOf(site)
+            val bitmap = iconOf(site, ctx.resources.displayMetrics.density)
             b.icon.setImageBitmap(bitmap)
             b.icon.isVisible = bitmap != null
             b.letter.isVisible = bitmap == null
@@ -259,23 +262,33 @@ class SitesActivity : BaseActivity() {
                 override fun areContentsTheSame(a: Site, b: Site) = a == b
             }
 
-            // Icons arrive as data: URLs in the list; decoded once each (a few KB).
+            // Icons arrive as data: URLs in the list (at most 32 KB); each is decoded once, at the size shown (24 dp), off
+            // the main thread. (1.20.1, the 2026-11-14 audit: one whose header said it was huge was decoded in full here.)
+            // Only on the main thread.
             private val icons = LruCache<String, Bitmap>(64)
             private val NO_ICON = Bitmap.createBitmap(1, 1, Bitmap.Config.ALPHA_8)
+        }
 
-            fun iconOf(site: Site): Bitmap? {
-                val data = site.icon ?: return null
-                val comma = data.indexOf(',')
-                if (!data.startsWith("data:image/") || comma < 0) return null
-                val cached = icons.get(data)
-                if (cached != null) return cached.takeIf { it !== NO_ICON }
-                val bitmap = runCatching {
-                    val bytes = Base64.decode(data.substring(comma + 1), Base64.DEFAULT)
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                }.getOrNull()
-                icons.put(data, bitmap ?: NO_ICON)
-                return bitmap
+        private val decoding = HashSet<String>() // (this list's: a screen closed mid-decode leaves nothing behind)
+
+        /** The site's icon if it's decoded already; otherwise null, and it's decoded (the row is drawn again then). */
+        private fun iconOf(site: Site, density: Float): Bitmap? {
+            val data = site.icon ?: return null
+            val cached = icons.get(data)
+            if (cached != null) return cached.takeIf { it !== NO_ICON }
+            if (decoding.add(data)) {
+                val px = ceil(24 * density).toInt().coerceAtLeast(16)
+                scope.launch {
+                    try {
+                        val bitmap = withContext(Dispatchers.Default) { Thumbs.fromDataUrl(data, px) }
+                        icons.put(data, bitmap ?: NO_ICON)
+                        if (bitmap != null) currentList.forEachIndexed { i, s -> if (s.icon == data) notifyItemChanged(i) }
+                    } finally {
+                        decoding.remove(data)
+                    }
+                }
             }
+            return null
         }
     }
 }

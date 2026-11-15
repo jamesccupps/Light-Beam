@@ -26,6 +26,10 @@ const FFMPEG = (() => {
   return spawnSync('ffmpeg', ['-hide_banner', '-version'], { windowsHide: true }).status === 0 ? 'ffmpeg' : null;
 })();
 const FFPROBE = FFMPEG && path.join(path.dirname(FFMPEG), path.basename(FFMPEG).replace(/ffmpeg/i, 'ffprobe'));
+// (1.34.1, the 2026-11-14 audit) Direct connections (WebRTC) need an address that isn't loopback: where there's none (a
+// container with networking off) the four tests that use them say so and pass, as F-R does without ffmpeg.
+const LAN = Object.values(os.networkInterfaces()).flat().find(a => a && a.family === 'IPv4' && !a.internal)?.address;
+const NO_LAN = '      (skipped: direct connections need a network address, and there is none here)';
 
 // ---------------------------------------------------------------- harness
 
@@ -643,7 +647,11 @@ test('F-G: files: resumable uploads, limits, only sent to the conversation, inli
     assert.equal((await call(s, 'GET', `/api/files/${photo}`, bob.who)).status, 404);
     assert.equal((await call(s, 'GET', `/api/files/${photo}`, mary.who)).status, 200);
     // A preview with the picture's size.
-    let r = await s.req('PUT', `/api/files/${photo}/thumb?w=4000&h=3000`, { headers: { ...as(mary.who), 'Content-Type': 'image/jpeg' }, body: Buffer.from([0xff, 0xd8, 0xff, 1, 2, 3]) });
+    // (1.34.1) a JPEG's header with its size (a start-of-frame segment): 480×360, or one that says 8000×6000
+    const jpegOf = (w, h) => Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, h >> 8, h & 255, w >> 8, w & 255, 3, ...Array(9).fill(1), 0xff, 0xd9]);
+    let r = await s.req('PUT', `/api/files/${photo}/thumb?w=4000&h=3000`, { headers: { ...as(mary.who), 'Content-Type': 'image/jpeg' }, body: jpegOf(8000, 6000) });
+    assert.deepEqual([r.status, r.json?.error], [400, 'A preview can be at most 2048 pixels a side'], 'a preview that says it’s huge (the 2026-11-14 audit)');
+    r = await s.req('PUT', `/api/files/${photo}/thumb?w=4000&h=3000`, { headers: { ...as(mary.who), 'Content-Type': 'image/jpeg' }, body: jpegOf(480, 360) });
     assert.equal(r.status, 204);
     r = await s.req('PUT', `/api/files/${photo}/thumb`, { headers: { ...as(mary.who), 'Content-Type': 'image/jpeg' }, body: Buffer.from('<svg/>') });
     assert.equal(r.status, 400, 'a preview must be what it says');
@@ -690,7 +698,11 @@ test('F-G: files: resumable uploads, limits, only sent to the conversation, inli
     assert.equal((await call(s, 'GET', `/api/files/${photo}`, mary.who)).status, 404);
     await waitFor(() => !fs.existsSync(path.join(s.data, 'files', photo)));
     // Avatars: JPEG/PNG/WebP that are what they say, seen by everyone signed in.
-    r = await s.req('PUT', '/api/me/avatar', { headers: { ...as(mary.who), 'Content-Type': 'image/png' }, body: Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), crypto.randomBytes(100)]) });
+    const pngOf = side => { const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(side, 0); ihdr.writeUInt32BE(side, 4);
+      return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from('IHDR'), ihdr, crypto.randomBytes(100)]); };
+    r = await s.req('PUT', '/api/me/avatar', { headers: { ...as(mary.who), 'Content-Type': 'image/png' }, body: pngOf(9000) });
+    assert.deepEqual([r.status, r.json?.error], [400, 'A picture can be at most 2048 pixels a side'], 'an avatar that says it’s huge (the 2026-11-14 audit)');
+    r = await s.req('PUT', '/api/me/avatar', { headers: { ...as(mary.who), 'Content-Type': 'image/png' }, body: pngOf(256) });
     assert.equal(r.status, 200, r.body);
     const avatar = r.json.me.avatar;
     assert.match(avatar, /^\/api\/people\/[0-9A-Z]{26}\/avatar\?v=/);
@@ -1074,6 +1086,7 @@ async function directTry(srv, who, route) {
 }
 
 test('F-P (1.9.0): direct connections: a file comes over a data channel (from any offset), an upload goes up one; only what the person may see; none without a sign-in', async () => {
+  if (!LAN) return console.log(NO_LAN);
   const s = await start('direct', 8846, { env: { BEAM_FAMILY_STUN: 'local' } });
   const conns = [];
   try {
@@ -1109,6 +1122,7 @@ test('F-P (1.9.0): direct connections: a file comes over a data channel (from an
 });
 
 test('F-Q (1.9.0): fast links: anyone with the link gets the file, no sign-in, over https or a direct connection, also while it still uploads; only that file; switched off: gone; guessing is slowed', async () => {
+  if (!LAN) return console.log(NO_LAN);
   const s = await start('links', 8845, { env: { BEAM_FAMILY_STUN: 'local', BEAM_FAMILY_URL: 'https://family.example.ts.net:8443' } });
   const conns = [];
   try {
@@ -1539,6 +1553,7 @@ test('F-W (1.15.0): a fast link can stop after some downloads (one picked up aga
 });
 
 test('F-X (1.15.1): a fast link’s direct download counts as it starts, as over https; one picked up again from where it got to isn’t a new one, and goes on when the link is used up', async () => {
+  if (!LAN) return console.log(NO_LAN);
   const s = await start('resume', 8847, { env: { BEAM_FAMILY_STUN: 'local' } });
   const conns = [];
   try {
@@ -1657,6 +1672,7 @@ test('F-Z (1.25, security review F-1): ffmpeg reads an upload only as a video fi
 });
 
 test('F-AA (1.25.1, the 10-11 audit): a fast link stops while its maker’s access is turned off (over https and a direct connection, one already open too), and works again once it’s turned back on', async () => {
+  if (!LAN) return console.log(NO_LAN);
   const s = await start('maker-off', 8847, { env: { BEAM_FAMILY_STUN: 'local', BEAM_FAMILY_URL: 'https://family.example.ts.net:8443' } });
   const conns = [];
   try {

@@ -10,6 +10,8 @@
 // Hide · Stop". Hide folds it into Beam's icon in the taskbar corner (the user: "make the banner able to be hidden"),
 // whose menu then shows the session (Show the banner, Back, Stop); folded, it still counts as up. Beam 1.12.1 (the
 // user found no Hide: the banner had shrunk): its pill keeps Hide too, "Beam · Hide · Stop".
+// Beam 1.26.2 (the 2026-11-14 audit): a Hide by the viewer's own input (injected, as every remote click is) folds it
+// for this session only; only this PC's own mouse or keyboard keeps it folded for the next sessions.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -28,7 +30,8 @@ namespace Beam
         static readonly Color Back = Color.FromArgb(0xA4, 0x26, 0x2C), Fore = Color.White, StopHover = Color.FromArgb(0xF3, 0xD6, 0xD7);
         readonly App app;
         readonly string label;
-        readonly Action onStop, onHide;               // onHide: a kvm session's banner only
+        readonly Action onStop;
+        readonly Action<bool> onHide;                 // a kvm session's banner only; true: by the viewer's own input (1.26.2)
         readonly Stopwatch shown = new Stopwatch();
         readonly ToolTip tip;
         readonly Timer shrink = new Timer(), grow = new Timer();
@@ -42,7 +45,7 @@ namespace Beam
         public RcBanner(App app, string label, Action onStop) : this(app, label, onStop, null, null) { }
 
         // kvmViewer: a kvm session's viewer (its name), whose banner says "<name>'s keyboard and mouse" and can be hidden.
-        public RcBanner(App app, string label, Action onStop, string kvmViewer, Action onHide)
+        public RcBanner(App app, string label, Action onStop, string kvmViewer, Action<bool> onHide)
         {
             this.app = app;
             this.label = kvmViewer != null ? kvmViewer + "'s keyboard and mouse" : label + " is controlling this PC";
@@ -200,12 +203,12 @@ namespace Beam
             app.Post(onStop); // not from inside this window's own click
         }
 
-        void ClickHide(string how)
+        void ClickHide(string how, bool remote)
         {
             if (stopped || folded || onHide == null) return;
             long ms = shown.ElapsedMilliseconds;
             if (ms < ClickGuardMs) { Log.Write("Remote control: Hide ignored, the banner appeared " + ms + " ms ago (" + how + ")"); return; }
-            app.Post(onHide);
+            app.Post(() => onHide(remote));
         }
 
         // ------------------------------------------------------------------ the pill
@@ -320,7 +323,7 @@ namespace Beam
             base.OnMouseClick(e);
             // Pressed and let go on Stop: a drag that ends over Stop (at a screen edge) isn't a click on it.
             if (e.Button == MouseButtons.Left && downOnStop && !moved && stopRect.Contains(e.Location)) ClickStop("a click");
-            else if (e.Button == MouseButtons.Left && downOnHide && !moved && hideRect.Contains(e.Location)) ClickHide("a click");
+            else if (e.Button == MouseButtons.Left && downOnHide && !moved && hideRect.Contains(e.Location)) ClickHide("a click", InputSource.Injected());
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
@@ -387,7 +390,8 @@ namespace Beam
                 case "jump": Location = p.Value; break; // something else moved it (KeepOnTop's next round puts it back)
                 case "hover": if (rest == "off") ShrinkLater(ShrinkAgainMs); else Grow(); break;
                 case "top": BackToTop("a test double-click"); break;
-                case "hide": ClickHide("a test click"); break; // (1.12, a kvm banner: as a click on Hide, guard and all)
+                case "hide": ClickHide("a test click", false); break; // (1.12, a kvm banner: as a click on Hide, guard and all)
+                case "hide-remote": ClickHide("a test click", true); break; // (1.26.2) as one by the viewer's own input
             }
             Log.Write("Remote control: (test) banner " + (folded ? "folded" : compact ? "pill" : "full") + " at " + (Left - area.X) + "," + (Top - area.Y) + " size " + Width + "x" + Height
                 + " of " + area.Width + "x" + area.Height + ", spot " + (app.Cfg.RcBannerSpot ?? "none") + (onHide != null ? ", hide " + (hideRect.IsEmpty ? "no" : "yes") : ""));
@@ -440,5 +444,21 @@ namespace Beam
         }
 
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    }
+
+    // (1.26.2, the 2026-11-14 audit) Whether the input message being handled now was injected: every click and key a
+    // viewer sends (SendInput, the input helper's too) is; this PC's own mouse and keyboard aren't. Only while a mouse or
+    // key message is being handled (a click handler); unknown counts as this PC's own.
+    static class InputSource
+    {
+        [StructLayout(LayoutKind.Sequential)] struct INPUT_MESSAGE_SOURCE { public int deviceType; public int originId; }
+        [DllImport("user32.dll")] static extern bool GetCurrentInputMessageSource(out INPUT_MESSAGE_SOURCE source);
+        const int IMO_INJECTED = 2;
+
+        public static bool Injected()
+        {
+            try { INPUT_MESSAGE_SOURCE s; return GetCurrentInputMessageSource(out s) && (s.originId & IMO_INJECTED) != 0; }
+            catch { return false; }
+        }
     }
 }

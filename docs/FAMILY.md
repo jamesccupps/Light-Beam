@@ -342,7 +342,8 @@ JSON under `/api`, live events at `/api/events` (server-sent events; `Last-Event
   `GET /api/files/:id/play[?download]` and `GET /api/links/:token/play[?download]`: the copy (or the original), Range,
   inline (`?download`: "<name> (plays everywhere).mp4"). A copy made or failed sends `msg-edit` for its message.
   `PUT /api/files/:id/thumb?w=&h=`, `GET /api/files/:id[?download]`, `GET /api/files/:id/thumb`,
-  `GET /api/people/:id/avatar`.
+  `GET /api/people/:id/avatar`. (1.34.1) A preview or a picture (`PUT /api/me/avatar`) whose header says more than
+  2048 px a side is refused (400), as Beam's thumbnails are.
 - Push: `GET /api/push` (VAPID key), `PUT /api/push {endpoint, keys}`, `DELETE /api/push {endpoint}`. (1.14.3) An
   address stays with the person who registered it: another's `PUT` of it is `409` unless it has been failing (the page
   then subscribes again for a fresh address).

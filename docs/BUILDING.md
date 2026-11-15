@@ -22,6 +22,11 @@ A new build reaches every device within seconds of landing in `dist/`.
     certificate (Windows asks for administrator rights once), so remote control can click and type in windows that run
     as administrator, and optionally answer Windows' UAC prompts. Keep using the same certificate (back it up too): a
     new one means setting that up again on each PC.
+  - **Both are as safe as the PC they're on:** neither has a password, so any program running as you can copy them.
+    With the update key, someone could make a Beam that all your PCs (and Beam for Linux) install as an update; with
+    the certificate, a program that clicks and types in administrator windows on the PCs where you set up
+    "Administrator windows". Build on a PC you trust, and keep the backups somewhere private and offline (an
+    encrypted drive, a password manager), out of sync folders (OneDrive, Dropbox) and shared backups.
 - **Android:** you need [Android Studio](https://developer.android.com/studio) (its JDK and SDK) and **your own signing
   key**, made once:
   ```bash

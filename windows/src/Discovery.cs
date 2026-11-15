@@ -43,8 +43,16 @@ namespace Beam
             public string Label;
         }
 
+        // (1.26.2, the 2026-11-14 audit) Program Files first: remote control's whois runs it, and a folder on the PATH may be
+        // one anyone can write to.
         public static string TailscaleExe()
         {
+            foreach (var root in new[] { Environment.GetEnvironmentVariable("ProgramW6432"), Environment.GetEnvironmentVariable("ProgramFiles") })
+            {
+                if (string.IsNullOrEmpty(root)) continue;
+                string p = Path.Combine(root, "Tailscale", "tailscale.exe");
+                if (File.Exists(p)) return p;
+            }
             try
             {
                 foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
@@ -55,12 +63,6 @@ namespace Beam
                 }
             }
             catch { }
-            foreach (var root in new[] { Environment.GetEnvironmentVariable("ProgramW6432"), Environment.GetEnvironmentVariable("ProgramFiles") })
-            {
-                if (string.IsNullOrEmpty(root)) continue;
-                string p = Path.Combine(root, "Tailscale", "tailscale.exe");
-                if (File.Exists(p)) return p;
-            }
             return null;
         }
 

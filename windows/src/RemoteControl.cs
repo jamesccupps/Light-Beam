@@ -470,7 +470,7 @@ namespace Beam
             RegisterKillSwitch();
             try
             {
-                s.Banner = kvm ? new RcBanner(app, s.Label, () => Stop("the banner's Stop"), RcPolicy.DisplayName(s.ViewerName), () => KvmBanner(false, "the banner's Hide"))
+                s.Banner = kvm ? new RcBanner(app, s.Label, () => Stop("the banner's Stop"), RcPolicy.DisplayName(s.ViewerName), remote => KvmBanner(false, "the banner's Hide", !remote))
                     : new RcBanner(app, s.Label, () => Stop("the banner's Stop"));
                 s.Banner.ShowBanner(DesktopLayout.Current().Primary, kvm && app.Cfg.RcKvmBannerHidden);
             }
@@ -1416,15 +1416,20 @@ namespace Beam
         }
 
         // (1.12) A kvm session's banner shown, or folded into the tray (which then shows the session); chosen at this PC
-        // and kept for the next session.
-        public void KvmBanner(bool show, string from)
+        // and kept for the next session. (1.26.2, the 2026-11-14 audit) A fold by the viewer's own input (keep false)
+        // lasts this session only: a device that may control this PC can't keep its next sessions out of sight.
+        public void KvmBanner(bool show, string from, bool keep = true)
         {
             var s = current;
             if (s == null || !s.Kvm || s.Banner == null) return;
             s.Banner.SetShown(show);
-            app.Cfg.RcKvmBannerHidden = !show;
-            app.Cfg.Save();
-            Log.Write("Remote control: the keyboard-and-mouse banner is " + (show ? "shown" : "folded into the tray") + " (" + from + ")");
+            if (keep || show)
+            {
+                app.Cfg.RcKvmBannerHidden = !show;
+                app.Cfg.Save();
+            }
+            Log.Write("Remote control: the keyboard-and-mouse banner is " + (show ? "shown" : "folded into the tray") + " (" + from + ")"
+                + (keep || show ? "" : ", by the viewer's own input: for this session only"));
             app.MarkChanged();
         }
 

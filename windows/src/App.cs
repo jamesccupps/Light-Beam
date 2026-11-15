@@ -3548,7 +3548,7 @@ namespace Beam
                 {
                     // (1.12) Another PC's keyboard and mouse can reach this one: back to it, the banner, Stop.
                     if (Rc.KvmHere) menu.Items.Add("Back to " + Rc.ViewerName, null, (s, e) => Rc.KvmBack("the tray menu"));
-                    menu.Items.Add(Rc.KvmBannerShown ? "Hide the banner" : "Show the banner", null, (s, e) => Rc.KvmBanner(!Rc.KvmBannerShown, "the tray menu"));
+                    menu.Items.Add(Rc.KvmBannerShown ? "Hide the banner" : "Show the banner", null, (s, e) => Rc.KvmBanner(!Rc.KvmBannerShown, "the tray menu", !InputSource.Injected()));
                     menu.Items.Add("Stop " + Rc.ViewerName + "'s keyboard and mouse", null, (s, e) => Rc.Stop("the tray menu"));
                 }
                 else if (Rc.Active) menu.Items.Add("Stop remote control (" + Rc.ViewerName + ")", null, (s, e) => Rc.Stop("the tray menu"));
