@@ -40,6 +40,10 @@ namespace Beam
         }
     }
 
+    // (Windows 1.26.1) The box Windows keeps the pointer in (ClipCursor), in physical pixels of the virtual desktop
+    // (Beam is Per-Monitor-V2); Right and Bottom are just outside it.
+    struct PointerBox { public int Left, Top, Right, Bottom; }
+
     // The native INPUT layout (40 bytes on 64-bit Windows, 28 on 32-bit: the union is pointer-aligned).
     static class NativeInput
     {
@@ -100,6 +104,26 @@ namespace Beam
             var native = NativeInput.ToNative(records);
             return (int)NativeInput.SendInput((uint)native.Length, native, Marshal.SizeOf(typeof(NativeInput.INPUT)));
         }
+    }
+
+    // (Windows 1.26.1) The box a program keeps the pointer in (a game playing in a window), read and let go: any program
+    // on this desktop may do both. Only a normal Beam uses it (never a test instance), like SendInputBackend.
+    static class PointerTrapNative
+    {
+        [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+        [DllImport("user32.dll")] static extern bool GetClipCursor(out RECT r);
+        [DllImport("user32.dll", EntryPoint = "ClipCursor")] static extern bool ClipNone(IntPtr none);
+
+        public static PointerBox? Box()
+        {
+            RECT r;
+            if (!GetClipCursor(out r)) return null;
+            var b = new PointerBox();
+            b.Left = r.Left; b.Top = r.Top; b.Right = r.Right; b.Bottom = r.Bottom;
+            return b;
+        }
+
+        public static void Free() { ClipNone(IntPtr.Zero); }
     }
 #endif
 
@@ -392,6 +416,9 @@ namespace Beam
         public long Injected, Dropped;
         public Action<string> Note;            // rare events for beam.log (never keys or text)
         public Func<KeyDef, int> VirtualKeyOf;  // the virtual key a key makes in this PC's layout now (Win+L by key, any layout)
+        public Func<PointerBox?> PointerTrap;   // (1.26.1) the box Windows keeps the pointer in now; null: never looked at
+        public Action FreePointer;             // ...and letting go of it (LeaveTrap)
+        public long Freed;                     // presses that let go of a program's box first
         readonly Dictionary<string, Bucket> repeats = new Dictionary<string, Bucket>(); // per held key
 
         public InputInjector(IInputBackend backend, Func<DesktopLayout> layoutSource, Func<long> clock)
@@ -519,7 +546,9 @@ namespace Beam
             }
             else if (!heldButtons.Contains(b)) return; // never let go of what the viewer didn't press here
             InputRecord at;
-            bool hasPoint = PointRecord(m, out at);
+            int vx, vy;
+            bool hasPoint = PointRecord(m, out at, out vx, out vy);
+            if (down && hasPoint) LeaveTrap(vx, vy);
             Send(new[] { ButtonRecord(b, down, hasPoint ? (InputRecord?)at : null) });
             if (down) heldButtons.Add(b); else heldButtons.Remove(b);
         }
@@ -536,6 +565,31 @@ namespace Beam
                 default: r.Flags |= down ? XDOWN : XUP; r.MouseData = b == 3 ? XBUTTON1 : XBUTTON2; break;
             }
             return r;
+        }
+
+        // (Windows 1.26.1; the user, 2026-11-15, from the phone: "minecraft is running, it won't let me do much, like I
+        // can't switch back to the Claude app", Chrome Remote Desktop fine) A game playing in a window keeps the pointer
+        // in its box (ClipCursor), and Windows keeps injected input in there too: every tap landed in the game. A press
+        // aimed outside the box is the viewer leaving the game, as a tap on a touch screen would (Chrome Remote Desktop's
+        // touch mode sends touches, which the box doesn't hold): the box goes first, so the press lands where it was
+        // aimed, that window comes to the front and the game lets go of the pointer by itself. A press inside, moves and
+        // the wheel are the game's as before. Not in a kvm session: there the laptop's idea of the pointer wanders while
+        // a game holds the real one, so a click meant for the game could fall outside.
+        void LeaveTrap(int x, int y)
+        {
+            if (AnyScreen || PointerTrap == null || FreePointer == null) return;
+            PointerBox? found;
+            try { found = PointerTrap(); } catch { return; }
+            var l = Layout;
+            if (found == null || l == null) return;
+            var box = found.Value;
+            if (box.Left <= l.X && box.Top <= l.Y && box.Right >= l.X + l.W && box.Bottom >= l.Y + l.H) return; // nothing held
+            if (x >= box.Left && x < box.Right && y >= box.Top && y < box.Bottom) return; // a press inside: the game's
+            try { FreePointer(); } catch { return; }
+            Freed++;
+            if (Note != null)
+                Note("a press outside the box a program holds the pointer in (" + (box.Right - box.Left) + "×" + (box.Bottom - box.Top) +
+                    " at " + box.Left + "," + box.Top + "): let go of it first");
         }
 
         void Wheel(Dictionary<string, object> m)
@@ -578,11 +632,18 @@ namespace Beam
 
         static double Clamp(double v, double max) { return v > max ? max : v < -max ? -max : v; }
 
-        // A move to (x, y) on the captured screen, clamped to it. (AnyScreen: on the screen `m` names; one this PC
-        // doesn't have now is dropped.)
         bool PointRecord(Dictionary<string, object> m, out InputRecord r)
         {
+            int vx, vy;
+            return PointRecord(m, out r, out vx, out vy);
+        }
+
+        // A move to (x, y) on the captured screen, clamped to it (vx, vy: that pixel on the virtual desktop). (AnyScreen:
+        // on the screen `m` names; one this PC doesn't have now is dropped.)
+        bool PointRecord(Dictionary<string, object> m, out InputRecord r, out int vx, out int vy)
+        {
             r = new InputRecord();
+            vx = vy = 0;
             double x = Num(m, "x"), y = Num(m, "y");
             if (double.IsNaN(x) || double.IsNaN(y) || Math.Abs(x) > 1e6 || Math.Abs(y) > 1e6) return false;
             var l = Layout;
@@ -591,9 +652,11 @@ namespace Beam
             if (s == null || l.W <= 0 || l.H <= 0) return false;
             int px = Math.Max(0, Math.Min(s.W - 1, (int)Math.Floor(x)));
             int py = Math.Max(0, Math.Min(s.H - 1, (int)Math.Floor(y)));
+            vx = s.X + px;
+            vy = s.Y + py;
             r.Type = InputRecord.Mouse;
-            r.Dx = Absolute(s.X + px - l.X, l.W);
-            r.Dy = Absolute(s.Y + py - l.Y, l.H);
+            r.Dx = Absolute(vx - l.X, l.W);
+            r.Dy = Absolute(vy - l.Y, l.H);
             r.Flags = MOVE | ABSOLUTE | VIRTUALDESK;
             return true;
         }

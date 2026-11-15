@@ -12,6 +12,16 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## Windows 1.26.1 (2026-11-15): out of a game that holds the mouse
+
+**Versions:** Windows app 1.26.1; server 1.34.0, Android app 1.20.0, Beam for Linux 1.6.0 (all unchanged).
+
+- **Remote control gets out of a game:** a game playing in a window (Minecraft, for one) keeps the mouse inside its
+  window, and Windows kept the viewer's taps and clicks in there too, so nothing outside the game could be reached
+  (the taskbar, another window). A tap or click outside the game's window now lands where it was aimed: that window
+  comes to the front and the game lets go of the mouse, as with a touch screen. Inside the game's window everything
+  still goes to the game.
+
 ## 1.34.0 (2026-11-14): Notes
 
 **Versions:** server 1.34.0, Android app 1.20.0 (the Windows app and Beam for Linux are unchanged).

@@ -671,6 +671,8 @@ namespace Beam
             var inj = new InputInjector(adminInput, DesktopLayout.Current, () => clock.ElapsedMilliseconds);
             inj.Note = note => Log.Write("Remote control: " + note);
             inj.VirtualKeyOf = InputTarget.VirtualKeyOf; // Win+L by virtual key, in whatever layout this PC uses
+            // (1.26.1) A press outside the box a game holds the pointer in lets it go first; never in a test instance.
+            if (!cfg.CustomPath) { inj.PointerTrap = PointerTrapNative.Box; inj.FreePointer = PointerTrapNative.Free; }
             Log.Write("Remote control: input through " + backend.Name);
             return inj;
         }

@@ -50,8 +50,8 @@ try {
   // The binary must not even contain SendInput (nor the backend that calls it), nor anything that changes a screen.
   const bytes = fs.readFileSync(exe);
   const has = s => bytes.includes(Buffer.from(s, 'utf8')) || bytes.includes(Buffer.from(s, 'utf16le'));
-  const clean = !has('SendInput') && !has('mouse_event') && !has('keybd_event');
-  console.log(`${clean ? 'ok  ' : 'FAIL'} the test binary has no SendInput, mouse_event or keybd_event`);
+  const clean = !has('SendInput') && !has('mouse_event') && !has('keybd_event') && !has('ClipCursor');
+  console.log(`${clean ? 'ok  ' : 'FAIL'} the test binary has no SendInput, mouse_event, keybd_event or ClipCursor`);
   const noDisplay = !has('ChangeDisplaySettings') && !has('DisplayConfigSetDeviceInfo');
   console.log(`${noDisplay ? 'ok  ' : 'FAIL'} ...nor ChangeDisplaySettingsEx or DisplayConfigSetDeviceInfo (no real screen changes)`);
   const run = spawnSync(exe, [], { encoding: 'utf8', windowsHide: true, timeout: 120000 });

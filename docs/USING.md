@@ -185,6 +185,9 @@
   - Scrolling carries on after a flick. The zoom stays when the keyboard opens or the phone turns. The key strip
     (Esc, Tab, Ctrl, Alt, Shift, Win, arrows, Del) shows upright, and sideways while the keyboard is up. Back asks
     before it disconnects.
+- **A game that holds the mouse** (Minecraft while you play, in a window): tap or click outside its window to get
+  out, as on a touch screen: that window comes to the front and the game lets go of the mouse (Windows app 1.26.1).
+  Inside the game's window everything goes to the game.
 - **Off on every PC until you switch it on at that PC:** Settings → Security → **Allow remote control** in its Beam
   window (Windows app 1.19.1), or the tray menu. You tick which of your
   devices may control it. Only tick devices you trust: Beam in another Windows account on the same PC counts as a

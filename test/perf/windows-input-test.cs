@@ -238,6 +238,108 @@ namespace Beam
             }
             Section("buttons (left, middle, right, back, forward), wheel and the mv order", f0);
 
+            // ---------------------------------------------------------------- (1.26.1) a game holding the pointer
+            f0 = failures;
+            {
+                var l = Layout(Scr(0, 0, 0, 1920, 1080, true, 1.0), Scr(1, 1920, 0, 1920, 1080, false, 1.0));
+                var b = new MemoryBackend();
+                var inj = Injector(b, l);
+                var notes = new List<string>();
+                inj.Note = notes.Add;
+                Func<int, int, int, int, PointerBox?> Box = (x, y, w, h) => { var p = new PointerBox(); p.Left = x; p.Top = y; p.Right = x + w; p.Bottom = y + h; return p; };
+                PointerBox? box = null;
+                int frees = 0, sentBefore = -1;
+                inj.PointerTrap = () => box;
+                inj.FreePointer = () => { frees++; sentBefore = b.All().Count; box = null; };
+                // Nothing held (the box is the whole desktop), or no box known: a press goes as before.
+                box = Box(0, 0, 3840, 1080);
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":1500,\"y\":1060,\"m\":0}"));
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":1500,\"y\":1060,\"m\":0}"));
+                Check(frees == 0 && b.All().Count == 2, "the box is the whole desktop: a press goes as before");
+                box = null;
+                b.Clear();
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":1500,\"y\":1060,\"m\":0}"));
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":1500,\"y\":1060,\"m\":0}"));
+                Check(frees == 0 && b.All().Count == 2, "no box known: a press goes as before");
+                // A game in a window on the main screen holds the pointer; the viewer taps the taskbar below it.
+                var game = Box(320, 180, 1280, 720);
+                box = game;
+                b.Clear();
+                inj.Handle(Msg("{\"t\":\"mv\",\"n\":1,\"x\":1500,\"y\":1060,\"m\":0}"));
+                Check(frees == 0 && b.All().Count == 1, "a move outside the box is the game's (nothing let go)");
+                inj.Handle(Msg("{\"t\":\"wheel\",\"dx\":0,\"dy\":120,\"x\":1500,\"y\":1060,\"m\":0}"));
+                Check(frees == 0 && b.All().Count == 2, "the wheel outside the box: nothing let go");
+                b.Clear();
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":1500,\"y\":1060,\"m\":0}"));
+                var r = b.All();
+                Check(frees == 1 && sentBefore == 0, "a press outside the box lets it go first, before the press goes");
+                Check(r.Count == 1 && r[0].Flags == (MOVE | InputInjector.LEFTDOWN) && Back(r[0].Dx, 0, 3840) == 1500 && Back(r[0].Dy, 0, 1080) == 1060,
+                    "...and the press lands where it was aimed: " + (r.Count > 0 ? Desc(r[0]) : "none"));
+                Check(inj.Freed == 1 && notes.Any(n => n.Contains("1280\u00d7720 at 320,180")), "...noted for beam.log: " + string.Join(" | ", notes));
+                box = game; // (the game hasn't noticed yet)
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":1500,\"y\":1060,\"m\":0}"));
+                Check(frees == 1 && b.All().Count == 2, "letting go of the button never frees anything");
+                // Presses inside the box are the game's; Right and Bottom are just outside it.
+                b.Clear();
+                foreach (var p in new[] { new[] { 960, 540 }, new[] { 320, 180 }, new[] { 1599, 899 } })
+                {
+                    inj.Handle(Msg("{\"t\":\"btn\",\"b\":2,\"d\":true,\"x\":" + p[0] + ",\"y\":" + p[1] + ",\"m\":0}"));
+                    inj.Handle(Msg("{\"t\":\"btn\",\"b\":2,\"d\":false,\"x\":" + p[0] + ",\"y\":" + p[1] + ",\"m\":0}"));
+                }
+                Check(frees == 1 && b.All().Count == 6, "presses inside the box (its corners too) are the game's");
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":1600,\"y\":540,\"m\":0}"));
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":1600,\"y\":540,\"m\":0}"));
+                Check(frees == 2, "a press just right of the box lets it go");
+                // The other screen: its own coordinates, placed on the desktop.
+                box = game;
+                inj.Screen = 1;
+                inj.NewConnection();
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":10,\"y\":10,\"m\":1}"));
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":10,\"y\":10,\"m\":1}"));
+                Check(frees == 3, "a press on the second screen, the box on the first: let go");
+                box = Box(1920 + 100, 100, 800, 600);
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":500,\"y\":400,\"m\":1}"));
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":500,\"y\":400,\"m\":1}"));
+                Check(frees == 3, "a press inside a box on the second screen is the game's");
+                // Letting go failing doesn't stop the press.
+                inj.FreePointer = () => { throw new InvalidOperationException("nope"); };
+                b.Clear();
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":5,\"y\":5,\"m\":1}"));
+                inj.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":5,\"y\":5,\"m\":1}"));
+                Check(b.All().Count == 2 && inj.Freed == 3, "letting go failing: the press still goes");
+                // kvm: the laptop's idea of the pointer wanders while a game holds the real one: never let go.
+                var kb = new MemoryBackend();
+                var kvm = Injector(kb, l);
+                kvm.AnyScreen = true;
+                int kvmFrees = 0;
+                kvm.PointerTrap = () => game;
+                kvm.FreePointer = () => kvmFrees++;
+                kvm.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":1500,\"y\":1060,\"m\":0}"));
+                kvm.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":1500,\"y\":1060,\"m\":0}"));
+                Check(kvmFrees == 0 && kb.All().Count == 2, "a kvm session never lets go of a game's box");
+                // A screen at negative x: a box the size of the whole desktop holds nothing.
+                var neg = Layout(Scr(0, -1920, 0, 1920, 1080, false, 1.0), Scr(1, 0, 0, 2560, 1440, true, 1.0));
+                var nb = new MemoryBackend();
+                var ni = Injector(nb, neg);
+                int nFrees = 0;
+                ni.PointerTrap = () => Box(-1920, 0, 4480, 1440);
+                ni.FreePointer = () => nFrees++;
+                ni.Screen = 0;
+                ni.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":5,\"y\":5,\"m\":0}"));
+                ni.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":5,\"y\":5,\"m\":0}"));
+                Check(nFrees == 0 && nb.All().Count == 2, "a screen at negative x: the whole desktop's box holds nothing");
+                ni.PointerTrap = () => Box(0, 0, 2560, 1440);
+                ni.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":5,\"y\":5,\"m\":0}"));
+                ni.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":false,\"x\":5,\"y\":5,\"m\":0}"));
+                Check(nFrees == 1, "...and a box on the main screen lets go for a press on the left one");
+                // A test instance (no PointerTrap): nothing is looked at.
+                var tb = new MemoryBackend();
+                var ti = Injector(tb, l);
+                ti.Handle(Msg("{\"t\":\"btn\",\"b\":0,\"d\":true,\"x\":1500,\"y\":1060,\"m\":0}"));
+                Check(tb.All().Count == 1 && ti.Freed == 0, "without PointerTrap (a test instance) a press goes as before");
+            }
+            Section("a game holding the pointer: a press outside its box frees it first; inside, moves, the wheel and kvm as before (1.26.1)", f0);
+
             // ---------------------------------------------------------------- keys
             f0 = failures;
             {
