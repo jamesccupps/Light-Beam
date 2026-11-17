@@ -50,6 +50,8 @@ namespace Beam
         public List<InstalledApp> InstalledApps = new List<InstalledApp>(); // ...and what Beam installed here
         public List<SharedFolder> SharedFolders = new List<SharedFolder>(); // app 1.18 (Beam 1.26): folders other devices may copy from (chosen here)
         public string TestWinget;              // tests (custom --config only, 1.16): a stand-in for winget (an .exe or .cmd)
+        public object[] TestInstalled;         // tests (custom --config only, 1.27): Installed apps' stand-in [{ name, version, location }]
+        public string TestHwbUrl;              // tests (custom --config only, 1.27): HW Blackbox's dashboard's stand-in (http://127.0.0.1:port)
         public bool AutoSave = true;
         public long MaxSaveMB = 2048;
         public string SaveFolder;
@@ -286,6 +288,8 @@ namespace Beam
                     c.TestTailscaleArgs = Json.Str(d, "testTailscaleArgs");
                     c.TestHistoryEvents = Json.Str(d, "testHistoryEvents");
                     c.TestWinget = Json.Str(d, "testWinget");
+                    c.TestInstalled = Json.Get(d, "testInstalled") as object[];
+                    c.TestHwbUrl = Json.Str(d, "testHwbUrl");
                     c.TestAdminHelper = Json.Str(d, "testAdminHelper");
                     c.TestAdminHelperRoot = Json.Str(d, "testAdminHelperRoot");
                     c.TestNoWarmHost = Json.Bool(d, "testNoWarmHost", false);

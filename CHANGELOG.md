@@ -12,6 +12,26 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.35.0 (2026-11-17): HW Blackbox on a PC's page; no second copy of an app
+
+**Versions:** server 1.35.0, Windows app 1.27.0; the Android app 1.20.1, Beam for Linux 1.6.0 and Beam Family
+unchanged.
+
+- **HW Blackbox on a PC's page:** where a PC runs [HW Blackbox](https://github.com/jamesccupps/HW-Blackbox) (a
+  hardware monitor for Windows), its Beam app reads HW Blackbox's dashboard on that PC (read only, at most every 10
+  minutes) and the PC's Device info shows what its Diagnose found: the findings that aren't fine, most serious first,
+  and the last time the PC went off without shutting down, with the power supply's last readings before it. On that PC
+  itself, a link opens HW Blackbox. The server's log gets its version and counts, never the findings' words.
+- **No second copy of an app:** before installing an app from Settings → Apps, a PC looks for one it has already,
+  installed some other way (Windows' Installed apps by name, App Paths, a folder of that name in its Programs folder).
+  Then nothing is installed and nobody there is asked; the Apps page says "already on it, not from Beam", and Beam never
+  updates or uninstalls that one. Before, Beam put its own beside it ("Slate (Beam)" next to Slate), with a second
+  Start menu entry. Where that already happened, the Apps page now says the app is also installed outside Beam (and
+  Uninstall removes only Beam's copy).
+- **A setup program inside a .zip:** a release that ships as a .zip with a setup program at its top (HW Blackbox's
+  `Setup.exe`) is installed by running that program (Windows asks for administrator rights at the PC), not unpacked as
+  the app.
+
 ## 1.34.1 (2026-11-15): fixes from an outside review
 
 **Versions:** server 1.34.1 (and Beam Family), Windows app 1.26.2, Android app 1.20.1; Beam for Linux 1.6.0 unchanged.

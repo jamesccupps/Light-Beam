@@ -843,6 +843,61 @@ export default function register(test) {
     eq(asking.errors, [], 'no page errors (the bar)');
   });
 
+  test('HW Blackbox (1.35): a PC’s Device info shows what HW Blackbox found there (most serious first) and its last power-off; Apps says when a PC has an app already, or twice', async ctx => {
+    const page = await ctx.signedIn();
+    await page.waitFor(`serverHas('hw-blackbox') && serverHas('apps-found')`, 8000, 'the server offers it');
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Shop PC', 'windows', ctx.nextIp(), '1.27.0');
+    await pc.me();
+    const up = Date.now() - 2 * 3600e3;
+    const r = await pc.putStatus({ hwBlackbox: {
+      version: '1.1.3', counts: { bad: 1, warn: 1, info: 1, ok: 15 }, port: 9070, at: Date.now() - 5 * 60e3,
+      checks: [{ id: 'problems', level: 'bad', title: 'Problems right now', summary: 'Port 25565 is held by 2 programs' }, { id: 'power', level: 'warn', title: 'Power-offs', summary: '1 in the last 30 days' }, { id: 'busy', level: 'info', title: 'node.exe kept the CPU busy', summary: 'A core flat out for 20 h' }],
+      powerOff: { up, down: up - 9200, why: 'It lost power, or froze', rails: { v12: 12.168, v5: 5.07, v33: 3.346 } },
+    } });
+    eq(r.status, 204, 'the status');
+    await page.waitFor(`deviceById('${pc.id}')?.status?.hwBlackbox?.version === '1.1.3'`, 8000, 'the page has it');
+    await page.evaluate(`openDeviceInfo(deviceById('${pc.id}'))`);
+    await page.waitFor(`$('#genBody .hwb') !== null`, 5000, 'its section');
+    const hwb = await page.evaluate(`(() => { const s = $('#genBody .hwb'); return { head: s.querySelector('h4').textContent, text: s.textContent, rows: [...s.querySelectorAll('li')].map(li => [li.className, li.textContent]), open: !!s.querySelector('a') }; })()`);
+    eq(hwb.head, 'HW Blackbox');
+    assert(/Version 1\.1\.3 · checked 5 min ago/.test(hwb.text), hwb.text);
+    eq(hwb.rows.length, 4, JSON.stringify(hwb.rows));
+    assert(hwb.rows[0][0] === 'warn-row' && /^Problems right nowPort 25565 is held by 2 programsProblem$/.test(hwb.rows[0][1]), JSON.stringify(hwb.rows[0]));
+    assert(hwb.rows[1][0] === 'warn-row' && /Power-offs1 in the last 30 daysWarning/.test(hwb.rows[1][1]), JSON.stringify(hwb.rows[1]));
+    assert(hwb.rows[2][0] === '' && /node\.exe kept the CPU busy.*Worth a look/.test(hwb.rows[2][1]), JSON.stringify(hwb.rows[2]));
+    assert(hwb.rows[3][0] === 'warn-row' && /Last went off without shutting down/.test(hwb.rows[3][1]) && /went down .* · back up /.test(hwb.rows[3][1])
+      && /It lost power, or froze/.test(hwb.rows[3][1]) && /The power supply just before: 12\u00a0V\u00a0rail\u00a012\.17\u00a0V · 5\u00a0V\u00a0rail\u00a05\.07\u00a0V · 3\.3\u00a0V\u00a0rail\u00a03\.35\u00a0V/.test(hwb.rows[3][1]), JSON.stringify(hwb.rows[3]));
+    eq(hwb.open, false, 'another PC’s: no link to its dashboard (127.0.0.1 there)');
+    // nothing to look at: says so
+    eq((await pc.putStatus({ hwBlackbox: { version: '1.1.3', counts: { ok: 18 } } })).status, 204);
+    await page.waitFor(`/All 18 of its checks are fine\\./.test($('#genBody .hwb')?.textContent || '')`, 8000, 'all fine');
+    eq((await pc.putStatus({ hwBlackbox: null })).status, 204);
+    await page.waitFor(`$('#genBody .hwb') === null`, 8000, 'gone (uninstalled)');
+    await page.evaluate(`$('#genDlg').close()`);
+
+    // Apps: on that PC already, not from Beam; and Beam's copy with another install beside it
+    const stream = pc.stream();
+    ctx.defer(() => stream.close());
+    await page.waitFor(`deviceById('${pc.id}')?.online === true && deviceById('${pc.id}')?.can?.apps === true`, 8000, 'online, and can install apps');
+    const name = `Found${ctx.uid()}`;
+    await page.evaluate(`sendAppFile(new File([new Uint8Array([77, 90, 0, 2])], '${name}.exe'), null)`);
+    await page.evaluate(`sendAppFile(new File([new Uint8Array([77, 90, 0, 3])], 'Twice${name}.exe'), null)`);
+    await page.evaluate(`openSettings('apps')`);
+    await page.waitFor(`appsState?.apps?.some(a => a.name === '${name}') && appsState.apps.some(a => a.name === 'Twice${name}')`, 8000, 'the two apps');
+    const [foundId, twiceId] = await page.evaluate(`['${name}', 'Twice${name}'].map(n => appsState.apps.find(a => a.name === n).id)`);
+    await pc.post(`/api/apps/${foundId}/install`, { devices: [pc.id] });
+    await pc.post('/api/devices/me/apps', { id: foundId, state: 'found', version: '2.0.1', where: 'C:\\Program Files\\Tool' });
+    await page.waitFor(`/Shop PC: already on it 2\\.0\\.1, not from Beam \\(C:\\\\Program Files\\\\Tool\\): not installed again/.test($('#set-apps .app-row[data-app="${foundId}"]')?.textContent || '')`, 8000, 'found, shown');
+    assert(!(await page.evaluate(`[...$('#set-apps .app-row[data-app="${foundId}"]').querySelectorAll('button')].some(b => b.textContent === 'Uninstall')`)), 'no Uninstall: not Beam’s');
+    await pc.post('/api/devices/me/apps', { id: twiceId, state: 'installed', version: '1.0' });
+    await fetch(`${ctx.srv.base}/api/devices/me/apps`, { method: 'PUT', headers: { ...pc.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apps: [{ id: foundId, version: '2.0.1', found: true, where: 'C:\\Program Files\\Tool' }, { id: twiceId, version: '1.0', also: 'C:\\Users\\robin\\AppData\\Local\\Programs\\Twice' }] }) });
+    await page.waitFor(`/Also installed outside Beam, in C:\\\\Users\\\\robin\\\\AppData\\\\Local\\\\Programs\\\\Twice: Uninstall removes only Beam’s copy\\./.test($('#set-apps .app-row[data-app="${twiceId}"]')?.textContent || '')`, 8000, 'twice, said so');
+    assert(await page.evaluate(`[...$('#set-apps .app-row[data-app="${twiceId}"]').querySelectorAll('button')].some(b => b.textContent === 'Uninstall')`), 'Beam’s copy: Uninstall');
+    await page.evaluate(`$('#settingsDlg').close()`);
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('Beam for Linux (1.22): a Raspberry Pi’s page (temperature, power, speed, hardware, up since, its log); Add a device gives the command that installs it, once it’s built', async ctx => {
     const page = await ctx.signedIn();
     await page.waitFor(`serverHas('linux')`, 8000, 'the server offers it');

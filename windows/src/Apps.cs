@@ -10,8 +10,10 @@
 //   zip    unpacked there (nothing outside it); the shortcut to its program: `run`, else its only .exe, else the one
 //          named like the app
 //   msi    msiexec /i … /passive (for this user where the package allows it); removed by its product code
-//   setup  an .exe named like an installer, or one given switches (`args`): run with them; Windows removes it
+//   setup  an .exe named like an installer, or one given switches (`args`): run with them; Windows removes it.
+//          (1.27) Also a .zip carrying one (HW Blackbox's): unpacked aside, its setup program run, the folder deleted
 //   winget winget install --id … --scope user (else as the package wants) --silent
+//   found  (1.27) on this PC already, not from Beam (AppsExisting.cs): nothing installed, never updated or removed
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -36,6 +38,9 @@ namespace Beam
         // (1.23, the review's M27) what Beam wrote in Dir (relative; a folder ends with \): only these go at an uninstall.
         // null: installed by 1.22 or older (an .exe's own file is known; a .zip's folder is left as it is)
         public List<string> Files;
+        // (1.27) kind "found": on this PC already, not from Beam (Dir: where). Beam never updates, moves or removes it;
+        // Asset/AssetType/Run: the app's file on the server, to look for it again at each connect.
+        public string Asset, AssetType, Run;
 
         public Dictionary<string, object> ToJson()
         {
@@ -44,6 +49,9 @@ namespace Beam
             d["dir"] = Dir; d["exe"] = Exe; d["shortcut"] = Shortcut; d["uninstallKey"] = UninstallKey;
             d["productCode"] = ProductCode; d["winget"] = Winget;
             if (Files != null) d["files"] = Files.ToArray();
+            if (Asset != null) d["asset"] = Asset;
+            if (AssetType != null) d["assetType"] = AssetType;
+            if (Run != null) d["run"] = Run;
             return d;
         }
 
@@ -56,6 +64,7 @@ namespace Beam
             a.Sha256 = Json.Str(d, "sha256"); a.Dir = Json.Str(d, "dir"); a.Exe = Json.Str(d, "exe"); a.Shortcut = Json.Str(d, "shortcut");
             a.UninstallKey = Json.Str(d, "uninstallKey"); a.ProductCode = Json.Str(d, "productCode"); a.Winget = Json.Str(d, "winget");
             if (Json.Get(d, "files") != null) a.Files = Json.StrList(d, "files");
+            a.Asset = Json.Str(d, "asset"); a.AssetType = Json.Str(d, "assetType"); a.Run = Json.Str(d, "run");
             return a.Id != null && a.Kind != null ? a : null;
         }
     }
@@ -110,11 +119,26 @@ namespace Beam
             string by = ByName(Json.Str(d, "by"));
             var have = Cfg.InstalledApps.FirstOrDefault(a => a.Id == id);
             // Already here at that version (an app that updates itself, like Slate, got there first): only say so.
-            if (have != null && Present(have) && Same(have, info))
+            if (have != null && have.Kind != "found" && await Task.Run(() => Present(have) && Same(have, info)))
             {
                 Log.Write("Apps: " + name + " " + (have.Version ?? "") + " is here already");
                 await Report(id, "installed", have.Version, null);
                 return;
+            }
+            // (1.27, the user: "make sure the app isnt already installed, i had two versions of slate on one of my computers
+            // because of beam") On this PC already, not from Beam (its own setup, winget, Slate's "Open files with Slate"):
+            // no second copy beside it, and nobody asked about one.
+            if (have == null || have.Kind == "found")
+            {
+                var file = Json.Obj(Json.Get(info, "file"));
+                string asset = file != null ? Json.Str(file, "name") : null, type = file != null ? Json.Str(file, "type") : null, run = Json.Str(info, "run");
+                var found = await Task.Run(() => ExistingApps.Find(Cfg, ProgramsFolder, name, asset, type, run, null));
+                if (found != null)
+                {
+                    await Found(id, name, found, asset, type, run);
+                    return;
+                }
+                if (have != null) { Cfg.InstalledApps.Remove(have); Cfg.Save(); } // (gone since: Beam may install it now)
             }
             if (!Cfg.AppsAllowed)
             {
@@ -122,6 +146,24 @@ namespace Beam
                 return;
             }
             await Install(id, info, by);
+        }
+
+        // (1.27) Remembered as found (not Beam's: never updated, moved or removed by it), and the server told where.
+        async Task Found(string id, string name, FoundApp found, string asset, string type, string run)
+        {
+            var a = Cfg.InstalledApps.FirstOrDefault(x => x.Id == id);
+            if (a == null) { a = new InstalledApp(); a.Id = id; Cfg.InstalledApps.Add(a); }
+            a.Name = name;
+            a.Kind = "found";
+            a.Version = found.Version;
+            a.Dir = found.Where;
+            a.Asset = asset;
+            a.AssetType = type;
+            a.Run = run;
+            Cfg.Save();
+            Log.Write("Apps: " + name + (found.Version != null ? " " + found.Version : "") + " is on this PC already (" + found.Where + "), not from Beam: not installed again");
+            if (app.ServerHas("apps-found")) await Report(id, "found", found.Version, null, found.Where);
+            else await Report(id, "failed", null, "it's on this PC already, not from Beam (" + found.Where + ")"); // (an older server)
         }
 
         // `app-uninstall { id }`.
@@ -145,7 +187,12 @@ namespace Beam
             try
             {
                 var a = Cfg.InstalledApps.FirstOrDefault(x => x.Id == id);
-                if (a != null) // (else not Beam's, or gone already)
+                if (a != null && a.Kind == "found") // (1.27) not Beam's: only forgotten, never touched
+                {
+                    Forget(a);
+                    Log.Write("Apps: " + a.Name + " wasn't installed by Beam: left as it is (" + a.Dir + ")");
+                }
+                else if (a != null) // (else not Beam's, or gone already)
                 {
                     why = await Task.Run(() => RemoveFiles(a));
                     if (why == null && a.Kind == "msi" && a.ProductCode != null) why = await RunMsi("/x " + a.ProductCode + " /passive /norestart", a.Name);
@@ -176,19 +223,36 @@ namespace Beam
         }
 
         // After each connect: what Beam installed and is still here, at the version it is now (Slate updates itself).
+        // (1.27) Also what it found here (still here, and where), and for each of its own copies, another install of the
+        // same app elsewhere (`also`: the Slate that was there twice), to a server that knows them (`apps-found`).
         public async Task ReportInstalled()
         {
             if (app.Api == null || !app.ServerHas("apps")) return;
+            bool found = app.ServerHas("apps-found");
+            var mine = Cfg.InstalledApps.ToList();
+            var looks = await Task.Run(() => mine.Select(a => Look(a, found)).ToList());
             var list = new List<object>();
             bool changed = false;
-            foreach (var a in Cfg.InstalledApps.ToList())
+            for (int i = 0; i < mine.Count; i++)
             {
-                if (!Present(a)) { Cfg.InstalledApps.Remove(a); changed = true; Log.Write("Apps: " + a.Name + " isn't on this PC any more"); continue; }
-                string v = VersionOf(a) ?? a.Version;
+                var a = mine[i];
+                var look = looks[i];
+                if (look == null)
+                {
+                    Cfg.InstalledApps.Remove(a);
+                    changed = true;
+                    Log.Write("Apps: " + a.Name + " isn't on this PC any more" + (a.Kind == "found" ? " (it wasn't Beam's)" : ""));
+                    continue;
+                }
+                string v = look.Version ?? a.Version;
                 if (v != a.Version) { a.Version = v; changed = true; }
+                if (a.Kind == "found" && look.Where != null && look.Where != a.Dir) { a.Dir = look.Where; changed = true; }
+                if (a.Kind == "found" && !found) continue; // (an older server: it would count it as Beam's)
                 var o = new Dictionary<string, object>();
                 o["id"] = a.Id;
                 o["version"] = v;
+                if (a.Kind == "found") { o["found"] = true; o["where"] = a.Dir; }
+                else if (look.Also != null) o["also"] = look.Also;
                 list.Add(o);
             }
             if (changed) Cfg.Save();
@@ -196,6 +260,28 @@ namespace Beam
             body["apps"] = list.ToArray();
             try { await app.Api.Call(HttpMethod.Put, "/api/devices/me/apps", body, 30, CancellationToken.None); }
             catch (Exception ex) { Log.Write("Apps: couldn't tell the server what's installed (" + Api.Describe(ex) + ")"); }
+        }
+
+        class Looked { public string Version, Where, Also; }
+
+        // (1.27, on a worker thread) One of the apps in the config as it is now: null once it's gone. A found one is looked
+        // for again; for Beam's own .exe and .zip copies, another install of the app elsewhere (`also`).
+        Looked Look(InstalledApp a, bool others)
+        {
+            if (a.Kind == "found")
+            {
+                var f = ExistingApps.Find(Cfg, ProgramsFolder, a.Name, a.Asset, a.AssetType, a.Run, null);
+                return f == null ? null : new Looked { Version = f.Version, Where = f.Where };
+            }
+            if (!Present(a)) return null;
+            var l = new Looked { Version = VersionOf(a) };
+            if (others && (a.Kind == "exe" || a.Kind == "zip"))
+            {
+                string file = a.Kind == "exe" && a.Exe != null ? Path.GetFileName(a.Exe) : null;
+                var f = ExistingApps.Find(Cfg, ProgramsFolder, a.Name, file, a.Kind, a.Kind == "zip" && a.Exe != null && a.Dir != null ? RelativeTo(a.Dir, a.Exe) : null, a.Dir);
+                if (f != null && !(a.Exe != null && f.Where != null && a.Exe.StartsWith(f.Where.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))) l.Also = f.Where;
+            }
+            return l;
         }
 
         // ------------------------------------------------------------------ asking someone at this PC
@@ -324,7 +410,8 @@ namespace Beam
                 Log.Write("Apps: installing " + name + (version != null ? " " + version : "") + (by != null ? " (asked by " + by + ")" : ""));
                 if (kind == "winget") done = await InstallWinget(id, info);
                 else done = await InstallFile(id, info);
-                done.Version = VersionOf(done) ?? version;
+                var made = done;
+                done.Version = await Task.Run(() => VersionOf(made)) ?? version;
                 Cfg.InstalledApps.RemoveAll(x => x.Id == id);
                 Cfg.InstalledApps.Add(done);
                 Cfg.Save();
@@ -375,6 +462,27 @@ namespace Beam
                     string why = await RunSetup(got, args, name);
                     if (why != null) throw new InvalidOperationException(why);
                     return a;
+                }
+                // (1.27) A .zip that carries a setup program (HW Blackbox's release: HWBlackbox\Setup.exe, which installs a
+                // service and asks Windows for administrator rights): unpacked aside, that program run, the folder gone after.
+                string setup = type == "zip" ? await Task.Run(() => SetupIn(got, Json.Str(info, "run"))) : null;
+                if (setup != null)
+                {
+                    a.Kind = "setup";
+                    string unpacked = Path.Combine(DownloadFolder, id + "-setup");
+                    try
+                    {
+                        await Task.Run(() =>
+                        {
+                            if (Directory.Exists(unpacked)) Directory.Delete(unpacked, true);
+                            Unzip(got, unpacked, new List<string>());
+                        });
+                        Log.Write("Apps: running " + setup + " from " + name + "'s .zip");
+                        string why = await RunSetup(Path.Combine(unpacked, setup), args, name);
+                        if (why != null) throw new InvalidOperationException(why);
+                        return a;
+                    }
+                    finally { try { Directory.Delete(unpacked, true); } catch { } }
                 }
                 var prev = Cfg.InstalledApps.FirstOrDefault(x => x.Id == id);
                 bool made;
@@ -568,6 +676,34 @@ namespace Beam
                     written.Add(rel);
                 }
             }
+        }
+
+        // (1.27) The setup program a .zip carries, to be run rather than the .zip unpacked as the app: the one `run` names
+        // when it's named like an installer, else the only .exe at its top (or in its only folder) when that one is
+        // (HW Blackbox's release: HWBlackbox\Setup.exe, its own Python's .exe files deeper down); never an uninstaller.
+        // null: a .zip of the app itself.
+        static string SetupIn(string zip, string run)
+        {
+            using (var archive = ZipFile.OpenRead(zip))
+            {
+                var files = archive.Entries.Select(e => e.FullName.Replace('\\', '/')).Where(n => n.Length > 0 && !n.EndsWith("/")).ToList();
+                if (!string.IsNullOrEmpty(run))
+                {
+                    string r = run.Replace('\\', '/');
+                    string hit = files.FirstOrDefault(n => string.Equals(n, r, StringComparison.OrdinalIgnoreCase));
+                    return hit != null && IsSetupProgram(Path.GetFileName(hit)) ? hit.Replace('/', '\\') : null;
+                }
+                var tops = files.Select(n => n.Split('/')[0]).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                string prefix = tops.Count == 1 && files.All(n => n.Contains("/")) ? tops[0] + "/" : "";
+                var exes = files.Where(n => n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && n.IndexOf('/', prefix.Length) < 0
+                    && n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)).ToList();
+                return exes.Count == 1 && IsSetupProgram(Path.GetFileName(exes[0])) ? exes[0].Replace('/', '\\') : null;
+            }
+        }
+
+        static bool IsSetupProgram(string name)
+        {
+            return IsSetupName(name) && name.IndexOf("uninst", StringComparison.OrdinalIgnoreCase) < 0;
         }
 
         // (1.23, the review's M27) Where an app goes: its own folder from before (this app's), else Programs\<name> only
@@ -794,7 +930,9 @@ namespace Beam
 
         async Task<string> RunSetup(string exe, string args, string name)
         {
-            int code = await Run(exe, args ?? "", true, TimeSpan.FromMinutes(30));
+            // (through the shell: Windows asks for administrator rights at this PC when it needs them; a test instance's
+            // stand-in runs hidden)
+            int code = await Run(exe, args ?? "", !Cfg.CustomPath, TimeSpan.FromMinutes(30));
             if (code == 0 || code == 3010) return null;
             if (code == -2) return "its setup program didn't finish within 30 minutes";
             if (code == 1223) return "cancelled at this PC (Windows asked for administrator rights)";
@@ -891,7 +1029,7 @@ namespace Beam
             catch { return null; }
         }
 
-        async Task Report(string id, string state, string version, string error)
+        async Task Report(string id, string state, string version, string error, string where = null)
         {
             if (app.Api == null) return;
             var body = new Dictionary<string, object>();
@@ -899,19 +1037,29 @@ namespace Beam
             body["state"] = state;
             if (version != null) body["version"] = version;
             if (error != null) body["error"] = error.Length > 300 ? error.Substring(0, 300) : error;
+            if (where != null) body["where"] = where.Length > 200 ? where.Substring(0, 200) : where; // (1.27: found)
             try { await app.Api.Call(HttpMethod.Post, "/api/devices/me/apps", body, 30, CancellationToken.None); }
             catch (Exception ex) { Log.Write("Apps: couldn't tell the server (" + Api.Describe(ex) + ")"); }
         }
 
         // ------------------------------------------------------------------ small things
 
-        // The version on the disk (Slate updates itself): the program's own, else what Beam installed.
-        static string VersionOf(InstalledApp a)
+        // The version on the disk (Slate updates itself): the program's own; (1.27) for an app whose setup or winget Beam ran,
+        // Installed apps' (HW Blackbox updates itself too: the same release isn't run again). null: what Beam installed.
+        string VersionOf(InstalledApp a)
         {
-            if (a.Exe == null || !File.Exists(a.Exe)) return null;
+            string v = ExeVersion(a.Exe);
+            if (v != null || a.Kind == "exe" || a.Kind == "zip") return v;
+            return ExistingApps.VersionOf(Cfg, a.Name);
+        }
+
+        // A program's own version ("1.2.3.0" → "1.2.3"), or null.
+        internal static string ExeVersion(string exe)
+        {
+            if (exe == null || !File.Exists(exe)) return null;
             try
             {
-                var v = FileVersionInfo.GetVersionInfo(a.Exe);
+                var v = FileVersionInfo.GetVersionInfo(exe);
                 string s = (v.ProductVersion ?? v.FileVersion ?? "").Trim();
                 int plus = s.IndexOfAny(new[] { '+', ' ' });
                 if (plus > 0) s = s.Substring(0, plus);
@@ -932,7 +1080,7 @@ namespace Beam
         // Nothing to do: the file Beam installed is the server's, or the program is that file now; or, for an app from
         // GitHub (its version is the release's), the program here is already at that version or newer (Slate updates
         // itself). A file app's version is only a label, so only its file counts.
-        static bool Same(InstalledApp a, Dictionary<string, object> info)
+        bool Same(InstalledApp a, Dictionary<string, object> info)
         {
             var file = Json.Obj(Json.Get(info, "file"));
             string sha = file != null ? Json.Str(file, "sha256") : null;
@@ -977,7 +1125,12 @@ namespace Beam
                 foreach (var a in Cfg.InstalledApps)
                     if (a.Dir != null && Directory.Exists(a.Dir))
                         foreach (var f in Directory.GetFiles(a.Dir, "*.beam-*", SearchOption.AllDirectories)) FileUtil.TryDelete(f);
-                if (Directory.Exists(DownloadFolder)) foreach (var f in Directory.GetFiles(DownloadFolder)) FileUtil.TryDelete(f);
+                if (Directory.Exists(DownloadFolder))
+                {
+                    foreach (var f in Directory.GetFiles(DownloadFolder)) FileUtil.TryDelete(f);
+                    // (1.27) a setup's .zip unpacked aside, left by a Beam that ended while it ran
+                    foreach (var d in Directory.GetDirectories(DownloadFolder, "*-setup")) { try { Directory.Delete(d, true); } catch { } }
+                }
             }
             catch { }
         }
@@ -1003,7 +1156,7 @@ namespace Beam
         }
 
         // The folder (and shortcut) name: the app's name without anything Windows refuses.
-        static string FolderName(string name)
+        internal static string FolderName(string name)
         {
             var sb = new StringBuilder();
             var bad = Path.GetInvalidFileNameChars();
@@ -1029,11 +1182,13 @@ namespace Beam
         }
 
         // Tests (custom --config only): "answer:<id>:install|always|notnow", "allow:on|off", "toggle" (1.26.2: as the tray
-        // menu's, refused during remote control; otherwise its confirmation comes up), "state".
+        // menu's, refused during remote control; otherwise its confirmation comes up), "state", "report" (1.27: what's
+        // installed, as after a connect).
         public void TestCommand(string cmd)
         {
             string[] p = cmd.Split(':');
             if (p[0] == "answer" && p.Length == 3) Answer(p[1], p[2]);
+            else if (p[0] == "report") { var ignored = ReportInstalled(); }
             else if (p[0] == "allow" && p.Length == 2) SetAllowed(p[1] == "on", "a test");
             else if (p[0] == "toggle") Toggle("a test");
             else if (p[0] == "state")

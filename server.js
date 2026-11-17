@@ -2280,7 +2280,7 @@ function forgetSitesOf(id) {
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
 // (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
 const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted',
-  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites', 'commands']);
+  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites', 'commands', 'hwBlackbox']);
 // (1.22) What a Raspberry Pi's firmware says about its power and speed (vcgencmd get_throttled), now and since it started.
 const THROTTLE_FLAGS = new Set(['undervoltage', 'capped', 'throttled', 'softLimit']);
 const HOT_C = 80; // a Pi 4 or 5 slows itself down from 80 °C
@@ -2295,6 +2295,68 @@ function normalizeMac(value) {
   // Unset, broadcast and multicast addresses can't belong to a network card.
   if (bytes.every(b => b === '00') || bytes.every(b => b === 'ff') || parseInt(bytes[0], 16) & 1) return null;
   return bytes.join(':');
+}
+
+// (1.35, Windows 1.27) What HW Blackbox (the user's hardware monitor, where a PC runs it) says there: its version, its
+// Diagnose counts and the findings that aren't fine, the last time the PC went off without shutting down (with the power
+// supply's last readings), its dashboard's port (for its own PC's window), when it looked. Keys it doesn't know are
+// left out (newer apps may say more).
+const HWB_LEVELS = new Set(['bad', 'warn', 'info']);
+function parseHwBlackbox(v) {
+  const bad = () => httpError(400, 'hwBlackbox must be {"version", "counts"?, "checks"?: [{"level": "bad"|"warn"|"info", "title", "summary"?, "id"?}], "powerOff"?: {"up", "down"?, "why"?, "rails"?}, "port"?, "at"?}');
+  if (!isPlainObject(v)) throw bad();
+  const version = statusText(v.version);
+  if (!/^\d{1,4}(\.\d{1,4}){1,3}$/.test(version)) throw bad();
+  const out = { version };
+  const time = x => Number.isSafeInteger(x) && x > Date.UTC(2000, 0, 1) && x < now() + 86400e3;
+  if (v.counts !== undefined) {
+    if (!isPlainObject(v.counts)) throw bad();
+    out.counts = {};
+    for (const k of ['bad', 'warn', 'info', 'ok']) {
+      const n = v.counts[k];
+      if (n === undefined) continue;
+      if (!Number.isSafeInteger(n) || n < 0 || n > 1000) throw bad();
+      out.counts[k] = n;
+    }
+  }
+  if (v.checks !== undefined) {
+    if (!Array.isArray(v.checks) || v.checks.length > 12) throw bad();
+    out.checks = v.checks.map(c => {
+      if (!isPlainObject(c) || !HWB_LEVELS.has(c.level)) throw bad();
+      const id = statusText(c.id), title = statusText(c.title), summary = statusText(c.summary);
+      if (!title || [...title].length > 80 || [...summary].length > 300 || [...id].length > 80) throw bad();
+      return { ...(id && { id }), level: c.level, title, ...(summary && { summary }) };
+    });
+  }
+  if (v.powerOff !== undefined && v.powerOff !== null) {
+    const p = v.powerOff;
+    if (!isPlainObject(p) || !time(p.up) || (p.down !== undefined && (!time(p.down) || p.down > p.up))) throw bad();
+    const off = { up: p.up, ...(p.down !== undefined && { down: p.down }) };
+    const why = statusText(p.why);
+    if ([...why].length > 200) throw bad();
+    if (why) off.why = why;
+    if (p.rails !== undefined) {
+      if (!isPlainObject(p.rails)) throw bad();
+      const rails = {};
+      for (const k of ['v12', 'v5', 'v33']) {
+        const x = p.rails[k];
+        if (x === undefined) continue;
+        if (typeof x !== 'number' || !Number.isFinite(x) || x <= 0 || x >= 30) throw bad();
+        rails[k] = Math.round(x * 1000) / 1000;
+      }
+      if (Object.keys(rails).length) off.rails = rails;
+    }
+    out.powerOff = off;
+  }
+  if (v.port !== undefined) {
+    if (!Number.isInteger(v.port) || v.port < 1 || v.port > 65535) throw bad();
+    out.port = v.port;
+  }
+  if (v.at !== undefined) {
+    if (!time(v.at)) throw bad();
+    out.at = v.at;
+  }
+  return out;
 }
 
 // A status report, validated; null for a field means "no longer known" (e.g. a laptop's battery was removed).
@@ -2363,6 +2425,8 @@ function parseStatus(body) {
         if (!list.some(x => x.port === s.port)) list.push({ port: s.port, title, ...(s.https && { https: true }) });
       }
       out.sites = list;
+    } else if (key === 'hwBlackbox') {
+      out.hwBlackbox = parseHwBlackbox(value); // (1.35)
     } else if (key === 'update') {
       // (1.6.2) an app update that didn't install there, in the system's words
       const version = statusText(value?.version), problem = statusText(value?.problem);
@@ -2378,7 +2442,7 @@ function parseStatus(body) {
 
 // What other devices see of a status report (no MAC addresses).
 function publicStatus(status) {
-  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, uacOnScreen, commands, at } = status;
+  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, uacOnScreen, commands, hwBlackbox, at } = status;
   return {
     ...(battery && { battery }), ...(storage && { storage }), ...(os && { os }),
     ...(remoteControl !== undefined && { remoteControl }), ...(locked !== undefined && { locked }), ...(update && { update }),
@@ -2387,6 +2451,7 @@ function publicStatus(status) {
     ...(controlProblem && { controlProblem }), // (1.27.1) Beam for Linux: why its remote control can't be on
     ...(uacOnScreen !== undefined && { uacOnScreen }), // (1.30.1) Windows shows its prompts (UAC) on the normal screen there
     ...(commands !== undefined && { commands }), // (1.32) "Allow commands too" there
+    ...(hwBlackbox && { hwBlackbox }), // (1.35) HW Blackbox's findings there
     at: at || 0,
   };
 }
@@ -2401,6 +2466,10 @@ function describeStatus(status) {
   if (status.storage) parts.push(`${formatSize(status.storage.free)} free of ${formatSize(status.storage.total)}`);
   if (status.remoteDesktop !== undefined) parts.push(`Remote Desktop ${status.remoteDesktop ? 'on' : 'off'}`);
   if (status.sites?.length) parts.push(`${status.sites.length} site${status.sites.length === 1 ? '' : 's'} on the tailnet`); // (1.31)
+  if (status.hwBlackbox) { // (1.35) counts only: its findings' words stay out of the log
+    const c = status.hwBlackbox.counts || {};
+    parts.push(`HW Blackbox ${status.hwBlackbox.version}${c.bad || c.warn ? ` (${[c.bad && `${c.bad} problem${c.bad === 1 ? '' : 's'}`, c.warn && `${c.warn} warning${c.warn === 1 ? '' : 's'}`].filter(Boolean).join(', ')})` : ''}`);
+  }
   if (status.remoteControl !== undefined) parts.push(`remote control ${status.remoteControl ? 'allowed' : 'off'}`);
   if (status.locked) parts.push('locked');
   if (status.macs?.length) parts.push(`${status.macs.length} network adapter${status.macs.length > 1 ? 's' : ''} for Wake-on-LAN`);
@@ -4113,7 +4182,8 @@ const APP_KINDS = new Set(['github', 'file', 'winget']);
 // pending: asked here, not yet there (offline: asked when it connects); asked: waiting for someone at the PC to allow
 // it; removing: asked to uninstall. The rest come from the PC.
 const APP_ON_STATES = new Set(['pending', 'asked', 'installing', 'installed', 'failed', 'declined', 'removing']);
-const APP_REPORTS = new Set(['asked', 'installing', 'installed', 'failed', 'declined', 'removed']);
+// (1.35, Windows 1.27) found: on that PC already, not from Beam (its own setup, winget…): nothing was installed there
+const APP_REPORTS = new Set(['asked', 'installing', 'installed', 'failed', 'declined', 'removed', 'found']);
 const appFetches = new Map(); // app id -> the GitHub fetch under way
 
 const canInstallApps = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, APPS_APP_MIN);
@@ -4496,7 +4566,8 @@ async function uninstallApp(req, res, [id], url) {
   const me = appsCaller(req, url);
   const app = appById(id);
   const body = await readJson(req);
-  const targets = appTargets(body).filter(d => app.on[d.id] && canInstallApps(d));
+  // (1.35) never one it found there (not Beam's to remove)
+  const targets = appTargets(body).filter(d => app.on[d.id] && app.on[d.id].state !== 'found' && canInstallApps(d));
   if (!targets.length) throw httpError(409, `${app.name} isn't installed on ${body.devices === 'all' ? 'any PC' : 'that PC'} through Beam`);
   for (const d of targets) app.on[d.id] = { ...app.on[d.id], state: 'removing', at: now() };
   persistApps();
@@ -4506,26 +4577,33 @@ async function uninstallApp(req, res, [id], url) {
   send(res, 200, { app: publicApp(app), asked: targets.map(d => d.name) });
 }
 
-// POST /api/devices/me/apps { id, state, version?, error? }: a PC says how an install or a removal went
-// (asked: waiting for someone at it to allow it; declined: Not now there).
-// PUT /api/devices/me/apps { apps: [{ id, version }] }: what Beam installed there and is still there (at its start).
+// POST /api/devices/me/apps { id, state, version?, error?, where? }: a PC says how an install or a removal went
+// (asked: waiting for someone at it to allow it; declined: Not now there; (1.35) found: there already, not from Beam,
+// `where`).
+// PUT /api/devices/me/apps { apps: [{ id, version, found?, where?, also? }] }: what Beam installed there and is still
+// there (at its start); (1.35) found: what it found there instead (`where`), also: another install of an app Beam put
+// there (a second copy: the user's Slate, 2026-11-17).
 async function reportApps(req, res, _m, url) {
   const d = devices[deviceIdOf(req, url)];
   if (!d) throw httpError(400, 'X-Beam-Device-Id is required');
   const body = await readJson(req, { limit: 64 * 1024 });
   const ver = v => (typeof v === 'string' && v ? v.trim().slice(0, 40) : null);
+  const place = v => (typeof v === 'string' && v ? statusText(v).slice(0, 200) || null : null);
   if (req.method === 'PUT') {
     if (!Array.isArray(body.apps)) throw httpError(400, 'Expected {"apps": [{"id", "version"}]}');
-    const have = new Map(body.apps.filter(x => isPlainObject(x) && typeof x.id === 'string').slice(0, 200).map(x => [x.id, ver(x.version)]));
+    const have = new Map(body.apps.filter(x => isPlainObject(x) && typeof x.id === 'string').slice(0, 200)
+      .map(x => [x.id, { version: ver(x.version), found: x.found === true, where: place(x.where), also: place(x.also) }]));
     let changed = false;
     for (const app of apps) {
       const s = app.on[d.id];
       if (have.has(app.id)) {
-        if (!s || s.state === 'installed' || s.state === 'failed') {
-          const next = { state: 'installed', at: s?.state === 'installed' ? s.at : now(), ...(have.get(app.id) && { version: have.get(app.id) }) };
+        const h = have.get(app.id);
+        if (!s || s.state === 'installed' || s.state === 'found' || s.state === 'failed') {
+          const state = h.found ? 'found' : 'installed';
+          const next = { state, at: s?.state === state ? s.at : now(), ...(h.version && { version: h.version }), ...(h.found && h.where && { where: h.where }), ...(!h.found && h.also && { also: h.also }) };
           if (JSON.stringify(next) !== JSON.stringify(s)) { app.on[d.id] = next; changed = true; }
         }
-      } else if (s?.state === 'installed') { // (removed there by hand)
+      } else if (s?.state === 'installed' || s?.state === 'found') { // (removed there by hand)
         delete app.on[d.id];
         changed = true;
       }
@@ -4537,8 +4615,9 @@ async function reportApps(req, res, _m, url) {
   if (!app) throw httpError(404, 'No such app');
   if (!APP_REPORTS.has(body.state)) throw httpError(400, `state must be one of: ${[...APP_REPORTS].join(', ')}`);
   const error = typeof body.error === 'string' && body.error ? statusText(body.error).slice(0, 300) : null;
+  const where = body.state === 'found' ? place(body.where) : null;
   if (body.state === 'removed') delete app.on[d.id];
-  else app.on[d.id] = { state: body.state, at: now(), ...(ver(body.version) && { version: ver(body.version) }), ...(error && { error }) };
+  else app.on[d.id] = { state: body.state, at: now(), ...(ver(body.version) && { version: ver(body.version) }), ...(error && { error }), ...(where && { where }) };
   persistApps();
   broadcastApps();
   const v = ver(body.version) ? ` ${ver(body.version)}` : '';
@@ -4547,6 +4626,7 @@ async function reportApps(req, res, _m, url) {
   else if (body.state === 'failed') log.warn(`${d.name} couldn't install ${app.name}: ${error || 'no reason given'}`);
   else if (body.state === 'declined') log.info(`Someone at ${d.name} chose not to install ${app.name} now`);
   else if (body.state === 'asked') log.info(`${d.name} asks whoever is there before installing ${app.name}`);
+  else if (body.state === 'found') log.info(`${d.name} has ${app.name}${v} already, not from Beam: not installed again`);
   send(res, 204);
 }
 
@@ -7874,6 +7954,8 @@ const FEATURES = [
   'sites', // (1.31.0: GET/POST /api/sites, PATCH/DELETE /api/sites/{id}, POST /api/sites/check, the `sites` event, status `sites`)
   'inbox', // (1.33.0: the alerts inbox: /notify (ntfy's publishing), GET /api/inbox, /api/inbox/senders, /api/inbox/alerts, PUT /api/inbox/read, the `inbox`, `inbox-changed` and `inbox-read` events)
   'notes', // (1.34.0: a message to the device it's sent from is a note (`note: true`, kept until deleted); the target name "notes"; PATCH /api/items/{id} {done})
+  'hw-blackbox', // (1.35.0: status `hwBlackbox`, HW Blackbox's findings where a PC runs it)
+  'apps-found', // (1.35.0: app state `found` (on a PC already, not from Beam; `where`), PUT /api/devices/me/apps items' found/where/also)
   'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];
 

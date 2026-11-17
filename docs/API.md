@@ -595,6 +595,16 @@ their last value, and `null` clears one. Unknown fields or bad values are `400`.
   (1 to 80 characters), "https"? }]`, 24 at most (see Sites). Not in the device list.
 - **(1.32, Windows app 1.25, feature `commands`)** `commands`: "Allow commands too" is on there (see Commands on a PC);
   only from the PC's own app once its remote control is tied to it, like `remoteControl`.
+- **(1.35, Windows app 1.27, feature `hw-blackbox`)** `hwBlackbox`: what HW Blackbox (a hardware monitor for Windows,
+  HW-Blackbox on GitHub) says on that PC, where it runs. The app reads its dashboard on 127.0.0.1 (the port
+  in `%ProgramData%\HWBlackbox\config.json`; only its `/api/ping`, `/api/diagnose` and `/api/overview`) with its status
+  check, at most every 10 minutes: `{ "version", "counts"?: { "bad", "warn", "info", "ok" }, "checks"?: [{ "id"?,
+  "level": "bad" | "warn" | "info", "title" (1–80), "summary"? (≤ 300) }] (the Diagnose findings that aren't fine, most
+  serious first, 12 at most), "powerOff"?: { "up", "down"?, "why"? (≤ 200), "rails"?: { "v12", "v5", "v33" } } (the last
+  time the PC went off without shutting down: when it went down and came back, ms, and the power supply's last readings,
+  volts), "port"? (its dashboard's: that PC's own window links to it), "at"? (when Diagnose looked, ms) }`; keys the
+  server doesn't know are left out. `null` when it's gone (after 30 minutes without an answer: a moment without one, as
+  while it updates, keeps the last). The log gets its version and counts only, never the findings' words.
 - Others see `status` (without the MACs), `tailscale` and `can` in the device list; the `devices` event goes out at
   most every 5 s for status changes. Low battery or storage, and (1.22) a hot or under-powered Pi can raise alerts
   (see Alerts).
@@ -830,9 +840,20 @@ file: { name, size, sha256, type: "exe" | "msi" | "zip" } | null, state: "ready"
 checkError? (a GitHub check that failed while an earlier version stays), checksum? (GitHub: the release's checksum file,
 or null when it publishes none), asset? (the release file chosen), choices? (the release's Windows files when there are
 several), run? (a .zip's program), args? (an installer's switches), addedAt, addedBy, checkedAt, updatedAt,
-on: { <device id>: { state, version?, error?, at } } }`. A PC's state: `pending` (asked; an offline PC is asked when it
-connects), `asked` (waiting for someone at the PC), `installing`, `installed`, `failed`, `declined` (Not now at the PC),
-`removing`.
+on: { <device id>: { state, version?, error?, where?, also?, at } } }`. A PC's state: `pending` (asked; an offline PC is
+asked when it connects), `asked` (waiting for someone at the PC), `installing`, `installed`, `failed`, `declined` (Not now
+at the PC), `removing`, **(1.35, Windows app 1.27, feature `apps-found`)** `found`: the PC has the app already, installed
+some other way (its own setup, winget; `where`: its folder, or its name in Installed apps), so nothing was installed and
+nobody there was asked. Beam never uninstalls or updates a found one (`POST …/uninstall` leaves it out; a new version
+isn't offered to it). An `installed` one may say `also`: the app is installed a second time there, outside Beam (where),
+and Uninstall removes only Beam's copy. The PC looks before installing: Installed apps (that user's and the PC's, by the
+app's name with a version or "(x64)" after it left out), App Paths for a portable .exe, and a folder of the app's name in
+its Programs folder that isn't Beam's.
+
+A .zip whose top (or only folder) holds one setup program and no other .exe (named like an installer, not an
+uninstaller: HW Blackbox's `HWBlackbox\Setup.exe`), or whose `run` names one, is run rather than unpacked as the app
+(1.35, Windows app 1.27): unpacked aside, that program started through Windows (which asks for administrator rights at the
+PC when it needs them), the folder deleted after; the PC then counts it as a setup (Windows' Installed apps removes it).
 
 | Method & path | Result |
 |---|---|
@@ -845,8 +866,8 @@ connects), `asked` (waiting for someone at the PC), `installing`, `installed`, `
 | `GET /api/apps/{id}/file` | the file (ranges, `no-cache`) |
 | `POST /api/apps/{id}/install` | `{ "devices": [ids] or "all" }` → `{ app, asked: [names], cannot: [names] }` and `app-install { id }` to each (`409` when none can) |
 | `POST /api/apps/{id}/uninstall` | `{ "devices": [ids] or "all" }` → `{ app, asked }` and `app-uninstall { id }` (`409` when it isn't installed there through Beam) |
-| `POST /api/devices/me/apps` | the PC: `{ "id", "state": "asked" \| "installing" \| "installed" \| "failed" \| "declined" \| "removed", "version"?, "error"? }` → `204` |
-| `PUT /api/devices/me/apps` | the PC, after each connect: `{ "apps": [{ "id", "version" }] }`, what Beam installed and is still there (its own version now: Slate updates itself); one not listed any more is forgotten there → `204` |
+| `POST /api/devices/me/apps` | the PC: `{ "id", "state": "asked" \| "installing" \| "installed" \| "failed" \| "declined" \| "removed" \| "found" (1.35), "version"?, "error"?, "where"? (found) }` → `204` |
+| `PUT /api/devices/me/apps` | the PC, after each connect: `{ "apps": [{ "id", "version", "found"?: true, "where"?, "also"? }] }`, what Beam installed and is still there (its own version now: Slate updates itself), (1.35) what it found there instead (`found`, `where`), and another install beside Beam's copy (`also`); one not listed any more is forgotten there → `204` |
 
 Events: `apps { at }` (to every stream: read the list again), `app-install { id, update? }` and `app-uninstall { id }`
 (only to that PC's streams). GitHub releases are looked for 3 minutes after a start and every 6 hours (`BEAM_GITHUB_API`

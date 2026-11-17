@@ -82,6 +82,11 @@
   own PC reads its own when the server starts (`BEAM_OWN_HISTORY=off` turns that off).
 - **Beam log** (in a PC's Device info): the end of that PC's Beam log, sent by its Beam app when you ask, from any of
   your devices. Nothing is kept on the server, and Beam never writes message text, keys or sign-ins into its log.
+- **HW Blackbox** (Beam 1.35, the Windows app 1.27; in a PC's Device info): where a PC runs
+  [HW Blackbox](https://github.com/jamesccupps/HW-Blackbox), a hardware monitor, what its Diagnose found there (the
+  findings that aren't fine, most serious first) and the last time the PC went off without shutting down, with the
+  power supply's last readings before it. The PC's Beam app reads HW Blackbox's dashboard on that PC, read only, at most
+  every 10 minutes; on that PC itself, **Open HW Blackbox** opens it.
 - **Shared folders** (Beam 1.26, the Windows app 1.18): copy files from another of your PCs without remoting in. At the
   PC, Settings → Control & sharing → **Shared folders…** chooses the folders, and for each one the devices that may see it
   (nothing until you add a folder; only there, never from another device, and not while the PC is being controlled).
@@ -260,7 +265,13 @@
 - **Install on all PCs** (or one): each PC's Beam app installs it for its signed-in user: a single .exe goes to
   `%LOCALAPPDATA%\Programs\<app>` with a Start menu shortcut and an entry in Windows' Installed apps; a .zip is unpacked
   there; an .msi or a setup program runs (with the switches you give it for a quiet install). Beam never installs as
-  administrator: an installer that needs that shows Windows' own prompt on that PC.
+  administrator: an installer that needs that shows Windows' own prompt on that PC. (Beam 1.35, the Windows app 1.27) A
+  .zip with a setup program at its top (like HW Blackbox's `Setup.exe`) is installed by running that program.
+- **Never a second copy** (the Windows app 1.27): a PC that has the app already, installed some other way (Windows'
+  Installed apps, App Paths, a folder of that name in `%LOCALAPPDATA%\Programs`), keeps that one: nothing is
+  installed, nobody there is asked, and the Apps page says **already on it, not from Beam**. Beam never updates or
+  uninstalls that one. Where Beam's copy has another install beside it, the Apps page says so (Uninstall removes only
+  Beam's copy).
 - **Each PC asks once:** until someone at the PC allows it, a request there asks **Install** (this once), **Always
   allow** or **Not now**. Turn it on or off later in its Settings → Security (**Let Beam install apps**), the tray menu, or Settings → Control & sharing.
 - **Where it is:** the Apps page shows each PC's state (installed and its version, waiting for someone at the PC,

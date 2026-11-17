@@ -7730,6 +7730,86 @@ test('AUD (audit 2026-10-04): reactions can’t be object keys; a reinstall need
   } finally { await p.stop(); }
 });
 
+// ---------------------------------------------------------------- 1.35 HW Blackbox, apps found
+
+test('1.35 HW Blackbox in a PC’s status (its findings, the last power-off; checked; the log gets counts only); an app a PC has already (found, where): not Beam’s to uninstall or update; Beam’s copy installed twice (also)', async () => {
+  const s = await startServer('hwb135', 8796);
+  try {
+    const K = s.key;
+    const pc = app(K, 'hwbpc000135', 'Shop Desktop', 'windows', { 'X-Beam-App-Version': '1.27.0', ...from('100.64.35.2') });
+    const phone = app(K, 'phone000135', 'Robin Phone', 'android', { 'X-Beam-App-Version': '1.20.1', ...from('100.64.35.4') });
+    for (const h of [pc, phone]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    const features = (await s.req('GET', '/api/info', { headers: pc })).json.features;
+    assert.ok(features.includes('hw-blackbox') && features.includes('apps-found'), 'the features');
+    const logged = re => waitFor(() => re.test(s.out), 5000).then(() => true, () => false);
+
+    // HW Blackbox's findings in the PC's status: what other devices see; direction marks and unknown keys gone
+    const put = body => s.req('PUT', '/api/devices/me/status', { headers: json(pc), body: JSON.stringify(body) });
+    const up = Date.now() - 3 * 86400e3;
+    const hwb = {
+      version: '1.1.3', counts: { bad: 1, warn: 1, info: 0, ok: 15 }, port: 9070, at: Date.now() - 60e3, extra: 'left out',
+      checks: [{ id: 'problems', level: 'bad', title: 'Problems right now', summary: 'Port 25565 is held by 2 programs' }, { id: 'power', level: 'warn', title: 'Power-offs', summary: '1 in the last 30 days\u202e' }],
+      powerOff: { up, down: up - 9200, why: 'It lost power, or froze', rails: { v12: 12.168, v5: 5.07, v33: 3.346 } },
+    };
+    let r = await put({ hwBlackbox: hwb });
+    assert.equal(r.status, 204, r.body);
+    const statusOf = async () => (await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(d => d.id === 'hwbpc000135').status;
+    assert.deepEqual((await statusOf()).hwBlackbox, {
+      version: '1.1.3', counts: { bad: 1, warn: 1, info: 0, ok: 15 }, port: 9070, at: hwb.at,
+      checks: [{ id: 'problems', level: 'bad', title: 'Problems right now', summary: 'Port 25565 is held by 2 programs' }, { id: 'power', level: 'warn', title: 'Power-offs', summary: '1 in the last 30 days' }],
+      powerOff: { up, down: up - 9200, why: 'It lost power, or froze', rails: { v12: 12.168, v5: 5.07, v33: 3.346 } },
+    });
+    assert.ok(await logged(/Shop Desktop reports its status: .*HW Blackbox 1\.1\.3 \(1 problem, 1 warning\)/), 'the log: its version and counts');
+    assert.doesNotMatch(s.out, /Port 25565|Problems right now/, 'never its findings’ words');
+    // gone (uninstalled): null takes it back
+    assert.equal((await put({ hwBlackbox: null })).status, 204);
+    assert.equal((await statusOf()).hwBlackbox, undefined);
+    const check = (o = {}) => ({ level: 'warn', title: 'A check', ...o });
+    for (const bad of [
+      'yes', { counts: {} }, { version: 'soon' }, { version: '1.1', checks: 'none' }, { version: '1.1', checks: [check({ level: 'ok' })] },
+      { version: '1.1', checks: Array(13).fill(check()) }, { version: '1.1', checks: [check({ title: '' })] }, { version: '1.1', checks: [check({ title: 't'.repeat(81) })] },
+      { version: '1.1', checks: [check({ summary: 's'.repeat(301) })] }, { version: '1.1', counts: { bad: -1 } }, { version: '1.1', powerOff: { down: up } },
+      { version: '1.1', powerOff: { up, down: up + 1 } }, { version: '1.1', powerOff: { up, rails: { v12: 40 } } }, { version: '1.1', powerOff: { up: Date.now() + 5 * 86400e3 } },
+      { version: '1.1', port: 0 }, { version: '1.1', at: 'now' },
+    ]) {
+      assert.equal((await put({ hwBlackbox: bad })).status, 400, JSON.stringify(bad).slice(0, 120));
+    }
+
+    // An app the PC has already, not from Beam: "found" (where), never uninstalled or updated by Beam
+    const file = async (q, body) => (await s.req('PUT', `/api/apps/file?${new URLSearchParams(q)}`, { headers: { ...phone, 'Content-Type': 'application/octet-stream' }, body: Buffer.from(body) })).json.app;
+    const tool = await file({ name: 'Tool.exe', label: 'Tool', version: '2.0' }, 'MZ tool');
+    const kit = await file({ name: 'Kit.exe', label: 'Kit', version: '1.0' }, 'MZ kit');
+    assert.ok(tool?.id && kit?.id, 'two apps');
+    r = await post(s, `/api/apps/${tool.id}/install`, { devices: ['hwbpc000135'] }, phone);
+    assert.equal(r.status, 200, r.body);
+    const report = (id, body) => post(s, '/api/devices/me/apps', { id, ...body }, pc);
+    assert.equal((await report(tool.id, { state: 'found', version: '2.0.1', where: 'C:\\Program Files\\Tool\u202e' })).status, 204);
+    const list = async () => (await s.req('GET', '/api/apps', { headers: phone })).json.apps;
+    const onPc = async id => (await list()).find(a => a.id === id).on.hwbpc000135;
+    assert.deepEqual(pick(await onPc(tool.id), ['state', 'version', 'where']), { state: 'found', version: '2.0.1', where: 'C:\\Program Files\\Tool' });
+    assert.ok(await logged(/Shop Desktop has Tool 2\.0\.1 already, not from Beam: not installed again/), 'logged');
+    r = await post(s, `/api/apps/${tool.id}/uninstall`, { devices: ['hwbpc000135'] }, phone);
+    assert.equal(r.status, 409, 'not Beam’s to uninstall');
+    const ev = await openEvents(s.port, pc);
+    await ev.wait('hello');
+    await sleep(300);
+    assert.equal((await file({ name: 'Tool.exe', app: tool.id, version: '2.1' }, 'MZ tool 2.1'))?.version, '2.1');
+    await sleep(500);
+    assert.ok(!ev.events.some(e => e.event === 'app-install' && e.data.id === tool.id), 'a new version isn’t offered to it');
+    assert.equal((await onPc(tool.id)).state, 'found');
+    ev.close();
+    // At its start: still there (found, where); Beam's own Kit with another install of it elsewhere (also)
+    assert.equal((await report(kit.id, { state: 'installed', version: '1.0' })).status, 204);
+    const putApps = items => s.req('PUT', '/api/devices/me/apps', { headers: json(pc), body: JSON.stringify({ apps: items }) });
+    assert.equal((await putApps([{ id: tool.id, version: '2.0.2', found: true, where: 'C:\\Program Files\\Tool' }, { id: kit.id, version: '1.0', also: 'C:\\Users\\robin\\AppData\\Local\\Programs\\Kit' }])).status, 204);
+    assert.deepEqual(pick(await onPc(tool.id), ['state', 'version', 'where', 'also']), { state: 'found', version: '2.0.2', where: 'C:\\Program Files\\Tool' });
+    assert.deepEqual(pick(await onPc(kit.id), ['state', 'version', 'where', 'also']), { state: 'installed', version: '1.0', also: 'C:\\Users\\robin\\AppData\\Local\\Programs\\Kit' });
+    assert.equal((await putApps([{ id: kit.id, version: '1.0' }])).status, 204);
+    assert.equal(await onPc(tool.id), undefined, 'not there any more');
+    assert.equal((await onPc(kit.id)).also, undefined, 'the other install gone');
+  } finally { await s.stop(); }
+});
+
 // ---------------------------------------------------------------- 1.34 Notes
 
 test('1.34 Notes: a message to the device you’re on is a note (also with the name "notes", a forward, a file); never pushed; done; the others see it as before', async () => {

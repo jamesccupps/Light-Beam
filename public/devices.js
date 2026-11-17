@@ -263,6 +263,7 @@ function openDeviceInfo(d, { refresh = false } = {}) {
     card(null, trustToggle(d), alertsSupported() && offlineAlertToggle(d),
       other && phoneFeature() && phoneShowable(d) && switchRow('Show phone notifications', phoneShownFor(d), (v, box) => setPhoneShown(d.id, v, box))),
     rc.length > 0 && el('div', { class: 'dev-rc' }, ...rc),
+    hwbSection(d),
     historySection(d),
     other && el('div', { class: 'dev-end' }, el('button', { class: 'btn small-btn ghost danger', type: 'button', onclick: () => removeDevice(d) }, serverHas('tokens') ? 'Sign out…' : 'Forget…'))].filter(Boolean);
   if (refresh) {
@@ -279,6 +280,48 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   dlg.dataset.device = d.id;
   // The offline-alert toggle needs the server's settings: load them once, then fill it in.
   if (!serverSettings && serverHas('settings')) loadServerSettings().then(() => openDeviceInfo(deviceById(d.id), { refresh: true }));
+}
+
+// ---------------------------------------------------------------- HW Blackbox (1.35)
+// Where a PC runs HW Blackbox (the user's hardware monitor), its Beam app (Windows 1.27) sends what HW Blackbox's
+// Diagnose found there with its status (read every 15 minutes at most): the findings that aren't fine, most serious
+// first, and the last time the PC went off without shutting down, with the power supply's last readings before it.
+
+const HWB_ICON = { bad: 'alert', warn: 'alert', info: 'eye' };
+const HWB_LEVEL = { bad: 'Problem', warn: 'Warning', info: 'Worth a look' };
+// (a rail and its reading never split across lines: no-break spaces)
+const railReading = (rail, v) => `${rail}\u00a0V\u00a0rail\u00a0${Number(v).toFixed(2)}\u00a0V`;
+
+function hwbSection(d) {
+  const h = d.status?.hwBlackbox;
+  if (!h || !h.version) return null;
+  const c = h.counts || {};
+  const checks = Array.isArray(h.checks) ? h.checks : [];
+  const p = h.powerOff;
+  const rows = checks.map(x => el('li', { class: x.level === 'info' ? '' : 'warn-row' },
+    icon(HWB_ICON[x.level] || 'eye'),
+    el('span', { class: 'alert-text history-text' }, el('span', {}, x.title), x.summary && el('span', { class: 'muted small' }, x.summary)),
+    el('span', { class: 'muted small' }, HWB_LEVEL[x.level] || '')));
+  if (p?.up) {
+    const lines = [[p.down && `went down ${historyWhen(p.down)}`, `back up ${p.down ? historyClock(p.up, p.down) : historyWhen(p.up)}`].filter(Boolean).join(' · ')];
+    if (p.why) lines.push(p.why);
+    const r = p.rails || {};
+    const readings = [r.v12 && railReading('12', r.v12), r.v5 && railReading('5', r.v5), r.v33 && railReading('3.3', r.v33)].filter(Boolean);
+    if (readings.length) lines.push(`The power supply just before: ${readings.join(' · ')}`);
+    rows.push(el('li', { class: Date.now() - p.up < 7 * 86400e3 ? 'warn-row' : '' }, icon('bolt'),
+      el('span', { class: 'alert-text history-text' }, el('span', {}, 'Last went off without shutting down'), ...lines.map(l => el('span', { class: 'muted small' }, l))),
+      el('span', { class: 'muted small' }, historyWhen(p.up))));
+  }
+  const total = ['bad', 'warn', 'info', 'ok'].reduce((n, k) => n + (Number.isFinite(c[k]) ? c[k] : 0), 0);
+  const allFine = !checks.length && total > 0 ? `All ${total} of its checks are fine.` : !checks.length ? 'Nothing to look at.' : null;
+  // On that PC itself: its own dashboard (127.0.0.1 there; it answers only that Windows session)
+  const open = d.id === me.id && Number.isInteger(h.port) && el('a', { class: 'btn small-btn', href: `http://127.0.0.1:${h.port}/#diagnose`, target: '_blank', rel: 'noopener' }, 'Open HW Blackbox');
+  return el('div', { class: 'history hwb' },
+    el('h4', {}, 'HW Blackbox'),
+    note([`Version ${h.version}`, Number.isFinite(h.at) && h.at > 0 && `checked ${timeAgo(h.at)}`].filter(Boolean).join(' · ')),
+    allFine && note(allFine),
+    rows.length > 0 && el('ul', { class: 'alert-list history-list' }, ...rows),
+    open);
 }
 
 // ---------------------------------------------------------------- history (1.18)

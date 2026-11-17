@@ -124,7 +124,7 @@ function runApp(cfgDir, cfgPath) {
 
 const realPrograms = path.join(process.env.LOCALAPPDATA || '', 'Programs');
 const realStart = path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs');
-const NAMES = ['Beam Test Tool', 'Beam Test Kit', 'Beam Test Evil'];
+const NAMES = ['Beam Test Tool', 'Beam Test Kit', 'Beam Test Evil', 'Beam Test Found', 'Beam Test Here', 'Beam Test Setup'];
 const realBefore = NAMES.map(n => [fs.existsSync(path.join(realPrograms, n)), fs.existsSync(path.join(realStart, `${n}.lnk`))]);
 
 try {
@@ -145,6 +145,13 @@ try {
   check((await call('PATCH', `/api/apps/${kit.id}`, { run: 'bin/kit.exe' })).status === 200, 'the .zip\'s program: bin/kit.exe');
   const wg = (await call('POST', '/api/apps', { winget: 'Beam.TestPackage', name: 'Beam Test Package' })).json.app;
   check(wg?.kind === 'winget', 'a winget app');
+  // (1.27) Two the PC has already (one in Installed apps, one in a Programs folder of its name), and a .zip that
+  // carries a setup program (as HW Blackbox's release does: its folder with Setup.exe, its own Python deeper down)
+  const foundApp = (await putFile({ name: 'BeamTestFound.exe', label: 'Beam Test Found', version: '2.0' }, where)).app;
+  const hereApp = (await putFile({ name: 'BeamTestHere.exe', label: 'Beam Test Here' }, where)).app;
+  const setupApp = (await putFile({ name: 'beam-test-setup.zip', label: 'Beam Test Setup' },
+    zip([['Setup Kit/Setup.exe', whoami], ['Setup Kit/readme.txt', 'x'], ['Setup Kit/python/python.exe', where]]))).app;
+  check(Boolean(foundApp?.id && hereApp?.id && setupApp?.id), '(1.27) three more: two the PC has already, a .zip with Setup.exe');
 
   // The PC: apps not allowed yet; winget is a .cmd that writes down each call (and has no installer for one user).
   const wingetLog = dir('winget-calls.txt');
@@ -157,18 +164,25 @@ try {
     'echo Successfully installed',
     'exit /b 0',
   ].join('\r\n'));
-  // (1.23, the review's M27) Another program's folder with the tool's name, already there; and an app an older Beam
-  // installed (no list of its files): its .exe and a file of its own beside it.
+  // (1.23, the review's M27) Another program's folder with the tool's name, already there (1.27: without the tool's
+  // program, else it's the tool installed already); and an app an older Beam installed (no list of its files): its
+  // .exe and a file of its own beside it.
   const theirs = path.join(dir('cfg'), 'Programs', 'Beam Test Tool');
   fs.mkdirSync(theirs, { recursive: true });
-  fs.writeFileSync(path.join(theirs, 'BeamTestTool.exe'), 'theirs');
+  fs.writeFileSync(path.join(theirs, 'other.exe'), 'theirs');
   fs.writeFileSync(path.join(theirs, 'notes.txt'), 'keep me');
+  // (1.27) The app "Beam Test Here" installed some other way: its program in Programs\Beam Test Here (no Beam marker)
+  const hereDir = path.join(dir('cfg'), 'Programs', 'Beam Test Here');
+  fs.mkdirSync(hereDir, { recursive: true });
+  fs.writeFileSync(path.join(hereDir, 'BeamTestHere.exe'), where);
   const oldDir = path.join(dir('cfg'), 'Programs', 'Old Tool');
   fs.mkdirSync(oldDir, { recursive: true });
   fs.writeFileSync(path.join(oldDir, 'old.exe'), 'old');
   fs.writeFileSync(path.join(oldDir, 'user.txt'), 'its own');
   const legacy = { id: 'abcdef12', name: 'Old Tool', kind: 'exe', version: '1.0', dir: oldDir, exe: path.join(oldDir, 'old.exe') };
-  const pc = await startPc({ testWinget: fakeWinget, installedApps: [legacy] });
+  // (1.27) Installed apps' stand-in: "Beam Test Found" there, under a name with its version and architecture after it
+  const testInstalled = [{ name: 'Beam Test Found 2.5.1 (x64)', version: '2.5.1', location: 'C:\\Program Files\\Beam Test Found' }, { name: 'Something Else', version: '1.0' }];
+  const pc = await startPc({ testWinget: fakeWinget, installedApps: [legacy], testInstalled });
   check(!!(await pc.waitLog(/Events: connected/)), 'the PC connects');
   const dl = await call('GET', '/api/devices');
   check(dl.json?.devices?.find(d => d.id === pc.id)?.can?.apps === true, `the server says it can install apps (Windows 1.16) (${dl.status} ${dl.json?.devices ? '' : dl.text.slice(0, 160)})`);
@@ -191,12 +205,40 @@ try {
   check(!!s && /^\d/.test(s.version || ''), `Install: installed, at the program's own version (${s?.version})`);
   check(fs.existsSync(toolExe) && sha(fs.readFileSync(toolExe)) === sha(where), '...the file in its Programs folder (under the test\'s config folder), byte for byte');
   check(fs.existsSync(path.join(pc.cfgDir, 'Start Menu', 'Beam Test Tool.lnk')), '...with a Start menu shortcut');
-  const theirsLeft = () => fs.readFileSync(path.join(theirs, 'BeamTestTool.exe'), 'utf8') === 'theirs' && fs.readFileSync(path.join(theirs, 'notes.txt'), 'utf8') === 'keep me';
+  const theirsLeft = () => fs.readFileSync(path.join(theirs, 'other.exe'), 'utf8') === 'theirs' && fs.readFileSync(path.join(theirs, 'notes.txt'), 'utf8') === 'keep me';
   check(theirsLeft(), '(1.23) the folder of that name that was already there (another program\'s) is left alone: the app went to "Beam Test Tool (Beam)"');
   const marker = path.join(path.dirname(toolExe), '.beamapp');
   check(fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').split(/\r?\n/)[0] === tool.id, '...with Beam\'s marker (the app\'s id)');
   let cfg = JSON.parse(fs.readFileSync(pc.cfgPath, 'utf8'));
   check(cfg.appsAllowed !== true && cfg.installedApps?.some(a => a.id === tool.id && a.kind === 'exe'), 'still not allowed for the next one; the config knows what it installed');
+
+  // 1b. (1.27, the user: "make sure the app isnt already installed, i had two versions of slate on one of my computers
+  // because of beam") Apps the PC has already, not from Beam: nobody asked, nothing installed, never Beam's to remove.
+  from = pc.mark();
+  await call('POST', `/api/apps/${foundApp.id}/install`, { devices: [pc.id] });
+  s = await waitState(foundApp.id, pc.id, 'found');
+  check(s?.version === '2.5.1' && s?.where === 'C:\\Program Files\\Beam Test Found', `in Installed apps already ("Beam Test Found 2.5.1 (x64)"): found there, at its version (${JSON.stringify(s)})`);
+  check(!(await pc.waitLog(/asks whoever is here before installing Beam Test Found/, from, 300)), '...nobody asked');
+  check(!fs.existsSync(path.join(pc.cfgDir, 'Programs', 'Beam Test Found')) && !fs.existsSync(path.join(pc.cfgDir, 'Programs', 'Beam Test Found (Beam)')), '...nothing written');
+  await call('POST', `/api/apps/${hereApp.id}/install`, { devices: [pc.id] });
+  s = await waitState(hereApp.id, pc.id, 'found');
+  check(s?.where === hereDir && /^\d/.test(s?.version || ''), `its program in Programs\\Beam Test Here, not Beam's: found, at the program's version (${JSON.stringify(s)})`);
+  check(!fs.existsSync(path.join(pc.cfgDir, 'Programs', 'Beam Test Here (Beam)')) && fs.readdirSync(hereDir).join() === 'BeamTestHere.exe', '...no second copy beside it, and its folder as it was');
+  r = await call('POST', `/api/apps/${hereApp.id}/uninstall`, { devices: [pc.id] });
+  check(r.status === 409 && fs.existsSync(path.join(hereDir, 'BeamTestHere.exe')), `Uninstall: refused (not Beam's) (${r.status})`);
+  let conf = JSON.parse(fs.readFileSync(pc.cfgPath, 'utf8'));
+  check(conf.installedApps?.filter(a => a.kind === 'found').map(a => a.id).sort().join() === [foundApp.id, hereApp.id].sort().join(), 'the config remembers both as found');
+  // Beam's own copy of the tool, and the tool installed again some other way (its program in that other folder):
+  // at the next report the server hears where the other one is (also); gone again, it hears that too.
+  fs.writeFileSync(path.join(theirs, 'BeamTestTool.exe'), where);
+  pc.forward(['--test-apps', 'report']);
+  let also = null;
+  for (const until = Date.now() + 15000; Date.now() < until && !also; await sleep(200)) also = (await appOn(tool.id, pc.id))?.also;
+  check(also === theirs && (await appOn(tool.id, pc.id))?.state === 'installed', `the tool installed twice: Beam's copy, and the other one named (${also})`);
+  fs.rmSync(path.join(theirs, 'BeamTestTool.exe'));
+  pc.forward(['--test-apps', 'report']);
+  for (const until = Date.now() + 15000; Date.now() < until && also; await sleep(200)) also = (await appOn(tool.id, pc.id))?.also;
+  check(!also, '...and once it\'s gone, no more');
 
   // 2. Not now, then Always allow.
   from = pc.mark();
@@ -228,6 +270,17 @@ try {
   check(!!s && !(await pc.waitLog(/asks whoever is here before installing Beam Test Package/, from, 500)), 'winget: installed without a question');
   check(calls.length === 2 && /^install --id Beam\.TestPackage --exact --source winget --silent .*--scope user$/.test(calls[0]) && !/--scope/.test(calls[1]),
     `...for one user first, then (none for one user) as the package wants (${JSON.stringify(calls)})`);
+
+  // 3b. (1.27) A .zip carrying a setup program: unpacked aside, Setup.exe run (here a copy of whoami.exe, hidden), the
+  // folder gone after; no app folder, no shortcut.
+  from = pc.mark();
+  await call('POST', `/api/apps/${setupApp.id}/install`, { devices: [pc.id] });
+  s = await waitState(setupApp.id, pc.id, 'installed');
+  check(!!s && !!(await pc.waitLog(/Apps: running Setup Kit\\Setup\.exe from Beam Test Setup's \.zip/, from, 2000)), `a .zip with Setup.exe: its setup program run (${JSON.stringify(s)})`);
+  conf = JSON.parse(fs.readFileSync(pc.cfgPath, 'utf8'));
+  check(conf.installedApps?.find(a => a.id === setupApp.id)?.kind === 'setup', '...kept as a setup Beam ran');
+  check(!fs.existsSync(path.join(pc.cfgDir, 'Programs', 'Beam Test Setup')) && !fs.existsSync(path.join(pc.cfgDir, 'Start Menu', 'Beam Test Setup.lnk')), '...not unpacked as an app (no folder, no shortcut)');
+  check(!fs.existsSync(path.join(pc.cfgDir, 'app-downloads', `${setupApp.id}-setup`)), '...and the folder it was unpacked into is gone');
 
   // 4. A .zip that would write outside its folder: refused, nothing written.
   await call('POST', `/api/apps/${evil.id}/install`, { devices: [pc.id] });
@@ -268,7 +321,8 @@ try {
   check(!!(await pc.waitLog(/Apps: Old Tool uninstalled/, from)), 'an app an older Beam installed: uninstalled');
   check(!fs.existsSync(path.join(oldDir, 'old.exe')) && fs.readFileSync(path.join(oldDir, 'user.txt'), 'utf8') === 'its own', '...its .exe gone, the file of its own kept');
   cfg = JSON.parse(fs.readFileSync(pc.cfgPath, 'utf8'));
-  check(!(cfg.installedApps || []).length, 'the config has nothing left');
+  const leftIds = (cfg.installedApps || []).map(a => a.id).sort().join();
+  check(leftIds === [foundApp.id, hereApp.id, setupApp.id].sort().join(), `the config has nothing else left (the two found, the setup Beam ran) (${leftIds})`);
 
   // (1.23, the review) The Beam log's Save in the app's window: the bridge's saveText (a test instance: into saved\)
   at = pc.mark();
@@ -282,7 +336,7 @@ try {
   const realAfter = NAMES.map(n => [fs.existsSync(path.join(realPrograms, n)), fs.existsSync(path.join(realStart, `${n}.lnk`))]);
   check(JSON.stringify(realAfter) === JSON.stringify(realBefore), 'the real Programs folder and Start menu: untouched');
   const reg = spawnSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall'], { encoding: 'utf8', windowsHide: true }).stdout || '';
-  check(![tool.id, kit.id, evil.id, wg.id].some(id => reg.includes(`BeamApp-${id}`)), 'nothing in the registry');
+  check(![tool.id, kit.id, evil.id, wg.id, foundApp.id, hereApp.id, setupApp.id].some(id => reg.includes(`BeamApp-${id}`)), 'nothing in the registry');
   await pc.quit();
 } catch (err) {
   check(false, `the run: ${err.stack || err}`);

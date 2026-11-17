@@ -126,6 +126,7 @@ namespace Beam
             if (!Equals(Val(last, "commands"), Val(body, "commands"))) return true; // (1.25)
             if (!Equals(Val(last, "startsWithWindows"), Val(body, "startsWithWindows")) || !Equals(Val(last, "startWanted"), Val(body, "startWanted"))) return true;
             if (SiteFinder.Signature(Val(last, "sites")) != SiteFinder.Signature(Val(body, "sites"))) return true; // (1.24)
+            if (HwBlackbox.Signature(Part(last, "hwBlackbox")) != HwBlackbox.Signature(Part(body, "hwBlackbox"))) return true; // (1.27)
             return string.Join(",", (string[])last["macs"]) != string.Join(",", (string[])body["macs"]);
         }
 
@@ -160,11 +161,22 @@ namespace Beam
                 if (app.ServerHas("uac-status")) body["uacOnScreen"] = AdminHelper.PromptsOnScreen();
                 // (1.24, Beam 1.31) the web pages this PC serves to the tailnet, for Beam's Sites list (Sites.cs)
                 if (app.ServerHas("sites")) body["sites"] = await Task.Run(() => SiteFinder.Find());
+                // (1.27, Beam 1.35) what HW Blackbox (the user's hardware monitor) says here, where it runs (HwBlackbox.cs)
+                bool hwb = app.ServerHas("hw-blackbox");
+                if (hwb)
+                {
+                    var cfg = app.Cfg;
+                    var h = await Task.Run(() => HwBlackbox.Read(cfg));
+                    if (h != null) body["hwBlackbox"] = h;
+                }
                 if (!force && !Changed(body)) return;
                 bool gone = !body.ContainsKey("battery") && Part(last, "battery") != null;
                 if (gone) body["battery"] = null; // it went away (a UPS unplugged)
+                bool hwbGone = hwb && !body.ContainsKey("hwBlackbox") && Part(last, "hwBlackbox") != null;
+                if (hwbGone) body["hwBlackbox"] = null; // (uninstalled, or its dashboard turned off)
                 await api.Call(HttpMethod.Put, "/api/devices/me/status", body, 20, CancellationToken.None);
                 if (gone) body.Remove("battery");
+                if (hwbGone) body.Remove("hwBlackbox");
                 bool first = lastSent == DateTime.MinValue;
                 lastSent = DateTime.UtcNow;
                 last = body;

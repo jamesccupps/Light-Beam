@@ -28,7 +28,7 @@ function sectionApps() {
   const pcs = appPcs();
   const older = pcs.filter(d => !d.can?.apps);
   return [
-    intro('Your own apps on your PCs: from a GitHub repository’s releases, a file you send, or winget. The first time, each PC asks before Beam installs anything there. Apps go in for the PC’s signed-in user, never as administrator (an installer that needs that asks on the PC).'),
+    intro('Your own apps on your PCs: from a GitHub repository’s releases, a file you send, or winget. The first time, each PC asks before Beam installs anything there. Apps go in for the PC’s signed-in user, never as administrator (an installer that needs that asks on the PC). A PC that has an app already, installed some other way, keeps that one: Beam doesn’t add a second.'),
     appsState.error && el('p', { class: 'warn small' }, appsState.error),
     appsState.apps.length ? listCard('Your apps', appsState.apps.map(appRow), { class: 'set-rows set-list app-list' }) : card('Your apps', cardInfo('No apps yet: add one below.')),
     card('Add an app', ...addAppRows().map(f => el('div', { class: 'set-row' }, f))),
@@ -56,6 +56,8 @@ function appRow(a) {
     where.length > 0 && el('ul', { class: 'plain app-where' }, ...where.map(({ d, s }) => el('li', { class: 'small' },
       el('span', {}, `${d.name}: ${appStateText(s, d)}`),
       s.state === 'installed' && el('button', { class: 'linkish', type: 'button', onclick: () => uninstallApp(a, d) }, 'Uninstall'),
+      // (1.35) the user's Slate, there twice: Beam's copy and another install of it
+      s.state === 'installed' && s.also && el('span', { class: 'warn small app-also' }, `Also installed outside Beam, in ${s.also}: Uninstall removes only Beam’s copy.`),
       // (1.16.1) This PC's own question: the Windows app's window for it
       s.state === 'asked' && d.id === me.id && hostHas('appAsk') && el('button', { class: 'linkish', type: 'button', onclick: () => hostDo('appAsk', { app: a.id }) }, 'Answer…')))),
     el('div', { class: 'dev-actions' },
@@ -71,6 +73,8 @@ function appStateText(s, d) {
   const v = s.version ? ` ${s.version}` : '';
   switch (s.state) {
     case 'installed': return `installed${v}`;
+    // (1.35, the user: "make sure the app isnt already installed") there already, not from Beam: no second copy
+    case 'found': return `already on it${v}, not from Beam (${s.where || 'in Installed apps'}): not installed again`;
     case 'pending': return d.online ? `asked${s.version ? ` (has${v})` : ''}` : 'asked: when it’s online';
     case 'asked': return d.id === me.id ? 'waiting for an answer on this PC' : 'waiting for an answer at the PC (Beam shows the question there)';
     case 'installing': return 'installing…';
@@ -99,7 +103,7 @@ function appOptions(a) {
   if (a.file?.type === 'zip') {
     const input = el('input', { type: 'text', value: a.run || '', placeholder: 'its only .exe, or the one named like the app', 'aria-label': 'The program in the .zip' });
     input.addEventListener('change', () => set({ run: input.value.trim() || null }, 'The program'));
-    out.push(field('The program in the .zip (the Start menu shortcut starts it)', input));
+    out.push(field('The program in the .zip (the Start menu shortcut starts it; a setup program, like Setup.exe, is run instead)', input));
   }
   if (a.file && (a.file.type === 'msi' || (a.file.type === 'exe' && (/setup|install/i.test(a.file.name) || a.args)))) {
     const input = el('input', { type: 'text', value: a.args || '', placeholder: a.file.type === 'msi' ? 'more MSI properties (optional)' : 'for a quiet install, like /S or /VERYSILENT', 'aria-label': 'Switches for its installer' });
