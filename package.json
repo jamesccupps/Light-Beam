@@ -23,11 +23,11 @@
     "qrcode": "^1.5.4"
   },
   "optionalDependencies": {
-    "node-datachannel": "^0.33.4"
+    "node-datachannel": "^0.33.6"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.14.0",
+    "eslint": "^10.15.0",
     "globals": "^17.14.0"
   }
 }
