@@ -14,6 +14,8 @@ another device. **Beam Family** adds your family's own chat, in the spirit of Di
 There are no accounts and no third-party cloud. Your devices reach your Beam privately through
 [Tailscale](https://tailscale.com), at home or away, without opening any ports.
 
+![Beam in a browser: the devices on the left, a conversation with a phone on the right (photos, a PDF, a reply)](docs/images/chat.png)
+
 | Device | How it runs Beam |
 |---|---|
 | **Anything with a browser** (iPhone, Android, Mac, Linux, Chromebook, Windows) | The web app, which installs to the home screen like an app |
@@ -30,8 +32,6 @@ devices only ever take updates you built.
 > phone and a Raspberry Pi (Beam for Linux). The server is plain Node.js and its tests run on Linux (Ubuntu) as well as
 > Windows; macOS should work but hasn't been tested yet, and neither have the systemd unit and the Docker files.
 > Reports and fixes are welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)).
-
-![Beam in a browser: the devices on the left, a conversation with a phone on the right (photos, a PDF, a reply)](docs/images/chat.png)
 
 | On a phone | Your devices | The Windows app: control and sharing |
 |---|---|---|

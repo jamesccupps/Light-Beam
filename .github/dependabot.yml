@@ -1,0 +1,34 @@
+# Dependabot keeps two things current, once a month:
+#
+# - The workflow's actions, pinned by commit SHA (it understands the `# v7.0.1`
+#   comment convention and updates the SHA and the comment together). One pull
+#   request for all of them.
+# - The server's npm packages (qrcode, and the lint toolchain). Minor and patch
+#   updates come as one pull request; a new major version comes on its own. CI's
+#   tests and `npm audit` run on each one.
+#
+# Left out on purpose: the Android app's Gradle dependencies (CI doesn't build the
+# Android app, so their pull requests would arrive untested) and the Docker base
+# image (pinned to be updated deliberately; see the Dockerfile).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "CI"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    versioning-strategy: "increase"
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "Deps"
