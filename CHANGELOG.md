@@ -12,6 +12,15 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## Dependencies (2026-11-18), after 1.35.0
+
+**Versions:** unchanged (server 1.35.0, Windows app 1.27.0, Android app 1.20.1, Beam for Linux 1.6.0); no new release.
+
+- node-datachannel 0.33.6 (Beam Family's direct connections) and eslint 10.15.0, which brings minimatch 11.0.9 (past
+  GHSA-g3hv-75wg-m249; a development dependency only). Dependabot's pull request #4 asked for both.
+- This repository's Dependabot (`.github/dependabot.yml`: the actions and the npm packages, once a month) and the
+  README's screenshot near the top stay.
+
 ## 1.35.0 (2026-11-17): HW Blackbox on a PC's page; no second copy of an app
 
 **Versions:** server 1.35.0, Windows app 1.27.0; the Android app 1.20.1, Beam for Linux 1.6.0 and Beam Family
