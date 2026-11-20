@@ -657,6 +657,13 @@ The server watches for trouble and tells every client:
 - **powerLoss (1.18):** a PC came back on after a power loss or a freeze, a blue screen or a forced power-off (see
   Each PC's history): once per start of Windows, and only when the server learns of it within a day. The text says when
   it went down and came back, and when nobody has signed in on it since (its Beam app isn't running yet).
+  **(1.35.1)** On a PC that runs HW Blackbox (its status has `hwBlackbox`), the text ends with HW Blackbox's report of
+  that power-off (its `powerOff` whose `up` is within 3 minutes of Windows' start): "HW Blackbox's last reading before
+  it went down was at 10:24:22 PM; the power supply then: 12 V rail 12.17 V, 5 V 5.07 V, 3.3 V 3.35 V." While the PC's
+  app is connected and someone has signed in, the alert waits for that report up to 5 minutes (the Windows app 1.27.1
+  sends it within a minute or two of starting), then goes without it. When nobody has signed in yet (the server's own
+  PC at boot), it goes at once, and the report follows as a second `powerLoss` alert, level `info`, when it comes
+  (within 12 hours): "Desktop, back since 7:15 AM: HW Blackbox's last reading …".
 - **(1.17)** An offline alert says why when tailscaled knows ("…: the PC is still on Tailscale, so Beam itself isn't
   running there", "…: Tailscale can't reach it either (off, asleep or without internet)", "…: its Tailscale sign-in has
   run out").

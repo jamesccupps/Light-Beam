@@ -12,6 +12,26 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.35.1 (2026-11-20): HW Blackbox's report in the power-loss alert; steadier tests
+
+**Versions:** server 1.35.1, Windows app 1.27.1; the Android app 1.20.1, Beam for Linux 1.6.0 and Beam Family
+unchanged.
+
+- **A power loss's alert says what HW Blackbox saw:** on a PC that runs HW Blackbox, the alert ends with the last
+  reading before the PC went down and the power supply's last voltages. While the PC's Beam app is running, the alert
+  waits up to 5 minutes for that report; when nobody has signed in yet, the alert goes at once and the report follows
+  as a second, shorter one. The Windows app looks for HW Blackbox every minute after it starts until its dashboard
+  answers, so the report comes within a minute or two.
+- **A file still arriving goes on right after a blip:** the Windows app, saving a big file while its sender is still
+  sending, wakes its download when its connection to Beam is back, instead of waiting out a 15-second pause.
+- **Apps:** an install answered at the PC while the request came again (after a reconnect) no longer asks a second
+  time, and an app found or installed just as the PC reconnected keeps its state on the Apps page.
+- **Tailscale's identity check is asked once more** when tailscaled doesn't answer, and a miss is kept 5 seconds
+  instead of a minute (it held back automatic sign-in from that device meanwhile).
+- **`node server.js stop` waits for a busy Beam:** 2 seconds, then 8 and 20 while something listens on its port.
+- **Tests:** the web runner starts a new browser when the one it had went away (and runs that test once more), instead
+  of failing every test after it.
+
 ## Dependencies (2026-11-18), after 1.35.0
 
 **Versions:** unchanged (server 1.35.0, Windows app 1.27.0, Android app 1.20.1, Beam for Linux 1.6.0); no new release.

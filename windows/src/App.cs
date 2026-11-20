@@ -436,6 +436,9 @@ namespace Beam
             SetConn(Conn.Online, "Connected");
             CatchUp();
             status.OnConnected();
+            // (1.27.1) A file still arriving that this PC saves as it comes: its "more arrived" signals come through this
+            // stream, so one that had caught up when it dropped waited out its pause (15 s) after the blip.
+            foreach (var job in Downloads.Values) if (job.Active && job.Early) job.WakeUp();
         }
 
         void OnDisconnected(string reason)

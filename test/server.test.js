@@ -188,6 +188,8 @@ function fakeTailscale({ self = [], selfInfo = {}, peers = [], whois = {}, serve
       const addr = u.searchParams.get('addr') || '';
       const ip = addr.startsWith('[') ? addr.slice(1, addr.indexOf(']')) : addr.split(':')[0];
       const w = whois[ip];
+      fake.whoisCalls.push(ip);
+      if (fake.failWhois[ip] > 0) { fake.failWhois[ip]--; return reply(500, {}); } // (1.35.1: a busy tailscaled)
       const addresses = (w?.ips || [ip]).map(a => `${a}/${a.includes(':') ? 128 : 32}`);
       const answer = () => (w ? reply(200, { UserProfile: { LoginName: w.login, DisplayName: w.login }, Node: { ComputedName: w.node || 'machine', StableID: w.stableId || `n${ip.replace(/\W/g, '')}`, Addresses: addresses } }) : reply(404, {}));
       return fake.delay ? setTimeout(answer, fake.delay) : answer();
@@ -195,7 +197,7 @@ function fakeTailscale({ self = [], selfInfo = {}, peers = [], whois = {}, serve
     if (u.pathname === '/localapi/v0/serve-config') return reply(200, servePort ? { Web: { 'beam.tail1234.ts.net:443': { Handlers: { '/': { Proxy: `http://127.0.0.1:${servePort}` } } } } } : {});
     reply(404, {});
   });
-  const fake = { socket: where, delay: 0, peers: peers.map(p => ({ ...p, info: { ...p.info } })), selfInfo: { ...selfInfo }, pings, pinged: [], statusCalls: 0, close: () => new Promise(r => server.close(r)) };
+  const fake = { socket: where, delay: 0, peers: peers.map(p => ({ ...p, info: { ...p.info } })), selfInfo: { ...selfInfo }, pings, pinged: [], statusCalls: 0, failWhois: {}, whoisCalls: [], close: () => new Promise(r => server.close(r)) };
   return new Promise(resolve => server.listen(where, () => resolve(fake)));
 }
 
@@ -7728,6 +7730,122 @@ test('AUD (audit 2026-10-04): reactions can’t be object keys; a reinstall need
     assert.equal((await p.req('GET', '/api/me', { headers: pcApp })).status, 200, 'the app signs in with the pairing key');
     assert.equal((await p.req('GET', '/api/me', { headers: pcApp })).status, 200, '...and keeps it as its sign-in');
   } finally { await p.stop(); }
+});
+
+// ---------------------------------------------------------------- 1.35.1
+
+test('1.35.1 a power loss on a PC that runs HW Blackbox: its alert waits for HW Blackbox’s report while the app is connected, says when it really went down and what the power supply read; without it in time, as before; nobody signed in: at once, and the report follows', async () => {
+  const s = await startServer('pl1351', 8796);
+  try {
+    const K = s.key;
+    const pc = app(K, 'hwbpl001351', 'Shop Desktop', 'windows', { 'X-Beam-App-Version': '1.27.1', ...from('100.64.36.2') });
+    const office = app(K, 'office01351', 'Office Desktop', 'windows', { 'X-Beam-App-Version': '1.27.1', ...from('100.64.36.3') });
+    const plain = app(K, 'plainpc1351', 'Robin Laptop', 'windows', { 'X-Beam-App-Version': '1.27.1', ...from('100.64.36.5') });
+    const phone = app(K, 'phone001351', 'Robin Phone', 'android', { 'X-Beam-App-Version': '1.20.1', ...from('100.64.36.4') });
+    for (const h of [pc, office, plain, phone]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    const put = (h, body) => s.req('PUT', '/api/devices/me/status', { headers: json(h), body: JSON.stringify(body) });
+    const powerAlerts = async () => (await s.req('GET', '/api/alerts', { headers: phone })).json.alerts.filter(a => a.kind === 'powerLoss');
+    const clock = ms => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    const H = 3600e3;
+    // Shop Desktop and Office Desktop run HW Blackbox (their last reports: an older power-off)
+    const old = Date.now() - 40 * 86400e3;
+    for (const h of [pc, office]) assert.equal((await put(h, { hwBlackbox: { version: '1.1.3', counts: { ok: 18 }, powerOff: { up: old, down: old - 9000 } } })).status, 204);
+    // 1. back from a power loss with its app connected (someone signed in): no alert yet ...
+    const ev = await openEvents(s.port, pc);
+    await ev.wait('hello');
+    const lost = Date.now() - 20 * 60e3;
+    let r = await post(s, '/api/devices/me/history', { events: [started(lost), unclean(lost + 3000), signedIn(lost + 60e3)] }, pc);
+    assert.equal(r.status, 200, r.body);
+    await waitFor(() => /Shop Desktop is back from a power-off: its alert waits up to 2 s for HW Blackbox's report of it/.test(s.out));
+    assert.equal((await powerAlerts()).length, 0, 'held');
+    // ... until HW Blackbox's report of it comes with the status: one alert, with its last reading and the rails
+    const down = lost - 9200;
+    assert.equal((await put(pc, { hwBlackbox: { version: '1.1.3', counts: { warn: 1, ok: 17 }, powerOff: { up: lost + 20e3, down, rails: { v12: 12.168, v5: 5.07, v33: 3.346 } } } })).status, 204);
+    let pa = await waitFor(async () => { const a = await powerAlerts(); return a.length && a; });
+    assert.equal(pa.length, 1);
+    assert.equal(pa[0].level, 'warn');
+    assert.match(pa[0].text, /^Shop Desktop went down without warning .*\(it lost power or froze\) and started again at [^.]+\. /);
+    assert.ok(pa[0].text.endsWith(` HW Blackbox's last reading before it went down was at ${clock(down)}; the power supply then: 12 V rail 12.17 V, 5 V 5.07 V, 3.3 V 3.35 V.`), pa[0].text);
+    await sleep(2000);
+    assert.equal((await powerAlerts()).length, 1, 'once');
+    // 2. another power loss minutes later, and HW Blackbox's report of it doesn't come in time: the alert goes without
+    // it (the report of the first one isn't taken for it)
+    const lost2 = Date.now() - 60e3;
+    r = await post(s, '/api/devices/me/history', { events: [started(lost2), unclean(lost2 + 3000), signedIn(lost2 + 20e3)] }, pc);
+    assert.equal(r.status, 200, r.body);
+    await waitFor(() => (s.out.match(/Shop Desktop is back from a power-off: its alert waits/g) || []).length === 2);
+    pa = await waitFor(async () => { const a = await powerAlerts(); return a.length === 2 && a; }, 6000);
+    assert.equal(pa[0].device, 'hwbpl001351');
+    assert.doesNotMatch(pa[0].text, /HW Blackbox/);
+    ev.close();
+    // 3. nobody signed in yet (its app isn't running): the alert at once; HW Blackbox's report, when it comes, follows
+    const lost3 = Date.now() - 30 * 60e3;
+    r = await post(s, '/api/devices/me/history', { events: [started(lost3), unclean(lost3 + 3000)] }, office);
+    assert.equal(r.status, 200, r.body);
+    pa = await waitFor(async () => { const a = await powerAlerts(); return a.length === 3 && a; });
+    assert.equal(pa[0].device, 'office01351');
+    assert.match(pa[0].text, /^Office Desktop went down without warning .*Nobody has signed in on it since/);
+    assert.equal((await put(office, { hwBlackbox: { version: '1.1.3', powerOff: { up: lost3 + 15e3, down: lost3 - 5000, rails: { v12: 12.2 } } } })).status, 204);
+    pa = await waitFor(async () => { const a = await powerAlerts(); return a.length === 4 && a; });
+    assert.equal(pa[0].level, 'info');
+    assert.ok(pa[0].text.startsWith('Office Desktop, back since '), pa[0].text);
+    assert.ok(pa[0].text.endsWith(`: HW Blackbox's last reading before it went down was at ${clock(lost3 - 5000)}; the power supply then: 12 V rail 12.20 V.`), pa[0].text);
+    assert.equal((await put(office, { hwBlackbox: { version: '1.1.3', counts: { ok: 18 }, powerOff: { up: lost3 + 15e3, down: lost3 - 5000 } } })).status, 204);
+    await sleep(300);
+    assert.equal((await powerAlerts()).length, 4, 'followed once');
+    // 4. a PC without HW Blackbox: as before, at once
+    const lost4 = Date.now() - 2 * H;
+    const ev2 = await openEvents(s.port, plain);
+    await ev2.wait('hello');
+    r = await post(s, '/api/devices/me/history', { events: [started(lost4), unclean(lost4 + 3000), signedIn(lost4 + 60e3)] }, plain);
+    assert.equal(r.status, 200, r.body);
+    pa = await waitFor(async () => { const a = await powerAlerts(); return a.length === 5 && a; }, 1000);
+    assert.equal(pa[0].device, 'plainpc1351');
+    ev2.close();
+  } finally { await s.stop(); }
+});
+
+test('1.35.1 tailscale whois: no answer once is asked again (automatic sign-in goes on); none twice is no sign-in, as before', async () => {
+  const ts = await fakeTailscale({ whois: { '100.64.37.1': { login: 'alice@example.com', node: 'alice-laptop' }, '100.64.37.2': { login: 'alice@example.com', node: 'alice-phone' } } });
+  const s = await startServer('whois1351', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket } });
+  try {
+    ts.failWhois['100.64.37.1'] = 1;
+    let r = await post(s, '/api/autopair', { client: 'app', platform: 'web', name: 'Alice browser' }, viaServe('100.64.37.1', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+    assert.ok(ts.whoisCalls.filter(ip => ip === '100.64.37.1').length >= 2, 'asked again');
+    assert.doesNotMatch(s.out, /couldn't confirm who 100\.64\.37\.1/);
+    ts.failWhois['100.64.37.2'] = 2;
+    r = await post(s, '/api/autopair', { client: 'app', platform: 'web', name: 'Alice phone' }, viaServe('100.64.37.2', 'alice@example.com'));
+    assert.deepEqual([r.status, r.json.reason], [403, 'whois-unavailable'], r.body);
+    assert.match(s.out, /couldn't confirm who 100\.64\.37\.2/);
+    // a miss isn't kept for a minute: a few seconds later it's asked again, and answered
+    await sleep(5200);
+    r = await post(s, '/api/autopair', { client: 'app', platform: 'web', name: 'Alice phone' }, viaServe('100.64.37.2', 'alice@example.com'));
+    assert.equal(r.status, 200, r.body);
+  } finally { await s.stop(); await ts.close(); }
+});
+
+test('1.35.1 `server.js stop` waits for a Beam that takes longer than 2 s to answer (it used to say "not running" and do nothing)', async () => {
+  const dir = path.join(TMP, 'stop1351');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(dir, 'data'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'data', 'server-id'), 'slowbeam1351');
+  fs.writeFileSync(path.join(dir, 'data', 'key'), 'k'.repeat(64));
+  const asked = [];
+  const slow = http.createServer((req, res) => {
+    asked.push(req.url);
+    const answer = (code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+    if (req.url === '/api/admin/shutdown') { answer(200, { ok: true }); setImmediate(() => { slow.close(); slow.closeAllConnections(); }); return; }
+    if (req.url === '/api/hello') return setTimeout(() => answer(200, { beam: true, serverId: 'slowbeam1351' }), asked.length === 1 ? 3500 : 0);
+    answer(404, {});
+  });
+  await new Promise(r => slow.listen(8797, '127.0.0.1', r));
+  try {
+    const r = await runNode(['stop'], serverEnv(8797, dir), { timeout: 60000 });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /Beam stopped\./);
+    assert.ok(asked.includes('/api/admin/shutdown'), JSON.stringify(asked));
+  } finally { try { slow.close(); slow.closeAllConnections(); } catch {} }
 });
 
 // ---------------------------------------------------------------- 1.35 HW Blackbox, apps found

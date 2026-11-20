@@ -451,7 +451,8 @@ async function blipMidChunk(r) {
   const had = r.partSize();
   r.dropConnections(); // the app's only: the sender goes straight to the server
   r.check(await r.waitFor(() => r.partSize() >= had + 4 * MB, 6000), `it goes on within seconds (had ${had}, now ${r.partSize()})`);
-  r.check(r.count(new RegExp(`down:${id}: waiting for the sender`), from) === 0, 'without waiting for the sender');
+  // (Windows 1.27.1) caught up just as the connection dropped, it may wait once, and is woken when its stream is back
+  r.check(r.count(new RegExp(`down:${id}: waiting for the sender`), from) <= 1, 'without waiting out a pause for the sender');
   r.check((await sending) === 200, 'the chunk arrived whole');
   await r.finishRest(id, data);
   r.check(await r.waitFor(() => r.saved(data), 30000), 'the file is saved complete when the sender finishes');

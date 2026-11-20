@@ -2573,6 +2573,7 @@ async function putStatus(req, res, _m, url) {
     if (changes.commands !== true) cmdStopOf(r => r.pc === device.id, `Commands were turned off on ${device.name}`, 'off');
   }
   checkStatusAlerts(device);
+  if (changes.hwBlackbox) hwbReported(device); // (1.35.1) a power loss's alert may be waiting for it
   persistDevices();
   broadcastDevicesThrottled();
   if (sitesChanged) broadcastSites();
@@ -3173,6 +3174,75 @@ function incidentText(device, e) {
   return `${text}.${e.signedIn ? '' : ' Nobody has signed in on it since, so its Beam app isn’t running yet.'}`;
 }
 
+// (1.35.1) A power loss on a PC that runs HW Blackbox: HW Blackbox's report of that power-off (status
+// hwBlackbox.powerOff: the last reading before it went down, the power supply's last voltages) goes with the alert. The
+// PC's Beam app sends it within a minute or two of its start (Windows 1.27.1), so while the app is connected the alert
+// waits for it, POWERLOSS_HOLD_MS at most. Nobody signed in yet (this server's own PC at boot), or no app connected:
+// the alert goes at once, and the report follows as a short second alert when it comes (within POWERLOSS_FOLLOW_MS).
+const POWERLOSS_HOLD_MS = FAST_TIMEOUTS ? 1500 : 5 * 60_000;
+const POWERLOSS_FOLLOW_MS = 12 * 3600e3;
+const powerLossWaits = new Map(); // device id -> { e, timer?, at }
+
+// HW Blackbox's report of the power-off `e` came back from (its boot within 3 minutes of Windows' start: the same
+// boot, seconds apart; another power-off minutes later is another one), or null.
+function hwbPowerOffFor(device, e) {
+  const p = device.status?.hwBlackbox?.powerOff;
+  return p && Number.isFinite(p.up) && Math.abs(p.up - e.up) <= 3 * 60_000 ? p : null;
+}
+
+function hwbPowerOffText(p) {
+  const r = p.rails || {};
+  const rails = [r.v12 && `12 V rail ${r.v12.toFixed(2)} V`, r.v5 && `5 V ${r.v5.toFixed(2)} V`, r.v33 && `3.3 V ${r.v33.toFixed(2)} V`].filter(Boolean);
+  const at = Number.isFinite(p.down) ? new Date(p.down).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : null;
+  if (!at && !rails.length) return '';
+  return `HW Blackbox's last reading before it went down${at ? ` was at ${at}` : ''}${rails.length ? `${at ? ';' : ':'} the power supply then: ${rails.join(', ')}` : ''}.`;
+}
+
+function sendPowerLoss(device, e, p) {
+  const extra = p ? hwbPowerOffText(p) : '';
+  const text = `${incidentText(device, e)}${extra ? ` ${extra}` : ''}`;
+  if (alertSettings().powerLoss) raiseAlert('powerLoss', device.id, 'warn', text);
+  else log.warn(text);
+}
+
+function powerLossAlert(device, e) {
+  const p = hwbPowerOffFor(device, e);
+  if (p || !device.status?.hwBlackbox) return sendPowerLoss(device, e, p);
+  const connected = [...clients].some(c => c.deviceId === device.id && !c.res.destroyed && !c.res.writableEnded);
+  const before = powerLossWaits.get(device.id);
+  if (before?.timer) { clearTimeout(before.timer); sendPowerLoss(device, before.e, null); } // (another one meanwhile: the first goes as it is)
+  if (connected && e.signedIn) {
+    const timer = setTimeout(() => { powerLossWaits.delete(device.id); sendPowerLoss(device, e, null); }, POWERLOSS_HOLD_MS);
+    powerLossWaits.set(device.id, { e, timer, at: now() });
+    log.info(`${device.name} is back from a power-off: its alert waits up to ${Math.round(POWERLOSS_HOLD_MS / 1000)} s for HW Blackbox's report of it`);
+    return;
+  }
+  sendPowerLoss(device, e, null);
+  powerLossWaits.set(device.id, { e, at: now() });
+}
+
+// A status report with HW Blackbox's findings: the report a waiting (or sent) power-loss alert wants?
+function hwbReported(device) {
+  const w = powerLossWaits.get(device.id);
+  if (!w) return;
+  const p = hwbPowerOffFor(device, w.e);
+  if (!p) {
+    if (!w.timer && now() - w.at > POWERLOSS_FOLLOW_MS) powerLossWaits.delete(device.id);
+    return;
+  }
+  powerLossWaits.delete(device.id);
+  if (w.timer) {
+    clearTimeout(w.timer);
+    sendPowerLoss(device, w.e, p);
+    return;
+  }
+  const text = hwbPowerOffText(p);
+  if (!text || now() - w.at > POWERLOSS_FOLLOW_MS) return;
+  const follow = `${device.name}, back since ${clockText(w.e.up)}: ${text}`;
+  if (alertSettings().powerLoss) raiseAlert('powerLoss', device.id, 'info', follow);
+  else log.info(follow);
+}
+
 // Adds a PC's records to its history; a new power loss, blue screen or forced power-off alerts. Returns how many were new.
 function ingestHistory(device, records) {
   const h = historyOf(device.id);
@@ -3182,9 +3252,7 @@ function ingestHistory(device, records) {
   const { entries } = pcHistory.explain(h.events, [], { at: now(), days: 2 });
   for (const e of pcHistory.alertable(entries, h.alerted, now())) {
     h.alerted = [...h.alerted, `up:${e.up}`].slice(-30);
-    const text = incidentText(device, e);
-    if (alertSettings().powerLoss) raiseAlert('powerLoss', device.id, 'warn', text);
-    else log.warn(text);
+    powerLossAlert(device, e);
   }
   persistHistory();
   return added;
@@ -9955,15 +10023,31 @@ function readKeyFile() {
 }
 
 // The server running on this data folder, if any (answers on the configured port with this folder's id).
-async function runningServer() {
+// patient: (1.35.1) for `stop`: a Beam that takes longer than 2 s to answer while something listens on its port gets
+// 8 s, then 20 s (2026-11-15: on a PC paging hard `stop` said "not running" and did nothing; the deploy went on).
+async function runningServer({ patient = false } = {}) {
   let id;
   try { id = fs.readFileSync(FILE.serverId, 'utf8').trim(); } catch { return false; }
-  try {
-    const hello = await (await fetch(`${LOCAL_URL}/api/hello`, { signal: AbortSignal.timeout(2000) })).json();
-    return hello.beam && hello.serverId === id;
-  } catch {
-    return false;
+  for (const ms of patient ? [2000, 8000, 20000] : [2000]) {
+    try {
+      const hello = await (await fetch(`${LOCAL_URL}/api/hello`, { signal: AbortSignal.timeout(ms) })).json();
+      return hello.beam && hello.serverId === id;
+    } catch {
+      if (!patient || !(await portListening())) return false;
+    }
   }
+  return false;
+}
+
+// Something accepts connections on Beam's port (1 s to connect).
+function portListening() {
+  return new Promise(resolve => {
+    const sock = net.connect({ host: LOCAL_HOST, port: PORT });
+    const done = ok => { sock.destroy(); resolve(ok); };
+    sock.setTimeout(1000, () => done(false));
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+  });
 }
 
 async function localApi(route, options = {}) {
@@ -10135,7 +10219,7 @@ async function commandStop() {
   // stopped. The supervisor clears it when it starts. (Audit B-5 suggested removing it when nothing runs: that would
   // let such a supervisor start Beam again.)
   try { fs.writeFileSync(FILE.stop, String(now())); } catch {}
-  if (!(await runningServer())) {
+  if (!(await runningServer({ patient: true }))) {
     console.log('Beam is not running (the supervisor, if any, will not restart it).');
     return;
   }

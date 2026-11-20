@@ -105,10 +105,23 @@ function removeTmp() {
 }
 
 let browserProc = null;
+let browsers = 0;
+async function startBrowser() {
+  browserProc = await launchBrowser(CDP_PORT, path.join(TMP, browsers++ ? `browser-profile-${browsers}` : 'browser-profile'));
+  ctx.browser = new Browser(CDP_PORT);
+}
+
+// (1.35.1) The browser is still there: it answers, and the runner's connection to it is open.
+async function browserAlive() {
+  try {
+    await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(3000) });
+    return !ctx.browser.conn?.closed;
+  } catch { return false; }
+}
+
 async function main() {
   const started = Date.now();
-  browserProc = await launchBrowser(CDP_PORT, path.join(TMP, 'browser-profile'));
-  ctx.browser = new Browser(CDP_PORT);
+  await startBrowser();
   ctx.srv = await ctx.startServer(8821);
   // Tests of a newer feature (`requires`) are skipped against a server without it.
   ctx.features = new Set((await (await fetch(`${ctx.srv.base}/api/info`, { headers: { Authorization: `Bearer ${ctx.srv.key}` } })).json()).features || []);
@@ -116,8 +129,9 @@ async function main() {
   let passed = 0;
   const failed = [];
   const skipped = [];
-  for (const t of tests) {
-    if (only && !new RegExp(only, 'i').test(t.name)) continue;
+  const queue = tests.filter(t => !only || new RegExp(only, 'i').test(t.name));
+  for (let i = 0; i < queue.length; i++) {
+    const t = queue[i];
     if (t.requires && !ctx.features.has(t.requires)) { skipped.push(t.name); console.log(`  skip  ${t.name} (the server has no ${t.requires})`); continue; }
     const t0 = Date.now();
     const pages = [];
@@ -132,12 +146,23 @@ async function main() {
       passed++;
       console.log(`  ok    ${t.name} (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
     } catch (err) {
-      failed.push(t.name);
-      console.log(`  FAIL  ${t.name} (${((Date.now() - t0) / 1000).toFixed(1)} s)\n        ${String((process.env.BEAM_TEST_STACK && err.stack) || err.message || err).split('\n').join('\n        ')}`);
+      // (1.35.1) The browser went away (headless Edge closed mid-run twice in a week): a new one, and this test once more
+      if (!t.again && !(await browserAlive())) {
+        console.log(`  ...   ${t.name}: the browser went away (${String(err.message || err).split('\n')[0]}): a new one, and this test again`);
+        queue.splice(i + 1, 0, { ...t, again: true });
+      } else {
+        failed.push(t.name);
+        console.log(`  FAIL  ${t.name} (${((Date.now() - t0) / 1000).toFixed(1)} s)\n        ${String((process.env.BEAM_TEST_STACK && err.stack) || err.message || err).split('\n').join('\n        ')}`);
+      }
     } finally {
       ctx.browser.newPage = orig;
       for (const fn of cleanups.reverse()) { try { await fn(); } catch {} }
       for (const p of pages) await p.close().catch(() => {});
+    }
+    if (!(await browserAlive())) {
+      ctx.browser.close();
+      await browserProc.stop().catch(() => {});
+      await startBrowser();
     }
   }
   await ctx.srv.stop();

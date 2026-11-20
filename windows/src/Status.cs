@@ -24,6 +24,8 @@ namespace Beam
         static readonly TimeSpan Refresh = TimeSpan.FromHours(6);    // report unchanged status this often
         readonly App app;
         readonly Timer timer;          // every minute on battery-powered PCs (battery changes), else every 15 minutes
+        readonly Timer hwbSoon = new Timer(); // (1.27.1) every minute while HW Blackbox's dashboard hasn't answered yet
+        DateTime hwbUntil;
         DateTime lastSent = DateTime.MinValue, lastChecked = DateTime.MinValue;
         Dictionary<string, object> last; // the last report the server took
         bool unsupported;              // the server has no status endpoint (older than 1.3): until the next connect
@@ -35,6 +37,8 @@ namespace Beam
             this.app = app;
             timer = new Timer();
             timer.Tick += (s, e) => Tick();
+            hwbSoon.Interval = 60 * 1000;
+            hwbSoon.Tick += (s, e) => HwbSoon();
         }
 
         public void OnConnected()
@@ -47,11 +51,33 @@ namespace Beam
             timer.Start();
             // A reconnect after a short blip needs no report unless something changed; after an hour it gets one.
             Report("connect", DateTime.UtcNow - lastSent > TimeSpan.FromHours(1));
+            // (1.27.1) HW Blackbox's dashboard starts with the session, as Beam does: until it answers (15 minutes at most), a
+            // look every minute, and its report goes out at once (after a power loss the server holds the alert for it).
+            if (app.ServerHas("hw-blackbox") && !HwBlackbox.Answered)
+            {
+                var cfg = app.Cfg;
+                Task.Run(() => HwBlackbox.Configured(cfg)).ContinueWith(t =>
+                {
+                    if (t.Status != TaskStatus.RanToCompletion || !t.Result) return;
+                    app.Post(() =>
+                    {
+                        hwbUntil = DateTime.UtcNow + TimeSpan.FromMinutes(15);
+                        hwbSoon.Start();
+                    });
+                });
+            }
+        }
+
+        void HwbSoon()
+        {
+            if (HwBlackbox.Answered || DateTime.UtcNow > hwbUntil || app.Conn != Conn.Online || unsupported) { hwbSoon.Stop(); return; }
+            Report("hw-blackbox", false); // (sent only when something changed: its findings arriving do)
         }
 
         public void Stop()
         {
             timer.Stop();
+            hwbSoon.Stop();
             Forget(); // signed out or revoked: the next sign-in reports afresh
         }
 

@@ -82,6 +82,9 @@ namespace Beam
         const string UninstallRoot = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\";
         readonly App app;
         readonly HashSet<string> busy = new HashSet<string>();
+        // (1.27.1) answered at this PC, its install not started yet (the catalog being read): a request sent again meanwhile
+        // (the server re-sends pending ones at a reconnect) asked a second time, and that question stayed
+        readonly HashSet<string> starting = new HashSet<string>();
         public readonly List<AppAsk> Asks = new List<AppAsk>();
         AppAskForm askForm;
 
@@ -110,7 +113,7 @@ namespace Beam
         public async void OnInstall(Dictionary<string, object> d)
         {
             string id = Json.Str(d, "id");
-            if (!ValidId(id) || app.Api == null || busy.Contains(id)) return;
+            if (!ValidId(id) || app.Api == null || busy.Contains(id) || starting.Contains(id)) return;
             Dictionary<string, object> info;
             try { info = await Catalog(id); }
             catch (Exception ex) { Log.Write("Apps: couldn't read Beam's apps (" + Api.Describe(ex) + ")"); return; }
@@ -140,6 +143,7 @@ namespace Beam
                 }
                 if (have != null) { Cfg.InstalledApps.Remove(have); Cfg.Save(); } // (gone since: Beam may install it now)
             }
+            if (busy.Contains(id) || starting.Contains(id)) return; // (1.27.1: answered or started while this looked)
             if (!Cfg.AppsAllowed)
             {
                 Ask(id, info, by);
@@ -255,6 +259,16 @@ namespace Beam
                 else if (look.Also != null) o["also"] = look.Also;
                 list.Add(o);
             }
+            // (1.27.1) found or installed while this looked: as they are (left out, the server took back their own report)
+            foreach (var a in Cfg.InstalledApps.Where(x => !mine.Contains(x)).ToList())
+            {
+                if (a.Kind == "found" && !found) continue;
+                var o = new Dictionary<string, object>();
+                o["id"] = a.Id;
+                o["version"] = a.Version;
+                if (a.Kind == "found") { o["found"] = true; o["where"] = a.Dir; }
+                list.Add(o);
+            }
             if (changed) Cfg.Save();
             var body = new Dictionary<string, object>();
             body["apps"] = list.ToArray();
@@ -364,11 +378,17 @@ namespace Beam
             if (choice == "always") SetAllowed(true, "the question on this PC");
             Dictionary<string, object> info = null;
             string unread = null;
-            try { info = await Catalog(id); }
-            catch (Exception ex) { unread = "couldn't read Beam's apps: " + Api.Describe(ex); }
-            if (unread != null) { await Report(id, "failed", null, unread); return; }
-            if (info == null) return;
-            await Install(id, info, ask.By);
+            starting.Add(id);
+            try
+            {
+                try { info = await Catalog(id); }
+                catch (Exception ex) { unread = "couldn't read Beam's apps: " + Api.Describe(ex); }
+                if (unread != null) { await Report(id, "failed", null, unread); return; }
+                if (info == null) return;
+                starting.Remove(id); // (Install marks it busy itself)
+                await Install(id, info, ask.By);
+            }
+            finally { starting.Remove(id); }
             // (Always allow: the others waiting go too)
             if (choice == "always") foreach (var other in Asks.ToList()) Answer(other.Id, "install");
         }

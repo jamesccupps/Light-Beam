@@ -22,7 +22,9 @@ namespace Beam
     static class HwBlackbox
     {
         const int ChecksMax = 12, TitleMax = 80, SummaryMax = 300;
-        static readonly TimeSpan Fresh = TimeSpan.FromMinutes(10), Retry = TimeSpan.FromMinutes(2), Grace = TimeSpan.FromMinutes(30);
+        // (1.27.1) Soon: its dashboard is set up here but didn't answer (it starts with the session, as Beam does): looked
+        // for again within a minute, and the status goes out as soon as it answers (a power loss's alert waits for it)
+        static readonly TimeSpan Fresh = TimeSpan.FromMinutes(10), Retry = TimeSpan.FromMinutes(2), Grace = TimeSpan.FromMinutes(30), Soon = TimeSpan.FromSeconds(50);
         static readonly object gate = new object();
         static DateTime nextRead = DateTime.MinValue, lastGood = DateTime.MinValue;
         static string readFrom;
@@ -57,10 +59,21 @@ namespace Beam
                 else if (got == null && why != null && !missing) Log.Write("HW Blackbox: couldn't read its dashboard (" + why + ")");
                 missing = got == null && why != null;
                 if (got != null) lastGood = DateTime.UtcNow;
-                nextRead = DateTime.UtcNow + (got == null && why != null ? Retry : Fresh);
+                nextRead = DateTime.UtcNow + (got != null || url == null ? Fresh : why != null ? Retry : Soon);
                 last = got;
                 return got;
             }
+        }
+
+        // (1.27.1) HW Blackbox is set up here (its settings say where its dashboard is), and whether it has answered.
+        public static bool Configured(Config cfg)
+        {
+            return BaseUrl(cfg) != null;
+        }
+
+        public static bool Answered
+        {
+            get { lock (gate) return last != null; }
         }
 
         static string Version(Dictionary<string, object> d)

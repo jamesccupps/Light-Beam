@@ -2,7 +2,8 @@
 // Beam for Windows 1.27 (server 1.35): HW Blackbox on a PC's page. Where HW Blackbox (the user's hardware monitor)
 // runs, the PC's app reads its dashboard on 127.0.0.1 and sends a summary with its status: its version, the Diagnose
 // findings that aren't fine (most serious first), the last power-off with the power supply's last readings. A program
-// on that port that isn't HW Blackbox gives nothing. Exits 1 if a check fails.
+// on that port that isn't HW Blackbox gives nothing; (1.27.1) a dashboard that isn't up yet at the connect is looked for
+// every minute, and its report goes out as soon as it answers. Exits 1 if a check fails.
 //
 //   node test/perf/windows-hwblackbox.mjs [--exe <Beam.exe>] [--keep]
 //
@@ -19,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
-const PORT = 8806, DASH = 8807;
+const PORT = 8806, DASH = 8807, LATE = 8808;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const args = process.argv.slice(2);
 const exeArg = args.indexOf('--exe');
@@ -59,15 +60,16 @@ const overview = {
   ],
 };
 
-async function startDash() {
-  dash = http.createServer((req, res) => {
+async function startDash(port = DASH) {
+  const server = http.createServer((req, res) => {
     asked.push(`${req.method} ${req.url} ${req.headers.host}`);
     const body = req.url === '/api/ping' ? { app: who, version: '1.1.3', pid: 1, user: 'robin' } : req.url === '/api/diagnose' ? diagnose : req.url === '/api/overview' ? overview : null;
     if (!body) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
   });
-  await new Promise(r => dash.listen(DASH, '127.0.0.1', r));
+  await new Promise(r => server.listen(port, '127.0.0.1', r));
+  return server;
 }
 
 async function startServer() {
@@ -112,7 +114,7 @@ try {
   if (!EXE) throw new Error('No Beam.exe: build with windows\\build.cmd or pass --exe');
   fs.copyFileSync(EXE, appExe);
   console.log(`Beam: ${EXE}\ntemp: ${TMP}`);
-  await startDash();
+  dash = await startDash();
   await startServer();
   key = fs.readFileSync(dir('data/key'), 'utf8').trim();
   check((await (await fetch(`${base}/api/info`, { headers: H() })).json()).features?.includes('hw-blackbox'), 'the server knows hw-blackbox');
@@ -146,6 +148,22 @@ try {
   check(!!(await other.waitLog(/Status sent/)), '...and sends its status');
   check((await statusOf(other.id))?.hwBlackbox === undefined, '...with nothing about HW Blackbox (that port isn\'t HW Blackbox\'s)');
   await other.quit();
+
+  // 3. (1.27.1) HW Blackbox set up, its dashboard not up yet at the connect (it starts with the session, as Beam does):
+  // looked for every minute, and the status goes out as soon as it answers (a power loss's alert waits for it)
+  who = 'hw-blackbox-dashboard';
+  const late = await startPc('Late PC', { testHwbUrl: `http://127.0.0.1:${LATE}` });
+  check(!!(await late.waitLog(/Status sent \(connect\)/)), 'a PC whose HW Blackbox isn\'t up yet connects and sends its status');
+  check((await statusOf(late.id))?.hwBlackbox === undefined, '...without HW Blackbox\'s findings');
+  await sleep(10000);
+  const lateDash = await startDash(LATE);
+  const upAt = Date.now();
+  let h2;
+  for (const until = Date.now() + 90000; Date.now() < until && !h2; await sleep(500)) h2 = (await statusOf(late.id))?.hwBlackbox;
+  check(h2?.version === '1.1.3' && Date.now() - upAt < 75000, `...they arrive once its dashboard answers, within about a minute (${Math.round((Date.now() - upAt) / 1000)} s)`);
+  check(!!(await late.waitLog(/Status sent \(hw-blackbox\)/, 5000)), '...sent for that ("Status sent (hw-blackbox)")');
+  await late.quit();
+  lateDash.close();
 } catch (err) {
   check(false, `the run: ${err.stack || err}`);
 } finally {

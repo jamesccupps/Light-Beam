@@ -142,6 +142,7 @@ async function wsConn(wsUrl) {
   ws.addEventListener('close', lost);
   ws.addEventListener('error', lost);
   return {
+    get closed() { return gone !== null; },
     send: (method, params = {}) => new Promise((resolve, reject) => {
       if (gone) return reject(gone);
       const i = ++id;
