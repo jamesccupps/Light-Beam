@@ -801,7 +801,10 @@ const BUDGETS = [
   // 1.5 phone.js and 1.6 remote.js grew the first open from ~114 to ~151 KB, 1.8–1.12 to 174–180; 1.12.2 loads remote.js
   // only for #remote= (its own page): 140 KB. 1.21–1.29 (apps, the Settings remake, shared folders like Explorer, the
   // text size) to ~157 without the apple-touch-icon (the audit of 2026-10-29, which left it out: no page loads it).
-  ['static', 'first open: compressed KB', r => r.static?.['sent KB (compressed)'], '<=', 170],
+  // (1.35.2, the audit of 2026-11-21) 1.31–1.35 (Sites, Commands, the alerts inbox, Notes, HW Blackbox) to ~181: raised
+  // on purpose to 195 (the first screen is still 183 ms cold); loading settings.js, commands.js, sites.js and inbox.js
+  // when first opened is an idea for later.
+  ['static', 'first open: compressed KB', r => r.static?.['sent KB (compressed)'], '<=', 195],
   ['keepalive', 'connection reused after 30 s idle', r => (row(r.keepalive, 'idle before request', '30 s')?.['connection reused'] === 'yes' ? 1 : row(r.keepalive, 'idle before request', '30 s') ? 0 : undefined), '>=', 1],
 ];
 

@@ -445,8 +445,8 @@ async function startAlertsPage() {
   }
   if (!serverHas('inbox')) return alertsPageSays('This Beam has no Alerts yet (that needs Beam 1.33).');
   if (!inboxFeature()) return alertsPageSays('Only an approved device sees the alerts: approve this one in Beam on a PC (Settings → Devices).');
-  const close = el('button', { class: 'btn primary', type: 'button', onclick: () => $('#genDlg').close() }, 'Close');
-  openDialog({ title: 'Alerts', className: 'inbox-dlg', body: [el('div', { id: 'inboxPage', class: 'inbox-list-page' })], buttons: [close],
+  // (1.35.2, the audit's finding 11) closed by its x alone (a Close button below it was a second way, side by side)
+  openDialog({ title: 'Alerts', className: 'inbox-dlg', body: [el('div', { id: 'inboxPage', class: 'inbox-list-page' })],
     onClose: how => { if (how !== 'replaced') location.replace(BASE.pathname); } });
   alertsBox.open = true;
   await loadInbox();

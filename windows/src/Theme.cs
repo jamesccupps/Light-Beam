@@ -191,6 +191,7 @@ namespace Beam
             GClose = "", GRetry = "", GImage = "", GVideo = "", GAudio = "", GZip = "",
             GLink = "", GMore = "", GClip = "", GPeople = "";
 
+        public const string GNote = "\uE70B"; // (1.27.2) QuickNote: Notes in the Send to picker
         public const string GQr = "";
 
         public static void Init()

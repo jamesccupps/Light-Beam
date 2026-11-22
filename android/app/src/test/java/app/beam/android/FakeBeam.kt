@@ -111,6 +111,14 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     val reactionCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
     val edits = CopyOnWriteArrayList<Pair<String, String>>()
 
+    /** (1.20.2) A long text's whole words (`GET /api/items/{id}/text`), and whether that fails (500) for now. */
+    val fullTexts = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile var textFails = false
+    val textRequests = CopyOnWriteArrayList<String>()
+
+    /** (1.20.2) What `GET /api/settings` answers (null: as before, not found). */
+    @Volatile var settingsGet: JSONObject? = null
+
     /** (1.20, server 1.34) Each `PATCH /api/items/{id} { done }` (item, done). */
     val dones = CopyOnWriteArrayList<Pair<String, Boolean>>()
 
@@ -292,6 +300,20 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
                 json(ex, 204, "")
                 send("devices", JSONObject().put("devices", devices))
             }
+            path.startsWith("/api/items/") && path.endsWith("/text") && method == "GET" -> {
+                val id = path.removePrefix("/api/items/").removeSuffix("/text")
+                textRequests += id
+                val words = fullTexts[id]
+                if (textFails) json(ex, 500, JSONObject().put("error", "The server had a problem"))
+                else if (words == null) json(ex, 404, JSONObject().put("error", "Not found"))
+                else {
+                    val bytes = words.toByteArray()
+                    ex.responseHeaders.set("Content-Type", "text/plain; charset=utf-8")
+                    ex.sendResponseHeaders(200, bytes.size.toLong())
+                    ex.responseBody.use { it.write(bytes) }
+                }
+            }
+            path == "/api/settings" && method == "GET" && settingsGet != null -> json(ex, 200, settingsGet!!)
             path == "/api/settings" && method == "PATCH" && "appearance" in features -> {
                 val body = JSONObject(ex.requestBody.readBytes().decodeToString())
                 appearance = body.optJSONObject("appearance")

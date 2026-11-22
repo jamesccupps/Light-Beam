@@ -96,6 +96,7 @@ namespace Beam
         readonly Dictionary<string, ApproveForm> approvals = new Dictionary<string, ApproveForm>();
         readonly HashSet<string> dismissedLogins = new HashSet<string>();
         bool switchingServer, updateChecked, updating, restored, signInOffered;
+        string updateWaitLogged; // (1.27.2) what the waiting update last said it waits for: said once, not every 30 s
         DateTime? offlineSince;
         DateTime lastRediscovery = DateTime.MinValue;
         UpdateInfo pendingUpdate;
@@ -1593,9 +1594,10 @@ namespace Beam
             if (u == null || updating || quitting || Api == null) return;
             if (TransfersBusy() || Rc.HoldsUpdate || Kvm.Away || remoteViews.Count > 0 || Commands.Running > 0)
             {
-                Log.Write("Update " + u.Version + " waits until " + (Rc.HoldsUpdate ? (Rc.Kvm ? "the keyboard and mouse of " + Rc.ViewerName + " go back to it" : "the remote control session ends")
+                string line = "Update " + u.Version + " waits until " + (Rc.HoldsUpdate ? (Rc.Kvm ? "the keyboard and mouse of " + Rc.ViewerName + " go back to it" : "the remote control session ends")
                     : Kvm.Away ? "this PC's keyboard and mouse are back from the PC beside it" : remoteViews.Count > 0 ? "the remote control windows close"
-                    : Commands.Running > 0 ? "the commands from other devices end" : "transfers finish"));
+                    : Commands.Running > 0 ? "the commands from other devices end" : "transfers finish");
+                if (line != updateWaitLogged) { Log.Write(line); updateWaitLogged = line; }
                 SetUpdateState("waiting", u.Version, null);
                 updateRetryTimer.Interval = 30000;
                 updateRetryTimer.Start();
@@ -1612,6 +1614,7 @@ namespace Beam
                 return;
             }
             updating = true;
+            if (updateWaitLogged != null) { Log.Write("Update " + u.Version + ": nothing to wait for now"); updateWaitLogged = null; }
             SetUpdateState("downloading", u.Version, null);
             try
             {
@@ -1783,6 +1786,7 @@ namespace Beam
         public string NamesOf(List<string> to)
         {
             if (to == null || to.Count == 0) return "all devices";
+            if (to.Count == 1 && to[0] == Me) return "Notes"; // (1.27.2) a message to this PC itself is a note
             var names = to.Select(NameOf).ToList();
             return names.Count <= 2 ? string.Join(" and ", names) : names[0] + ", " + names[1] + " +" + (names.Count - 2);
         }
@@ -3185,6 +3189,8 @@ namespace Beam
                 if (DeviceById(t) != null) { to.Add(t); continue; }
                 var byName = DeviceByName(t);
                 if (byName != null) { to.Add(byName.Id); continue; }
+                // (1.27.2) "notes": this PC itself (a note), unless a device is named so (as the server reads it)
+                if (t.Equals("notes", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(Me)) { to.Add(Me); continue; }
                 // The device list may not be loaded yet; ids are accepted by the server as they are.
                 if (Config.ValidId(t)) { to.Add(t); continue; }
                 return null;
@@ -3503,6 +3509,12 @@ namespace Beam
                 var mi = new ToolStripMenuItem(d.Name + (d.Online ? "" : "  (offline)"), MenuRenderer.Dot(d.Online ? Theme.Online : Theme.Offline), (s, e) => SendClipboardTo(new List<string> { id }));
                 mi.Tag = id;
                 clip.DropDownItems.Add(mi);
+            }
+            if (!string.IsNullOrEmpty(Me) && ServerHas("notes")) // (1.27.2) Notes: this PC itself
+            {
+                string self = Me;
+                clip.DropDownItems.Add(new ToolStripSeparator());
+                clip.DropDownItems.Add(new ToolStripMenuItem("Notes", null, (s, e) => SendClipboardTo(new List<string> { self })));
             }
             menu.Items.Add(clip);
             if (last != null)

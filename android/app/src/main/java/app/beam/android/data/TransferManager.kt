@@ -15,6 +15,7 @@ import app.beam.android.core.Format
 import app.beam.android.core.Item
 import app.beam.android.core.NoRoomException
 import app.beam.android.core.SourceChangedException
+import app.beam.android.core.SourceUnreadableException
 import app.beam.android.core.TransferCancelledException
 import app.beam.android.core.TransferPausedException
 import app.beam.android.core.UploadSource
@@ -379,7 +380,7 @@ class TransferManager(private val app: BeamApp) {
                 else -> {
                     val message = Format.error(e)
                     val offline = e is IOException && e !is FileNotFoundException && e !is SourceChangedException &&
-                        e !is NoRoomException && !Format.noSpace(e)
+                        e !is SourceUnreadableException && e !is NoRoomException && !Format.noSpace(e)
                     // (1.16, the review's M7) It waits for a connection: a copy of its own while Beam may still read the file.
                     if (offline) keepACopy(localId)
                     if (localId in cancelledUploads) {

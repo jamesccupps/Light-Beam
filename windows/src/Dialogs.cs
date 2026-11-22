@@ -373,10 +373,14 @@ namespace Beam
         }
     }
 
-    // Small popup listing All devices + each device. Click (or 1–9) sends to one; tick several (Ctrl+click,
+    // Small popup listing All devices + each device (+ Notes, 1.27.2). Click (or 1–9) sends to one; tick several (Ctrl+click,
     // Space) to send to all of them at once. The last choice is highlighted next time (never All devices).
     class TargetPicker : Form
     {
+        // (1.27.2) Notes: a message to this PC itself. Its own row, last (the devices keep their number keys); ticked
+        // alone, like All devices (a message to this PC and another isn't a note).
+        const string NotesKey = "notes";
+
         readonly App app;
         readonly string title, what;
         readonly Action<List<string>> onPick;
@@ -402,6 +406,7 @@ namespace Beam
         {
             string key = keys[i];
             if (key == "*") return "All devices" + (ticked.Contains(key) ? ", ticked" : "");
+            if (key == NotesKey) return "Notes" + (ticked.Contains(key) ? ", ticked" : "");
             var d = app.DeviceById(key);
             return app.NameOf(key) + (d != null && d.Online ? ", online" : ", offline") + (ticked.Contains(key) ? ", ticked" : "");
         }
@@ -477,10 +482,11 @@ namespace Beam
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
             keys.Add("*");
             foreach (var d in app.OtherDevices()) keys.Add(d.Id);
+            if (!string.IsNullOrEmpty(app.Me) && app.ServerHas("notes")) keys.Add(NotesKey);
             // Highlight the last device used (never All devices); tick it again if it was several.
             var last = app.LastTargets();
             if (last != null && last.Count > 1) foreach (var t in last) if (keys.Contains(t)) ticked.Add(t);
-            string first = last != null && last.Count > 0 ? last[0] : null;
+            string first = last != null && last.Count > 0 ? (last.Count == 1 && last[0] == app.Me ? NotesKey : last[0]) : null;
             sel = first != null && keys.Contains(first) ? keys.IndexOf(first) : (keys.Count > 1 ? 1 : 0);
             Relayout();
         }
@@ -534,7 +540,7 @@ namespace Beam
             if (ticked.Contains(k)) ticked.Remove(k);
             else
             {
-                if (k == "*") ticked.Clear(); else ticked.Remove("*");
+                if (k == "*" || k == NotesKey) ticked.Clear(); else { ticked.Remove("*"); ticked.Remove(NotesKey); }
                 ticked.Add(k);
             }
             sel = i;
@@ -566,12 +572,13 @@ namespace Beam
         void Pick(int i)
         {
             if (i < 0 || i >= keys.Count) return;
-            Finish(keys[i] == "*" ? new List<string>() : new List<string> { keys[i] });
+            Finish(keys[i] == "*" ? new List<string>() : keys[i] == NotesKey ? new List<string> { app.Me } : new List<string> { keys[i] });
         }
 
         void PickTicked()
         {
             if (ticked.Contains("*")) { Finish(new List<string>()); return; }
+            if (ticked.Contains(NotesKey)) { Finish(new List<string> { app.Me }); return; }
             Finish(keys.Where(k => ticked.Contains(k)).ToList());
         }
 
@@ -631,7 +638,7 @@ namespace Beam
                 if (i == sel) Ui.FillRound(g, Theme.Hover, r, Ui.S(8));
                 string key = keys[i];
                 var d = app.DeviceById(key);
-                bool all = key == "*";
+                bool all = key == "*", notes = key == NotesKey;
                 var box = BoxRect(r);
                 if (ticked.Contains(key))
                 {
@@ -641,19 +648,19 @@ namespace Beam
                 else Ui.DrawRound(g, i == sel ? Theme.Text2 : Theme.Text3, box, Ui.S(4), 1f);
                 var av = new Rectangle(box.Right + Ui.S(10), r.Y + (r.Height - Ui.S(30)) / 2, Ui.S(30), Ui.S(30));
                 Ui.FillCircle(g, all ? Theme.Accent : Theme.Surface2, av);
-                Ui.Glyph(g, all ? Ui.GPeople : Ui.PlatformGlyph(d != null ? d.Platform : null), Ui.IconFont(13), av, all ? Theme.AccentText : Theme.Text2);
+                Ui.Glyph(g, all ? Ui.GPeople : notes ? Ui.GNote : Ui.PlatformGlyph(d != null ? d.Platform : null), Ui.IconFont(13), av, all ? Theme.AccentText : Theme.Text2);
                 int tx = av.Right + Ui.S(10);
                 bool online = d != null && d.Online;
                 int dotX = r.Right - Ui.S(38);
-                Ui.Text(g, app.NameOf(key), Ui.Font, new Rectangle(tx, r.Y, dotX - tx - Ui.S(10), r.Height), Theme.Text, Ui.Line);
-                if (!all) Ui.FillCircle(g, online ? Theme.Online : Theme.Offline, new Rectangle(dotX, r.Y + r.Height / 2 - Ui.S(4), Ui.S(8), Ui.S(8)));
+                Ui.Text(g, notes ? "Notes" : app.NameOf(key), Ui.Font, new Rectangle(tx, r.Y, dotX - tx - Ui.S(10), r.Height), Theme.Text, Ui.Line);
+                if (!all && !notes) Ui.FillCircle(g, online ? Theme.Online : Theme.Offline, new Rectangle(dotX, r.Y + r.Height / 2 - Ui.S(4), Ui.S(8), Ui.S(8)));
                 if (i < 9) Ui.Text(g, (i + 1).ToString(), Ui.Small, new Rectangle(r.Right - Ui.S(22), r.Y, Ui.S(14), r.Height), Theme.Text3, Ui.Center);
             }
             if (ticked.Count > 0)
             {
                 var b = SendButtonRect();
                 Ui.FillRound(g, Theme.Accent, b, Ui.S(8));
-                string label = ticked.Contains("*") ? "Send to all devices" : "Send to " + ticked.Count + (ticked.Count == 1 ? " device" : " devices");
+                string label = ticked.Contains("*") ? "Send to all devices" : ticked.Contains(NotesKey) ? "Keep in Notes" : "Send to " + ticked.Count + (ticked.Count == 1 ? " device" : " devices");
                 Ui.Text(g, label, Ui.Bold, b, Theme.AccentText, Ui.Center);
             }
             else

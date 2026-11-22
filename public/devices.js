@@ -298,7 +298,7 @@ function hwbSection(d) {
   const c = h.counts || {};
   const checks = Array.isArray(h.checks) ? h.checks : [];
   const p = h.powerOff;
-  const rows = checks.map(x => el('li', { class: x.level === 'info' ? '' : 'warn-row' },
+  const rows = checks.map(x => el('li', { class: x.level === 'bad' ? 'warn-row bad-row' : x.level === 'info' ? '' : 'warn-row' },
     icon(HWB_ICON[x.level] || 'eye'),
     el('span', { class: 'alert-text history-text' }, el('span', {}, x.title), x.summary && el('span', { class: 'muted small' }, x.summary)),
     el('span', { class: 'muted small' }, HWB_LEVEL[x.level] || '')));

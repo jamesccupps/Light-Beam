@@ -54,11 +54,15 @@ try {
   $env:BEAM_LOCAL_URLS = $base; $env:BEAM_TEST_PEERS = $base
   $appPid = (Start-Process -FilePath $appExe -ArgumentList @('--config', "`"$cfg`"", '--background') -PassThru).Id
   Start-Sleep -Seconds 5
+  # (1.35.2, the audit's finding 16) connects counted from here: a first start swaps the sign-in made here for its own and
+  # opens its stream again a second later (two "Events: connected" lines before any check)
+  $settled = Connects
+  Check ($settled -ge 1 -and $settled -le 2) "connected once its start settled (connects so far: $settled)"
 
   $s = @(Streams)
   Check ($s.Count -eq 1 -and $s[0].mode -eq 'background' -and [int]$s[0].ping -eq 180) "opens in background mode with a 180 s ping ($($s.mode) $($s.ping))"
   Fwd @('--test-poke'); Start-Sleep -Seconds 2
-  Check ((Select-String -Path $log -Pattern 'Events: the stream is fine after a test poke' -Quiet) -and (Connects) -eq 1) 'a poke keeps the stream'
+  Check ((Select-String -Path $log -Pattern 'Events: the stream is fine after a test poke' -Quiet) -and (Connects) -eq $settled) 'a poke keeps the stream'
   Fwd @('--test-mode', 'foreground'); Start-Sleep -Seconds 2
   $s = @(Streams)
   Check ($s.Count -eq 1 -and $s[0].mode -eq 'foreground' -and [int]$s[0].ping -eq 25) "switches to foreground (ping 25 s) on the same stream ($($s.mode) $($s.ping))"
@@ -69,7 +73,7 @@ try {
   Write-Host "     waiting $HoldSec s with no data expected on the stream..."
   Start-Sleep -Seconds $HoldSec
   $s = @(Streams)
-  Check ((Connects) -eq 1 -and $s.Count -eq 1) "no reconnect $HoldSec s after switching back (connections: $(Connects))"
+  Check ((Connects) -eq $settled -and $s.Count -eq 1) "no reconnect $HoldSec s after switching back (connections: $(Connects), $settled at the start)"
   Check (-not (Select-String -Path $log -Pattern 'nothing received for' -Quiet)) 'the watchdog never fired'
 } catch {
   $failures += $_.Exception.Message

@@ -115,7 +115,10 @@ class MainActivity : BaseActivity() {
                 }
             }
         }
-        adapter = ConversationAdapter(this, { startActivity(ThreadActivity.intent(this, it.key)) }, ::conversationMenu)
+        adapter = ConversationAdapter(this, {
+            // (1.20.2) the Alerts row opens the list (#alerts), as the menu's Alerts does
+            if (it.isAlerts) startActivity(FilesActivity.alertsIntent(this)) else startActivity(ThreadActivity.intent(this, it.key))
+        }, ::conversationMenu)
         b.list.layoutManager = LinearLayoutManager(this)
         b.list.adapter = adapter
         b.refresh.setColorSchemeColors(themeColor(R.attr.beamAccent))
@@ -134,13 +137,19 @@ class MainActivity : BaseActivity() {
         }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                combine(app.repo.state, app.prefs.lastRead) { s, read -> s to Conversations.summaries(s.me, s.devices, s.items, read, s.notesOn) }
+                combine(app.repo.state, app.prefs.lastRead, app.appAlerts.row) { s, read, alerts -> Triple(s, Conversations.summaries(s.me, s.devices, s.items, read, s.notesOn), alerts) }
                     .flowOn(Dispatchers.Default) // the summaries go over every item: not on the main thread
                     .conflate()
-                    .collect { (s, list) ->
+                    .collect { (s, list, alerts) ->
                         adapter.me = s.me
                         adapter.muted = app.prefs.mutedDevices
-                        adapter.submitList(list)
+                        // (1.20.2, the 2026-11-21 audit) The Alerts row, after All devices (as on the web and Windows)
+                        val shown = if (alerts != null && s.info?.lists(AppAlerts.FEATURE) == true && list.isNotEmpty()) {
+                            list.toMutableList().apply {
+                                add(1, Conversations.Summary(Conversations.ALERTS, getString(R.string.alerts), null, false, alerts.at, true, null, alerts.unread, alerts.line))
+                            }
+                        } else list
+                        adapter.submitList(shown)
                         b.empty.isVisible = s.loaded && list.size == 1 && list[0].last == null
                         if (s.loaded && b.refresh.isRefreshing && !manualRefresh) b.refresh.isRefreshing = false
                         b.toolbar.subtitle = when (s.conn) {
@@ -358,12 +367,13 @@ class ConversationAdapter(
         val ctx = b.root.context
         holder.key = s.key
         b.title.text = if (s.isAll) ctx.getString(R.string.all_devices) else if (s.isNotes) ctx.getString(R.string.notes) else s.name
-        b.avatar.setImageResource(if (s.isNotes) R.drawable.ic_note else platformIcon(s.platform, s.isAll))
+        b.avatar.setImageResource(if (s.isNotes) R.drawable.ic_note else if (s.isAlerts) R.drawable.ic_ring else platformIcon(s.platform, s.isAll))
         b.onlineDot.isVisible = s.online
         b.muted.isVisible = s.key in muted
-        b.time.text = s.last?.let { Format.relative(it.ts) }.orEmpty()
+        b.time.text = s.last?.let { Format.relative(it.ts) } ?: (if (s.isAlerts && s.lastSeen > 0) Format.relative(s.lastSeen) else "")
         val last = s.last
         b.preview.text = when {
+            s.isAlerts -> s.note ?: ctx.getString(R.string.alerts_row_empty)
             last == null && s.isAll -> ctx.getString(R.string.broadcast_subtitle)
             last == null && s.isNotes -> ctx.getString(R.string.notes_row_empty)
             last == null -> Format.presence(s.online, s.lastSeen)
@@ -380,6 +390,7 @@ class ConversationAdapter(
         b.preview.setTypeface(null, if (unread) Typeface.BOLD else Typeface.NORMAL)
         b.row.setOnClickListener { onOpen(s) }
         b.row.setOnLongClickListener {
+            if (s.isAlerts) return@setOnLongClickListener false // (1.20.2: no menu of its own)
             onMenu(s)
             true
         }

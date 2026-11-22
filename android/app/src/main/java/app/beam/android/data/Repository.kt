@@ -332,6 +332,7 @@ class Repository(private val app: BeamApp) {
             "ring" -> app.ringer.onEvent(o)
             "alert" -> app.alerts.onEvent(o)
             "inbox" -> app.appAlerts.onEvent(o) // (1.19, server 1.33) the alerts inbox
+            "inbox-read", "inbox-changed" -> app.appAlerts.onChanged() // (1.20.2) the main list's Alerts row
             "sites" -> _sitesChanged.value++ // (1.17, server 1.31)
         }
         return null

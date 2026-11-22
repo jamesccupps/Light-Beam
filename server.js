@@ -1776,6 +1776,12 @@ function forgetDeviceNow(id, reason) {
   dropPairingsBy(id);
   revokeTokens((h, t) => t.device && resolveAlias(t.device) === id, reason);
   for (const c of clients) if (c.deviceId === id && c.tokenHash) c.res.end();
+  forgetDeviceRecords(id);
+}
+
+// What the server keeps about a device, gone (1.35.2: also for a browser forgotten after a month unused, whose read
+// marks, inbox read state and offline-alert entry stayed behind for good: the audit's finding 7). Its sign-ins stay.
+function forgetDeviceRecords(id) {
   delete devices[id];
   for (const [a, b] of Object.entries(aliases)) if (b === id) delete aliases[a];
   if (readMarks[id]) { delete readMarks[id]; persistRead(); }
@@ -3349,7 +3355,7 @@ async function setupChecks() {
   const remote = await publicBase();
   out.push(setupItem('https', 'Devices reach Beam over https', /^https:/.test(remote || '') ? true : remote ? false : null,
     remote ? `At ${remote}` : 'No address known yet (one is learned from the first device that signs in through it)',
-    'Share Beam with "tailscale serve" (README: Running it) so every device comes in over https.'));
+    'Share Beam with "tailscale serve" (the manual: docs/SERVER.md, Tailscale, ports and firewalls) so every device comes in over https.'));
   // backups
   if (BACKUP_HOURS > 0) {
     const list = await listBackups().catch(() => null);
@@ -3418,7 +3424,8 @@ function runSetupCheck() {
       for (const c of checks) {
         if (c.ok === false && !alerted.has(c.id)) {
           alerted.add(c.id);
-          const text = `Beam's setup check: “${c.title}” isn't so: ${c.detail}.${c.fix ? ` ${c.fix}` : ''}`;
+          // (1.35.2, the audit's finding 11) what's wrong first
+          const text = `Setup check: ${c.detail} (“${c.title}”).${c.fix ? ` ${c.fix}` : ''}`;
           if (alertSettings().setup) raiseAlert('setup', null, 'warn', text); else log.warn(text);
         } else if (c.ok === true) alerted.delete(c.id);
       }
@@ -3874,9 +3881,16 @@ function addInboxAlert(senderId, a, from = null) {
 }
 
 // Beam's own alerts (raiseAlert) are in the inbox too, as "Beam" (they pop up as before: `alert`).
+// (1.35.2, the audit's finding 8) a title by kind: the Alerts row said "Beam: ⚠" with nothing after it
+const ALERT_TITLES = {
+  battery: 'Battery', storage: 'Storage', serverDisk: 'Server disk', tailscaleKey: 'Tailscale sign-in', powerLoss: 'Power loss',
+  setup: 'Setup check', hardware: 'Hardware', down: 'Beam was down', offline: 'Offline', online: 'Back online', update: 'Update',
+};
+
 function inboxFromBeam(alert) {
   try {
-    addInboxAlert(BEAM_SENDER, { title: '', text: inboxLib.multiline(alert.text), priority: alert.level === 'warn' ? 4 : 3, ...(alert.level === 'warn' && { emojis: '⚠️' }) });
+    const title = ALERT_TITLES[alert.kind] || 'Beam';
+    addInboxAlert(BEAM_SENDER, { title, text: inboxLib.multiline(alert.text), priority: alert.level === 'warn' ? 4 : 3, ...(alert.level === 'warn' && { emojis: '⚠️' }) });
   } catch (err) { log.warn(`The inbox didn't take Beam's alert: ${err.message}`); }
 }
 
@@ -4942,7 +4956,9 @@ function logOnce(key, line, more) {
   const entry = { count: 0 };
   entry.timer = setTimeout(() => {
     requestLogs.delete(key);
-    if (entry.count) log.info(more(entry.count));
+    // (1.35.2, the 2026-11-21 audit's finding 1) a log line can never stop the server: a call without `more` crashed it
+    // a minute after a second refused automatic sign-in (as one in 1.7.6 did)
+    try { if (entry.count && typeof more === 'function') log.info(more(entry.count)); } catch (err) { log.warn(`A log line failed: ${err.message}`); }
   }, NOTE_LOG_MS);
   entry.timer.unref();
   requestLogs.set(key, entry);
@@ -6335,7 +6351,7 @@ function sweep() {
   let forgot = false;
   for (const d of Object.values(devices)) {
     if (d.platform === 'web' && !isOnline(d.id) && now() - d.lastSeen > 30 * 86400e3) {
-      delete devices[d.id];
+      forgetDeviceRecords(d.id);
       forgot = true;
     }
   }
@@ -6554,8 +6570,9 @@ async function receiveBody(req, dest, limit, { flags = 'w', onData, onWritten, d
   let size = 0;
   let stored = 0;
   let synced = 0;
-  const idle = setTimeout(() => req.destroy(Object.assign(new Error('No data for 60 s'), { code: 'EIDLE' })), BODY_IDLE_MS);
   const fh = await fsp.open(dest, flags, 0o600); // (only this account, like every state file; 1.7.3)
+  // (1.35.2) after the open: one that failed left this timer running
+  const idle = setTimeout(() => req.destroy(Object.assign(new Error('No data for 60 s'), { code: 'EIDLE' })), BODY_IDLE_MS);
   const sync = async (end, failed = false) => {
     if (stored > synced && durable?.want(stored, end, failed)) {
       await fh.sync();
@@ -7238,6 +7255,8 @@ async function cancelUpload(req, res, [id]) {
     upload.activeReq?.destroy();
     await upload.settled;
   }
+  // (1.35.2, the audit's finding 7) its last chunk finished meanwhile: the item stands (no upload-cancelled for it)
+  if (findItem(id)) return send(res, 409, { error: 'It had finished already', id });
   await removeUploadFiles(id);
   broadcast('upload-cancelled', { id });
   send(res, 204);
@@ -7332,8 +7351,10 @@ async function putChunk(req, res, [id], url) {
     addItem(item);
     notifyUpload(upload);
     await syncDir(DIR.files);
-    await rmQuiet(uploadPaths(id).meta);
+    // (1.35.2, the audit's finding 4) the item saved first: a stop between the two used to leave a file with neither
+    // its item nor its upload record (moved aside at the next start; the sender's retry got 404 and sent it all again)
     await saved();
+    await rmQuiet(uploadPaths(id).meta);
     send(res, 201, { done: true, item: publicItem(item) });
   } finally {
     upload.busy = false;
@@ -7754,6 +7775,7 @@ async function checkDist() {
 
 const PILOT_MS = FAST_TIMEOUTS ? 1500 : 10 * 60e3;
 const PILOT_SWITCH_MS = FAST_TIMEOUTS ? 3000 : 30 * 60e3;
+const PILOT_GONE_MS = FAST_TIMEOUTS ? 600 : 5 * 60e3; // (1.35.2) a first PC offline this long before its minutes: another one
 let knownWindowsBuild = null; // the Windows build in dist when last looked at (its sha256; '' for none)
 
 const stagedOn = () => settings.stagedUpdates !== false && env.BEAM_STAGED_UPDATES !== '0';
@@ -7765,11 +7787,21 @@ function rolloutChanged() {
   broadcast('settings', publicSettings());
 }
 
+// (1.35.2) Never a PC in a remote control session, on either side, while another can go first: its app waits for the
+// session's end (2026-11-20: Windows 1.27.1 went back and forth between Desktop and Robin Laptop, controlling each
+// other, for 2 h 40 min).
+function inRcSession(id) {
+  for (const x of rcSessions.values()) if (x.host === id || x.viewer === id) return true;
+  return false;
+}
+
 function choosePilot(skip = new Set()) {
   const ok = d => d && d.appVersion && isOnline(d.id) && !skip.has(d.id);
   const own = ownPc();
-  if (ok(own)) return own;
-  return windowsApps().filter(ok).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0))[0] || null;
+  const free = d => ok(d) && !inRcSession(d.id);
+  if (free(own)) return own;
+  const byLastSeen = windowsApps().sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  return byLastSeen.find(free) || (ok(own) ? own : null) || byLastSeen.find(ok) || null;
 }
 
 // Looks at the Windows build in dist: the first look at it (a server start) only notes it (a rollout already under way
@@ -7817,7 +7849,12 @@ function offersFor(deviceId, updates) {
 
 function pilotRuns(device) {
   const r = activeRollout();
-  if (!r || device.id !== r.pilot || r.installedAt || !versionAtLeast(device.appVersion, r.version)) return;
+  if (!r || r.installedAt || !versionAtLeast(device.appVersion, r.version)) return;
+  // (1.35.2) another PC that took it meanwhile (its update check, a session's end) is as good a first one
+  if (device.id !== r.pilot) {
+    if (device.platform !== 'windows') return;
+    r.pilot = device.id;
+  }
   r.installedAt = now();
   log.info(`${device.name} runs Windows ${r.version}: the other PCs get it at ${clockText(r.installedAt + PILOT_MS)} if it keeps running`);
   rolloutChanged();
@@ -7849,10 +7886,21 @@ function rolloutTick() {
     releaseRollout(`${nameOf(r.pilot)} has run it for ${durationText(PILOT_MS)}`);
     return;
   }
-  if (r.installedAt || now() - r.since < PILOT_SWITCH_MS) return;
+  // (1.35.2, the audit's finding 6) a first PC that took it and went away before its minutes (a laptop asleep) used to
+  // hold every other PC until it was back: another online one tries it first; a day is the backstop
+  let why;
+  if (r.installedAt && !isOnline(r.pilot)) {
+    if (now() - r.installedAt >= 86400e3) { releaseRollout(`${nameOf(r.pilot)} took it a day ago and is offline`); return; }
+    if (now() - Math.max(devices[r.pilot]?.lastSeen || 0, r.installedAt) < PILOT_GONE_MS) return;
+    why = `${nameOf(r.pilot)} went offline before it had run it for ${durationText(PILOT_MS)}`;
+  } else {
+    if (r.installedAt || now() - r.since < PILOT_SWITCH_MS) return;
+    why = r.pilot ? `${nameOf(r.pilot)} hasn't installed it in ${durationText(PILOT_SWITCH_MS)}` : 'no PC has taken it';
+  }
   const next = choosePilot(new Set([r.pilot].filter(Boolean)));
   if (!next) return;
-  log.info(`Windows ${r.version}: ${r.pilot ? `${nameOf(r.pilot)} hasn't installed it in ${durationText(PILOT_SWITCH_MS)}` : 'no PC has taken it'}; offering it to ${next.name} first instead`);
+  log.info(`Windows ${r.version}: ${why}; offering it to ${next.name} first instead`);
+  delete r.installedAt;
   r.pilot = next.id;
   r.since = now();
   rolloutChanged();
@@ -8583,7 +8631,8 @@ async function autoPair(req, res) {
   }
   const machineKey = identity?.tsNode?.node || identity?.ip || clientIp(req);
   if (via && autopairRate.blocked(machineKey)) {
-    logOnce(`autopair-rate ${machineKey}`, `Too many automatic sign-ins from ${describeWhereSync(req)}: refused for a while`);
+    logOnce(`autopair-rate ${machineKey}`, `Too many automatic sign-ins from ${describeWhereSync(req)}: refused for a while`,
+      n => `Refused ${n} more automatic sign-in${n === 1 ? '' : 's'} from ${describeWhereSync(req)}`);
     return send(res, 429, { error: 'Too many automatic sign-ins from this device; try again in a few minutes', reason: 'rate' }, { 'Retry-After': String(autopairRate.retryAfter(machineKey)) });
   }
   if (via) autopairRate.hit(machineKey);
@@ -9883,8 +9932,56 @@ async function shutdown(code = 0) {
   process.exit(code);
 }
 
-function serve() {
+// (1.35.2, the 2026-11-21 audit's finding 2) One Beam per data folder. A second `node server.js` on the same data (typed
+// in the project folder, whose .env points at the live data; a deploy's fallback; a task overlapping) used to cut every
+// running upload back to its last saved point and move a one-shot upload's file aside before it found the port taken:
+// silently wrong files. A local socket named after the folder is held for the process's life (Windows: a named pipe,
+// gone with its process; elsewhere a socket file in the folder, a stale one replaced); taken before anything is read.
+function dataLockName() {
+  const folder = path.resolve(DATA_DIR);
+  const id = crypto.createHash('sha256').update(process.platform === 'win32' ? folder.toLowerCase() : folder).digest('hex').slice(0, 24);
+  if (process.platform === 'win32') return `\\\\.\\pipe\\beam-data-${id}`;
+  const inFolder = path.join(folder, '.beam.lock');
+  return Buffer.byteLength(inFolder) < 100 ? inFolder : path.join(os.tmpdir(), `beam-data-${id}.lock`);
+}
+
+// Another process holds this data folder's lock (a running Beam).
+function dataLockHeld() {
+  return new Promise(resolve => {
+    const sock = net.connect(dataLockName());
+    const done = held => { sock.destroy(); resolve(held); };
+    sock.setTimeout(2000, () => done(true)); // (connected but slow: held)
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+  });
+}
+
+let _dataLock = null; // (held for the life of this process; never closed)
+// 'held' (another Beam has it), or null (taken, or there's no way to take one here: Beam goes on without it).
+async function takeDataLock() {
+  const name = dataLockName();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const err = await new Promise(resolve => {
+      const srv = net.createServer(sock => sock.destroy());
+      srv.once('error', resolve);
+      srv.listen(name, () => { srv.unref(); _dataLock = srv; resolve(null); });
+    });
+    if (!err) return null;
+    if (err.code !== 'EADDRINUSE') {
+      log.warn(`Couldn't take ${DATA_DIR}'s lock (${err.code || err.message}): going on without it`);
+      return null;
+    }
+    if (await dataLockHeld()) return 'held';
+    if (process.platform === 'win32') return 'held'; // (a pipe name in use belongs to a live process)
+    try { fs.rmSync(name, { force: true }); } catch {} // (a socket file left by a Beam that was killed)
+  }
+  return 'held';
+}
+
+async function serve() {
   log.setFile(path.join(DIR.logs, 'server.log'));
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+  if ((await takeDataLock()) === 'held') fatal(`Another Beam is already running on ${DATA_DIR}: this one stops without touching it (node server.js stop stops that one).`);
   const importing = importRunning();
   if (importing === 'failed') {
     log.error(`An import into ${DATA_DIR} failed part-way: Beam doesn't start on it. Run the import again with --force, or remove ${FILE.importing} to start on what's there.`);
@@ -10026,6 +10123,13 @@ function readKeyFile() {
 // patient: (1.35.1) for `stop`: a Beam that takes longer than 2 s to answer while something listens on its port gets
 // 8 s, then 20 s (2026-11-15: on a PC paging hard `stop` said "not running" and did nothing; the deploy went on).
 async function runningServer({ patient = false } = {}) {
+  // (1.35.2) a Beam holding this data folder's lock is running, whatever its port answers
+  if (patient && (await dataLockHeld())) {
+    for (const ms of [2000, 8000, 20000]) {
+      try { if ((await (await fetch(`${LOCAL_URL}/api/hello`, { signal: AbortSignal.timeout(ms) })).json()).beam) return true; } catch {}
+    }
+    throw new Error(`A Beam is running on ${DATA_DIR} but doesn't answer at ${LOCAL_URL}: stop it first (node server.js stop)`);
+  }
   let id;
   try { id = fs.readFileSync(FILE.serverId, 'utf8').trim(); } catch { return false; }
   for (const ms of patient ? [2000, 8000, 20000] : [2000]) {
@@ -10058,7 +10162,7 @@ async function localApi(route, options = {}) {
 
 async function commandPair() {
   let link;
-  if (await runningServer()) {
+  if (await runningServer({ patient: true })) {
     const res = await localApi('/api/pair');
     const info = await res.json();
     if (!res.ok) throw new Error(info.error || `HTTP ${res.status}`);
@@ -10077,7 +10181,7 @@ async function commandPair() {
 async function commandExport(file) {
   const target = file || `beam-export-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.tar.gz`;
   const out = target === '-' ? process.stdout : fs.createWriteStream(target, { mode: 0o600 });
-  if (await runningServer()) {
+  if (await runningServer({ patient: true })) {
     const res = await localApi('/api/admin/export');
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
     await pipeline(Readable.fromWeb(res.body), out);
@@ -10091,7 +10195,7 @@ async function commandExport(file) {
 // (1.8.1) A backup now, into BEAM_BACKUP_DIR: by the running server, else here.
 async function commandBackup() {
   let dir = BACKUP_DIR, last;
-  if (await runningServer()) {
+  if (await runningServer({ patient: true })) {
     const res = await localApi('/api/backups', { method: 'POST' });
     const info = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(info.error || `HTTP ${res.status}`);
@@ -10104,7 +10208,7 @@ async function commandBackup() {
 }
 
 async function assertDataFolderFree(force) {
-  if (await runningServer()) throw new Error(`Beam is running on ${DATA_DIR}. Stop it first (node server.js stop).`);
+  if (await runningServer({ patient: true }).catch(() => true)) throw new Error(`Beam is running on ${DATA_DIR}. Stop it first (node server.js stop).`);
   if (dataDirHasBeam()) {
     if (!force) throw new Error(`${DATA_DIR} already holds a Beam. Use --force to replace it (the current contents are moved to a "replaced-…" folder, not deleted).`);
     console.error(`Moved the current contents of ${DATA_DIR} to ${setAsideData()}`);
@@ -10199,7 +10303,7 @@ async function commandMovedTo(target, flags) {
   const clear = flags.has('--clear');
   const to = clear ? '' : normalizeBaseUrl(target || '');
   if (!clear && !to) throw new Error('Usage: node server.js moved-to <new address> [--force] | --clear');
-  if (await runningServer()) {
+  if (await runningServer({ patient: true })) {
     const res = clear
       ? await localApi('/api/move', { method: 'DELETE' })
       : await localApi('/api/move', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to, force: flags.has('--force') }) });

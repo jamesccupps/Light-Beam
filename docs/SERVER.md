@@ -42,6 +42,11 @@ node server.js help            # all commands
 - **Safety:** state files are written atomically and fsynced, with a `.bak` of the previous version. Beam never deletes
   stored files it doesn't recognize; it moves them to `data/orphaned/`. Uploads that don't fit on the disk are refused
   up front.
+- **One Beam per data folder (1.35.2):** a second `node server.js` on a data folder that a running Beam uses stops at
+  once, before it touches anything, with "Another Beam is already running on …" (exit code 78, so `--supervise` doesn't
+  start it again). On Windows the lock is a named pipe, elsewhere a socket file (`.beam.lock` in the data folder);
+  either goes with the process, so a crash never leaves it held. `pair`, `export`, `backup` and `stop` wait up to half
+  a minute for a busy Beam on that folder.
 - **Health:** `GET /api/hello` answers without a key; Docker uses it as a health check.
 - **Stats:** `GET /api/metrics` (signed in) shows memory and CPU, how long requests take, how often each device's
   connection is woken, and how much the server writes to disk.
@@ -177,4 +182,8 @@ environment variable wins and locks the setting.
 | `BEAM_TRUSTED_PROXIES` | loopback | Reverse proxies whose `X-Forwarded-*` headers to believe (IPs/CIDRs) |
 | `BEAM_CHUNK_MB` | `8` | Upload chunk size |
 | `BEAM_NTFY`, `BEAM_NTFY_TOKEN`, `BEAM_NTFY_PREVIEW`, `BEAM_NTFY_SKIP` | (none) | Optional push notifications through [ntfy](https://ntfy.sh) |
-| `BEAM_FAMILY_*` | | Beam Family's settings: see [docs/FAMILY.md](FAMILY.md) |
+| `BEAM_STAGED_UPDATES` | on | `0`: a new Windows build goes to every PC at once, not one PC first (also in Settings → Server) |
+| `BEAM_SETUP_CHECK` | on for a real install | `on` / `off`: the setup check every 6 hours and its `setup` alerts (off by itself for a test's server) |
+| `BEAM_OWN_HISTORY` | on (Windows) | `off`: the server's own PC's restarts and power losses aren't read from Windows' event log |
+| `BEAM_GITHUB_API` | `https://api.github.com` | Where Apps looks up GitHub releases (a mirror or a test's stand-in) |
+| `BEAM_FAMILY_*` | | Beam Family's settings (`BEAM_FAMILY_HOST` and `_PORT`, where it listens, among them): see [docs/FAMILY.md](FAMILY.md) |

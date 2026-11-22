@@ -187,9 +187,11 @@ let sizer = null;
 function autosize() {
   const box = $('#text');
   $('#sendBtn').disabled = !box.value.trim() || box.disabled;
+  if (!box.offsetWidth) return; // (not laid out yet: measured when it is)
   if (!sizer) {
     sizer = box.cloneNode(false);
     sizer.removeAttribute('id');
+    sizer.removeAttribute('placeholder'); // (1.35.2: a wrapped placeholder kept an empty box two lines tall)
     sizer.removeAttribute('aria-label');
     sizer.setAttribute('aria-hidden', 'true');
     sizer.tabIndex = -1;
@@ -198,6 +200,19 @@ function autosize() {
   }
   const max = Math.round(window.innerHeight * 0.4);
   sizer.style.width = `${box.offsetWidth}px`;
+  // (1.35.2, the audit's finding 10) A narrow box (a phone) says just "Message…" when the whole "Message Shop Desktop…"
+  // would wrap: its second line was cut off. Measured only while the box is empty (nothing more while typing).
+  const full = box.dataset.placeholder;
+  if (full && !box.value) {
+    let shown = full;
+    if (/^Message ./.test(full)) {
+      sizer.value = 'M';
+      const one = sizer.scrollHeight;
+      sizer.value = full;
+      if (sizer.scrollHeight > one) shown = 'Message…';
+    }
+    if (box.placeholder !== shown) box.placeholder = shown;
+  }
   sizer.value = box.value;
   const wanted = sizer.scrollHeight + 2;
   const height = `${Math.min(wanted, max)}px`;
@@ -368,8 +383,8 @@ async function sendOutbox() {
         // mid-upload (Android does that to background tabs) left a pasted screenshot nowhere; after a reload it goes again
         dropOutboxEntry(entry, { keepStored: true });
         const up = enqueueUpload(file, entry.conv);
+        up.outbox = entry; // (1.35.2, the audit's finding 3: settled by finishUpload or cleanupCancelled, outboxSettled)
         refreshPending();
-        up.done.then(ok => { if (ok) { markSent(entry); outboxStore.remove(entry.id); } });
       }
     } catch (err) {
       entry.sending = false;
@@ -676,7 +691,17 @@ function cancelUpload(up) {
   if (up.state === 'queued' || up.state === 'failed' || up.state === 'preparing') { cleanupCancelled(up); up.resolve(false); }
 }
 
+// (1.35.2) A file from the outbox: its stored copy goes once its upload is sent or cancelled (only then).
+function outboxSettled(up, sent) {
+  const entry = up.outbox;
+  if (!entry) return;
+  up.outbox = null;
+  if (sent) markSent(entry);
+  outboxStore.remove(entry.id).then(ok => { if (!ok) setTimeout(() => outboxStore.remove(entry.id), 1000); });
+}
+
 function cleanupCancelled(up) {
+  outboxSettled(up, false);
   if (up.uploadId) api(`api/uploads/${up.uploadId}`, { method: 'DELETE' }).catch(() => {});
   forgetUpload(up);
   dropUpload(up);
@@ -693,6 +718,7 @@ function dropUpload(up) {
 
 async function finishUpload(up, item) {
   up.state = 'done';
+  outboxSettled(up, true);
   forgetUpload(up);
   if (up.file && /^image\//.test(up.mime) && up.size <= 50 * 1024 * 1024 && item?.id) {
     localPreviews.set(item.id, URL.createObjectURL(up.file));

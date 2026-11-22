@@ -20,6 +20,14 @@ alerts) and 1.18 `history` (each device's history, `powerLoss` alerts) and `spee
 device and the server), and 1.19 `staged-updates` (a Windows build goes to one PC first), 1.20 `setup-check` and
 `device-logs` (shipped with 1.19's in Beam 1.20.0), 1.21 `apps`, 1.22 `linux` (Beam for Linux) and 1.23 `vnc` (control
 of a Linux computer, relayed) and 1.24 `wake-relay` (Wake-on-LAN through Beam for Linux too), and 1.25 `trust` (trusted sign-ins: see Credentials), and 1.26 `shared-folders` (a PC's folders shared with some devices), and 1.27 `appearance` (the look: see Appearance), and 1.27.1 `control-here` (Beam for Linux's window switches its own remote control), and 1.28 `shared-folders-2` (shared folders like Explorer: icons, thumbnails, previews, search, whole folders), and 1.28.1 `shared-folders-page` (`index.html#files=<PC id>`: a PC's shared folders alone, for an app to show). Use each one only when its flag is there; everything older keeps working.
+**(1.35.2, the 2026-11-21 audit)** v3's own flags, there since v3: `tokens` (devices' own tokens), `tailscale-sign-in`
+(a device on the tailnet signs in by itself: Signing in a new device), `settings` (`GET`/`PATCH /api/settings`), `move`
+(When the server moves), `handoff`, `export`, `forward`, `bulk-delete` (`POST /api/items/delete` with several ids),
+`pin`, `read-markers` (each device's read markers: the `read` event, Conversations), `logs`, `text-files` (a long text
+kept apart: `truncated` and `textLength` in lists, the whole text at `GET /api/items/{id}/text`), `thumbnails`,
+`sessions`, `upload-progress` (the `upload` event while a file arrives) and `proof`. Later ones are named in their
+sections: 1.29 `text-size`, 1.30.1 `uac-status`, 1.31 `sites`, 1.32 `commands`, 1.33 `inbox`, 1.34 `notes`, 1.35
+`hw-blackbox` and `apps-found`.
 
 ## Credentials
 
@@ -310,7 +318,12 @@ Apps update themselves from the Beam server.
   build didn't install (its status `update.problem` for that version) stops it there: an `update` alert, and the others
   keep their version until `POST /api/updates/release` offers it to every PC anyway (**1.25.4:** also when they ask or
   connect later; before, only the announcement at the stop was held back). A pilot that hasn't installed it
-  within 30 minutes hands over to another online PC. Only when more than one Windows app is known. The setting
+  within 30 minutes hands over to another online PC. **(1.35.2, the 2026-11-21 audit)** A PC in a remote control
+  session (either side) goes first only when no other PC is online (its app waits for the session's end: on 11-20 the
+  build went back and forth between two PCs controlling each other for 2 h 40 min); another Windows app that runs the
+  build already (it took it meanwhile) counts as the first PC; and a first PC that runs it but goes offline for 5
+  minutes before its 10 minutes (a laptop asleep) hands over to another online PC; a day after it took it, the build is
+  offered to every PC. Only when more than one Windows app is known. The setting
   `stagedUpdates` (true unless turned off; `BEAM_STAGED_UPDATES=0` overrides) turns it off; turning it off on the way
   offers a build still on its pilot to every PC (not one stopped there), so it takes a trusted sign-in (1.25.4).
   `GET /api/settings` → `rollout`: `{ "version", "pilot", "pilotName", "since", "installedAt",
@@ -750,6 +763,8 @@ The checks (each only where it applies):
 - `family`: Beam Family answers on its local address.
 
 A check that turns `false` raises a `setup` alert once; it alerts again only after it was right in between.
+**(1.35.2)** Its text says what is wrong first: `Setup check: <detail> (“<title>”). <fix>` (it was the check's title,
+then "isn't so", then the detail).
 
 ### A PC's log (1.20)
 Feature `device-logs`. A device asks a PC's Beam app (Windows 1.14 or later, or (1.22) Beam for Linux; online: its
@@ -884,7 +899,11 @@ points the server at a stand-in for tests); downloads only from github.com and i
 Feature `inbox`. The user's other programs send their alerts to Beam the way they'd send them to ntfy, and every device
 has them in one place (the web app's Alerts row; Android: Alerts in the menu and notifications). Each program ("app")
 gets a key in Settings → Alerts (`bn_` and 32 base64url characters: ntfy's topic rule): it posts alerts and nothing
-else. Beam's own alerts are in it too (sender `beam`; they pop up as `alert` events, as before).
+else. Beam's own alerts are in it too (sender `beam`; they pop up as `alert` events, as before). **(1.35.2)** Each
+carries a title by its kind: Battery, Storage, Server disk, Tailscale sign-in, Power loss, Setup check, Hardware, Beam
+was down, Offline, Back online, Update ("Beam" for any other). The Android app 1.20.2 shows an Alerts row on its main
+list too (the newest alert, and how many since the phone's read marker), kept up by `inbox`, `inbox-read` and
+`inbox-changed`.
 
 **Posting (no Beam sign-in: the key), as ntfy publishes** (https://docs.ntfy.sh/publish/): the server is
 `<Beam's address>/notify`, the topic the key.
@@ -1073,7 +1092,8 @@ raw file bytes (not multipart) → `201` + Item.
      received nothing for 30 s is taken over by the next `PUT`, and one with no data for 60 s is cut off. So retry
      after a short wait; the upload never stays stuck.
 4. Cancel with `DELETE /api/uploads/{id}` → `204` (also while a chunk is in flight). Unfinished uploads are deleted
-   after 24 hours idle.
+   after 24 hours idle. **(1.35.2)** An upload that finished while its cancel waited for the chunk in flight answers
+   `409 { "error": "It had finished already", "id" }` (the item stays; before, an `upload-cancelled` went out for it).
 5. The finished item has the same id as the upload. If the final response was lost, `GET /api/items/{id}` returns it.
 
 **Big chunks (1.4, feature `big-chunks`).** Each chunk waits a full round trip for its reply before the next one

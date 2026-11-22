@@ -373,6 +373,127 @@
                         android:focusable="false" />
                 </LinearLayout>
 
+                <!-- (1.20.2, the 2026-11-21 audit) the server's other alert switches, each shown when it has it -->
+                <LinearLayout
+                    android:id="@+id/rowAlertTailscale"
+                    style="@style/SettingsRow"
+                    android:visibility="gone">
+
+                    <LinearLayout style="@style/SettingsTexts">
+
+                        <TextView
+                            style="@style/SettingsTitle"
+                            android:text="@string/settings_alert_tailscale" />
+
+                        <TextView
+                            style="@style/SettingsSummary"
+                            android:text="@string/settings_alert_tailscale_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/alertTailscale"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:clickable="false"
+                        android:focusable="false" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/rowAlertPowerLoss"
+                    style="@style/SettingsRow"
+                    android:visibility="gone">
+
+                    <LinearLayout style="@style/SettingsTexts">
+
+                        <TextView
+                            style="@style/SettingsTitle"
+                            android:text="@string/settings_alert_power_loss" />
+
+                        <TextView
+                            style="@style/SettingsSummary"
+                            android:text="@string/settings_alert_power_loss_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/alertPowerLoss"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:clickable="false"
+                        android:focusable="false" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/rowAlertSetup"
+                    style="@style/SettingsRow"
+                    android:visibility="gone">
+
+                    <LinearLayout style="@style/SettingsTexts">
+
+                        <TextView
+                            style="@style/SettingsTitle"
+                            android:text="@string/settings_alert_setup" />
+
+                        <TextView
+                            style="@style/SettingsSummary"
+                            android:text="@string/settings_alert_setup_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/alertSetup"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:clickable="false"
+                        android:focusable="false" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/rowAlertHardware"
+                    style="@style/SettingsRow"
+                    android:visibility="gone">
+
+                    <LinearLayout style="@style/SettingsTexts">
+
+                        <TextView
+                            style="@style/SettingsTitle"
+                            android:text="@string/settings_alert_hardware" />
+
+                        <TextView
+                            style="@style/SettingsSummary"
+                            android:text="@string/settings_alert_hardware_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/alertHardware"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:clickable="false"
+                        android:focusable="false" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/rowAlertDown"
+                    style="@style/SettingsRow"
+                    android:visibility="gone">
+
+                    <LinearLayout style="@style/SettingsTexts">
+
+                        <TextView
+                            style="@style/SettingsTitle"
+                            android:text="@string/settings_alert_down" />
+
+                        <TextView
+                            style="@style/SettingsSummary"
+                            android:text="@string/settings_alert_down_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/alertDown"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:clickable="false"
+                        android:focusable="false" />
+                </LinearLayout>
+
                 <TextView
                     style="@style/SettingsSummary"
                     android:layout_width="match_parent"

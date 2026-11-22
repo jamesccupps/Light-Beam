@@ -49,6 +49,24 @@ object Files {
 
     data class Meta(val name: String, val size: Long, val mime: String)
 
+    /** (1.20.2) A Uri from the system photo picker (content://media/picker/..., picker_get_content on Android 14+). */
+    fun isPickerUri(uri: Uri): Boolean =
+        uri.scheme == "content" && uri.authority == MediaStore.AUTHORITY && uri.pathSegments.firstOrNull()?.startsWith("picker") == true
+
+    /**
+     * (1.20.2) The picker's name for a photo or video ("23.jpg": its number) as one from when it was taken, in this
+     * phone's time zone: "IMG 2026-11-21 16.39.05.jpg" ("VID" for a video). Null: a real name, or no time to name it by.
+     */
+    fun pickerName(name: String, mime: String, takenMs: Long?, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): String? {
+        if (takenMs == null || takenMs <= 0) return null
+        val base = name.substringBeforeLast('.')
+        if (base.isEmpty() || !base.all { it.isDigit() }) return null
+        val ext = name.substringAfterLast('.', "").ifEmpty { MimeTypeMap.getSingleton().getExtensionFromMimeType(mime).orEmpty() }
+        val kind = if (mime.startsWith("video/")) "VID" else "IMG"
+        val stamp = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH.mm.ss").withZone(zone).format(java.time.Instant.ofEpochMilli(takenMs))
+        return "$kind $stamp" + if (ext.isNotEmpty()) ".$ext" else ""
+    }
+
     /**
      * Name, size (-1 if unknown) and type of a content Uri the user picked or shared. (1.14.1) A size of 0 counts as
      * unknown: Google Photos' share says 0 for a photo it streams, and Beam sent exactly that (an empty file).
@@ -89,6 +107,18 @@ object Files {
         }
         var n = (name ?: uri.lastPathSegment?.substringAfterLast('/') ?: "file").trim().ifEmpty { "file" }
         val mime = type ?: mimeFor(n)
+        // (1.20.2, the 2026-11-21 audit) The system photo picker names a photo by its number ("23.jpg"): named from when
+        // it was taken instead, as it reads on the PCs ("IMG 2026-11-21 16.39.05.jpg").
+        if (isPickerUri(uri)) {
+            val taken = try {
+                resolver.query(uri, arrayOf(MediaStore.MediaColumns.DATE_TAKEN), null, null, null)?.use { c ->
+                    if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null
+                }
+            } catch (_: Exception) {
+                null
+            }
+            pickerName(n, mime, taken)?.let { n = it }
+        }
         if (!n.contains('.')) {
             MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.let { n = "$n.$it" }
         }

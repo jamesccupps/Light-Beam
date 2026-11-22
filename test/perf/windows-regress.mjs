@@ -502,6 +502,27 @@ async function lostFinish(r) {
   r.check(items.length === 1 && !!done && done.includes(items[0].id), 'one item on the server, the one logged');
 }
 
+// (1.27.2, the 2026-11-21 audit) Notes from Windows: Explorer's Send to > Beam > Notes runs `--send --to <this PC's id>`,
+// and `--to notes` is this PC too. The file goes up as a note (a message to this PC itself), and the app doesn't save
+// its own note as a download.
+async function notes(r) {
+  await r.setup();
+  const sendOne = async (name, to) => {
+    const file = path.join(r.dir, 'files', name);
+    fs.writeFileSync(file, `keep ${name} for later`);
+    const from = r.logLines().length;
+    r.forward(['--send', '--to', to, file]);
+    const done = await r.waitLog(/Upload up:\S+ finished as item \S+/, from, 30000);
+    const items = ((await r.api('GET', '/api/items')).data.items || []).filter(i => i.name === name);
+    r.check(!!done && items.length === 1 && items[0].note === true && items[0].from === r.appId && JSON.stringify(items[0].to) === JSON.stringify([r.appId]),
+      `--to ${to === r.appId ? '<its own id>' : to}: one note, from this PC to itself (${JSON.stringify(items.map(i => ({ from: i.from, to: i.to, note: i.note })))})`);
+  };
+  await sendOne('for-later.txt', 'notes');
+  await sendOne('for-later-2.txt', r.appId);
+  await sleep(3000);
+  r.check(!fs.readdirSync(path.join(r.dir, 'down')).some(f => f.startsWith('for-later')), 'its own notes are not saved as downloads');
+}
+
 // 1.6.2: Copy image in the chat goes through the app (an http page has no image clipboard). Here the clipboard is the
 // isolated one (cfg/clipboard.png, and clipboard-image.txt: "png" when PNG bytes went along for transparency). A photo
 // is turned as its EXIF says; a type Windows can't read is "unsupported" (the page then sends PNG, which the app
@@ -776,7 +797,7 @@ async function backups(r) {
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
   'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups,
-  'outbox-restart': outboxRestart, names };
+  'outbox-restart': outboxRestart, names, notes };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

@@ -33,6 +33,8 @@ const TMP = path.join(os.tmpdir(), `beam-files-win-${Date.now()}`);
 const failures = [];
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failures.push(what); return ok; };
 const dir = p => path.join(TMP, p);
+// (1.35.2, the audit's finding 12) The folder that must be refused, in AppData by itself (%TEMP% may be elsewhere: G:)
+const OUTSIDE = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), `beam-files-win-outside-${Date.now()}`, 'outside-share');
 for (const d of ['data', 'dist', 'app', 'cfg']) fs.mkdirSync(dir(d), { recursive: true });
 const base = `http://127.0.0.1:${PORT}`;
 const appExe = dir('app/Beam.exe');
@@ -117,11 +119,11 @@ try {
   put(path.join(cfgDir, 'shares', 'Other', 'other.txt'), 'for the other phone');
   const outgoing = path.join(cfgDir, 'outgoing');
   put(path.join(outgoing, 'keep-me.txt'), 'in the outgoing folder');
-  put(dir('outside-share/x.txt'), 'in %TEMP%, outside the instance\'s folder');
+  put(path.join(OUTSIDE, 'x.txt'), 'in %LOCALAPPDATA%, outside the instance\'s folder');
   // (1.23, the review) a junction inside the instance's own folder to that one: judged by where it really is
   fs.mkdirSync(path.join(cfgDir, 'shares'), { recursive: true });
-  const toTemp = spawnSync('cmd.exe', ['/c', 'mklink', '/J', path.join(cfgDir, 'shares', 'ToTemp'), dir('outside-share')], { windowsHide: true, encoding: 'utf8' });
-  check(toTemp.status === 0, 'a junction in its own folder to the folder in %TEMP%');
+  const toTemp = spawnSync('cmd.exe', ['/c', 'mklink', '/J', path.join(cfgDir, 'shares', 'ToTemp'), OUTSIDE], { windowsHide: true, encoding: 'utf8' });
+  check(toTemp.status === 0, 'a junction in its own folder to the folder in %LOCALAPPDATA%');
   // (1.20) a real picture, a big text, a file of no kind, and what a .zip of Photos must leave out
   const sunset = pngOf(64, 48), bigText = 'line of a big log\n'.repeat(20000), blob = Buffer.alloc(5000, 0);
   put(path.join(dl, 'Photos', 'sunset.png'), sunset);
@@ -143,7 +145,7 @@ try {
       { id: 'a1a1a1a1', name: 'Downloads', path: dl, devices: [askerId] },
       { id: 'b2b2b2b2', name: 'Other', path: path.join(cfgDir, 'shares', 'Other'), devices: [otherId] },
       { id: 'c3c3c3c3', name: 'Outgoing', path: outgoing, devices: [askerId] },
-      { id: 'd4d4d4d4', name: 'Temp', path: dir('outside-share'), devices: [askerId] },
+      { id: 'd4d4d4d4', name: 'Temp', path: OUTSIDE, devices: [askerId] },
       { id: 'e5e5e5e5', name: 'Through a link', path: path.join(cfgDir, 'shares', 'ToTemp'), devices: [askerId] },
     ] }, null, 2));
   app = spawn(appExe, ['--config', cfgPath, '--background'], { env, windowsHide: true, stdio: 'ignore' });
@@ -156,7 +158,7 @@ try {
   online = online && await pcOnline();
   check(!!online && online.can?.files2 === true, 'the PC (Beam for Windows 1.20) is online and shares folders (can.files, can.files2)');
   check(!!(await waitLog(/Shared folders: Temp \(.*outside-share\) isn't shared: Windows' and apps' own folders can't be shared$/, 1000)),
-    'a folder outside its own folder, in %TEMP% (AppData), is refused when the config is read');
+    'a folder outside its own folder, in %LOCALAPPDATA%, is refused when the config is read');
   check(!!(await waitLog(/Shared folders: Through a link \(.*ToTemp\) isn't shared: Windows' and apps' own folders can't be shared$/, 1000)),
     '(1.23) ...and so is a junction to it inside its own folder (where it really is counts)');
 
@@ -319,6 +321,8 @@ try {
   if (server) { try { server.kill(); } catch {} }
   await sleep(500);
   try { fs.rmSync(path.join(dir('cfg/shares/Downloads'), 'Linked')); } catch {} // (the junction alone, never what it points to)
+  try { fs.rmSync(path.join(dir('cfg/shares'), 'ToTemp')); } catch {} // (the same)
+  try { fs.rmSync(path.dirname(OUTSIDE), { recursive: true, force: true }); } catch {}
   if (!KEEP && !failures.length) fs.rmSync(TMP, { recursive: true, force: true });
   else console.log(`kept ${TMP}`);
   console.log(failures.length ? `\n${failures.length} check(s) FAILED` : '\nAll shared folder checks passed.');

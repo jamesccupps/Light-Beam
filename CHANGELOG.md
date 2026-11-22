@@ -12,6 +12,51 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.35.2 (2026-11-21): fixes from a review; Notes from Windows' Send to; the phone's Alerts row
+
+**Versions:** server 1.35.2, Windows app 1.27.2, Android app 1.20.2; Beam for Linux 1.6.0 and Beam Family's server
+unchanged (its text sizes are named as Beam's).
+
+- **The server no longer stops a minute after a machine is refused automatic sign-in twice** (a log line about the
+  refusals was missing its words and threw; the supervisor restarted Beam).
+- **One Beam per data folder:** a second `node server.js` on a data folder already in use stops at once, before it
+  touches anything (it used to cut an upload in progress short and lose a one-shot upload's file before it noticed
+  the port was taken). `pair`, `export`, `backup` and `stop` wait for a busy Beam on that folder instead of deciding
+  none is running.
+- **A file queued while offline and then cancelled stays cancelled** (it was sent after the next reload of the web
+  app), and one retried after a failure is sent once.
+- **An upload finished just as Beam stopped is kept:** its item is saved before its upload record goes.
+- **Updates of the Windows app go one PC at a time even when the first PC goes away:** another PC is picked when it
+  has been offline 5 minutes (it held every other PC until it came back), a PC in a remote control session isn't
+  picked first (its app waits for the session to end), and a PC that already runs the build counts as the first.
+  The waiting app says so once in its log, not every 30 seconds.
+- **Beam's own alerts carry a title** in the Alerts list (Low battery, Server disk, Power loss, Setup check…), and
+  the setup check's alert says what is wrong first.
+- **Windows: Notes in the Send to picker** (Explorer's Send to, the hotkey, a dragged file) and in Explorer's
+  Send to > Beam folder, and under the tray's Send clipboard to.
+- **Android:**
+  - an upload whose file can't be read any more (deleted or moved before it was read, a cloud file its app can't
+    supply, a removed card) stops at once with "Can't read this file any more", and the next upload goes. It said
+    "Connection lost, retrying..." for about ten minutes and held every upload behind it.
+  - a long text whose whole words can't be fetched waits for the next sync; it was copied and notified cut at 16 KB.
+  - one sound for a burst of items: seven at once turned on Android 16's "Notification cooldown", and an urgent
+    alert right after was quiet.
+  - an Alerts row on the main list, with how many came since the phone last looked, as on the web and Windows.
+  - Settings > Alerts has every switch the server has (Tailscale sign-in, power loss, the setup check, a Pi's
+    hardware, the server was down); it had three.
+  - a photo from the system photo picker is named from when it was taken ("IMG 2026-11-21 16.39.05.jpg"), not by
+    its number in the picker ("23.jpg").
+- **The web app:** thin scrollbars in the look's colours (the Windows app's window showed Windows' classic ones);
+  Settings' list of pages fits the Windows app's default window; the message box says just "Message…" when its whole
+  placeholder would wrap (a phone) and is sized right after a first sign-in; a conversation opens at its newest message
+  while its pictures load (one could stop a few pictures short); Settings > Shortcuts lines its descriptions up; an app's
+  row in Settings > Alerts is no longer indented; a HW Blackbox problem has a red icon (a warning stays yellow); the
+  Alerts page has one way to close it.
+- **Tests:** two servers on one data folder, a second refused automatic sign-in, an outbox upload cancelled and
+  reloaded, the phone's unreadable upload, Notes from Windows. `windows-files` no longer assumes %TEMP% is in
+  AppData, and `windows-stream-modes` counts connections after the app's start settles. The first open's size
+  budget was raised on purpose (195 KB compressed), and the release run includes both benchmarks.
+
 ## 1.35.1 (2026-11-20): HW Blackbox's report in the power-loss alert; steadier tests
 
 **Versions:** server 1.35.1, Windows app 1.27.1; the Android app 1.20.1, Beam for Linux 1.6.0 and Beam Family

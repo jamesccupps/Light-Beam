@@ -85,6 +85,7 @@
     <!-- (1.17, server 1.31) Sites: the web pages on the tailnet -->
     <string name="sites">Sites</string>
     <string name="alerts">Alerts</string>
+    <string name="alerts_row_empty">Beam\'s and your apps\' alerts</string>
     <string name="sites_add">Add a site</string>
     <string name="sites_check">Check again</string>
     <string name="sites_checking">Checking each site…</string>
@@ -403,6 +404,16 @@
     <string name="settings_alert_storage_desc">A device is almost out of storage</string>
     <string name="settings_alert_server_disk">Server disk</string>
     <string name="settings_alert_server_disk_desc">The Beam server\'s disk is almost full</string>
+    <string name="settings_alert_tailscale">A Tailscale sign-in running out</string>
+    <string name="settings_alert_tailscale_desc">Two weeks and three days before, for your devices and the server</string>
+    <string name="settings_alert_power_loss">A PC lost power or crashed</string>
+    <string name="settings_alert_power_loss_desc">When it\'s back on after a power loss, a freeze, a blue screen or being forced off</string>
+    <string name="settings_alert_setup">Something in Beam\'s setup is wrong</string>
+    <string name="settings_alert_setup_desc">The setup check looks every 6 hours: servers starting with Windows, Tailscale, backups, every PC up to date</string>
+    <string name="settings_alert_hardware">A Raspberry Pi too hot or short of power</string>
+    <string name="settings_alert_hardware_desc">Its processor at 80 °C or more, or a power supply too weak for it</string>
+    <string name="settings_alert_down">The Beam server was down</string>
+    <string name="settings_alert_down_desc">Once it\'s back: for how long, and why when it can tell</string>
     <string name="settings_alerts_note">Alerts come to every device, on the Alerts notification channel. Offline alerts are set per device, in its menu below.</string>
     <string name="download">Download</string>
     <string name="download_now">Download now</string>

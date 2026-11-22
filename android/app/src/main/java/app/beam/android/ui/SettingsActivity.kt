@@ -89,6 +89,8 @@ class SettingsActivity : BaseActivity() {
         b.rowAlertBattery.setOnClickListener { changeAlerts { it.put("battery", !it.optBoolean("battery", true)) } }
         b.rowAlertStorage.setOnClickListener { changeAlerts { it.put("storage", !it.optBoolean("storage", true)) } }
         b.rowAlertServerDisk.setOnClickListener { changeAlerts { it.put("serverDisk", !it.optBoolean("serverDisk", true)) } }
+        // (1.20.2) the server's other alert switches
+        for ((row, _, key) in moreAlertRows()) row.setOnClickListener { changeAlerts { it.put(key, !it.optBoolean(key, true)) } }
         b.rowMaxSize.setOnClickListener { pickMaxSize() }
         b.rowNotifications.setOnClickListener { MainActivity.openNotificationSettings(this) }
         b.rowBattery.setOnClickListener { allowBackground() }
@@ -494,7 +496,20 @@ class SettingsActivity : BaseActivity() {
         b.alertBattery.isChecked = a.optBoolean("battery", true)
         b.alertStorage.isChecked = a.optBoolean("storage", true)
         b.alertServerDisk.isChecked = a.optBoolean("serverDisk", true)
+        for ((row, switch, key) in moreAlertRows()) {
+            row.isVisible = a.has(key) // (a server that has it)
+            switch.isChecked = a.optBoolean(key, true)
+        }
     }
+
+    /** (1.20.2, the 2026-11-21 audit) The server's alert switches past the first three: the row, its switch, its key. */
+    private fun moreAlertRows() = listOf(
+        Triple(b.rowAlertTailscale, b.alertTailscale, "tailscaleKey"),
+        Triple(b.rowAlertPowerLoss, b.alertPowerLoss, "powerLoss"),
+        Triple(b.rowAlertSetup, b.alertSetup, "setup"),
+        Triple(b.rowAlertHardware, b.alertHardware, "hardware"),
+        Triple(b.rowAlertDown, b.alertDown, "down"),
+    )
 
     /** Changes the server's alert settings (shared by every device) and shows the result. */
     private fun changeAlerts(edit: (org.json.JSONObject) -> Unit) {

@@ -243,7 +243,7 @@ function pageGeneral() {
       // (1.8.1) This PC's settings are kept on the server too; the app puts a backup back (its native choice).
       hostHas('restoreSettings') && serverHas('backups') && card('Settings backup',
         cardInfo(deviceById(me.id)?.backup?.at
-          ? `This PC’s settings are kept on your Beam too (last ${timeAgo(deviceById(me.id).backup.at)}). After a reinstall, Beam offers to put them back.`
+          ? `This PC’s settings are kept on your Beam too (last backed up ${timeAgo(deviceById(me.id).backup.at)}). After a reinstall, Beam offers to put them back.`
           : 'This PC’s settings are kept on your Beam too, from the next change on. After a reinstall, Beam offers to put them back.'),
         buttonRow(smallBtn('Restore settings…', () => hostDo('restoreSettings')))),
       card('Connected to',
@@ -474,7 +474,7 @@ function pageSending() {
       switchRow('“Send to › Beam” in Explorer', s.sendToMenu, (v, box) => setHostSettings({ sendToMenu: v }, box), { hint: 'Right-click files → Send to → Beam.' }),
       switchRow('Outbox folders', s.outbox, (v, box) => setHostSettings({ outbox: v }, box), { hint: 'Files dropped in a “To <device>” folder are sent to that device.' }),
       s.outbox && folderRow('Outbox folders are in', s.outboxFolder, 'outboxFolder', 'outbox')),
-    hotkeys.length > 0 && listCard('Hotkeys (anywhere in Windows)', hotkeys),
+    hotkeys.length > 0 && listCard('Hotkeys (anywhere in Windows)', hotkeys, { class: 'set-rows set-list set-shortcuts' }),
   ];
 }
 
@@ -539,7 +539,8 @@ function pageControl() {
 
 // One row per shortcut (so a search finds one), from extras.js's list.
 function pageHelp() {
-  return listCard(null, SHORTCUTS.map(([k, d]) => el('li', { class: 'set-row set-shortcut' }, el('kbd', {}, k), el('span', {}, d))));
+  return listCard(null, SHORTCUTS.map(([k, d]) => el('li', { class: 'set-row set-shortcut' }, el('kbd', {}, k), el('span', {}, d))),
+    { class: 'set-rows set-list set-shortcuts' });
 }
 
 // ---------------------------------------------------------------- Devices
@@ -1088,7 +1089,7 @@ async function moveServer() {
   const input = el('input', { type: 'url', placeholder: 'https://beam.your-tailnet.ts.net', 'aria-label': 'New address', autocomplete: 'off' });
   const ok = await confirmDialog({
     title: 'Move Beam to a new address',
-    text: 'Use this after Beam is already running at the new address with a copy of this server’s data (Settings are in the README under “Moving Beam”). Every device then switches over by itself, and this server only points to the new one.',
+    text: 'Use this after Beam is already running at the new address with a copy of this server’s data (the manual’s “Moving Beam”: docs/SERVER.md). Every device then switches over by itself, and this server only points to the new one.',
     confirm: 'Move', danger: true,
     extra: field('New address', input),
   });

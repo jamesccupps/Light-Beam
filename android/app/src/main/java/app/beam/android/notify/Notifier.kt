@@ -13,6 +13,7 @@ import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.service.notification.StatusBarNotification
 import android.util.Patterns
 import androidx.core.app.NotificationCompat
@@ -72,6 +73,7 @@ object Notifier {
     private const val IMMUTABLE = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
 
     fun createChannels(ctx: Context) {
+        synchronized(this) { lastItemSound = -1L } // (1.20.2) the app starts: no burst yet
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
         nm.createNotificationChannels(
             listOf(
@@ -131,6 +133,21 @@ object Notifier {
     }
 
     fun cancel(ctx: Context, id: Int, tag: String? = null) = NotificationManagerCompat.from(ctx).cancel(tag, id)
+
+    // (1.20.2, the 2026-11-21 audit) One sound for a burst of items: seven notifications in a few seconds turned on
+    // Android 16's "Notification cooldown" (alerts quieter for up to 2 minutes), and an urgent alert right after was
+    // quiet. The first item of a burst sounds; the others within BURST_MS of that sound come silently (listed as ever).
+    private const val BURST_MS = 10_000L
+    private var lastItemSound = -1L
+
+    /** Whether an item's notification may make its sound now (not muted, and no other item sounded just before). */
+    private fun soundsNow(muted: Boolean): Boolean = synchronized(this) {
+        if (muted) return@synchronized false
+        val now = SystemClock.elapsedRealtime()
+        if (lastItemSound >= 0 && now >= lastItemSound && now - lastItemSound < BURST_MS) return@synchronized false
+        lastItemSound = now
+        true
+    }
 
     fun cancelAll(ctx: Context) = NotificationManagerCompat.from(ctx).cancelAll()
 
@@ -210,7 +227,7 @@ object Notifier {
         message.extras.putString(EXTRA_ITEM_ID, item.id)
         style.addMessage(message)
         while (style.messages.size > MAX_MESSAGES) style.messages.removeAt(0)
-        post(ctx, ID_TEXTS, buildTexts(ctx, conversation, style, item, text, copied, muted, alert = true), tagFor(conversation))
+        post(ctx, ID_TEXTS, buildTexts(ctx, conversation, style, item, text, copied, muted, alert = true, burst = !soundsNow(muted)), tagFor(conversation))
         updateSummary(ctx)
     }
 
@@ -230,6 +247,7 @@ object Notifier {
         copied: Boolean,
         muted: Boolean,
         alert: Boolean,
+        burst: Boolean = false, // (1.20.2) part of a burst: silent, the burst's first item sounded
     ): Notification {
         val tag = tagFor(conversation)
         val b = base(ctx, CH_MESSAGES)
@@ -238,7 +256,7 @@ object Notifier {
             .setLocusId(LocusIdCompat(Shortcuts.idFor(conversation)))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(if (muted) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_HIGH)
-            .setSilent(muted || !alert)
+            .setSilent(muted || !alert || burst)
             .setOnlyAlertOnce(!alert)
             .setAutoCancel(true)
             .setSubText(if (copied) ctx.getString(R.string.copied) else null)
@@ -303,7 +321,7 @@ object Notifier {
             .setWhen(item.ts)
             .setShowWhen(true)
             .setAutoCancel(true)
-            .setSilent(muted)
+            .setSilent(!soundsNow(muted))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(if (muted) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(open)
@@ -329,7 +347,7 @@ object Notifier {
             .setWhen(item.ts)
             .setShowWhen(true)
             .setAutoCancel(true)
-            .setSilent(muted || waitingForWifi)
+            .setSilent(waitingForWifi || !soundsNow(muted))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(if (muted) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(conversationIntent(ctx, conversation))

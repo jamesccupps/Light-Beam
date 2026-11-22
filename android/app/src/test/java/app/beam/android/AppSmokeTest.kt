@@ -361,6 +361,9 @@ class TestFiles : ContentProvider() {
         /** (1.16) Beam may no longer read it (a share's access ended with the transfer service). */
         @Volatile var denied = false
 
+        /** (1.20.2) Names whose file is gone (deleted before it was read): their opens fail as Android's do. */
+        val gone = java.util.concurrent.CopyOnWriteArraySet<String>()
+
         fun reset() {
             reportedSize = null
             type = null
@@ -368,6 +371,7 @@ class TestFiles : ContentProvider() {
             gateFrom = Int.MAX_VALUE
             opens.set(0)
             denied = false
+            gone.clear()
         }
     }
 
@@ -377,6 +381,7 @@ class TestFiles : ContentProvider() {
         MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)).apply { addRow(arrayOf<Any>(uri.lastPathSegment!!, reportedSize ?: file.length())) }
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         if (denied) throw SecurityException("Permission Denial: reading $uri")
+        if (uri.lastPathSegment in gone) throw java.io.FileNotFoundException("open failed: ENOENT (No such file or directory)")
         if (opens.incrementAndGet() >= gateFrom) gate?.await(30, java.util.concurrent.TimeUnit.SECONDS)
         return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
     }

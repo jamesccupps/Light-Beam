@@ -168,6 +168,15 @@ function runClocks() {
 
 function onThreadScroll() {
   const box = $('#thread');
+  // (1.35.2) The event of scrollToBottom's own scroll comes a frame later: a picture sized meanwhile (the thread taller)
+  // must not unpin it (it opened ~400 px above its newest message): it follows the content down instead.
+  const own = view.pinnedBottom && view.autoTop !== null && Math.abs(box.scrollTop - view.autoTop) < 1;
+  view.autoTop = null;
+  if (own) {
+    if (!atBottom(box)) scrollToBottom();
+    scheduleCheckRead();
+    return;
+  }
   view.pinnedBottom = atBottom(box);
   if (view.pinnedBottom && view.newCount) { view.newCount = 0; $('#newPill').hidden = true; }
   scheduleCheckRead();

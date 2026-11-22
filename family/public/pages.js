@@ -290,7 +290,7 @@ function lookSection(render) {
     canEdit ? h('div', {},
       h('div', { class: 'muted small' }, own ? 'Your look' : 'The family’s look'),
       h('div', { class: 'seg-row', role: 'group', 'aria-label': 'Theme' }, seg('auto', 'Like the device'), seg('light', 'Light'), seg('dark', 'Dark')),
-      h('div', { class: 'seg-row', role: 'group', 'aria-label': 'Text size' }, textSeg('small', 'Small'), textSeg('normal', 'Normal'), textSeg('large', 'Large'), textSeg('larger', 'Larger')),
+      h('div', { class: 'seg-row', role: 'group', 'aria-label': 'Text size' }, textSeg('small', 'Smaller'), textSeg('normal', 'Normal'), textSeg('large', 'Larger'), textSeg('larger', 'Largest')),
       h('div', { class: 'swatches', role: 'group', 'aria-label': 'Accent colour' }, ...window.FAMILY_ACCENTS.map(([name, hex]) => swatch(name, hex)), custom)) : null,
   ];
 }

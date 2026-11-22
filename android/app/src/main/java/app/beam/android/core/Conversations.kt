@@ -11,6 +11,9 @@ object Conversations {
     /** (1.20, server 1.34) Key of Notes: messages to the device they were sent from, shown on every device. */
     const val NOTES = "~notes"
 
+    /** (1.20.2) Key of the main list's Alerts row (the alerts inbox: not a conversation; it opens the list). */
+    const val ALERTS = "~alerts"
+
     /** The conversations [item] belongs to, seen from device [me]. Empty = not shown. */
     fun keysOf(item: Item, me: String, devices: Map<String, Device>): Set<String> {
         if (item.isNote) return setOf(NOTES) // (1.20) whoever wrote it (older apps: in none)
@@ -44,9 +47,12 @@ object Conversations {
         val known: Boolean,
         val last: Item?,
         val unread: Int,
+        /** (1.20.2) The Alerts row's line: its newest alert. */
+        val note: String? = null,
     ) {
         val isAll get() = key == ALL
         val isNotes get() = key == NOTES
+        val isAlerts get() = key == ALERTS
     }
 
     /**

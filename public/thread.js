@@ -22,6 +22,7 @@ const view = {
   expanded: new Set(),  // item ids with "Show more" open (survives re-renders and conversation switches)
   fullText: new Map(),  // item id -> full text fetched for truncated items
   pinnedBottom: true,   // is the thread scrolled to the bottom?
+  autoTop: null,        // (1.35.2) where scrollToBottom last put it, until that scroll's own event arrives
   newCount: 0,
   highlight: null,
   filled: false,        // has this thread shown any messages yet (until then it starts at the newest WINDOW)
@@ -213,12 +214,13 @@ function renderComposerState() {
   box.disabled = !sendable;
   $('#attachBtn').disabled = !sendable;
   $('#pasteBtn').disabled = !sendable;
-  box.placeholder = !sendable ? (current === 'notes' ? 'Notes need the updated Beam server' : 'This device was removed from Beam')
-    : current === 'all' ? 'Message all devices…' : current === 'notes' ? 'Write a note…' : `Message ${convName(current)}…`;
+  box.placeholder = box.dataset.placeholder = !sendable ? (current === 'notes' ? 'Notes need the updated Beam server' : 'This device was removed from Beam')
+    : current === 'all' ? 'Message all devices…' : current === 'notes' ? 'Write a note…' : `Message ${convName(current)}…`; // (1.35.2: autosize may show "Message…")
   const note = $('#composerNote');
   note.hidden = sendable;
   if (!sendable) note.textContent = current === 'notes' ? 'Your notes stay here; new ones need the updated Beam server.' : 'This device was removed from Beam. Its history stays here; it comes back if it connects again.';
   $('#sendBtn').disabled = !sendable || !box.value.trim();
+  if (typeof autosize === 'function') autosize(); // (1.35.2, the audit's finding 10: after a first sign-in the box showed scroll arrows until typing)
 }
 
 // ---------------------------------------------------------------- opening conversations
@@ -279,7 +281,9 @@ const atBottom = box => box.scrollHeight - box.scrollTop - box.clientHeight < 80
 
 function scrollToBottom(smooth = false) {
   const box = $('#thread');
-  box.scrollTo({ top: box.scrollHeight, behavior: smooth && !REDUCED_MOTION.matches ? 'smooth' : 'auto' });
+  const instant = !smooth || REDUCED_MOTION.matches;
+  box.scrollTo({ top: box.scrollHeight, behavior: instant ? 'auto' : 'smooth' });
+  view.autoTop = instant ? box.scrollTop : null;
   view.pinnedBottom = true;
   view.newCount = 0;
   $('#newPill').hidden = true;

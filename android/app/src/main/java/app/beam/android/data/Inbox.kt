@@ -9,6 +9,8 @@ import app.beam.android.notify.Notifier
 import app.beam.android.ui.Clip
 import java.util.Collections
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Auto-actions for items sent to this device (docs/API.md checklist): notify, auto-copy, auto-download,
@@ -17,6 +19,18 @@ import java.util.concurrent.Executors
  */
 class Inbox(private val app: BeamApp) {
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "beam-inbox") }
+
+    /** (1.20.2) A catch-up 30 s after a long text's whole words couldn't be fetched (one waiting at a time). */
+    private val retryTimer = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "beam-inbox-retry").apply { isDaemon = true } }
+    private val retrying = AtomicBoolean(false)
+
+    private fun retrySoon() {
+        if (!retrying.compareAndSet(false, true)) return
+        retryTimer.schedule({
+            retrying.set(false)
+            catchUp()
+        }, TEXT_RETRY_MS, TimeUnit.MILLISECONDS)
+    }
     private val inFlight: MutableSet<String> = Collections.synchronizedSet(HashSet())
 
     /** Files that would be downloaded automatically but wait for Wi-Fi ("Wi-Fi only" setting). */
@@ -83,6 +97,12 @@ class Inbox(private val app: BeamApp) {
                     try {
                         text = app.api?.itemText(item.id) ?: text
                     } catch (_: Exception) {
+                        // (1.20.2, the 2026-11-21 audit's finding 5) Never the 16 KB preview, copied or notified as the
+                        // text: it stays unhandled and the next catch-up tries again (as the Windows app does since 1.23),
+                        // one 30 s from now at the latest.
+                        inFlight.remove(item.id)
+                        retrySoon()
+                        return
                     }
                 }
                 val copy = acts && (app.prefs.autoCopy || (item.from != null && item.from in app.prefs.autoCopyDevices))
@@ -173,5 +193,10 @@ class Inbox(private val app: BeamApp) {
             block()
         } catch (_: Exception) {
         }
+    }
+
+    companion object {
+        /** (1.20.2) How soon a long text whose whole words couldn't be fetched is tried again (tests: less). */
+        @Volatile var TEXT_RETRY_MS = 30_000L
     }
 }

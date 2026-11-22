@@ -122,6 +122,7 @@ object Format {
         is NotBeamServerException -> "That address doesn't answer like a Beam server. Check it and try again."
         is IllegalArgumentException -> e.message ?: "That doesn't look right."
         is SourceChangedException -> e.message ?: "The file changed while it was being sent."
+        is SourceUnreadableException -> "Can't read this file any more."
         is SecurityException -> "Beam no longer has access to that file."
         is NoRoomException -> e.message ?: "Not enough free space on this phone."
         is java.io.FileNotFoundException -> if (noSpace(e)) "Not enough free space on this phone." else "The file couldn't be opened."

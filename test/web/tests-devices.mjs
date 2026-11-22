@@ -862,7 +862,8 @@ export default function register(test) {
     eq(hwb.head, 'HW Blackbox');
     assert(/Version 1\.1\.3 · checked 5 min ago/.test(hwb.text), hwb.text);
     eq(hwb.rows.length, 4, JSON.stringify(hwb.rows));
-    assert(hwb.rows[0][0] === 'warn-row' && /^Problems right nowPort 25565 is held by 2 programsProblem$/.test(hwb.rows[0][1]), JSON.stringify(hwb.rows[0]));
+    // (1.35.2, the audit's finding 11) a Problem: red (bad-row); a Warning stays yellow (warn-row alone)
+    assert(hwb.rows[0][0] === 'warn-row bad-row' && /^Problems right nowPort 25565 is held by 2 programsProblem$/.test(hwb.rows[0][1]), JSON.stringify(hwb.rows[0]));
     assert(hwb.rows[1][0] === 'warn-row' && /Power-offs1 in the last 30 daysWarning/.test(hwb.rows[1][1]), JSON.stringify(hwb.rows[1]));
     assert(hwb.rows[2][0] === '' && /node\.exe kept the CPU busy.*Worth a look/.test(hwb.rows[2][1]), JSON.stringify(hwb.rows[2]));
     assert(hwb.rows[3][0] === 'warn-row' && /Last went off without shutting down/.test(hwb.rows[3][1]) && /went down .* · back up /.test(hwb.rows[3][1])

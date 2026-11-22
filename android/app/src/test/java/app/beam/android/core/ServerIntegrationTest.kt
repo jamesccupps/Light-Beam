@@ -172,7 +172,8 @@ class ServerIntegrationTest {
         b.me()
         val size = 2L * UploadInfo.DEFAULT_CHUNK + 123_457 // three chunks
         val data = Random(42).nextBytes(size.toInt())
-        // The source "drops the connection" once, in the middle of the second chunk.
+        // The file's stream fails once, in the middle of the second chunk (a hiccup reading the file: since 1.20.2 tried
+        // once more quietly, not "Connection lost": that's for the request's own failures).
         val source = FlakySource("big test.bin", data, failAt = UploadInfo.DEFAULT_CHUNK + 3_000_000)
         val retries = AtomicInteger()
         val progress = AtomicInteger()
@@ -182,7 +183,7 @@ class ServerIntegrationTest {
         }, sleep = fastSleep)
         val item = uploader.run()
         assertTrue("the simulated failure should have happened", source.failed)
-        assertTrue("expected at least one retry", retries.get() >= 1)
+        assertEquals("a hiccup reading the file isn't a lost connection (1.20.2)", 0, retries.get())
         assertTrue(progress.get() > 3)
         assertEquals(size, item.size)
         assertEquals("big test.bin", item.name)

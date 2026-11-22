@@ -69,6 +69,29 @@ export default function register(test) {
     eq(list.filter(i => i.text === 'written on the train').length, 1, 'sent once');
   });
 
+  test('offline: a file from the outbox cancelled while it goes out stays cancelled (not sent after a reload: the 2026-11-21 audit’s finding 3)', async ctx => {
+    const page = await ctx.signedIn();
+    await swReady(page);
+    const name = `cancel-me-${ctx.uid()}.bin`;
+    // queued as when offline (its copy stored), then the outbox goes out and its upload is cancelled at once
+    await page.evaluate(`(async () => {
+      queueFile(new File([new Uint8Array(96 * 1024 * 1024)], '${name}'), current);
+      for (let i = 0; i < 100 && !(await outboxStore.all()).some(e => e.name === '${name}'); i++) await new Promise(r => setTimeout(r, 30));
+      flushOutbox();
+      for (let i = 0; i < 200 && ![...uploads.values()].some(u => u.outbox); i++) await new Promise(r => setTimeout(r, 10));
+      const up = [...uploads.values()].find(u => u.outbox);
+      if (up) cancelUpload(up);
+    })()`);
+    await page.waitFor(`!uploads.size && outbox.size === 0`, 15000, 'cancelled');
+    eq(await page.evaluate(`outboxStore.all().then(l => l.filter(e => e.name === '${name}').length)`), 0, 'its stored copy is gone');
+    await page.reload();
+    await page.waitFor(`typeof outbox !== 'undefined' && typeof paired !== 'undefined' && paired && net.state === 'online'`, 10000, 'back');
+    await ctx.sleep(3000);
+    eq(await page.evaluate(`outbox.size + uploads.size`), 0, 'nothing waiting after the reload');
+    const list = await serverItems(ctx.srv);
+    assert(!list.some(i => i.name === name), 'never sent');
+  });
+
   test('service worker: the saved app opens when the server is down (502) or silent (3 s)', async ctx => {
     const proxy = await ctx.proxy(8826, 8821);
     ctx.defer(() => proxy.stop());

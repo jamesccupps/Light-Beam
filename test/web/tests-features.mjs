@@ -625,6 +625,7 @@ export default function register(test) {
     await page.goto(`${ctx.srv.base}/#alerts`);
     await page.waitFor(`document.documentElement.classList.contains('alerts-mode') && $$('#inboxPage .inbox-alert').length === 4`, 8000, 'the page of its own');
     eq(await page.evaluate(`[$('#genTitle').textContent, Boolean($('#inboxPage .inbox-bar .btn'))]`), ['Alerts', false], 'no Apps… there');
+    eq(await page.evaluate(`$('#genFoot').hidden`), true, '(1.35.2) one way to close it: its x, no Close button below');
     eq(await post({ message: 'Live on the page', priority: 3 }), 200);
     await page.waitFor(`$('#inboxPage .inbox-alert .inbox-text')?.textContent === 'Live on the page'`, 5000, 'its stream');
     await page.evaluate(`$$('#inboxPage .inbox-chips .chip')[1].click(); true`);

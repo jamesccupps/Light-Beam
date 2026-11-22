@@ -312,7 +312,7 @@ namespace Beam
         }
     }
 
-    // Explorer "Send to > Beam > <device>" shortcuts, one per device plus "All devices".
+    // Explorer "Send to > Beam > <device>" shortcuts, one per device plus "All devices" (and "Notes", 1.27.2).
     static class SendToMenu
     {
         public static void Sync(App app)
@@ -330,11 +330,13 @@ namespace Beam
                 string prefix = cfg.CustomPath ? "--config \"" + cfg.FilePath + "\" " : "";
                 var desired = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 desired["All devices"] = prefix + "--send --to all";
+                // (1.27.2) Notes: this PC itself, by its id (a device named Notes stays a device)
+                if (!string.IsNullOrEmpty(app.Me) && app.ServerHas("notes")) desired["Notes"] = prefix + "--send --to " + app.Me;
                 foreach (var d in app.Devices)
                 {
                     if (d.Id == app.Me) continue;
                     string name = FileUtil.SafeName(d.Name);
-                    if (name.Equals("All devices", StringComparison.OrdinalIgnoreCase)) name += " (device)";
+                    if (name.Equals("All devices", StringComparison.OrdinalIgnoreCase) || name.Equals("Notes", StringComparison.OrdinalIgnoreCase)) name += " (device)";
                     string unique = name;
                     for (int i = 2; desired.ContainsKey(unique); i++) unique = name + " (" + i + ")";
                     desired[unique] = prefix + "--send --to " + d.Id;

@@ -3000,7 +3000,7 @@ test('1.20 the setup check: the servers at boot, backups, disk, every PC up to d
     assert.match(byId('autostart').fix, /Start Beam when I sign in to Windows/);
     const setupAlerts = async () => (await s.req('GET', '/api/alerts', { headers: up })).json.alerts.filter(a => a.kind === 'setup');
     let alerts = await waitFor(async () => { const a = await setupAlerts(); return a.length >= 2 && a; });
-    assert.ok(alerts.some(a => /^Beam's setup check: “Beam starts with Windows on each PC” isn't so: Not on Shop Desktop\. On that PC:/.test(a.text)), JSON.stringify(alerts));
+    assert.ok(alerts.some(a => /^Setup check: Not on Shop Desktop \(“Beam starts with Windows on each PC”\)\. On that PC:/.test(a.text)), JSON.stringify(alerts));
     await sleep(300);
     r = (await s.req('GET', '/api/setup?refresh=1', { headers: up })).json;
     assert.equal((await setupAlerts()).length, 2, 'once while it stays wrong');
@@ -6486,6 +6486,14 @@ test('2026-11-05 review: no taking a device that has a sign-in; automatic sign-i
     for (let i = 0; i < 10; i++) assert.equal((await post(s, '/api/autopair', { client: 'app', name: `iPad ${i}`, platform: 'ios' }, viaServe('100.64.31.13', 'alice@example.com'))).status, 200);
     r = await post(s, '/api/autopair', { client: 'app', name: 'iPad 10', platform: 'ios' }, viaServe('100.64.31.13', 'alice@example.com'));
     assert.deepEqual([r.status, r.json.reason], [429, 'rate']);
+    // (1.35.2, the 2026-11-21 audit's finding 1) refused again within the minute: when the minute's summary comes the
+    // server goes on (its log call had no summary: "more is not a function" crashed it)
+    r = await post(s, '/api/autopair', { client: 'app', name: 'iPad 11', platform: 'ios' }, viaServe('100.64.31.13', 'alice@example.com'));
+    assert.deepEqual([r.status, r.json.reason], [429, 'rate']);
+    await waitFor(() => /Refused 1 more automatic sign-in from /.test(s.out), 5000);
+    await sleep(300);
+    assert.equal((await s.req('GET', '/api/hello')).status, 200, 'still answering');
+    assert.doesNotMatch(s.out, /Crashed|more is not a function/);
     assert.equal((await post(s, '/api/autopair', { client: 'app', name: 'Another phone', platform: 'android' }, viaServe('100.64.31.12', 'alice@example.com'))).status, 200, 'another machine isn’t held back');
 
     // M21: the links a device made stop when it's removed
@@ -7730,6 +7738,107 @@ test('AUD (audit 2026-10-04): reactions can’t be object keys; a reinstall need
     assert.equal((await p.req('GET', '/api/me', { headers: pcApp })).status, 200, 'the app signs in with the pairing key');
     assert.equal((await p.req('GET', '/api/me', { headers: pcApp })).status, 200, '...and keeps it as its sign-in');
   } finally { await p.stop(); }
+});
+
+// ---------------------------------------------------------------- 1.35.2: the 2026-11-21 audit
+
+test('1.35.2 one Beam per data folder: a second server on the same data stops before reading or cleaning anything (an upload in progress and a one-shot file stay as they are); after the first one ends, a new one starts', async () => {
+  const s = await startServer('lock1352', 8796);
+  try {
+    const K = s.key;
+    const pc = app(K, 'lockpc01352', 'Shop Desktop', 'windows', from('100.64.38.2'));
+    assert.equal((await s.req('GET', '/api/me', { headers: pc })).status, 200);
+    // an upload under way: 3 MB of 8 sent
+    const size = 8 * 1024 * 1024;
+    const data = crypto.randomBytes(size);
+    let r = await post(s, '/api/uploads', { name: 'big.bin', size, to: [] }, pc);
+    assert.equal(r.status, 201, r.body);
+    const id = r.json.id;
+    r = await s.req('PUT', `/api/uploads/${id}?offset=0`, { headers: { ...pc, 'Content-Type': 'application/octet-stream' }, body: data.subarray(0, 3 * 1024 * 1024) });
+    assert.equal(r.status, 200, r.body);
+    const part = path.join(s.data, 'uploads', `${id}.part`);
+    const before = fs.statSync(part).size;
+    const filesBefore = fs.readdirSync(path.join(s.data, 'files')).sort();
+    // a second server on the same data, another port (worse than the same one: both would serve) and the same port
+    for (const port of [8797, 8796]) {
+      const second = await runNode([], serverEnv(port, s.dir), { timeout: 20000 });
+      assert.equal(second.code, 78, `port ${port}: ${second.out}`);
+      assert.match(second.out, /Another Beam is already running on .+: this one stops without touching it/);
+      assert.doesNotMatch(second.out, /goes on from its last saved point|no item refers to|is running on port/);
+    }
+    assert.equal(fs.statSync(part).size, before, 'the upload in progress wasn’t cut back');
+    assert.deepEqual(fs.readdirSync(path.join(s.data, 'files')).sort(), filesBefore);
+    // the upload goes on and is stored as sent
+    r = await s.req('PUT', `/api/uploads/${id}?offset=${3 * 1024 * 1024}`, { headers: { ...pc, 'Content-Type': 'application/octet-stream' }, body: data.subarray(3 * 1024 * 1024) });
+    assert.equal(r.status, 201, r.body);
+    assert.ok(fs.readFileSync(path.join(s.data, 'files', id)).equals(data), 'byte for byte');
+    // a command sees the running one by its lock, and doesn't touch its data
+    const imp = await runNode(['import', path.join(TMP, 'nothing.tar.gz'), '--force'], serverEnv(8797, s.dir), { timeout: 60000 });
+    assert.notEqual(imp.code, 0);
+    assert.match(imp.out, /Beam is running on /);
+    assert.ok(fs.existsSync(path.join(s.data, 'items.json')), 'its data left where it is');
+  } finally { await s.stop(); }
+  // once it ended (its lock with it), a new one starts on that folder
+  const again = await startServer('lock1352', 8796, { keep: true });
+  try {
+    assert.equal((await again.req('GET', '/api/hello')).status, 200);
+  } finally { await again.stop(); }
+});
+
+test('1.35.2 updates one PC at a time: another PC running the build meanwhile becomes the first; a first PC that went offline before its minutes hands it to another', async () => {
+  const s = await startServer('stage1352', 8794);
+  try {
+    const K = s.key;
+    const v = version => ({ 'X-Beam-App-Version': version });
+    const own = app(K, 'hostpc01352', 'Office PC', 'windows', v('1.13.0')); // (this server's own PC)
+    const shop = app(K, 'shoppc01352', 'Shop Desktop', 'windows', { ...v('1.13.0'), ...from('100.64.39.2') });
+    const cam = app(K, 'campc001352', 'Office Desktop', 'windows', { ...v('1.13.0'), ...from('100.64.39.4') });
+    const streams = {};
+    for (const [name, h] of [['own', own], ['shop', shop], ['cam', cam]]) { streams[name] = await openEvents(s.port, h); await streams[name].wait('hello'); }
+    const publish = version => {
+      fs.writeFileSync(path.join(s.dist, 'Beam.exe'), crypto.randomBytes(2000));
+      fs.writeFileSync(path.join(s.dist, 'Beam.exe.json'), JSON.stringify({ version }));
+    };
+    const rollout = async () => (await s.req('GET', '/api/settings', { headers: shop })).json.rollout;
+    // 1. this server's own PC first, as before; Office Desktop takes it anyway (it asked) and runs it: it's the first
+    //    one now, and the others get it after its minutes
+    publish('1.14.0');
+    await streams.own.wait('app-update', d => d.windows?.version === '1.14.0', 10000);
+    assert.equal((await s.req('GET', '/api/me', { headers: { ...cam, ...v('1.14.0') } })).status, 200);
+    await waitFor(() => /Office Desktop runs Windows 1\.14\.0: the other PCs get it at/.test(s.out), 5000);
+    assert.equal((await rollout()).pilotName, 'Office Desktop');
+    await streams.shop.wait('app-update', d => d.windows?.version === '1.14.0', 6000);
+    // 2. the first PC runs 1.15.0 and goes offline before its minutes (a laptop asleep): another online PC tries it
+    //    first (it used to hold every other PC until it was back), then the last one gets it
+    publish('1.15.0');
+    await streams.own.wait('app-update', d => d.windows?.version === '1.15.0', 10000);
+    assert.equal((await s.req('GET', '/api/me', { headers: { ...own, ...v('1.15.0') } })).status, 200);
+    await waitFor(() => /Office PC runs Windows 1\.15\.0/.test(s.out), 5000);
+    streams.own.close();
+    const next = await waitFor(() => /Windows 1\.15\.0: Office PC went offline before it had run it for .+; offering it to (Shop|Camera) Desktop first instead/.exec(s.out), 8000);
+    const [h, other] = next[1] === 'Shop' ? [shop, 'cam'] : [cam, 'shop'];
+    assert.equal((await s.req('GET', '/api/me', { headers: { ...h, ...v('1.15.0') } })).status, 200);
+    await streams[other].wait('app-update', d => d.windows?.version === '1.15.0', 8000);
+    for (const st of Object.values(streams)) st.close();
+  } finally { await s.stop(); }
+});
+
+test('1.35.2 updates one PC at a time: a PC in a remote control session (either side) isn’t the first while another can be (2026-11-20: 1.27.1 waited 2 h 40 min on two PCs controlling each other)', async () => {
+  const t = await rcSetup('rc-pilot1352');
+  try {
+    const { s, pc, laptop, status, start } = t;
+    await status(pc, { remoteControl: true, locked: false });
+    const ev = {};
+    for (const [n, h] of [['pc', pc], ['laptop', laptop], ['other', t.other]]) { ev[n] = await openEvents(s.port, h); await ev[n].wait('hello'); }
+    const r = await start(laptop);
+    assert.equal(r.status, 201, r.body);
+    fs.writeFileSync(path.join(s.dist, 'Beam.exe'), crypto.randomBytes(2000));
+    fs.writeFileSync(path.join(s.dist, 'Beam.exe.json'), JSON.stringify({ version: '1.7.0' }));
+    await ev.other.wait('app-update', d => d.windows?.version === '1.7.0', 10000);
+    assert.match(s.out, /Windows 1\.7\.0: offered to Other PC first/);
+    assert.ok(!ev.pc.events.some(e => e.event === 'app-update') && !ev.laptop.events.some(e => e.event === 'app-update'), 'not the two in the session');
+    for (const e of Object.values(ev)) e.close();
+  } finally { await t.stop(); }
 });
 
 // ---------------------------------------------------------------- 1.35.1

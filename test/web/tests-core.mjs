@@ -108,7 +108,9 @@ export default function register(test) {
     const page = await ctx.signedIn();
     const meId = await page.evaluate('me.id');
     await page.waitFor('readMarks !== null && items.length > 0');
-    eq(await page.evaluate('document.title'), 'Beam', 'a fresh browser starts with nothing unread');
+    // (1.35.2) the open conversation marks itself read a moment after the first sync: the title settles then (the
+    // check raced it: 3 failures in 8 runs under the 1.35.2 suite's load)
+    await page.waitFor(`document.title === 'Beam'`, 3000, 'a fresh browser starts with nothing unread');
     await laptop.text('from laptop', [meId]);
     await page.evaluate(`openConv('${laptop.id}')`);
     await phone.text('new broadcast');

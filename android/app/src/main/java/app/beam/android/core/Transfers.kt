@@ -16,6 +16,45 @@ class TransferPausedException : Exception("Paused")
 /** (1.16) Getting a file ready to send would leave this phone too little free space. Not retried. */
 class NoRoomException : IOException("Not enough free space on this phone to get the file ready.")
 
+/**
+ * (1.20.2, the 2026-11-21 audit's finding 17) The file being sent can't be opened or read any more (deleted or moved
+ * before it was read, a cloud file its app can't supply, a removed card): not the network. Not retried as a lost
+ * connection (that held every upload behind it for ten minutes); the upload stops and the next one goes.
+ */
+class SourceUnreadableException(cause: Throwable?) : IOException("Can't read this file any more", cause)
+
+/** A failure opening or reading the source, told apart from the request's own (inside [Uploader.run] only). */
+private class SourceReadException(cause: IOException) : IOException(cause.message, cause)
+
+/** The source's stream, its read failures marked as the file's (not the connection's). */
+private class SourceInput(private val inner: InputStream) : InputStream() {
+    override fun read(): Int = try {
+        inner.read()
+    } catch (e: IOException) {
+        throw SourceReadException(e)
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int = try {
+        inner.read(b, off, len)
+    } catch (e: IOException) {
+        throw SourceReadException(e)
+    }
+
+    override fun skip(n: Long): Long = try {
+        inner.skip(n)
+    } catch (e: IOException) {
+        throw SourceReadException(e)
+    }
+
+    override fun available(): Int = try {
+        inner.available()
+    } catch (_: IOException) {
+        0
+    }
+
+    override fun close() = inner.close()
+}
+
 /** Something that can be uploaded: must know its size up front and be re-openable at any offset. */
 interface UploadSource {
     val name: String
@@ -107,6 +146,7 @@ class Uploader(
         }
         var input: InputStream? = null
         var inputPos = -1L
+        var sourceFailures = 0 // (1.20.2) in a row: the file couldn't be opened or read
 
         fun retryAfter(e: Throwable) {
             if (kicked) {
@@ -156,8 +196,18 @@ class Uploader(
                     listener.onProgress(start, source.size)
                     val len = minOf(chunk, source.size - start)
                     if (input == null || inputPos != start) {
-                        input?.close()
-                        input = source.open(start)
+                        try {
+                            input?.close()
+                        } catch (_: IOException) {
+                        }
+                        input = null
+                        input = try {
+                            SourceInput(source.open(start))
+                        } catch (e: SourceChangedException) {
+                            throw e
+                        } catch (e: IOException) {
+                            throw SourceReadException(e)
+                        }
                         inputPos = start
                     }
                     val body = ChunkBody(input, len, last = start + len == source.size) { listener.onProgress(start + it, source.size) }
@@ -167,6 +217,7 @@ class Uploader(
                     inputPos = start + len
                     chunk = nextChunk(len, (System.nanoTime() - t0) / 1_000_000, minChunk, maxChunk)
                     failures = 0
+                    sourceFailures = 0
                     backoff.reset()
                     if (result.done) {
                         listener.onProgress(source.size, source.size)
@@ -195,6 +246,19 @@ class Uploader(
                     }
                 } catch (e: SourceChangedException) {
                     throw e
+                } catch (e: SourceReadException) {
+                    // (1.20.2) The file, not the connection: once more after a second (a provider's hiccup), then it stops.
+                    checkStopped()
+                    holder.abortCurrent() // (a chunk cut off by its file: its connection isn't used again)
+                    try {
+                        input?.close()
+                    } catch (_: IOException) {
+                    }
+                    input = null
+                    inputPos = -1
+                    if (++sourceFailures > 1) throw SourceUnreadableException(e.cause)
+                    sleepChecked(1000)
+                    if (id != null) offset = -1
                 } catch (e: IOException) {
                     checkStopped()
                     retryAfter(e)
