@@ -12,6 +12,19 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.37.0 (2026-11-22): remote control starts sooner and keeps big changes quick
+
+**Versions:** server 1.37.0 (the viewer), Windows app 1.29.0; the Android app 1.21.1 and Beam for Linux 1.6.0 unchanged.
+
+- **A picture at once:** right after the two sides are connected and checked, the PC sends a still of its screen, shown
+  until the live picture arrives (that took about 0.6 s more: half of a start). The details' start line shows it.
+  Never for keyboard-and-mouse sessions, never while the PC is locked or shows a security prompt.
+- **Big changes stay quick in Auto:** while the screen is busy (scrolling, a video), Auto keeps treating the picture
+  as a screen and only raises the frame rate; a window opening during that took about three times as long before.
+- **A higher bandwidth floor:** on a fast link the picture may use up to 30 Mbps on the same network (was 12) and up
+  to 40 across the internet (half the speed tests' link; was 20), so a big change leaves sooner. A still screen sends
+  no more for it. A data limit you set still applies.
+
 ## Android 1.21.1 (2026-11-22): LocalCast's page opens on the phone
 
 **Versions:** the Android app 1.21.1; the server (1.36.0), the Windows app (1.28.0) and Beam for Linux unchanged.

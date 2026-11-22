@@ -219,11 +219,13 @@ function rcBuild() {
   video.defaultMuted = true;
   video.addEventListener('loadeddata', () => {
     if (typeof video.requestVideoFrameCallback !== 'function') rcStartMark('picture'); // (else the frame's own time: rcWatchFrames)
-    if (!rc.frames) { rc.frames = true; rcLayout(); rcRender(); }
+    if (!rc.frames) { rc.frames = true; rcStillDone(); rcLayout(); rcRender(); }
   });
   video.addEventListener('resize', () => rcLayout());
   const canvas = el('canvas', { class: 'rc-canvas', hidden: true, 'aria-hidden': 'true' }); // (1.17: the picture drawn here, rcFast)
-  const stage = el('div', { class: 'rc-stage' }, video, canvas);
+  // (1.37, the audit's RC2) the PC's still of its screen, in the picture's place until the first video frame
+  const still = el('img', { class: 'rc-still', hidden: true, alt: '', 'aria-hidden': 'true', draggable: 'false' });
+  const stage = el('div', { class: 'rc-stage' }, video, still, canvas);
   const cursor = el('div', { class: 'rc-cursor', hidden: true, 'aria-hidden': 'true' });
   const fx = el('div', { class: 'rc-fxs', 'aria-hidden': 'true' }); // (taps, the hold ring)
   const notice = el('div', { class: 'rc-notice', role: 'status', hidden: true });
@@ -241,7 +243,7 @@ function rcBuild() {
   const keys = el('div', { class: 'rc-keys', hidden: true });
   const root = el('div', { id: 'remote', class: 'rc' }, bar, el('div', { class: 'rc-body' }, stage, fx, cursor, details, notice, overlay, help), keys, sink);
   document.body.prepend(root);
-  Object.assign(rcUi, { root, bar, name, chip, tools, stage, video, canvas, cursor, fx, notice, overlay, help, card, sink, keys, details });
+  Object.assign(rcUi, { root, bar, name, chip, tools, stage, video, canvas, still, cursor, fx, notice, overlay, help, card, sink, keys, details });
   rcBindInput();
   rcBuildKeyStrip();
   rcRender();
@@ -459,6 +461,7 @@ function rcClosePeer() {
   rc.ctlEarly = [];
   rc.hostHello = null;
   rc.frames = false;
+  rcStillDone(); // (1.37)
   rc.statsPrev = null;
   if (rcUi.video) rcUi.video.srcObject = null;
 }
@@ -1217,12 +1220,12 @@ function rcMeasureSum(got, caps = {}) {
 
 // (1.15) The PC's steps of a start (its `started`, a Windows app 1.15), as the details name them, in the order they came.
 const RC_PC_STEPS = ['banner', 'page', 'offer', 'answer', 'connected', 'checked', 'capture', 'picture'];
-const RC_PC_STEP_NAMES = { banner: 'banner', page: 'its page', offer: 'offer', answer: 'answer', connected: 'connected', checked: 'checked', capture: 'capture', picture: 'picture out' };
+const RC_PC_STEP_NAMES = { banner: 'banner', page: 'its page', offer: 'offer', answer: 'answer', connected: 'connected', checked: 'checked', still: 'still out', capture: 'capture', picture: 'picture out' };
 
 // "2.05 s to the picture · here: asked 0.42 · offer 0.60 · … · on Desktop: banner 0.07 · its page 0.12 · …". This
 // page's seconds count from its own start (a first attempt: the page's, its sign-in checks and the request included;
 // a later one: from Reconnect); the PC's from when the request got there. (1.17: this page's steps shown too.)
-const RC_HERE_STEPS = ['asked', 'offer', 'answered', 'connected'];
+const RC_HERE_STEPS = ['asked', 'offer', 'answered', 'connected', 'still']; // (1.37: the PC's still shown here)
 function rcStartText() {
   const s = rc.start;
   if (!s || s.at.picture == null) return '';
@@ -1316,6 +1319,42 @@ function rcOnCtlOpen() {
 }
 
 // What the PC says on `ctl`, checked: it decides nothing here but the picture's details.
+// (1.37, the 2026-11-21 audit's RC2) The PC's still of its screen, in parts (`still` { i, n, w, h, d: base64 JPEG }),
+// right after the peer check: shown in the picture's place until the first video frame. Once a connection; a JPEG only;
+// 4 MB at most; nothing once the video has a frame.
+function rcStillPart(m) {
+  if (rc.frames || rc.stillShown || !Number.isInteger(m.i) || !Number.isInteger(m.n) || m.n < 1 || m.n > 100 || m.i < 0 || m.i >= m.n || typeof m.d !== 'string') return;
+  const parts = rc.stillParts && rc.stillParts.n === m.n ? rc.stillParts : (rc.stillParts = { n: m.n, got: new Array(m.n), have: 0 });
+  if (parts.got[m.i] == null) { parts.got[m.i] = m.d; parts.have++; }
+  if (parts.have < parts.n) return;
+  rc.stillParts = null;
+  const b64 = parts.got.join('');
+  if (b64.length > 4 * 1024 * 1024) return;
+  let bytes;
+  try { bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); } catch { return; }
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return; // (a JPEG only)
+  const img = rcUi.still;
+  if (!img || rc.frames) return;
+  img.onload = () => {
+    if (rc.frames || img.src !== rc.stillUrl) return;
+    img.hidden = false;
+    rc.stillShown = true;
+    rcStartMark('still');
+    rcLayout();
+    rcRender();
+  };
+  rc.stillUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+  img.src = rc.stillUrl;
+}
+
+function rcStillDone() {
+  rc.stillParts = null;
+  rc.stillShown = false;
+  const img = rcUi.still;
+  if (img) { img.hidden = true; img.removeAttribute('src'); }
+  if (rc.stillUrl) { URL.revokeObjectURL(rc.stillUrl); rc.stillUrl = null; }
+}
+
 function rcOnCtl(data) {
   if (typeof data !== 'string' || data.length > 4 * RC_CLIP_MAX) return;
   // Before our own check passes (the PC's can pass first, and it says hello then): kept, and read once it passes.
@@ -1325,6 +1364,7 @@ function rcOnCtl(data) {
   try { m = JSON.parse(data); } catch { return; }
   if (!m || typeof m !== 'object') return;
   switch (m.t) {
+    case 'still': rcStillPart(m); break; // (1.37, the audit's RC2)
     case 'hello': // after the PC's own peer check; again after a switch of screens (a new connection)
       rc.hostHello = { v: Number(m.v) || 1 };
       rc.monitors = rcMonitors(m.monitors);
@@ -2493,6 +2533,11 @@ function rcApplyView() {
   const v = rcV;
   if (!v.base) return;
   rcUi.video.style.transform = `translate(${v.ox}px, ${v.oy}px) scale(${v.s / v.base})`;
+  if (rcUi.still && !rcUi.still.hidden) { // (1.37: the still where the picture will be)
+    rcUi.still.style.width = rcUi.video.style.width;
+    rcUi.still.style.height = rcUi.video.style.height;
+    rcUi.still.style.transform = rcUi.video.style.transform;
+  }
   const zoom = v.s / v.base;
   if (Math.abs(zoom - rc.zoom) > 0.01) rcPicSoon(); // (zoomed in, the PC sends more of its pixels: 1.8)
   rc.zoom = zoom;
@@ -3226,6 +3271,8 @@ function rcRender() {
         : 'To answer them from here, turn on “Answer Windows’ prompts” in Beam’s settings on that PC.')];
   } else if (rc.state === 'live' && rc.switching) {
     parts = [spin(), el('strong', {}, `Switching to ${rc.switching.name}…`), el('p', {}, 'The picture comes back in a moment.')];
+  } else if (rc.state === 'live' && rc.stillShown && !rc.frames) {
+    parts = null; // (1.37: the PC's still shows meanwhile; the live picture replaces it)
   } else if (rc.state === 'live' && (!rc.frames || !rc.hostHello)) {
     parts = [spin(), el('strong', {}, `Connected to ${n}`), el('p', {}, 'Waiting for the picture…')];
   }

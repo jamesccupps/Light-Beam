@@ -18,7 +18,9 @@ const floorNext = new Function(`${src.slice(at, end + 4)}\nreturn floorNext;`)()
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 const off = { kbps: 0, off: false, fast: 0, bad: 0 };
-const tick = (o = {}) => ({ rtt: 2, lost: 0, lan: false, allowed: true, limit: 15000, ...o });
+// (1.29, RC3) Auto's limit for the floor is 40 Mbps (floorLimit(): above Auto's own 15/25); a hand-picked profile's,
+// or a data limit the viewer set, as they are
+const tick = (o = {}) => ({ rtt: 2, lost: 0, lan: false, allowed: true, limit: 40000, ...o });
 // Runs the ticks from a state; returns the last state and every act
 function run(ticks, s = off) {
   const acts = [];
@@ -27,9 +29,9 @@ function run(ticks, s = off) {
 }
 
 let r = run([{}, {}]);
-check(r.s.kbps === 12000 && r.acts.join() === ',on' && /round trip of 2 ms/.test(r.s.why), `two fast ticks (a 2 ms round trip): on at 12 Mbps on the second (${r.acts.join()} · ${r.s.why})`);
+check(r.s.kbps === 30000 && r.acts.join() === ',on' && /round trip of 2 ms/.test(r.s.why), `two fast ticks (a 2 ms round trip): on at 30 Mbps on the second (1.29, RC3: was 12) (${r.acts.join()} · ${r.s.why})`);
 r = run([{ rtt: 25, lan: true }, { rtt: 25, lan: true }]);
-check(r.s.kbps === 12000 && r.s.why === 'Tailscale direct on the LAN', `Tailscale direct on the LAN counts as fast whatever the round trip (${r.s.why})`);
+check(r.s.kbps === 30000 && r.s.why === 'Tailscale direct on the LAN', `Tailscale direct on the LAN counts as fast whatever the round trip (${r.s.why})`);
 r = run([{ rtt: 25 }, { rtt: 25 }, { rtt: 25 }]);
 check(r.s.kbps === 0 && r.acts.every(a => !a), 'across the internet (25 ms, not on the LAN): never on');
 r = run([{ rtt: null }, { rtt: null }]);
@@ -43,22 +45,22 @@ check(r.s.kbps === 0 && r.s.off === true && r.acts[3] === 'off' && r.s.why === '
 r = run([{}, {}, { lost: 3 }, { lost: 3 }, {}, {}, {}, {}], );
 check(r.s.kbps === 0 && r.acts.slice(4).every(a => !a), '...and fast ticks after that never bring it back');
 r = run([{}, {}, { lost: 3 }, {}, { lost: 3 }, {}]);
-check(r.s.kbps === 12000 && !r.s.off, 'loss on single ticks, a clean one between: it stays on');
+check(r.s.kbps === 30000 && !r.s.off, 'loss on single ticks, a clean one between: it stays on');
 r = run([{}, {}, { rtt: 40 }, { rtt: 45 }]);
 check(r.s.off === true && r.s.why === 'a round trip of 45 ms', `on, then two ticks over 30 ms: off for the session (${r.s.why})`);
 r = run([{}, {}, { lost: 2 }, { lost: 2 }]);
-check(r.s.kbps === 12000, 'exactly 2% loss is fine');
+check(r.s.kbps === 30000, 'exactly 2% loss is fine');
 r = run([{ limit: 8000 }, { limit: 8000 }]);
 check(r.s.kbps === 8000, 'never over the profile\'s limit (Sharp text: 8 Mbps)');
 r = run([{ limit: 8000 }, { limit: 8000 }, { limit: 16000 }]);
 const up = r.s;
 r = run([{ limit: 25000 }], up);
-check(up.kbps === 12000 && up.act === 'on' && up.why === 'the profile changed' && r.s.kbps === 12000 && !r.s.act,
-  `the profile's limit goes up: 8 → 12 Mbps (${up.why}), then stays at 12 for a higher one`);
+check(up.kbps === 16000 && up.act === 'on' && up.why === 'the profile changed' && r.s.kbps === 25000 && r.s.act === 'on',
+  `the limit goes up: 8 → 16 Mbps (${up.why}), then 25 for a higher one (under the LAN's 30)`);
 r = run([{ limit: 1500 }, { limit: 1500 }, { limit: 1500 }]);
 check(r.s.kbps === 0, 'a limit under 2 Mbps (the viewer set it low): no floor');
 r = run([{}, {}, { allowed: false }, {}, {}]);
-check(r.acts.join() === ',on,off,,on' && r.s.kbps === 12000 && !r.s.off && r.acts[2] === 'off', `not allowed for a while (mobile data, Data saver): off, and back after two fast ticks (${r.acts.join()})`);
+check(r.acts.join() === ',on,off,,on' && r.s.kbps === 30000 && !r.s.off && r.acts[2] === 'off', `not allowed for a while (mobile data, Data saver): off, and back after two fast ticks (${r.acts.join()})`);
 r = run([{ allowed: false }, { allowed: false }]);
 check(r.s.kbps === 0, 'never on while not allowed');
 
@@ -68,9 +70,13 @@ r = run([far(), far()]);
 check(r.s.kbps === 10000 && r.acts.join() === ',on' && r.s.kind === 'measured' && r.s.why === 'the speed tests: 20 Mbit/s between them',
   `24 ms away, 20 Mbit/s measured: on at half of it, 10 Mbps, on the second tick (${r.acts.join()} · ${r.s.why})`);
 r = run([far({ link: 48 }), far({ link: 48 })]);
-check(r.s.kbps === 15000, `48 Mbit/s measured: at most the profile's limit (Auto's 15 Mbps): ${r.s.kbps}`);
-r = run([far({ link: 100, limit: 25000 }), far({ link: 100, limit: 25000 })]);
-check(r.s.kbps === 20000, `100 Mbit/s and Smooth motion's 25: at most 20 Mbps (${r.s.kbps})`);
+check(r.s.kbps === 24000, `48 Mbit/s measured: half of it, 24 Mbps (1.29, RC3: no longer Auto's 15) (${r.s.kbps})`);
+r = run([far({ link: 48, limit: 15000 }), far({ link: 48, limit: 15000 })]);
+check(r.s.kbps === 15000, `...but a data limit the viewer set (15 Mbps) still caps it: ${r.s.kbps}`);
+r = run([far({ link: 100 }), far({ link: 100 })]);
+check(r.s.kbps === 40000, `100 Mbit/s measured: at most 40 Mbps (1.29, RC3: was 20) (${r.s.kbps})`);
+r = run([far({ link: 100, limit: 16000 }), far({ link: 100, limit: 16000 })]);
+check(r.s.kbps === 16000, `100 Mbit/s and the hand-picked Smooth motion's 16: at most 16 (${r.s.kbps})`);
 r = run([far({ link: 8 }), far({ link: 8 }), far({ link: 8 })]);
 check(r.s.kbps === 0, '8 Mbit/s measured (4 Mbps, no more than WebRTC\'s own estimate): no floor');
 r = run([far({ direct: false }), far({ direct: false }), far({ direct: false })]);
@@ -82,7 +88,7 @@ check(r.s.kbps === 0, 'the round trip not known yet: not on (no lowest to watch)
 r = run([far({ allowed: false }), far({ allowed: false })]);
 check(r.s.kbps === 0, 'mobile data, Data saver, keyboard and mouse: never on');
 r = run([far({ lan: true }), far({ lan: true })]);
-check(r.s.kbps === 12000 && r.s.kind === 'near', `Tailscale direct on the LAN: the LAN's 12 Mbps, not the speed tests' (${r.s.kbps}, ${r.s.why})`);
+check(r.s.kbps === 30000 && r.s.kind === 'near', `Tailscale direct on the LAN: the LAN's 30 Mbps, not the speed tests' (${r.s.kbps}, ${r.s.why})`);
 r = run([far(), far(), far({ rtt: 50 }), far({ rtt: 30 }), far({ rtt: 55 })]);
 check(r.s.kbps === 10000 && !r.s.off, 'on, then a round trip of 50 and 55 ms with 30 between (lowest 24, the limit 56): it stays on');
 r = run([far(), far(), far({ rtt: 60 }), far({ rtt: 70 })]);

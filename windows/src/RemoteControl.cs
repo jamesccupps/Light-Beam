@@ -895,6 +895,68 @@ namespace Beam
 
         static string Secs(long ms) { return (ms / 1000.0).ToString("0.00", CultureInfo.InvariantCulture); }
 
+        // (1.29, the 2026-11-21 audit's RC2) A still of the shared screen as soon as the peer check passed: the viewer shows
+        // it until the first video frame (Edge's capture took ~0.6 s more: half of a start). Grabbed here (GDI, a few tens
+        // of ms), at most StillSide px a side, JPEG; the capture page sends it in parts. Never for kvm, never while this
+        // PC is locked or shows the secure desktop, only the first time a session goes live; its size goes to the log,
+        // never what it shows.
+        const int StillSide = 1600;
+        const long StillQuality = 62;
+
+        void SendStill(RcSession s, DesktopLayout layout)
+        {
+            var screen = layout.Screen(s.Screen);
+            if (screen == null || screen.W < 16 || screen.H < 16 || Locked || InputTarget.SecureDesktop()) return;
+            int x = screen.X, y = screen.Y, w = screen.W, h = screen.H;
+            Task.Run(() =>
+            {
+                try
+                {
+                    var watch = Stopwatch.StartNew();
+                    double k = Math.Min(1.0, (double)StillSide / Math.Max(w, h));
+                    int ow = Math.Max(1, (int)Math.Round(w * k)), oh = Math.Max(1, (int)Math.Round(h * k));
+                    byte[] jpeg;
+                    using (var full = new System.Drawing.Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
+                    {
+                        using (var g = System.Drawing.Graphics.FromImage(full))
+                            g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(w, h), System.Drawing.CopyPixelOperation.SourceCopy);
+                        using (var small = new System.Drawing.Bitmap(ow, oh, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
+                        {
+                            using (var g = System.Drawing.Graphics.FromImage(small))
+                            {
+                                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                                g.DrawImage(full, 0, 0, ow, oh);
+                            }
+                            var codec = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders().First(c => c.MimeType == "image/jpeg");
+                            using (var ps = new System.Drawing.Imaging.EncoderParameters(1))
+                            using (var ms = new MemoryStream())
+                            {
+                                ps.Param[0] = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, StillQuality);
+                                small.Save(ms, codec, ps);
+                                jpeg = ms.ToArray();
+                            }
+                        }
+                    }
+                    long took = watch.ElapsedMilliseconds;
+                    string b64 = Convert.ToBase64String(jpeg);
+                    app.Post(() =>
+                    {
+                        // (still this session, live, on screen: else nothing goes)
+                        if (current != s || s.State != RcState.Live || s.Kvm || Locked || s.Host == null) return;
+                        var m = new Dictionary<string, object>();
+                        m["t"] = "still";
+                        m["d"] = b64;
+                        m["w"] = ow;
+                        m["h"] = oh;
+                        s.Host.Post(m);
+                        s.Mark("still");
+                        Log.Write("Remote control: a still of the screen goes first (" + (jpeg.Length / 1024) + " KB, " + ow + "x" + oh + ", " + took + " ms)");
+                    });
+                }
+                catch (Exception ex) { Log.Write("Remote control: no still of the screen (" + ex.GetType().Name + ")"); }
+            });
+        }
+
         // The captured frame's size, matched to a screen (several monitors: Chromium's "Screen N" order is a best guess).
         static int MatchScreen(DesktopLayout l, int expected, int w, int h)
         {
@@ -1002,6 +1064,7 @@ namespace Beam
             v["hello"] = hello;
             host.Post(v);
             bool first = s.State != RcState.Live;
+            if (first && !s.Kvm) SendStill(s, layout); // (1.29, the audit's RC2) a still first, while the capture starts
             s.State = RcState.Live;
             if (first)
             {

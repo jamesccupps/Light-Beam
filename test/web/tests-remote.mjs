@@ -1562,6 +1562,36 @@ export default function register(test) {
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 240000 });
 
+  test('remote control 1.37 (the 2026-11-21 audit’s RC2): the PC’s still of its screen shows in the picture’s place until the first frame (parts of one JPEG; not another kind; not once frames come)', async ctx => {
+    const pc = await fakePc(ctx);
+    const page = await viewer(ctx, pc.id);
+    await live(page, pc);
+    // (the fake PC's video is on at once: the viewer is told no frame has come yet, as at a start)
+    await page.evaluate(`(rc.frames = false, rcStillDone(), rcRender(), true)`);
+    const sendStill = async (type, parts = 2) => pc.js(`(() => {
+      const cv = document.createElement('canvas'); cv.width = 320; cv.height = 180;
+      const g = cv.getContext('2d'); g.fillStyle = '#c04040'; g.fillRect(0, 0, 320, 180);
+      const d = cv.toDataURL('${type}').split(',')[1];
+      const size = Math.ceil(d.length / ${parts});
+      for (let i = 0; i < ${parts}; i++) fakePc.send('ctl', { t: 'still', i, n: ${parts}, w: 320, h: 180, d: d.slice(i * size, (i + 1) * size) });
+      return true;
+    })()`);
+    await sendStill('image/png');
+    await sleep(500);
+    eq(await page.evaluate(`[rcUi.still.hidden, rc.stillShown]`), [true, false], 'a PNG: not shown (a JPEG only)');
+    await sendStill('image/jpeg');
+    await page.waitFor(`!rcUi.still.hidden && rc.stillShown`, 5000, 'the still shown');
+    eq(await page.evaluate(`[rcUi.overlay.hidden, rcUi.still.style.width === rcUi.video.style.width && rcUi.still.style.transform === rcUi.video.style.transform, rc.start ? rc.start.at.still != null : true]`),
+      [true, true, true], 'in the picture’s place, no “Waiting for the picture” card over it; its step in the start’s details');
+    // The first frame: the still goes
+    await page.evaluate(`(rcUi.video.dispatchEvent(new Event('loadeddata')), true)`);
+    await page.waitFor(`rc.frames && rcUi.still.hidden && !rcUi.still.getAttribute('src') && !rc.stillShown`, 5000, 'gone at the first frame');
+    await sendStill('image/jpeg', 1);
+    await sleep(500);
+    eq(await page.evaluate(`rcUi.still.hidden`), true, 'not once frames come');
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('remote control in the chat app: Control (a new tab), a locked PC says to use Remote Desktop, Settings → Devices shows who controls a PC (End) and turns it off', async ctx => {
     const pc = await fakePc(ctx);
     await pc.js('fakePc.offer = false; true'); // (it accepts sessions but never offers: enough for the lists)

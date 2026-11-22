@@ -655,6 +655,17 @@ try {
   const frames = await waitFor(async () => { const n = await evalIn('V.frames()'); return n > 10 ? n : null; }, 10000, 250);
   check(!!frames, `video flows (${frames || 0} frames decoded by the viewer; none stored)`);
   {
+    // (1.29, the 2026-11-21 audit's RC2) A still of the screen went first, right after the check: the parts of one JPEG
+    // (none stored), and beam.log names only its size.
+    const parts = ctlSince('still', t0).slice().sort((a, b) => a.i - b.i);
+    const n = parts[0] ? parts[0].n : 0;
+    const bytes = Buffer.from(parts.map(x => x.d).join(''), 'base64');
+    check(n > 0 && parts.length === n && bytes[0] === 0xff && bytes[1] === 0xd8 && parts[0].w > 0 && parts[0].h > 0 && Math.max(parts[0].w, parts[0].h) <= 1600,
+      `a still of the screen went first (${n} part(s), ${Math.round(bytes.length / 1024)} KB, ${parts[0] ? parts[0].w + 'x' + parts[0].h : '-'})`);
+    const stillLine = await waitLog(/Remote control: a still of the screen goes first \(\d+ KB, \d+x\d+, \d+ ms\)$/, from, 3000);
+    check(!!stillLine, `beam.log says so, with its size only (${stillLine ? stillLine.replace(/.*goes first /, '') : 'none'})`);
+  }
+  {
     // 1.15: the start, step by step, once: in beam.log, and to the viewer (`started`, ms since the request got here).
     const line = await waitLog(/the first picture went out [\d.]+ s after the request \(/, from, 5000);
     check(!!line && /\(banner [\d.]+ · page [\d.]+ · .*picture [\d.]+/.test(line), `beam.log: the start, step by step (${line ? line.replace(/.*went out /, '') : 'none'})`);
@@ -845,7 +856,7 @@ try {
   await send('ctl', { t: 'quality', mode: 'motion' });
   const q = await waitCtl('quality', t1, 4000);
   check(!!q && q.mode === 'motion' && q.maxFps === 60 && q.maxKbps === 16000, 'Smooth motion: 60 fps / 16 Mbps');
-  check(!!(await waitLog(/a bandwidth floor of 12000 kbps \(the profile changed\), was 8000$/, from, 5000)), '...and the floor follows its limit: 12 Mbps at most (1.17.7)');
+  check(!!(await waitLog(/a bandwidth floor of 16000 kbps \(the profile changed\), was 8000$/, from, 5000)), '...and the floor follows its limit: 16 Mbps, Smooth motion\'s own (1.29, RC3: the LAN\'s ceiling is 30)');
   // 1.8: the picture's settings apply at once (here Data saver); the fit changes this test instance's made-up screen
   // (FakeDisplay: never a real one), noted in config.json first, and answers with the new sizes; Fit off puts it back;
   // a hidden viewer gets no frames.

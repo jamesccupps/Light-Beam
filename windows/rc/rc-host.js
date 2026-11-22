@@ -52,6 +52,10 @@
     const mode = settings.mode === 'auto' ? (settings.net === 'cellular' ? 'saver' : autoPick) : settings.mode;
     const p = Object.assign({ name: mode }, PROFILES[mode] || PROFILES.text);
     if (settings.mode === 'auto' && mode !== 'saver') { p.kbps = AUTO_KBPS[mode]; p.fps = AUTO_FPS; }
+    // (1.29, the 2026-11-21 audit's RC1) Auto's busy pick keeps the screen's content hint: maintain-framerate and the
+    // higher rate do the "smooth" part. With `motion` the encoder stopped treating it as a screen: a window of text
+    // opening took 396 ms (606 KB) instead of 129 (123 KB). The hand-picked Smooth motion keeps `motion`.
+    if (settings.mode === 'auto' && mode === 'motion') p.hint = 'detail';
     if (settings.fps) p.fps = settings.fps;
     if (settings.kbps) p.kbps = settings.kbps;
     return p;
@@ -368,8 +372,10 @@
     const n = { kbps: s.kbps, off: s.off, fast: s.fast, bad: s.bad, low: s.low, kind: s.kind, act: '', why: '' };
     if (n.off) return n;
     if (t.rtt != null && !(n.low <= t.rtt)) n.low = t.rtt;
-    const measured = t.direct && t.link > 0 ? Math.min(20000, Math.round(t.link * 500)) : 0;
-    const wantOf = kind => (!t.allowed ? 0 : kind === 'measured' ? (measured >= 5000 ? Math.min(measured, t.limit) : 0) : Math.min(12000, t.limit));
+    // (1.29, the audit's RC3) 30 Mbps on the LAN (was 12), across the internet half the measured link up to 40 (was 20):
+    // a higher floor costs no data (a still screen sends ~89 kbps whatever it is), it only lets a big frame leave sooner
+    const measured = t.direct && t.link > 0 ? Math.min(40000, Math.round(t.link * 500)) : 0;
+    const wantOf = kind => (!t.allowed ? 0 : kind === 'measured' ? (measured >= 5000 ? Math.min(measured, t.limit) : 0) : Math.min(30000, t.limit));
     const lossy = t.lost != null && t.lost > 2;
     if (n.kbps) {
       const slow = t.rtt != null && (n.kind === 'measured' ? t.rtt > n.low * 1.5 + 20 : t.rtt > 30);
@@ -524,13 +530,19 @@
     paramsChain = paramsChain.then(setParams, setParams);
     return paramsChain;
   }
+
+  // (1.29, RC3) How high the floor may go: Auto's floor up to 40 Mbps (above Auto's own 15/25), a data limit the viewer
+  // set or a hand-picked profile's limit as they are.
+  function floorLimit() {
+    return settings.mode === 'auto' && !settings.kbps ? 40000 : profile().kbps;
+  }
   async function setParams() {
     if (!tr) return;
     const pr = profile();
     const p = tr.sender.getParameters();
     if (!p.encodings || !p.encodings.length) return;
     p.encodings[0].active = verified && !ended && videoOn;
-    p.encodings[0].maxBitrate = pr.kbps * 1000;
+    p.encodings[0].maxBitrate = Math.max(pr.kbps, floor.kbps && !kvm ? floor.kbps : 0) * 1000; // (1.29, RC3: a floor above Auto's budget raises it)
     p.encodings[0].maxFramerate = pr.fps;
     p.encodings[0].scaleResolutionDownBy = downscale(pr);
     p.degradationPreference = pr.pref;
@@ -563,6 +575,17 @@
       if (Date.now() < until) firstFrameTimer = setTimeout(look, 20);
     };
     firstFrameTimer = setTimeout(look, 0);
+  }
+
+  // (1.29, the 2026-11-21 audit's RC2) The app's still of the screen (a JPEG, base64), right after the peer check: to the
+  // viewer in parts on the control channel, which shows it until the first video frame. Not once a frame has gone out,
+  // never for kvm.
+  const STILL_PART = 48000;
+  function sendStill(m) {
+    if (!verified || ended || kvm || firstFrame || typeof m.d !== 'string' || m.d.length > 4 * 1024 * 1024) return;
+    const n = Math.ceil(m.d.length / STILL_PART);
+    for (let i = 0; i < n; i++) sendCtl({ t: 'still', i, n, w: m.w, h: m.h, d: m.d.slice(i * STILL_PART, (i + 1) * STILL_PART) });
+    log('a still of the screen sent first (' + Math.round(m.d.length * 0.75 / 1024) + ' KB in ' + n + ' parts)');
   }
 
   function sendHello() {
@@ -693,11 +716,13 @@
       // (1.17.7) The floor: on, changed or off by a renegotiation (the next answer carries it, or not); only once Beam's
       // peer check has passed (no video flows before it, and a renegotiation then would bring the viewer's candidates in
       // the middle of the check)
-      const f = !verified || ended ? Object.assign({}, floor, { act: '' }) : floorNext(floor, { rtt: st.rtt, lost: st.lost, lan: pathLan, direct: pathDirect, link: Number(cfg && cfg.link) || 0, allowed: !kvm && settings.net !== 'cellular' && profile().name !== 'saver', limit: profile().kbps });
+      // (1.29, RC3) In Auto the floor isn't held to Auto's own budget (15/25 Mbps), only to 40 or the viewer's data limit
+      const f = !verified || ended ? Object.assign({}, floor, { act: '' }) : floorNext(floor, { rtt: st.rtt, lost: st.lost, lan: pathLan, direct: pathDirect, link: Number(cfg && cfg.link) || 0, allowed: !kvm && settings.net !== 'cellular' && profile().name !== 'saver', limit: floorLimit() });
       const was = floor.kbps;
       floor = f;
       if (f.act === 'on') await renegotiate('a bandwidth floor of ' + f.kbps + ' kbps (' + f.why + ')' + (was ? ', was ' + was : ''));
       else if (f.act === 'off') await renegotiate('no bandwidth floor' + (f.off ? ' for the rest of this session' : '') + ' (' + f.why + ')');
+      if (f.act) await applyParams(); // (1.29, RC3) the sender's limit follows the floor (above Auto's own budget)
     }
     if (pc && pc.connectionState === 'connected') {
       const sel = await selected();
@@ -823,6 +848,7 @@
         if (battery && !h264First && codecNow && codecNow.toLowerCase() !== 'h264') renegotiate('on battery: switching to H.264').catch(() => {});
         break;
       case 'recapture': recapture(); break;
+      case 'still': sendStill(m); break; // (1.29, the audit's RC2)
       case 'end': end(m.reason); break;
     }
   });
