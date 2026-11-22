@@ -7767,6 +7767,7 @@ test('1.35.2 one Beam per data folder: a second server on the same data stops be
       assert.doesNotMatch(second.out, /goes on from its last saved point|no item refers to|is running on port/);
     }
     assert.equal(fs.statSync(part).size, before, 'the upload in progress wasn’t cut back');
+    assert.ok(!fs.readdirSync(s.data).some(f => /lock/i.test(f)), 'no lock file in the data folder (a copy of it would fail on a socket)');
     assert.deepEqual(fs.readdirSync(path.join(s.data, 'files')).sort(), filesBefore);
     // the upload goes on and is stored as sent
     r = await s.req('PUT', `/api/uploads/${id}?offset=${3 * 1024 * 1024}`, { headers: { ...pc, 'Content-Type': 'application/octet-stream' }, body: data.subarray(3 * 1024 * 1024) });

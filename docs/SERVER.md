@@ -44,8 +44,9 @@ node server.js help            # all commands
   up front.
 - **One Beam per data folder (1.35.2):** a second `node server.js` on a data folder that a running Beam uses stops at
   once, before it touches anything, with "Another Beam is already running on …" (exit code 78, so `--supervise` doesn't
-  start it again). On Windows the lock is a named pipe, elsewhere a socket file (`.beam.lock` in the data folder);
-  either goes with the process, so a crash never leaves it held. `pair`, `export`, `backup` and `stop` wait up to half
+  start it again). On Windows the lock is a named pipe, on Linux an abstract socket, elsewhere a socket in the temp
+  folder: never a file in the data folder (a copy of it stays plain files), and it goes with the process, so a crash
+  never leaves it held. `pair`, `export`, `backup` and `stop` wait up to half
   a minute for a busy Beam on that folder.
 - **Health:** `GET /api/hello` answers without a key; Docker uses it as a health check.
 - **Stats:** `GET /api/metrics` (signed in) shows memory and CPU, how long requests take, how often each device's

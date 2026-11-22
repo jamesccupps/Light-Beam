@@ -9941,8 +9941,11 @@ function dataLockName() {
   const folder = path.resolve(DATA_DIR);
   const id = crypto.createHash('sha256').update(process.platform === 'win32' ? folder.toLowerCase() : folder).digest('hex').slice(0, 24);
   if (process.platform === 'win32') return `\\\\.\\pipe\\beam-data-${id}`;
-  const inFolder = path.join(folder, '.beam.lock');
-  return Buffer.byteLength(inFolder) < 100 ? inFolder : path.join(os.tmpdir(), `beam-data-${id}.lock`);
+  // (1.35.2, Light Beam's CI) never a file in the data folder: copying the folder (a move, cp -r, the tests) failed on
+  // the socket (ENXIO), and one left by a killed Beam stayed there. Linux: an abstract socket (no file at all, gone
+  // with its process); elsewhere (macOS) a socket in the temp folder.
+  if (process.platform === 'linux') return `\0beam-data-${id}`;
+  return path.join(os.tmpdir(), `beam-data-${id}.lock`);
 }
 
 // Another process holds this data folder's lock (a running Beam).
@@ -9972,7 +9975,7 @@ async function takeDataLock() {
       return null;
     }
     if (await dataLockHeld()) return 'held';
-    if (process.platform === 'win32') return 'held'; // (a pipe name in use belongs to a live process)
+    if (process.platform === 'win32' || process.platform === 'linux') return 'held'; // (a pipe's or an abstract socket's name in use belongs to a live process)
     try { fs.rmSync(name, { force: true }); } catch {} // (a socket file left by a Beam that was killed)
   }
   return 'held';
