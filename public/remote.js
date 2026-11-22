@@ -129,6 +129,7 @@ const rc = {
   lastInput: 0,        // the user's last input (idle); nothing else moves it
   idleWarn: null,      // "Still there?" under way: { until }
   wake: null,
+  waking: null,        // (1.39) Control on a PC that wasn't connected: { until } while Beam waits for it after waking it
   // touch (the mode is remembered: a choice of this page's, nothing of a session)
   touchMode: ['trackpad', 'touch'].includes(store.get('beam.rc.touchMode')) ? store.get('beam.rc.touchMode') : matchMedia('(pointer: coarse)').matches ? 'trackpad' : 'touch',
   pointer: null,       // where the pointer is on the PC's screen { x, y } (trackpad mode; touch mode: the last tap)
@@ -266,6 +267,7 @@ function rcClearTimer(name) {
 function rcSetState(state, step = '') {
   rc.state = state;
   rc.step = step;
+  if (state === 'live') rc.waking = null; // (1.39) it woke and it's on
   if (state !== 'ended') rc.end = null;
   rcRender();
   rcHook();
@@ -379,8 +381,43 @@ function rcEndedFromError(err) {
   if (err.status === 403) return rcEnded('refused', { text: err.body?.error });
   if (err.status === 404) return rcEnded('unknown');
   if (err.status === 429) return rcEnded('rate', { text: friendlyError(err) });
+  if (err.status === 409 && reason === 'offline') { // (1.39, the audit's F8)
+    if (rcWakeFirst()) return;
+    if (rc.waking) return rcEnded('no-wake');
+  }
   if (err.status === 409 && reason) return rcEnded(reason, { text: err.body?.error });
   rcEnded(err.offline ? 'unreachable' : 'error', { text: friendlyError(err) });
+}
+
+// (1.39, the 2026-11-21 audit's F8) Control on a PC that isn't connected, and that Beam can wake (its Beam app told
+// Beam its network cards: can.wake): the wake-up signal first, then this waits, and the session starts by itself once
+// the PC is back (its device event on this page's stream, or a look every RC_WAKE_LOOK_MS), RC_WAKE_MS at most. Cancel
+// stops waiting; Retry after it wakes it again. True when it took over (the refusal doesn't end the session).
+const RC_WAKE_MS = 3 * 60e3;
+const RC_WAKE_LOOK_MS = 15e3;
+
+function rcWakeFirst() {
+  const w = rc.waking;
+  if (w ? performance.now() > w.until : !rc.device?.can?.wake) return false;
+  const gen = rc.gen;
+  if (!w) {
+    rc.waking = { until: performance.now() + RC_WAKE_MS };
+    apiJson(`api/devices/${encodeURIComponent(rc.id)}/wake`, jsonBody({})).catch(err => {
+      if (gen === rc.gen && rc.waking) rcEnded('no-wake', { text: `Beam couldn’t send it a wake-up signal: ${friendlyError(err)}` });
+    });
+  }
+  rcSetState('connecting', `${rc.name} was asleep or off: Beam sent it a wake-up signal, and connects once it’s back (often a minute or two).`);
+  rcTimer('wake', () => rcWakeLook(gen), RC_WAKE_LOOK_MS);
+  return true;
+}
+
+async function rcWakeLook(gen) {
+  if (gen !== rc.gen || !rc.waking) return;
+  let d = null;
+  try { d = (await apiJson('api/devices', { timeout: 10000 })).devices?.find(x => x && x.id === rc.id); } catch {}
+  if (gen !== rc.gen || !rc.waking) return;
+  if (d?.online || performance.now() > rc.waking.until) return rcConnect(); // (past the wait: its refusal ends it)
+  rcTimer('wake', () => rcWakeLook(gen), RC_WAKE_LOOK_MS);
 }
 
 // The attempt failed on the way (no offer, no direct connection, the connection gone): a new session a couple of
@@ -493,6 +530,7 @@ function rcDisconnect() {
 
 function rcEnded(reason, { text = '', by = '', from = '', endSession = false, endReason = 'stopped' } = {}) {
   rcTeardown({ endSession, reason: endReason });
+  rc.waking = null;
   rc.idleWarn = null;
   rc.gen++;
   rcCloseStreamLater();
@@ -523,6 +561,8 @@ function rcEnded(reason, { text = '', by = '', from = '', endSession = false, en
     'not-allowed': { title: `Remote control is off on ${n}`, text: `To allow it, turn on “Allow remote control” in Beam on ${n} (its menu in the taskbar corner).`, retry: true },
     locked: { title: `${n} is locked: use Remote Desktop`, text: 'Remote control works while someone is signed in and the PC is unlocked. Remote Desktop can sign in to it.', rdp: true, retry: true },
     offline: { title: `${n} isn’t connected to Beam`, text: 'Turn it on, or start Beam on it.', retry: true },
+    // (1.39) woken from here, and it didn't come
+    'no-wake': { title: `${n} didn’t wake up`, text: text || `Beam sent it a wake-up signal ${Math.round(RC_WAKE_MS / 60e3)} minutes ago, and it hasn’t connected to Beam. Wake-on-LAN may be off in its BIOS or its network card’s settings, or it was shut down rather than asleep.`, retry: true },
     busy: { title: `${n} is busy`, text: text || `${n} is being controlled from another device.`, retry: true },
     'no-tailscale': { title: 'Tailscale is needed', text: text || 'Both devices must reach Beam through Tailscale.', retry: true },
     'no-offer': { title: `${n} didn’t answer`, text: `Is Beam running on ${n}, with “Allow remote control” on?`, retry: true },
@@ -586,6 +626,8 @@ function rcOpenStream() {
       const d = list.find(x => x && x.id === rc.id);
       if (d) rcSetDevice(d);
       else if (rc.state !== 'ended') rcEnded('unknown');
+      // (1.39) woken from here and waiting (not while an attempt is under way): it's back
+      if (d?.online && rc.waking && rc.timers.wake) rcConnect();
     });
     on('moved', () => rcEnded('moved'));
     setTimeout(() => { if (rc.stream === st) settle(); }, 10000);

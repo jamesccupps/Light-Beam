@@ -2466,10 +2466,10 @@ test('QW-E: battery and storage alerts fire once and re-arm; settings; alerts.js
     assert.equal(JSON.parse(fs.readFileSync(path.join(s.data, 'alerts.json'), 'utf8')).length, 4);
     // settings
     let r = await s.req('GET', '/api/settings', { headers: desk });
-    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, down: true, offline: [] });
+    assert.deepEqual(r.json.alerts, { battery: true, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, down: true, health: true, offline: [] });
     r = await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify({ alerts: { battery: false } }) });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, down: true, offline: [] }, 'partial changes keep the rest');
+    assert.deepEqual(r.json.alerts, { battery: false, storage: true, serverDisk: true, tailscaleKey: true, powerLoss: true, setup: true, hardware: true, down: true, health: true, offline: [] }, 'partial changes keep the rest');
     for (const bad of [{ alerts: { battery: 'no' } }, { alerts: { nope: true } }, { alerts: { offline: 'phone' } }, { alerts: [] }]) {
       assert.equal((await s.req('PATCH', '/api/settings', { headers: json(desk), body: JSON.stringify(bad) })).status, 400, JSON.stringify(bad));
     }
@@ -8278,6 +8278,81 @@ test('1.36 Weather: LocalCast’s page found among the Sites (titled LocalCast),
   } finally {
     await e.stop();
   }
+});
+
+// ---------------------------------------------------------------- 1.39
+
+test('1.39 health alerts (the 2026-11-21 audit’s F9): a new “Problem” among HW Blackbox’s findings alerts once with its words (the log says only how many); again only after it was gone a while; what a PC showed before 1.39 is taken as known; the switch', async () => {
+  let s = await startServer('hwb139', 8796);
+  try {
+    const K = s.key;
+    const pc = app(K, 'hwbpc000139', 'Shop Desktop', 'windows', { 'X-Beam-App-Version': '1.27.0', ...from('100.64.39.2') });
+    const phone = app(K, 'phone000139', 'Robin Phone', 'android', { 'X-Beam-App-Version': '1.20.1', ...from('100.64.39.4') });
+    for (const h of [pc, phone]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    const put = (...checks) => s.req('PUT', '/api/devices/me/status', { headers: json(pc), body: JSON.stringify({ hwBlackbox: { version: '1.2.0', counts: { bad: checks.filter(c => c.level === 'bad').length, ok: 15 }, checks } }) }).then(r => r.status);
+    const health = async () => (await s.req('GET', '/api/alerts', { headers: phone })).json.alerts.filter(a => a.kind === 'health');
+    const logged = re => waitFor(() => re.test(s.out), 5000).then(() => true, () => false);
+    const count = re => (s.out.match(re) || []).length;
+    const ram = { id: 'ram', level: 'bad', title: 'Memory (RAM)', summary: 'A memory error was corrected 3 times' };
+    const temp = { id: 'cpu_temp_c', level: 'bad', title: 'CPU temperature', summary: '96 °C at its hottest' };
+    const power = { id: 'power', level: 'warn', title: 'Power-offs', summary: '1 in the last 30 days' };
+    const one = /HW Blackbox on Shop Desktop found a problem \(its Device info says which\)/g;
+
+    // 1. A problem in its first report: one alert with its words; in the inbox as Beam's, titled HW Blackbox
+    assert.equal(await put(ram, power), 204);
+    let list = await health();
+    assert.equal(list.length, 1, 'one alert');
+    assert.deepEqual([list[0].text, list[0].level, list[0].device], ['HW Blackbox on Shop Desktop found a problem: Memory (RAM) (A memory error was corrected 3 times)', 'warn', 'hwbpc000139']);
+    const inbox = (await s.req('GET', '/api/inbox', { headers: phone })).json.alerts[0];
+    assert.deepEqual([inbox.sender, inbox.title], ['beam', 'HW Blackbox']);
+    assert.ok(await logged(/Alert: HW Blackbox on Shop Desktop found a problem \(its Device info says which\)/), 'the log: how many');
+    // 2. The same again (a warning's words changed): nothing new. A second problem: an alert for it alone
+    assert.equal(await put(ram, { ...power, summary: '2 in the last 30 days' }), 204);
+    assert.equal((await health()).length, 1, 'still one');
+    assert.equal(await put(ram, temp, power), 204);
+    list = await health();
+    assert.equal(list.length, 2);
+    assert.equal(list[0].text, 'HW Blackbox on Shop Desktop found a problem: CPU temperature (96 °C at its hottest)');
+    // 3. Gone and back at once: no alert; gone a while (600 ms in tests, 6 hours for real): both at once, one alert
+    assert.equal(await put(power), 204);
+    assert.equal(await put(ram, temp, power), 204);
+    assert.equal((await health()).length, 2, 'back at once: no alert');
+    assert.equal(await put(power), 204);
+    await sleep(800);
+    assert.equal(await put(ram, temp, power), 204);
+    list = await health();
+    assert.equal(list.length, 3);
+    assert.equal(list[0].text, 'HW Blackbox on Shop Desktop found 2 problems: Memory (RAM) (A memory error was corrected 3 times); CPU temperature (96 °C at its hottest)');
+    assert.doesNotMatch(s.out, /Memory \(RAM\)|memory error|CPU temperature|96 °C/, 'never its words in the log');
+    // 4. The switch: off, only the log (how many); a bad value refused; on again
+    let r = await s.req('PATCH', '/api/settings', { headers: json(phone), body: JSON.stringify({ alerts: { health: false } }) });
+    assert.deepEqual([r.status, r.json.alerts.health], [200, false]);
+    assert.equal((await s.req('PATCH', '/api/settings', { headers: json(phone), body: JSON.stringify({ alerts: { health: 'no' } }) })).status, 400);
+    assert.equal(await put(power), 204);
+    await sleep(800);
+    const before = count(one);
+    assert.equal(await put(ram, power), 204);
+    assert.equal((await health()).length, 3, 'switched off: no alert');
+    assert.ok(await waitFor(() => count(one) === before + 1, 5000).then(() => true, () => false), 'logged (how many)');
+    r = await s.req('PATCH', '/api/settings', { headers: json(phone), body: JSON.stringify({ alerts: { health: true } }) });
+    assert.equal(r.status, 200);
+    // 5. A PC whose findings were on its page before 1.39 (no record of them): known, no alert; a new one alerts
+    await sleep(2500); // (devices.json and alerts.json written)
+    await s.stop();
+    const file = path.join(s.data, 'devices.json');
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.ok(saved.hwbpc000139.alerted.hwb.ram, 'kept in devices.json');
+    delete saved.hwbpc000139.alerted.hwb;
+    fs.writeFileSync(file, JSON.stringify(saved));
+    s = await startServer('hwb139', 8796, { keep: true });
+    assert.equal(await put(ram, power), 204);
+    assert.ok(await logged(/Shop Desktop: HW Blackbox's 1 problem on its page already is taken as known/), 'known');
+    assert.equal((await health()).length, 3, 'no alert for what it showed already');
+    assert.equal(await put(ram, temp, power), 204);
+    list = await health();
+    assert.equal(list.length, 4);
+    assert.equal(list[0].text, 'HW Blackbox on Shop Desktop found a problem: CPU temperature (96 °C at its hottest)');
+  } finally { await s.stop(); }
 });
 
 // ---------------------------------------------------------------- runner

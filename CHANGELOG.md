@@ -12,6 +12,18 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.39.0 (2026-11-22): Control wakes a sleeping PC; alerts for HW Blackbox's problems
+
+**Versions:** server 1.39.0; the Windows app 1.30.0, the Android app 1.21.2 and Beam for Linux 1.6.0 unchanged.
+
+- **Control on a PC that isn't connected** and that Beam can wake (Wake-on-LAN: its Beam app has told Beam its
+  network cards) sends the wake-up signal itself, says so, and connects once the PC is back (3 minutes at most;
+  Cancel stops waiting). A PC that doesn't come in time, or a wake that couldn't be sent, says why.
+- **Health alerts:** on a PC that runs HW Blackbox, a new "Problem" among its findings raises a Beam alert (on every
+  device, in Alerts and through ntfy) with the finding's title and summary. The same finding alerts again only once it
+  has been gone 6 hours; findings a PC already showed before this release aren't alerted. Settings → Alerts → "HW
+  Blackbox finds a problem on a PC" turns it off (`alerts.health`); the log says only how many, not the words.
+
 ## 1.38.1 (2026-11-22): fixes: sign-in codes, a new browser's unread count, the phone's header at large text
 
 **Versions:** server 1.38.1, Android app 1.21.2; the Windows app 1.30.0 and Beam for Linux 1.6.0 unchanged.

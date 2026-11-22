@@ -1694,4 +1694,73 @@ export default function register(test) {
     eq(await win.page.evaluate(`[__host.log.filter(m => m.type === 'remoteSession').at(-1).id, __host.log.filter(m => m.type === 'keyboardHook').at(-1).on, __host.log.some(m => m.type === 'closeWindow')]`), [null, false, true], 'session off, hook off, the window closes');
     eq(chat.page.errors.concat(win.page.errors), [], 'no page errors');
   }, { requires: FEATURE, timeout: 90000 });
+
+  test('remote control 1.39 (the 2026-11-21 audit’s F8): Control on a PC that isn’t connected wakes it, waits, and connects once it’s back; Cancel stops waiting; a wake that fails or a PC that doesn’t come says so', async ctx => {
+    const macs = ['aa:bb:cc:dd:ee:39'];
+    const asleep = await fakePc(ctx, { online: false, status: { remoteControl: true, locked: false, macs } });
+    const broken = await fakePc(ctx, { online: false, status: { remoteControl: true, locked: false, macs } });
+    const away = await fakePc(ctx, { online: false, status: { remoteControl: true, locked: false, macs } });
+    const page = await ctx.signedIn();
+    // The wake answered here for two of them (no packets leave the test; the fake PCs have no device key, so Beam itself
+    // refuses to wake the third), and the viewer's 201 attested at this machine's Tailscale address (as attestAs does).
+    const wakes = [];
+    page.on(async m => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      const { requestId, request, responseStatusCode, responseHeaders = [] } = m.params;
+      if (/\/wake$/.test(request.url)) {
+        wakes.push(new URL(request.url).pathname);
+        if (request.url.includes(broken.id)) return page.send('Fetch.continueRequest', { requestId }).catch(() => {});
+        return page.send('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }], body: Buffer.from(JSON.stringify({ sent: 12, macs: 1, relays: [] })).toString('base64') }).catch(() => {});
+      }
+      if (request.method !== 'POST' || responseStatusCode !== 201) return page.send('Fetch.continueRequest', { requestId }).catch(() => {});
+      const { body, base64Encoded } = await page.send('Fetch.getResponseBody', { requestId });
+      const json = JSON.parse(base64Encoded ? Buffer.from(body, 'base64').toString() : body);
+      json.host.ip4 = TS4;
+      json.host.ip6 = null;
+      const headers = responseHeaders.filter(h => !/^(content-length|content-encoding)$/i.test(h.name));
+      await page.send('Fetch.fulfillRequest', { requestId, responseCode: 201, responseHeaders: headers, body: Buffer.from(JSON.stringify(json)).toString('base64') }).catch(() => {});
+    });
+    await page.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/rc/sessions', requestStage: 'Response' }, { urlPattern: '*/wake', requestStage: 'Request' }] });
+    const waiting = `rc.state === 'connecting' && Boolean(rc.waking) && /wake-up signal/.test(rc.step)`;
+
+    // 1. Asleep: woken once, waits (and says so), connects by itself when its app is back
+    await viewer(ctx, asleep.id, { attest: null, page });
+    await page.waitFor(waiting, 15000, 'waking');
+    eq(wakes, [`/api/devices/${asleep.id}/wake`], 'one wake-up signal');
+    const card = await page.evaluate(`document.querySelector('.rc-card').textContent`);
+    assert(card.includes(`${asleep.name} was asleep or off: Beam sent it a wake-up signal`) && card.includes('Cancel'), `says what it waits for: ${card}`);
+    await sleep(1500);
+    eq(await page.evaluate('[rc.state, Boolean(rc.waking), Boolean(rc.session)]'), ['connecting', true, false], 'still waiting');
+    eq(await asleep.js('fakePc.open()'), 200, 'its app is back');
+    await live(page, asleep);
+    eq(await page.evaluate('rc.waking'), null, 'done waiting');
+    eq(wakes.length, 1, 'woken once');
+    await page.evaluate(`document.querySelector('.rc-tool.danger').click(); true`);
+    await page.waitFor(`rc.state === 'ended'`, 5000, 'disconnected');
+
+    // 2. Beam couldn't send it (here: the server's own refusal): says why
+    await viewer(ctx, broken.id, { attest: null, page });
+    await page.waitFor(`rc.state === 'ended' && rc.end?.reason === 'no-wake'`, 15000, 'the wake failed');
+    let text = await page.evaluate(`document.querySelector('.rc-card').textContent`);
+    assert(text.includes(`${broken.name} didn’t wake up`) && text.includes('Beam couldn’t send it a wake-up signal') && text.includes('Reconnect'), `why: ${text}`);
+
+    // 3. Cancel stops waiting (its app coming back later starts nothing); Reconnect wakes it again; no PC in time: says so
+    await viewer(ctx, away.id, { attest: null, page });
+    await page.waitFor(waiting, 15000, 'waking (3)');
+    await page.evaluate(`[...document.querySelectorAll('.rc-card button')].find(b => b.textContent === 'Cancel').click(); true`);
+    await page.waitFor(`rc.state === 'ended' && rc.end?.reason === 'disconnected' && rc.waking === null`, 5000, 'cancelled');
+    await page.evaluate(`[...document.querySelectorAll('.rc-card button')].find(b => b.textContent === 'Reconnect').click(); true`);
+    await page.waitFor(waiting, 15000, 'waking again');
+    eq(wakes.filter(p => p.includes(away.id)).length, 2, 'woken again');
+    await page.evaluate('rc.waking.until = 0; rcWakeLook(rc.gen); true'); // (as if the 3 minutes were over)
+    await page.waitFor(`rc.state === 'ended' && rc.end?.reason === 'no-wake'`, 15000, 'it didn’t come');
+    text = await page.evaluate(`document.querySelector('.rc-card').textContent`);
+    assert(text.includes(`${away.name} didn’t wake up`) && text.includes('3 minutes ago') && text.includes('Wake-on-LAN'), `no PC: ${text}`);
+    // A PC Beam can't wake (no network card known) is as before: "isn't connected"
+    const plain = await fakePc(ctx, { online: false });
+    await viewer(ctx, plain.id, { attest: null, page });
+    await page.waitFor(`rc.state === 'ended' && rc.end?.reason === 'offline'`, 15000, 'not wakeable: as before');
+    eq(wakes.filter(p => p.includes(plain.id)), [], 'no wake for it');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: FEATURE, timeout: 90000 });
 }

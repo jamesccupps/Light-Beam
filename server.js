@@ -2634,6 +2634,7 @@ async function putStatus(req, res, _m, url) {
   const changes = parseStatus(await readJson(req, { optional: true }));
   await rcStatusFrom(device, req, url, changes);
   const first = !device.status;
+  const hwbBefore = Boolean(device.status?.hwBlackbox); // (1.39) its findings were on its page already
   const allowed = device.status?.remoteControl === true;
   const commandsWere = device.status?.commands === true; // (1.32)
   const { update } = changes;
@@ -2658,6 +2659,7 @@ async function putStatus(req, res, _m, url) {
   }
   checkStatusAlerts(device);
   if (changes.hwBlackbox) hwbReported(device); // (1.35.1) a power loss's alert may be waiting for it
+  if (changes.hwBlackbox) hwbFindings(device, hwbBefore); // (1.39, the audit's F9) a new problem alerts
   persistDevices();
   broadcastDevicesThrottled();
   if (sitesChanged) broadcastSites();
@@ -2875,11 +2877,13 @@ function alertSettings() {
     setup: a.setup !== false, // (1.20) the setup check found something wrong
     hardware: a.hardware !== false, // (1.22) a Raspberry Pi or another Linux computer too hot, or short of power
     down: a.down !== false, // (1.27.2) Beam itself was down (said once it's back)
+    health: a.health !== false, // (1.39) HW Blackbox found a new problem on a PC (hwbFindings)
     offline: Array.isArray(a.offline) ? a.offline.filter(id => typeof id === 'string') : [],
   };
 }
 
-function raiseAlert(kind, deviceId, level, text) {
+// (1.39) logText: what the log says instead of the text (HW Blackbox's findings: their words stay out of the log).
+function raiseAlert(kind, deviceId, level, text, { logText = '' } = {}) {
   text = statusText(String(text)).slice(0, 1000); // (1.25, security review L-3: one line in the log and in ntfy, whatever a device sent)
   const alert = { id: crypto.randomBytes(6).toString('hex'), kind, device: deviceId || null, level, text, at: now() };
   alerts.unshift(alert);
@@ -2887,7 +2891,7 @@ function raiseAlert(kind, deviceId, level, text) {
   persistAlerts();
   broadcast('alert', alert);
   inboxFromBeam(alert); // (1.33) in the alerts inbox too, as "Beam"
-  (level === 'warn' ? log.warn : log.info)(`Alert: ${text}`);
+  (level === 'warn' ? log.warn : log.info)(`Alert: ${logText ? statusText(String(logText)).slice(0, 300) : text}`);
   ntfyPost({ title: level === 'warn' ? 'Beam alert' : 'Beam', message: text, tags: [level === 'warn' ? 'warning' : 'information_source'], priority: level === 'warn' ? 4 : 3 });
   return alert;
 }
@@ -3330,6 +3334,49 @@ function hwbReported(device) {
   const follow = `${device.name}, back since ${clockText(w.e.up)}: ${text}`;
   if (alertSettings().powerLoss) raiseAlert('powerLoss', device.id, 'info', follow);
   else log.info(follow);
+}
+
+// (1.39, the 2026-11-21 audit's F9) Health alerts: a "Problem" (level bad) among HW Blackbox's findings on a PC alerts
+// once (one alert for the ones new in a report). It alerts again only after it has been gone HWB_REARM_MS, so a
+// finding that comes and goes doesn't alert each time; one gone a week is forgotten. What a PC showed in Device info
+// already when this came in (Beam 1.35-1.38 kept no record) is taken as known: no alert for it until it's gone and
+// back. device.alerted.hwb = { <finding id>: { at, gone? } } (devices.json). The alert has the finding's title and
+// summary; the log only says how many (as the status line, its words stay out of the log).
+const HWB_REARM_MS = FAST_TIMEOUTS ? 600 : 6 * 3600e3;
+const HWB_FORGET_MS = 7 * 86400e3;
+
+function hwbFindings(device, before) {
+  const checks = device.status?.hwBlackbox?.checks;
+  if (!Array.isArray(checks)) return;
+  const flags = (device.alerted ||= {});
+  const quiet = !isPlainObject(flags.hwb) && before;
+  const known = isPlainObject(flags.hwb) ? flags.hwb : {};
+  const t = now();
+  const bad = new Map(checks.filter(c => c.level === 'bad').map(c => [c.id || c.title, c]));
+  const fresh = [];
+  for (const [key, c] of bad) {
+    const k = known[key];
+    if (k && !(k.gone && t - k.gone >= HWB_REARM_MS)) { delete k.gone; continue; }
+    known[key] = { at: t };
+    fresh.push(c);
+  }
+  for (const [key, k] of Object.entries(known)) {
+    if (bad.has(key)) continue;
+    if (!k.gone) k.gone = t;
+    else if (t - k.gone > HWB_FORGET_MS) delete known[key];
+  }
+  flags.hwb = known;
+  if (!fresh.length) return;
+  const n = fresh.length;
+  if (quiet) {
+    log.info(`${device.name}: HW Blackbox's ${n} problem${n === 1 ? '' : 's'} on its page already ${n === 1 ? 'is' : 'are'} taken as known (no alert until gone and back)`);
+    return;
+  }
+  const one = c => `${c.title}${c.summary ? ` (${c.summary})` : ''}`;
+  const text = `HW Blackbox on ${device.name} found ${n === 1 ? `a problem: ${one(fresh[0])}` : `${n} problems: ${fresh.map(one).join('; ')}`}`;
+  const logText = `HW Blackbox on ${device.name} found ${n === 1 ? 'a problem' : `${n} problems`} (its Device info says which)`;
+  if (alertSettings().health) raiseAlert('health', device.id, 'warn', text, { logText });
+  else log.warn(logText);
 }
 
 // Adds a PC's records to its history; a new power loss, blue screen or forced power-off alerts. Returns how many were new.
@@ -3968,6 +4015,7 @@ function addInboxAlert(senderId, a, from = null) {
 const ALERT_TITLES = {
   battery: 'Battery', storage: 'Storage', serverDisk: 'Server disk', tailscaleKey: 'Tailscale sign-in', powerLoss: 'Power loss',
   setup: 'Setup check', hardware: 'Hardware', down: 'Beam was down', offline: 'Offline', online: 'Back online', update: 'Update',
+  health: 'HW Blackbox', // (1.39)
 };
 
 function inboxFromBeam(alert) {
@@ -8269,7 +8317,7 @@ const SETTING_RULES = {
     if (!isPlainObject(v)) throw httpError(400, 'alerts must be an object like {"battery": true, "offline": ["<device id>"]}');
     const next = alertSettings();
     for (const [key, value] of Object.entries(v)) {
-      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss', 'setup', 'hardware', 'down'].includes(key)) {
+      if (['battery', 'storage', 'serverDisk', 'tailscaleKey', 'powerLoss', 'setup', 'hardware', 'down', 'health'].includes(key)) {
         if (typeof value !== 'boolean') throw httpError(400, `alerts.${key} must be true or false`);
         next[key] = value;
       } else if (key === 'offline') {

@@ -691,7 +691,9 @@ The server watches for trouble and tells every client:
 
 Each alert is the event `alert { "id", "kind", "device", "level": "warn" | "info", "text", "at" }`:
 - `kind` is one of `battery`, `storage`, `offline`, `online`, `serverDisk`, `tailscaleKey` (1.17), `powerLoss` (1.18), `update` (1.19: a Windows build that didn't work on the PC that tried it first; `device` null), `setup` (1.20: a setup
-  check that went wrong; `device` null), `hardware` (1.22), `down` (1.27.2: Beam was down; `device` null);
+  check that went wrong; `device` null), `hardware` (1.22), `down` (1.27.2: Beam was down; `device` null), `health` (1.39: a new
+  "Problem", level `bad`, among HW Blackbox's findings in the PC's status `hwBlackbox`: once per finding id, again after
+  it has been gone 6 hours; findings already reported before 1.39 are taken as known; the log says only how many);
 - `device` is the device it is about (`null` for `serverDisk` and the server's own `tailscaleKey`);
 - `text` is ready to show.
 
@@ -700,7 +702,7 @@ log and pushed through ntfy when that is configured. **Clients ignore alerts abo
 except `serverDisk`, `tailscaleKey` (the apps don't watch their own Tailscale key) and `powerLoss` (1.18: why this PC
 restarted).
 
-The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "setup": true (1.20), "hardware": true (1.22), "down": true (1.27.2), "offline": ["<device id>", …] }`,
+The settings are `alerts: { "battery": true, "storage": true, "serverDisk": true, "tailscaleKey": true (1.17), "powerLoss": true (1.18), "setup": true (1.20), "hardware": true (1.22), "down": true (1.27.2), "health": true (1.39), "offline": ["<device id>", …] }`,
 changed with `PATCH /api/settings`; see Settings. Crossings are logged even when that kind of alert is turned off.
 
 ### Each PC's history (1.18)
