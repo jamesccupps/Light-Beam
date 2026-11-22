@@ -83,6 +83,7 @@ class BeamApp : Application() {
         private set
     lateinit var alerts: Alerts
     lateinit var appAlerts: AppAlerts // (1.19) the alerts inbox
+    lateinit var weather: app.beam.android.data.Weather // (1.21) LocalCast's weather for the main list
         private set
     lateinit var phone: PhoneNotifications
         private set
@@ -140,6 +141,7 @@ class BeamApp : Application() {
         ringer = Ringer(this).also { it.recover() }
         alerts = Alerts(this)
         appAlerts = AppAlerts(this) // (1.19)
+        weather = app.beam.android.data.Weather(this) // (1.21)
         phone = PhoneNotifications(this)
         remote = RemoteControl(this)
         backups = SettingsBackups(this).also { it.start() }
@@ -256,6 +258,7 @@ class BeamApp : Application() {
             }
             step { alerts.catchUp() }
             step { appAlerts.catchUp() } // (1.19, server 1.33)
+            step { weather.refresh() } // (1.21, server 1.36) the Weather row
             step { phone.onConnected() }
             step { remote.onConnected() }
             step { backups.onConnected() }

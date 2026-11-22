@@ -27,6 +27,7 @@ import app.beam.android.core.Conversations
 import app.beam.android.core.Format
 import app.beam.android.core.Pairing
 import app.beam.android.data.AppAlerts
+import app.beam.android.data.Weather
 import app.beam.android.data.AppUpdater
 import app.beam.android.data.Repository
 import app.beam.android.databinding.ActivityMainBinding
@@ -117,7 +118,11 @@ class MainActivity : BaseActivity() {
         }
         adapter = ConversationAdapter(this, {
             // (1.20.2) the Alerts row opens the list (#alerts), as the menu's Alerts does
-            if (it.isAlerts) startActivity(FilesActivity.alertsIntent(this)) else startActivity(ThreadActivity.intent(this, it.key))
+            when {
+                it.isAlerts -> startActivity(FilesActivity.alertsIntent(this))
+                it.isWeather -> app.weather.row.value?.let { w -> startActivity(WeatherActivity.intent(this, w.url)) } // (1.21) LocalCast's page
+                else -> startActivity(ThreadActivity.intent(this, it.key))
+            }
         }, ::conversationMenu)
         b.list.layoutManager = LinearLayoutManager(this)
         b.list.adapter = adapter
@@ -131,16 +136,19 @@ class MainActivity : BaseActivity() {
                 while (true) {
                     delay(5_000)
                     updateBanner()
+                    app.weather.refreshIfOld(10 * 60_000L) // (1.21) the Weather row: every 10 minutes while the list shows
                     if (System.currentTimeMillis() / 5_000 % 6 == 0L) adapter.notifyItemRangeChanged(0, adapter.itemCount)
                 }
             }
         }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                combine(app.repo.state, app.prefs.lastRead, app.appAlerts.row) { s, read, alerts -> Triple(s, Conversations.summaries(s.me, s.devices, s.items, read, s.notesOn), alerts) }
+                combine(app.repo.state, app.prefs.lastRead, app.appAlerts.row, app.weather.row) { s, read, alerts, weather ->
+                    MainList(s, Conversations.summaries(s.me, s.devices, s.items, read, s.notesOn), alerts, weather)
+                }
                     .flowOn(Dispatchers.Default) // the summaries go over every item: not on the main thread
                     .conflate()
-                    .collect { (s, list, alerts) ->
+                    .collect { (s, list, alerts, weather) ->
                         adapter.me = s.me
                         adapter.muted = app.prefs.mutedDevices
                         // (1.20.2, the 2026-11-21 audit) The Alerts row, after All devices (as on the web and Windows)
@@ -149,7 +157,13 @@ class MainActivity : BaseActivity() {
                                 add(1, Conversations.Summary(Conversations.ALERTS, getString(R.string.alerts), null, false, alerts.at, true, null, alerts.unread, alerts.line))
                             }
                         } else list
-                        adapter.submitList(shown)
+                        // (1.21) The Weather row, after Alerts (as on the web and Windows): LocalCast's weather
+                        val withWeather = if (weather != null && s.info?.lists(Weather.FEATURE) == true && shown.isNotEmpty()) {
+                            shown.toMutableList().apply {
+                                add(if (getOrNull(1)?.isAlerts == true) 2 else 1, Conversations.Summary(Conversations.WEATHER, getString(R.string.weather), null, false, 0, true, null, 0, weather.line, weather.temp))
+                            }
+                        } else shown
+                        adapter.submitList(withWeather)
                         b.empty.isVisible = s.loaded && list.size == 1 && list[0].last == null
                         if (s.loaded && b.refresh.isRefreshing && !manualRefresh) b.refresh.isRefreshing = false
                         b.toolbar.subtitle = when (s.conn) {
@@ -182,6 +196,7 @@ class MainActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         if (::b.isInitialized) updateBanner()
+        app.weather.refreshIfOld() // (1.21) the Weather row, when it's older than 5 minutes
     }
 
     override fun onDestroy() {
@@ -367,13 +382,14 @@ class ConversationAdapter(
         val ctx = b.root.context
         holder.key = s.key
         b.title.text = if (s.isAll) ctx.getString(R.string.all_devices) else if (s.isNotes) ctx.getString(R.string.notes) else s.name
-        b.avatar.setImageResource(if (s.isNotes) R.drawable.ic_note else if (s.isAlerts) R.drawable.ic_ring else platformIcon(s.platform, s.isAll))
+        b.avatar.setImageResource(if (s.isNotes) R.drawable.ic_note else if (s.isAlerts) R.drawable.ic_ring else if (s.isWeather) R.drawable.ic_weather else platformIcon(s.platform, s.isAll))
         b.onlineDot.isVisible = s.online
         b.muted.isVisible = s.key in muted
-        b.time.text = s.last?.let { Format.relative(it.ts) } ?: (if (s.isAlerts && s.lastSeen > 0) Format.relative(s.lastSeen) else "")
+        b.time.text = s.last?.let { Format.relative(it.ts) } ?: (if (s.isAlerts && s.lastSeen > 0) Format.relative(s.lastSeen) else if (s.isWeather) s.side.orEmpty() else "")
         val last = s.last
         b.preview.text = when {
             s.isAlerts -> s.note ?: ctx.getString(R.string.alerts_row_empty)
+            s.isWeather -> s.note?.takeIf { it.isNotBlank() } ?: ctx.getString(R.string.weather_row_empty)
             last == null && s.isAll -> ctx.getString(R.string.broadcast_subtitle)
             last == null && s.isNotes -> ctx.getString(R.string.notes_row_empty)
             last == null -> Format.presence(s.online, s.lastSeen)
@@ -390,7 +406,7 @@ class ConversationAdapter(
         b.preview.setTypeface(null, if (unread) Typeface.BOLD else Typeface.NORMAL)
         b.row.setOnClickListener { onOpen(s) }
         b.row.setOnLongClickListener {
-            if (s.isAlerts) return@setOnLongClickListener false // (1.20.2: no menu of its own)
+            if (s.isAlerts || s.isWeather) return@setOnLongClickListener false // (1.20.2: no menu of its own; 1.21: nor Weather)
             onMenu(s)
             true
         }
@@ -410,3 +426,6 @@ class ConversationAdapter(
         }
     }
 }
+
+/** (1.21) What the main list is made of: the state, its conversations, the Alerts row's and the Weather row's. */
+private data class MainList(val s: Repository.State, val list: List<Conversations.Summary>, val alerts: AppAlerts.Row?, val weather: Weather.Row?)

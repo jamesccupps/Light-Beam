@@ -186,5 +186,6 @@ environment variable wins and locks the setting.
 | `BEAM_STAGED_UPDATES` | on | `0`: a new Windows build goes to every PC at once, not one PC first (also in Settings → Server) |
 | `BEAM_SETUP_CHECK` | on for a real install | `on` / `off`: the setup check every 6 hours and its `setup` alerts (off by itself for a test's server) |
 | `BEAM_OWN_HISTORY` | on (Windows) | `off`: the server's own PC's restarts and power losses aren't read from Windows' event log |
+| `BEAM_WEATHER_URL` | (found) | LocalCast's page for the Weather row (`off`: no Weather row); by default the first Site titled LocalCast (also in Settings → Server → Weather) |
 | `BEAM_GITHUB_API` | `https://api.github.com` | Where Apps looks up GitHub releases (a mirror or a test's stand-in) |
 | `BEAM_FAMILY_*` | | Beam Family's settings (`BEAM_FAMILY_HOST` and `_PORT`, where it listens, among them): see [docs/FAMILY.md](FAMILY.md) |

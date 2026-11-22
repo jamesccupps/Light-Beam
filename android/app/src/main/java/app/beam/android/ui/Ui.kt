@@ -311,7 +311,7 @@ object Drops {
 
     fun listener(activity: Activity, conversation: () -> String, onHover: (Boolean) -> Unit) = View.OnDragListener { _, e ->
         when (e.action) {
-            DragEvent.ACTION_DRAG_STARTED -> e.localState != LOCAL_DRAG && e.clipDescription != null && conversation() != Conversations.ALERTS // (1.20.2: not a conversation)
+            DragEvent.ACTION_DRAG_STARTED -> e.localState != LOCAL_DRAG && e.clipDescription != null && conversation() !in setOf(Conversations.ALERTS, Conversations.WEATHER) // (1.20.2, 1.21: not conversations)
             DragEvent.ACTION_DRAG_ENTERED -> {
                 onHover(true)
                 true

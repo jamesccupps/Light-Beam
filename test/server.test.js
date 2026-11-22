@@ -8157,6 +8157,115 @@ test('1.34 Notes: the age clean-up, the item limit and the storage limit keep no
   } finally { await s.stop(); }
 });
 
+test('1.36 Weather: LocalCast’s page found among the Sites (titled LocalCast), its summary for the Weather row (read once a minute at most, the last one kept while it’s down), set by hand, off, from BEAM_WEATHER_URL; trusted sign-ins only', async () => {
+  // A made-up LocalCast: its page (titled LocalCast) and its page data, as LocalCast 0.27 gives them.
+  let reads = 0;
+  let down = false;
+  const dash = {
+    meta: { site: 'Clifford St', locale: 'Biddeford, Maine', units: 'imperial', version: '0.27.0' }, site: { id: 'home', name: 'Biddeford' },
+    now: { ts: 1, age_s: 11, temp: 6.07, feels: 5.48, text: 'Partly cloudy', kind: 'partly', day: false, hi: 16, lo: 2.2 },
+    days: [{ date: '2026-11-21', hi: 16.04, lo: 2.2, pop: 13, kind: 'partly', text: 'Partly cloudy' }],
+    hazards: [{ kind: 'freeze', title: 'Freeze risk', value_c: -1 }, { kind: 'nws', title: 'Winter Storm Watch\u202e', severity: 'Moderate' }, { kind: 'x', title: '' }],
+  };
+  const lc = http.createServer((req, res) => {
+    if (down) { res.writeHead(503); return res.end(); }
+    if (req.url === '/api/dashboard') { reads++; res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(dash)); }
+    if (req.url === '/other/api/dashboard') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end('{"hello": "not LocalCast"}'); }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><head><title>LocalCast</title></head><body></body></html>');
+  });
+  await new Promise(r => lc.listen(8796, '127.0.0.1', r));
+  const ts = await fakeTailscale({ whois: { '100.64.36.1': { login: 'robin@example.com', node: 'robin-laptop' }, '100.64.36.2': { login: 'robin@example.com', node: 'robin-tablet' } } });
+  const s = await startServer('weather136', 8791, { env: { BEAM_TAILSCALE: '', BEAM_TAILSCALE_SOCKET: ts.socket, BEAM_TAILSCALE_OWNERS: 'robin@example.com' } });
+  try {
+    const K = s.key;
+    const phone = app(K, 'phone00w136', 'Phone', 'android');
+    assert.ok((await s.req('GET', '/api/info', { headers: phone })).json.features.includes('weather'));
+    const get = (h = phone) => s.req('GET', '/api/weather', { headers: h });
+    let r = await get();
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json, { url: null, off: false }, 'none yet');
+
+    // Added as a Site: its title says LocalCast, so it's the weather's page
+    r = await post(s, '/api/sites', { url: 'http://127.0.0.1:8796' }, phone);
+    assert.equal(r.status, 201, r.body);
+    assert.equal(r.json.site.name, 'LocalCast');
+    r = await get();
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(pick(r.json, ['url', 'how', 'name', 'locale', 'units', 'now', 'today']), {
+      url: 'http://127.0.0.1:8796/', how: 'found', name: 'Biddeford', locale: 'Biddeford, Maine', units: 'imperial',
+      now: { temp: 6.1, feels: 5.5, text: 'Partly cloudy', kind: 'partly', day: false, age: 11 },
+      today: { hi: 16, lo: 2.2, pop: 13 },
+    });
+    assert.deepEqual(r.json.hazards, [{ title: 'Freeze risk', kind: 'freeze' }, { title: 'Winter Storm Watch', kind: 'nws', official: true }], 'its hazards, as text (an empty one left out)');
+    assert.equal(r.json.error, undefined);
+    assert.equal((await s.req('GET', '/api/settings', { headers: phone })).json.weather.how, 'found', 'Settings says where it is from');
+
+    // Read once a minute at most (here 400 ms), one read for several asks at once
+    const before = reads;
+    await Promise.all([get(), get(), get()]);
+    assert.equal(reads, before, 'from the last read');
+    await sleep(500);
+    await Promise.all([get(), get()]);
+    assert.equal(reads, before + 1, 'read again once, for both');
+
+    // Down: the last summary stays, with why
+    down = true;
+    await sleep(500);
+    r = await get();
+    assert.equal(r.json.now?.temp, 6.1, 'the last summary');
+    assert.match(r.json.error, /answered with 503/);
+    assert.ok(r.json.summaryAt < r.json.at, 'when that summary was read');
+    down = false;
+
+    // Set by hand: another address (a page that isn't LocalCast's says so); bad ones refused; off; back to found
+    const patch = body => s.req('PATCH', '/api/settings', { headers: json(phone), body: JSON.stringify(body) });
+    for (const bad of [{ weather: 'http://x/' }, { weather: { url: 'ftp://x/' } }, { weather: { url: 'http://me:pw@x/' } }, { weather: true }]) {
+      assert.equal((await patch(bad)).status, 400, JSON.stringify(bad));
+    }
+    assert.equal((await patch({ weather: { url: 'http://127.0.0.1:8796/other/' } })).status, 200);
+    await sleep(500);
+    r = await get();
+    assert.deepEqual(pick(r.json, ['url', 'how', 'error']), { url: 'http://127.0.0.1:8796/other/', how: 'set', error: 'that isn’t LocalCast’s page' });
+    assert.equal(r.json.now, undefined, 'nothing kept from another page');
+    assert.equal((await patch({ weather: false })).status, 200);
+    assert.deepEqual((await get()).json, { url: null, off: true });
+    assert.deepEqual(pick((await s.req('GET', '/api/settings', { headers: phone })).json.weather, ['url', 'off']), { url: null, off: true });
+    assert.equal((await patch({ weather: null })).status, 200);
+    assert.equal((await get()).json.how, 'found', 'null: found among the Sites again');
+
+    // Not for a sign-in that isn't approved (it names a page on the tailnet), nor changed by one: Robin's laptop
+    // (Tailscale's first: approved), then a tablet Tailscale signs in (not approved yet)
+    r = await post(s, '/api/autopair', { client: 'app', name: 'Robin laptop', platform: 'windows' }, viaServe('100.64.36.1', 'robin@example.com'));
+    assert.equal(r.status, 200, r.body);
+    r = await post(s, '/api/autopair', { client: 'app', name: 'Robin tablet', platform: 'android' }, viaServe('100.64.36.2', 'robin@example.com'));
+    assert.equal(r.status, 200, r.body);
+    const tablet = app(r.json.key, r.json.you, 'Robin tablet', 'android');
+    r = await get(tablet);
+    assert.equal(r.status, 403, r.body);
+    assert.equal(r.json.reason, 'trusted');
+    assert.equal((await s.req('PATCH', '/api/settings', { headers: json(tablet), body: JSON.stringify({ weather: false }) })).status, 403);
+  } finally {
+    await s.stop();
+    lc.close();
+    await ts.close();
+  }
+
+  // BEAM_WEATHER_URL wins and locks it; "off" turns it off
+  const e = await startServer('weather136e', 8792, { env: { BEAM_WEATHER_URL: 'http://127.0.0.1:8799/' } });
+  try {
+    const phone = app(e.key, 'phone01w136', 'Phone', 'android');
+    let r = await e.req('GET', '/api/weather', { headers: phone });
+    assert.deepEqual(pick(r.json, ['url', 'how']), { url: 'http://127.0.0.1:8799/', how: 'env' });
+    assert.equal(r.json.error, 'nothing answers on that port');
+    r = await e.req('PATCH', '/api/settings', { headers: json(phone), body: JSON.stringify({ weather: false }) });
+    assert.equal(r.status, 409, r.body);
+    assert.equal((await e.req('GET', '/api/settings', { headers: phone })).json.weather.fixed, true);
+  } finally {
+    await e.stop();
+  }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

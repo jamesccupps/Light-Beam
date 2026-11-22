@@ -32,6 +32,7 @@ const winsetup = require('./lib/winsetup');
 const appsLib = require('./lib/apps');
 const sharesLib = require('./lib/shares');
 const sitesLib = require('./lib/sites'); // (1.31)
+const weatherLib = require('./lib/weather'); // (1.36)
 const { thumbDims } = require('./lib/imagesize'); // (1.34.1: shared with Beam Family)
 const inboxLib = require('./lib/inbox'); // (1.33) what apps post to the alerts inbox
 const ws = require('./lib/websocket');
@@ -737,6 +738,7 @@ function publicSettings() {
     stagedUpdates: stagedOn(), // (1.19) a Windows build goes to one PC first
     rollout: rolloutInfo(),
     appearance: appearanceOf(settings.appearance), // (1.27) the look for every device without its own
+    weather: weatherInfo(), // (1.36) where the Weather row's page is
     locked: Object.keys(ENV_SETTINGS).filter(k => ENV_SETTINGS[k] !== undefined),
   };
 }
@@ -2156,6 +2158,64 @@ function sitesCaller(req, url, change = false) {
   if (!isTrusted(authOf(req))) throw notTrusted(change ? 'change your sites' : 'see your sites');
   if (change) requireLasting(req, url, 'change your sites');
   return resolveAlias(deviceIdOf(req, url) || '');
+}
+
+// ---------------------------------------------------------------- weather (1.36)
+// LocalCast's weather in Beam (the user, 2026-11-21: "my local cast weather should be part of this app", then "you
+// should just implement the page that is served by tailscale into beam, i wont change that link"): a Weather row on
+// every device that opens LocalCast's own page at its tailnet address. LocalCast isn't changed: Beam reads its page
+// data (lib/weather.js) for the row's summary. Where it is: BEAM_WEATHER_URL ("off": none), else Settings' `weather`
+// ({ url }, or false: off), else the first Site titled LocalCast (Desktop's Beam app finds it: Sites).
+const WEATHER_FRESH_MS = FAST_TIMEOUTS ? 400 : 60e3;
+const WEATHER_TIMEOUT_MS = FAST_TIMEOUTS ? 2000 : 5000;
+let weatherCache = null; // { url, at, summary, summaryAt, error }
+let weatherReading = null;
+
+function weatherSource() {
+  const fromEnv = String(env.BEAM_WEATHER_URL || '').trim();
+  if (fromEnv) {
+    if (/^off$/i.test(fromEnv)) return null;
+    const url = sitesLib.parseSiteUrl(fromEnv);
+    return url ? { url, how: 'env' } : null;
+  }
+  if (settings.weather === false) return null;
+  if (settings.weather?.url) return { url: settings.weather.url, how: 'set' };
+  const s = siteList().find(x => !x.hidden && /\bLocalCast\b/i.test(`${x.title || ''} ${x.name || ''}`));
+  return s ? { url: s.url, how: 'found', name: s.name } : null;
+}
+
+// For Settings: where the weather comes from, or why there's none.
+function weatherInfo() {
+  const src = weatherSource();
+  const off = /^off$/i.test(String(env.BEAM_WEATHER_URL || '').trim()) || (!env.BEAM_WEATHER_URL && settings.weather === false);
+  return { url: src?.url || null, how: src?.how || null, off, fixed: Boolean(env.BEAM_WEATHER_URL) };
+}
+
+// The summary, read again when the last read is older than WEATHER_FRESH_MS (one read at a time). A read that fails
+// keeps the last summary, with the reason.
+async function weatherNow(src) {
+  const fresh = weatherCache?.url === src.url && now() - weatherCache.at < WEATHER_FRESH_MS;
+  if (fresh) return weatherCache;
+  weatherReading ||= weatherLib.read(outbound.request, src.url, { timeout: WEATHER_TIMEOUT_MS })
+    .then(summary => ({ url: src.url, at: now(), summary, summaryAt: now(), error: null }),
+      err => {
+        const kept = weatherCache?.url === src.url ? weatherCache : null;
+        return { url: src.url, at: now(), summary: kept?.summary || null, summaryAt: kept?.summaryAt || null, error: String(err?.message || 'it didn’t answer') };
+      })
+    .then(c => { weatherCache = c; return c; })
+    .finally(() => { weatherReading = null; });
+  return weatherReading;
+}
+
+// GET /api/weather: { url, how, at, summaryAt, name, locale, units, now, today, hazards, error? }, or { url: null,
+// off } when there's none. Trusted sign-ins, as the Sites list (it names a page on the tailnet).
+async function getWeather(req, res, _m, url) {
+  if (!isTrusted(authOf(req))) throw notTrusted('see the weather');
+  await refreshTailnet(); // (Sites' found pages are at the PCs' Tailscale names)
+  const src = weatherSource();
+  if (!src) return send(res, 200, { url: null, off: weatherInfo().off }, { 'Cache-Control': 'no-store' });
+  const c = await weatherNow(src);
+  send(res, 200, { url: src.url, how: src.how, at: c.at, summaryAt: c.summaryAt, ...(c.summary || {}), ...(c.error && { error: c.error }) }, { 'Cache-Control': 'no-store' });
 }
 
 // GET /api/sites: { sites, checking, checkedAt }. A check starts when the last one is older than SITES_FRESH_MS.
@@ -8072,6 +8132,7 @@ const FEATURES = [
   'notes', // (1.34.0: a message to the device it's sent from is a note (`note: true`, kept until deleted); the target name "notes"; PATCH /api/items/{id} {done})
   'hw-blackbox', // (1.35.0: status `hwBlackbox`, HW Blackbox's findings where a PC runs it)
   'apps-found', // (1.35.0: app state `found` (on a PC already, not from Beam; `where`), PUT /api/devices/me/apps items' found/where/also)
+  'weather', // (1.36.0: GET /api/weather (LocalCast's weather for the Weather row), the setting `weather`)
   'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];
 
@@ -8172,6 +8233,13 @@ const SETTING_RULES = {
   maxItems: v => { if (!Number.isInteger(v) || v < 0 || v > 100_000) throw httpError(400, 'maxItems must be 0 (no limit) to 100000'); return v; },
   stagedUpdates: v => { if (typeof v !== 'boolean') throw httpError(400, 'stagedUpdates must be true or false'); return v; }, // (1.19)
   appearance: v => cleanAppearance(v), // (1.27)
+  // (1.36) where the weather comes from: { url } (LocalCast's page), false (none), null (find it among the Sites)
+  weather: v => {
+    if (v === null || v === false) return v;
+    const url = isPlainObject(v) ? sitesLib.parseSiteUrl(v.url) : null;
+    if (!url) throw httpError(400, 'weather must be {"url": "<LocalCast’s page, http(s)>"}, false (none) or null (find it)');
+    return { url };
+  },
   // Partial: only the given kinds change. offline is the full list of watched device ids.
   alerts: v => {
     if (!isPlainObject(v)) throw httpError(400, 'alerts must be an object like {"battery": true, "offline": ["<device id>"]}');
@@ -8206,6 +8274,8 @@ async function patchSettings(req, res) {
   }
   // (1.25.4, the user's audit) Turning "one PC first" off sends a build still on its pilot to every PC at once.
   if (body.stagedUpdates === false && !isTrusted(authOf(req))) throw notTrusted('send Windows builds to every PC at once');
+  if (body.weather !== undefined && !isTrusted(authOf(req))) throw notTrusted('choose where the weather comes from'); // (1.36)
+  if (body.weather !== undefined && env.BEAM_WEATHER_URL) throw httpError(409, 'weather is set by BEAM_WEATHER_URL on the server');
   // Everything is checked before anything changes.
   const { unblockNode, allowOwner, removeOwner, ...rest } = body;
   const nodes = unblockNode === undefined ? [] : [].concat(unblockNode);
@@ -9503,6 +9573,7 @@ const routes = [
   ['POST', '/api/apps/([a-f0-9]{8})/uninstall', uninstallApp],
   ['GET', '/api/setup', getSetup],
   ['GET', '/api/sites', getSites], // (1.31)
+  ['GET', '/api/weather', getWeather], // (1.36) LocalCast's weather for the Weather row
   ['POST', '/api/sites', addSite],
   ['POST', '/api/sites/check', checkSitesNow],
   ['PATCH', '/api/sites/([A-Za-z0-9_-]{8,64}(?:\\.\\d{1,5})?)', editSite],

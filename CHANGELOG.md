@@ -12,6 +12,17 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.36.0 (2026-11-21): the weather from LocalCast
+
+**Versions:** server 1.36.0, Windows app 1.28.0, Android app 1.21.0; Beam for Linux 1.6.0 and Beam Family unchanged.
+
+- **A Weather row** under Alerts on every device, from LocalCast (a forecaster that
+  runs on one of your PCs and serves its page on your tailnet): the temperature now, today's high and low and chance of
+  rain, its warnings first (in °F when its page shows imperial). Tapping it opens LocalCast's own page: in a window of
+  its own in the Windows app, on a screen of its own on the phone, in a new tab in a browser. Beam finds it among your
+  Sites (a site titled LocalCast); Settings → Server → Weather says where it comes from, takes another address, or turns
+  it off; `BEAM_WEATHER_URL` sets it on the server. Beam only reads LocalCast's page data; nothing of Beam's goes to it.
+
 ## 1.35.2 (2026-11-21): fixes from a review; Notes from Windows' Send to; the phone's Alerts row
 
 **Versions:** server 1.35.2, Windows app 1.27.2, Android app 1.20.2; Beam for Linux 1.6.0 and Beam Family's server

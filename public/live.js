@@ -363,6 +363,7 @@ function applyMe(m) {
   if (typeof m.auth?.trusted === 'boolean') me.trusted = m.auth.trusted; // (1.25: may approve other devices)
   updateSitesButton(); // (1.31) the Sites list is for approved sign-ins
   if (!alertsBox.loaded && inboxFeature()) loadInbox(); // (1.33) the Alerts row's count
+  if (typeof loadWeather === 'function') loadWeather(); // (1.36) the Weather row (at most once a minute)
   openPendingInbox(); // (1.33: asked for while the app started)
   if (me.temporary && !cacheDisabled) disableOfflineCache(); // a borrowed computer keeps nothing
 }

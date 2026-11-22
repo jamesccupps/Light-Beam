@@ -523,6 +523,39 @@ async function notes(r) {
   r.check(!fs.readdirSync(path.join(r.dir, 'down')).some(f => f.startsWith('for-later')), 'its own notes are not saved as downloads');
 }
 
+// (1.28, Beam 1.36) The Weather row's page: the bridge's openWeather opens LocalCast's page (here a made-up one) in a
+// window of its own (its own profile, no bridge); asked again, the same window; an address that isn't a web page's is
+// refused.
+async function weather(r) {
+  await r.setup();
+  let hits = 0;
+  const lc = http.createServer((req, res) => { hits++; res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end('<!doctype html><title>LocalCast</title><p>43°</p>'); });
+  await new Promise(res => lc.listen(0, '127.0.0.1', res));
+  try {
+    const url = `http://127.0.0.1:${lc.address().port}/`;
+    const ask = async (msg, id) => {
+      const from = r.logLines().length;
+      r.forward(['--test-bridge', JSON.stringify({ type: 'openWeather', id, ...msg })]);
+      const line = await r.waitLog(new RegExp(`Bridge test reply: .*"id":"${id}"`), from, 20000);
+      return line ? JSON.parse(line.slice(line.indexOf('{'))) : null;
+    };
+    let from = r.logLines().length;
+    let rep = await ask({ url }, 'test-w1');
+    r.check(rep && rep.ok !== false && !rep.code, `openWeather answers (${JSON.stringify(rep)})`);
+    r.check(!!(await r.waitLog(/Weather: LocalCast's page shown/, from, 30000)), 'its window shows LocalCast’s page');
+    r.check(hits > 0, 'the page was asked for');
+    from = r.logLines().length;
+    rep = await ask({ url }, 'test-w2');
+    r.check(rep && !rep.code, 'asked again: fine');
+    await sleep(1500);
+    r.check(!r.logLines().slice(from).some(l => /Weather: opened its window/.test(l)), 'the same window, not another one');
+    rep = await ask({ url: 'file:///C:/Windows/win.ini' }, 'test-w3');
+    r.check(rep && rep.code === 'bad-request', `a file's address is refused (${JSON.stringify(rep)})`);
+  } finally {
+    lc.close();
+  }
+}
+
 // 1.6.2: Copy image in the chat goes through the app (an http page has no image clipboard). Here the clipboard is the
 // isolated one (cfg/clipboard.png, and clipboard-image.txt: "png" when PNG bytes went along for transparency). A photo
 // is turned as its EXIF says; a type Windows can't read is "unsupported" (the page then sends PNG, which the app
@@ -797,7 +830,7 @@ async function backups(r) {
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
   'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups,
-  'outbox-restart': outboxRestart, names, notes };
+  'outbox-restart': outboxRestart, names, notes, weather };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

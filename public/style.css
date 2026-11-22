@@ -788,6 +788,11 @@ html.files-mode .shared-stage img { max-height: 70vh; }
 .app.inbox-open #thread, .app.inbox-open #composer, .app.inbox-open #composerNote, .app.inbox-open #newPill,
 .app.inbox-open #pinnedBtn, .app.inbox-open #galleryBtn, .app.inbox-open #threadSearchBtn, .app.inbox-open #threadMenuBtn, .app.inbox-open #threadSearch { display: none !important; }
 .avatar.alerts { background: var(--accent-soft); color: var(--accent); }
+/* (1.36) the Weather row: LocalCast's weather now (where a conversation's time is), its warnings in the warning colour */
+.avatar.weather { background: var(--accent-soft); color: var(--accent); }
+.weather-row .conv-time.weather-now { font-size: 0.9375rem; font-weight: 650; color: var(--text); }
+.weather-row .conv-preview.warn { color: var(--warn); }
+.weather-row .conv-name, .weather-row .conv-preview { unicode-bidi: isolate; }
 .inbox-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .inbox-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
 .inbox-chips .chip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: inherit; font: inherit; font-size: 0.8125rem; cursor: pointer; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -14,6 +14,9 @@ object Conversations {
     /** (1.20.2) Key of the main list's Alerts row (the alerts inbox: not a conversation; it opens the list). */
     const val ALERTS = "~alerts"
 
+    /** (1.21) Key of the main list's Weather row (LocalCast's page: not a conversation). */
+    const val WEATHER = "~weather"
+
     /** The conversations [item] belongs to, seen from device [me]. Empty = not shown. */
     fun keysOf(item: Item, me: String, devices: Map<String, Device>): Set<String> {
         if (item.isNote) return setOf(NOTES) // (1.20) whoever wrote it (older apps: in none)
@@ -47,12 +50,15 @@ object Conversations {
         val known: Boolean,
         val last: Item?,
         val unread: Int,
-        /** (1.20.2) The Alerts row's line: its newest alert. */
+        /** (1.20.2) The Alerts row's line: its newest alert. (1.21) The Weather row's: now and today. */
         val note: String? = null,
+        /** (1.21) The Weather row's temperature now (where a conversation's time is). */
+        val side: String? = null,
     ) {
         val isAll get() = key == ALL
         val isNotes get() = key == NOTES
         val isAlerts get() = key == ALERTS
+        val isWeather get() = key == WEATHER
     }
 
     /**

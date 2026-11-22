@@ -86,6 +86,10 @@
     <string name="sites">Sites</string>
     <string name="alerts">Alerts</string>
     <string name="alerts_row_empty">Beam\'s and your apps\' alerts</string>
+    <string name="weather">Weather</string>
+    <string name="weather_row_empty">LocalCast\'s weather</string>
+    <string name="weather_no_answer">LocalCast didn\'t answer (%1$s)</string>
+    <string name="weather_load_failed">LocalCast\'s page at %1$s isn\'t answering.</string>
     <string name="sites_add">Add a site</string>
     <string name="sites_check">Check again</string>
     <string name="sites_checking">Checking each site…</string>

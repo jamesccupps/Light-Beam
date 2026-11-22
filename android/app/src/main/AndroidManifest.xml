@@ -130,6 +130,13 @@
         <!--
             (1.15) Shared folders: the server's page of a PC's shared folders. Rotating keeps the page; one at a time.
         -->
+        <!-- (1.21) LocalCast's page, from the main list's Weather row (its own address only; nothing of Beam's goes to it) -->
+        <activity
+            android:name=".ui.WeatherActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:exported="false"
+            android:launchMode="singleTop" />
+
         <activity
             android:name=".ui.FilesActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"

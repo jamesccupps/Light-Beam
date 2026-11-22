@@ -163,7 +163,10 @@ function renderSidebar() {
     patchRow(row, conv, { active: conv === current && !panelOpen() });
     if (row.li === cursor) cursor = cursor.nextElementSibling;
     else list.insertBefore(row.li, cursor);
-    if (conv === 'all') cursor = placeInboxRow(list, placePhoneRow(list, cursor)); // pinned under All devices (1.33: and Alerts)
+    if (conv === 'all') { // pinned under All devices (1.33: and Alerts; 1.36: and Weather)
+      cursor = placeInboxRow(list, placePhoneRow(list, cursor));
+      if (typeof placeWeatherRow === 'function') cursor = placeWeatherRow(list, cursor);
+    }
   }
   // First start with nothing saved: say the devices are on their way instead of showing "All devices" alone.
   if (devicesKnown) { sidebarLoading?.remove(); sidebarLoading = null; }

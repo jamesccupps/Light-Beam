@@ -957,7 +957,7 @@ function sectionServer() {
   } else {
     parts.push(card('Messages and files', cardInfo(retention > 0 ? `Items are deleted after ${retention} days (at most ${maxItems.toLocaleString()} are kept).` : `Items are kept until you delete them (at most ${maxItems.toLocaleString()}).`)));
   }
-  parts.push(setupCard(), updatesCard());
+  parts.push(setupCard(), updatesCard(), typeof weatherCard === 'function' && weatherCard()); // (1.36: where the weather comes from)
   if (serverHas('backups')) parts.push(backupCard());
   parts.push(card('Moving or starting over',
     serverHas('move') && inlineRow('Move Beam to a new address', smallBtn('Move…', moveServer), 'Once Beam runs at the new address with a copy of this server’s data.'),

@@ -86,6 +86,7 @@ namespace Beam
         bool appsReported;                // ...what's installed told to the server on this stream
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
         FamilyWindow family;                     // (1.10) Beam Family in a window of its own
+        WeatherWindow weather;                   // (1.28) LocalCast's page in a window of its own
         bool familyPending, familyPendingQuiet;  // asked for (--family, an update) before the server said where Family is
         readonly HashSet<string> alertsShown = new HashSet<string>();
         readonly Timer uiTimer, resyncTimer, integrationTimer, rediscoverTimer, updateTimer, updateRetryTimer, healthTimer;
@@ -3059,6 +3060,25 @@ namespace Beam
             }
             else family.UrlChanged(url);
             family.ShowAndActivate(!quiet);
+            return null;
+        }
+
+        // (1.28, Beam 1.36) The chat's Weather row: LocalCast's page (the address Beam's server found: its page on the
+        // tailnet) in a window of its own. The browser when this PC has no WebView2.
+        public string OpenWeather(string address)
+        {
+            string url = WeatherWindow.CleanUrl(address);
+            if (url == null) return "That isn't a web page's address";
+            if (WebHost.RuntimeVersion(Cfg) == null) { FileUtil.OpenUrl(url); return null; }
+            if (weather == null || weather.IsDisposed)
+            {
+                var w = new WeatherWindow(this, url);
+                w.FormClosed += (s, e) => { if (weather == w) { weather = null; Log.Write("Weather: its window closed"); } };
+                weather = w;
+                Log.Write("Weather: opened its window (" + App.HostOf(url) + ")");
+            }
+            else weather.UrlChanged(url);
+            weather.ShowAndActivate();
             return null;
         }
 

@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper", "saveText", "allowCommands" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper", "saveText", "allowCommands", "weather" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -268,6 +268,12 @@ namespace Beam
                 {
                     string err = app.OpenFamily(false);
                     if (err != null) Fail(id, "unavailable", err); else Reply(id, null);
+                    break;
+                }
+                case "openWeather": // (1.28, Beam 1.36) the Weather row: LocalCast's page in a window of its own
+                {
+                    string err = app.OpenWeather(Json.Str(m, "url"));
+                    if (err != null) Fail(id, "bad-request", err); else Reply(id, null);
                     break;
                 }
                 case "openRemote": // Beam 1.6: "Control" opens a viewer window of its own

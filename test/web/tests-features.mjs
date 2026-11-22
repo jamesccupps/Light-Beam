@@ -896,4 +896,50 @@ export default function register(test) {
     await waitForServer(ctx, mine.id, i => !i, 'deleted');
   }, { timeout: 60000 });
 
+  test('1.36 Weather: LocalCast’s weather as a row under Alerts (°F when its page shows imperial, its warning first), opening its page as it is; Settings → Server says where it comes from and turns it off', async ctx => {
+    const http = await import('node:http');
+    const dash = {
+      meta: { site: 'Clifford St', locale: 'Biddeford, Maine', units: 'imperial' }, site: { id: 'home', name: 'Biddeford' },
+      now: { age_s: 11, temp: 6.07, feels: 5.5, text: 'Partly cloudy', kind: 'partly', day: false },
+      days: [{ hi: 16.04, lo: 2.2, pop: 13 }], hazards: [{ kind: 'freeze', title: 'Freeze risk' }],
+    };
+    const lc = http.createServer((req, res) => {
+      if (req.url === '/api/dashboard') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(dash)); }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><title>LocalCast</title>');
+    });
+    await new Promise(r => lc.listen(0, '127.0.0.1', r));
+    ctx.defer(() => lc.close());
+    const url = `http://127.0.0.1:${lc.address().port}/`;
+    const page = await ctx.signedIn();
+    eq(await page.evaluate(`Boolean($('.weather-row'))`), false, 'no row before LocalCast is known');
+    // LocalCast's page added as a site: its title says LocalCast
+    eq(await page.evaluate(`apiJson('api/sites', jsonBody({ url: '${url}' })).then(r => r.site.name)`), 'LocalCast');
+    await page.evaluate(`(weatherBox.at = 0, loadWeather(true), true)`);
+    await page.waitFor(`$('.weather-row .weather-now')?.textContent === '43°'`, 8000, 'the row');
+    eq(await page.evaluate(`$('.weather-row .conv-preview').textContent`), 'Freeze risk · Partly cloudy · ↑61° ↓36° · rain 13%');
+    eq(await page.evaluate(`$('.weather-row .conv-preview').classList.contains('warn')`), true, 'a warning in the warning colour');
+    const order = await page.evaluate(`[...$('#convList').children].map(li => li.querySelector('.conv')?.dataset.conv).filter(Boolean).slice(0, 3)`);
+    eq(order[0], 'all', 'All devices first');
+    assert(order.indexOf('weather') === (order.includes('alerts') ? 2 : 1), `then Alerts, then Weather (${JSON.stringify(order)})`);
+    // It opens LocalCast's own page (a new tab here)
+    await page.evaluate(`(window.__opened = [], window.open = u => { window.__opened.push(u); return null; }, $('.weather-row').click(), true)`);
+    eq(await page.evaluate('window.__opened'), [url]);
+    // Settings → Server: where it comes from; off takes the row away, on brings it back
+    await page.evaluate(`openSettings('server')`);
+    await page.waitFor(`[...document.querySelectorAll('.set-card h4')].some(h => h.textContent === 'Weather')`, 5000, 'the card');
+    const cardText = () => page.evaluate(`[...document.querySelectorAll('.set-card')].find(c => c.querySelector('h4')?.textContent === 'Weather').textContent`);
+    assert((await cardText()).includes(`LocalCast, found among your sites: ${url}`), await cardText());
+    await page.evaluate(`[...document.querySelectorAll('.set-card')].find(c => c.querySelector('h4')?.textContent === 'Weather').querySelectorAll('button')[1].click()`);
+    await page.waitFor(`(serverSettings?.weather?.off) === true`, 5000, 'off');
+    await page.evaluate(`(weatherBox.at = 0, loadWeather(true), true)`);
+    await page.waitFor(`!$('.weather-row')`, 5000, 'the row gone');
+    await page.waitFor(`[...document.querySelectorAll('.set-card')].find(c => c.querySelector('h4')?.textContent === 'Weather')?.textContent.includes('Off:')`, 5000, 'says off');
+    await page.evaluate(`[...document.querySelectorAll('.set-card')].find(c => c.querySelector('h4')?.textContent === 'Weather').querySelector('button:last-child').click()`);
+    await page.waitFor(`(serverSettings?.weather?.off) === false`, 5000, 'on again');
+    await page.evaluate(`(weatherBox.at = 0, loadWeather(true), true)`);
+    await page.waitFor(`$('.weather-row .weather-now')?.textContent === '43°'`, 8000, 'the row again');
+    eq(page.errors, [], 'no page errors');
+  }, { requires: 'weather' });
+
 }

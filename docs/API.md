@@ -1007,6 +1007,17 @@ ms?, checkedAt?, icon? (a data: URL) }`. A found one's id is `<device id>.<port>
 
 Events: `sites { at }` (to every stream) when the list changed or a check finished: read it again.
 
+### Weather (1.36)
+Feature `weather`. LocalCast (the user's own forecaster: a web page on the tailnet, as Sites finds it) as a Weather row
+on every device, opening LocalCast's own page as it is. Beam doesn't change LocalCast: it reads its page data
+(`<its page>api/dashboard`) for the row. Where it is: `BEAM_WEATHER_URL` (`off`: none), else the setting `weather`
+(`{ "url" }`, or `false`: none), else the first Site titled LocalCast (found or added, not hidden).
+
+| Method & path | Result |
+|---|---|
+| `GET /api/weather` | `{ "url", "how": "found"\|"set"\|"env", "at", "summaryAt", "name", "locale", "units": "imperial"\|"metric", "now": { "temp", "feels", "text", "kind", "day", "age" }, "today": { "hi", "lo", "pop" }, "hazards": [{ "title", "kind", "official"? }], "error"? }`; `{ "url": null, "off" }` when there's none. Temperatures in °C as LocalCast gives them (`units` says how its page shows them); read at most once a minute (one read for many asks); a read that fails keeps the last summary, with `error` (in words). Trusted sign-ins (`403 trusted`), as the Sites list |
+| `PATCH /api/settings { "weather": { "url" } \| false \| null }` | Trusted sign-ins; `url` http(s) without a user name or password (`400`); `null` finds it among the Sites again; `409` when `BEAM_WEATHER_URL` sets it. `GET /api/settings` → `weather: { url, how, off, fixed }` |
+
 ### Items
 | Method & path | Result |
 |---|---|

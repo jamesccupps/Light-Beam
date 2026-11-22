@@ -116,6 +116,10 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
     @Volatile var textFails = false
     val textRequests = CopyOnWriteArrayList<String>()
 
+    /** (1.21, server 1.36) What `GET /api/weather` answers (a server with "weather"), and how often it was asked. */
+    @Volatile var weather: JSONObject = JSONObject().put("url", JSONObject.NULL).put("off", false)
+    val weatherRequests = java.util.concurrent.atomic.AtomicInteger()
+
     /** (1.20.2) What `GET /api/settings` answers (null: as before, not found). */
     @Volatile var settingsGet: JSONObject? = null
 
@@ -314,6 +318,10 @@ class FakeBeam(private val features: List<String>) : AutoCloseable {
                 }
             }
             path == "/api/settings" && method == "GET" && settingsGet != null -> json(ex, 200, settingsGet!!)
+            path == "/api/weather" && method == "GET" && "weather" in features -> {
+                weatherRequests.incrementAndGet()
+                json(ex, 200, weather)
+            }
             path == "/api/settings" && method == "PATCH" && "appearance" in features -> {
                 val body = JSONObject(ex.requestBody.readBytes().decodeToString())
                 appearance = body.optJSONObject("appearance")

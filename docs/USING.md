@@ -125,6 +125,11 @@
   finds the pages that PC serves to your tailnet by itself (it asks only the ports web pages use); add others by
   address, like a Raspberry Pi's `http://my-pi:8080`. Beam checks each one when you open the list: a green dot when it
   answers, red with the reason when it doesn't, its title and icon. Rename, hide a found one, remove an added one.
+- **Weather** (Beam 1.36, the Windows app 1.28, the Android app 1.21): when one of your sites is LocalCast (a forecaster
+  that runs on one of your PCs), a Weather row under Alerts shows the temperature now, today's high and low and chance
+  of rain, and its warnings first. Tap it for LocalCast's own page: a window of its own in the Windows app, a screen of
+  its own on the phone, a new tab in a browser. Settings → Server → Weather says where it comes from, takes another
+  address or turns it off.
 - **Connections** (Settings → Connections): how the Beam server reaches each device over Tailscale: direct on the same
   network, direct over the internet, through a peer relay, or through Tailscale's relay (slower), with **Test** to
   check it now and the delay. It also shows when each Tailscale sign-in runs out: turn off key expiry in Tailscale's
