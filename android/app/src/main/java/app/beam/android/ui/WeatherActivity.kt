@@ -46,7 +46,7 @@ class WeatherActivity : AppCompatActivity() {
             finish()
             return
         }
-        page = url
+        page = reachable(url)
         b = ActivityFilesBinding.inflate(layoutInflater)
         setContentView(b.root)
         ViewCompat.setOnApplyWindowInsetsListener(b.root) { v, insets ->
@@ -77,7 +77,7 @@ class WeatherActivity : AppCompatActivity() {
     private fun load() {
         b.problem.isVisible = false
         b.progress.isVisible = true
-        webView().loadUrl(page.toString())
+        webView().apply { isVisible = true }.loadUrl(page.toString())
     }
 
     @SuppressLint("SetJavaScriptEnabled") // LocalCast's page is a script; only its own address loads here
@@ -102,6 +102,7 @@ class WeatherActivity : AppCompatActivity() {
     }
 
     private fun problem(text: String) {
+        web?.isVisible = false // (1.21.1: the WebView's own error page showed behind this)
         b.progress.isVisible = false
         b.problemText.text = text
         b.problem.isVisible = true
@@ -157,6 +158,19 @@ class WeatherActivity : AppCompatActivity() {
         private const val EXTRA_URL = "url"
 
         private fun portOf(u: Uri): Int = if (u.port != -1) u.port else if (u.scheme == "https") 443 else 80
+
+        /**
+         * (1.21.1, the user's report: "net::ERR_CLEARTEXT_NOT_PERMITTED") Beam's network_security_config allows only https
+         * to Tailscale's *.ts.net names (audit S-22), and LocalCast's page is plain http on the tailnet: the machine's
+         * short MagicDNS name (the same PC: Tailscale's search domain resolves it) is used instead. https stays as it is.
+         */
+        fun reachable(u: Uri): Uri {
+            val host = u.host ?: return u
+            if (u.scheme != "http" || !host.endsWith(".ts.net", ignoreCase = true)) return u
+            val short = host.substringBefore('.')
+            if (short.isEmpty()) return u
+            return u.buildUpon().encodedAuthority(if (u.port != -1) "$short:${u.port}" else short).build()
+        }
 
         /** http(s) only, with a host and without a user name or password: LocalCast's page as the server gave it. */
         fun cleanUrl(s: String): Uri? {

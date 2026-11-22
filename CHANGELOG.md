@@ -12,6 +12,14 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## Android 1.21.1 (2026-11-22): LocalCast's page opens on the phone
+
+**Versions:** the Android app 1.21.1; the server (1.36.0), the Windows app (1.28.0) and Beam for Linux unchanged.
+
+- **The Weather screen** said "net::ERR_CLEARTEXT_NOT_PERMITTED": the app allows only https to Tailscale's `*.ts.net`
+  names, and LocalCast's page is plain http on the tailnet. It now opens LocalCast by the PC's short tailnet name (the
+  same PC), and the WebView's own error page no longer shows behind Beam's message when a page doesn't answer.
+
 ## 1.36.0 (2026-11-21): the weather from LocalCast
 
 **Versions:** server 1.36.0, Windows app 1.28.0, Android app 1.21.0; Beam for Linux 1.6.0 and Beam Family unchanged.

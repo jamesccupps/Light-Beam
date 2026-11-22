@@ -139,6 +139,21 @@ class Weather121Test {
         idleUntil("the row gone") { bindAll(list).none { "Weather" in texts(it) } }
     }
 
+    /** (1.21.1, the user's report) Plain http to a *.ts.net name is refused by Android here: the short name is used. */
+    @Test
+    fun aTailnetNameOpensByItsShortName() {
+        val c = keep(Robolectric.buildActivity(WeatherActivity::class.java, WeatherActivity.intent(app, "http://my-pc.tail1234.ts.net:8787/")).setup())
+        var web: WebView? = null
+        idleUntil("the page") {
+            web = c.get().findViewById<FrameLayout>(R.id.page).getChildAt(0) as? WebView
+            web?.let { shadowOf(it).lastLoadedUrl } != null
+        }
+        assertEquals("http://my-pc:8787/", shadowOf(web!!).lastLoadedUrl)
+        assertEquals("https stays as it is", "https://my-pc.tail1234.ts.net/", WeatherActivity.reachable(android.net.Uri.parse("https://my-pc.tail1234.ts.net/")).toString())
+        assertEquals("not a tailnet name: as it is", "http://192.168.1.5:8787/", WeatherActivity.reachable(android.net.Uri.parse("http://192.168.1.5:8787/")).toString())
+        assertEquals("no port", "http://my-pc/x?y=1", WeatherActivity.reachable(android.net.Uri.parse("http://my-pc.tail1234.ts.net/x?y=1")).toString())
+    }
+
     @Test
     fun onlyAWebPagesAddressOpens() {
         for (bad in listOf("file:///sdcard/x.html", "javascript:alert(1)", "http://me:pw@host/", "content://x/y", "")) {
