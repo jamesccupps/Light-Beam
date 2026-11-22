@@ -702,7 +702,8 @@ class TransferManager(private val app: BeamApp) {
 
     fun cancelAll() {
         _uploads.value.forEach { cancelUpload(it.localId) }
-        dlTasks.keys.toList().forEach { cancelDownload(it) }
+        // (1.21.2) a copy by walking the keys: toList() read the size first and threw when the last download ended meanwhile
+        ArrayList(dlTasks.keys).forEach { cancelDownload(it) }
     }
 
     /**

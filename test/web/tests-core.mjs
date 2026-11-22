@@ -123,6 +123,26 @@ export default function register(test) {
     eq(await page.evaluate(`unread('${phone.id}')`), 1, 'the broadcast read in All devices is read in Pixel too');
   });
 
+  test('unread 1.38.1 (the 2026-11-21 audit): a fresh browser on a phone’s layout (nothing opened) seeds its read marks: broadcasts and messages from before it aren’t unread, and the server keeps them', async ctx => {
+    const phone = dev(ctx, 'Pixel');
+    await phone.me();
+    await phone.text('a broadcast from before this browser existed');
+    const page = await ctx.signedIn({ width: 412, height: 915 });
+    const meId = await page.evaluate('me.id');
+    await page.waitFor(`readMarks !== null && items.some(i => i.text === 'a broadcast from before this browser existed') && !syncing`, 8000, 'the first sync');
+    eq(await page.evaluate(`[unread('all'), document.title, getComputedStyle($('#thread') || document.body).display !== 'none' && !NARROW.matches]`), [0, 'Beam', false], 'the list on screen (no thread read itself), nothing unread');
+    eq(await page.evaluate(`readMarks.all === items.filter(i => i.to.length === 0).at(-1).ts`), true, 'All devices seeded to its newest');
+    // the marks reach the server (pushRead): another sign-in of this device would have them
+    let server = {};
+    for (let i = 0; i < 20 && !server.all; i++) { await ctx.sleep(250); server = (await page.evaluate(`apiJson('api/me').then(m => m.read || {})`)) || {}; }
+    assert(server.all > 0, `the server has All devices' mark: ${JSON.stringify(server)}`);
+    // later ones still count
+    await phone.text('a new broadcast');
+    await page.waitFor(`unread('all') === 1`, 5000, 'a new broadcast is unread');
+    eq(await page.evaluate(`[unread('${phone.id}'), document.title]`), [1, '(1) Beam'], 'once');
+    eq(meId.length > 0, true, 'signed in');
+  });
+
   test('a merge keeps the open thread and its read state', async ctx => {
     const page = await ctx.signedIn();
     const meId = await page.evaluate('me.id');

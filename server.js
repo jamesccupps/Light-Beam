@@ -8533,7 +8533,9 @@ const normalizeCode = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '
 
 function newCode() {
   let code;
-  do code = [...crypto.randomBytes(8)].map(b => CODE_CHARS[b % CODE_CHARS.length]).join('');
+  // (1.38.1, code scanning alert #17) randomInt, not a byte % 31: 256 isn't a multiple of 31, so 8 characters came a
+  // little more often
+  do code = Array.from({ length: 8 }, () => CODE_CHARS[crypto.randomInt(CODE_CHARS.length)]).join('');
   while ([...loginRequests.values()].some(r => r.code === code));
   return code;
 }

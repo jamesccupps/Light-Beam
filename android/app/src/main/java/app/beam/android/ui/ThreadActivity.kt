@@ -99,6 +99,7 @@ class ThreadActivity : BaseActivity(), MessageAdapter.Actions {
         b = ActivityThreadBinding.inflate(layoutInflater)
         setContentView(b.root)
         b.appbar.padForSystemBars(top = true)
+        b.toolbar.roomForLargeText() // (1.21.2) room for its second line at large text
         b.composeBar.padForSystemBars(bottom = true, ime = true)
         setUpToolbar()
         if (key == Conversations.NOTES) b.input.setHint(R.string.note_hint) // (1.20)

@@ -69,6 +69,7 @@ class MainActivity : BaseActivity() {
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
         b.appbar.padForSystemBars(top = true)
+        b.toolbar.roomForLargeText() // (1.21.2) room for its second line at large text
         b.list.padForSystemBars(bottom = true)
         b.empty.padForSystemBars(bottom = true)
 

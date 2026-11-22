@@ -12,6 +12,19 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.38.1 (2026-11-22): fixes: sign-in codes, a new browser's unread count, the phone's header at large text
+
+**Versions:** server 1.38.1, Android app 1.21.2; the Windows app 1.30.0 and Beam for Linux 1.6.0 unchanged.
+
+- **Sign-in codes:** every character is now equally likely (`crypto.randomInt`; before, 8 of the 31 characters came
+  slightly more often: code scanning alert #17).
+- **A browser signed in for the first time** no longer counts what was already in All devices as unread (on a
+  phone's layout it stayed unread until All devices was opened).
+- **Android at large text sizes:** the header's second line ("Online") has room under it instead of touching the
+  messages; at normal sizes nothing moves.
+- **Android:** signing out while a download was just finishing could stop the app (a copy of the running transfers that
+  could fail when the last one ended at that moment); the same kind of copy fixed in five other places.
+
 ## 1.38.0 (2026-11-22): Remote Desktop, explained; losses in remote control's details
 
 **Versions:** server 1.38.0, Windows app 1.30.0; the Android app 1.21.1 and Beam for Linux 1.6.0 unchanged.

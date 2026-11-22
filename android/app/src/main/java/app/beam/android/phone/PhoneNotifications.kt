@@ -128,7 +128,7 @@ class PhoneNotifications(private val app: BeamApp) {
     private val serial = Dispatchers.IO.limitedParallelism(1)
 
     /** The shared ones right now (tests). */
-    val sharedKeys: Set<String> get() = active.keys.toSet()
+    val sharedKeys: Set<String> get() = HashSet(active.keys) // (1.21.2: not toSet(), which can throw on a concurrent map)
 
     private fun later(block: () -> Unit) {
         app.scope.launch(serial) { block() }
@@ -310,7 +310,7 @@ class PhoneNotifications(private val app: BeamApp) {
         val inShade = all.map { NotificationReader.keyOf(it) }.toSet()
         active.keys.retainAll(inShade)
         resend.retainAll(inShade)
-        val known = active.keys.toSet()
+        val known = HashSet(active.keys)
         val wholeShade = resendShade
         resendShade = false
         val syncedUntil = syncedAt()
@@ -403,7 +403,7 @@ class PhoneNotifications(private val app: BeamApp) {
         }
         // Its group's summary showed alone until now: with a child shared, it would show twice.
         if (!summary) {
-            for ((k, s) in active.entries.toList()) if (s.summary && s.groupKey == sbn.groupKey && s.notification.app == sbn.packageName) remove(k)
+            for ((k, s) in ArrayList(active.entries)) if (s.summary && s.groupKey == sbn.groupKey && s.notification.app == sbn.packageName) remove(k)
         }
     }
 
@@ -544,7 +544,7 @@ class PhoneNotifications(private val app: BeamApp) {
      * up). A re-send that failed stays one. Keys with a send already queued keep it.
      */
     private fun retryNow() {
-        val backingOff = failures.keys.toSet()
+        val backingOff = HashSet(failures.keys)
         failures.clear()
         fun due(key: String) = key in backingOff || !pending.containsKey(key)
         val missing = active.filter { (key, s) -> due(key) && sent[key] != NotificationReader.contentHash(s.notification) }.keys

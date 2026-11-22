@@ -215,10 +215,14 @@ function markConvRead(conv, ts, { local = false } = {}) {
 // Merge markers from the server or another tab (take the newest of each).
 function mergeReadMarks(marks) {
   if (!marks || typeof marks !== 'object') return false;
+  // (1.38.1, the 2026-11-21 audit) none at all (a fresh browser's from /api/me, an empty saved copy) aren't this device's
+  // read state yet: the first sync still seeds it (seedReadMarks), so what was there before isn't unread
+  const valid = Object.entries(marks).filter(([, ts]) => Number.isFinite(ts) && ts > 0);
+  if (!readMarks && !valid.length) return false;
   let changed = false;
   if (!readMarks) readMarks = {};
-  for (const [conv, ts] of Object.entries(marks)) {
-    if (Number.isFinite(ts) && ts > (readMarks[conv] || 0)) { readMarks[conv] = ts; changed = true; }
+  for (const [conv, ts] of valid) {
+    if (ts > (readMarks[conv] || 0)) { readMarks[conv] = ts; changed = true; }
   }
   if (changed) { store.setJson('beam.read', readMarks); cache.saveRead(); }
   return changed;

@@ -110,6 +110,20 @@ object Clip {
     }
 }
 
+/**
+ * (1.21.2, the 2026-11-21 audit) Room above and below a toolbar's title and second line ("Online") at large text, from
+ * a 1.3x font scale: there they're taller than the toolbar's minimum height and it wrapped them edge to edge (at 200 %
+ * the second line sat on the messages' edge). Not below 1.3x: padding there moved the title (bottom only) or made the
+ * bar taller (both sides), since its content nearly fills M3's 64dp. Once per toolbar, in onCreate.
+ */
+fun com.google.android.material.appbar.MaterialToolbar.roomForLargeText() {
+    if (resources.configuration.fontScale < LARGE_TEXT_SCALE) return
+    val pad = (6 * resources.displayMetrics.density).toInt()
+    setPadding(paddingLeft, paddingTop + pad, paddingRight, paddingBottom + pad)
+}
+
+const val LARGE_TEXT_SCALE = 1.3f
+
 /** Pads a view for the system bars (and the keyboard), since Beam draws edge to edge. */
 fun View.padForSystemBars(top: Boolean = false, bottom: Boolean = false, ime: Boolean = false, sides: Boolean = true) {
     val l = paddingLeft

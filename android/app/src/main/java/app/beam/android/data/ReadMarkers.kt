@@ -37,7 +37,7 @@ class ReadMarkers(private val app: BeamApp) {
             pending.clear() // an older server: read state stays on this device
             return
         }
-        for ((key, ts) in pending.entries.toList()) {
+        for ((key, ts) in ArrayList(pending.entries)) { // (1.21.2: not toList(), which can throw on a concurrent map)
             try {
                 api.putRead(Repository.serverConversation(key), ts)
                 pending.remove(key, ts)
