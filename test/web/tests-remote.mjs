@@ -1562,6 +1562,20 @@ export default function register(test) {
     eq(page.errors, [], 'no page errors');
   }, { requires: FEATURE, timeout: 240000 });
 
+  test('remote control 1.38 (the 2026-11-21 audit’s RC5): the details’ Losses row (packets lost, FEC, resends, freezes, since it connected)', async ctx => {
+    const pc = await fakePc(ctx);
+    const page = await viewer(ctx, pc.id);
+    await live(page, pc);
+    eq(await page.evaluate(`rcLossText({ got: 9990, lost: 10, fec: 40, fecUnused: 30, nacks: 12, resent: 9, freezes: 2, frozeMs: 1400 })`),
+      '10 of 10,000 packets lost (0.1%) · FEC: 10 of 40 repair packets used · 12 asked for again, 9 resent · the picture froze 2 times (1.4 s), since it connected', 'everything');
+    eq(await page.evaluate(`rcLossText({ got: 1000000, lost: 3, fec: 0, fecUnused: 0, nacks: 0, resent: 0, freezes: 1, frozeMs: 200 })`),
+      '3 of 1,000,003 packets lost (0.00%) · no FEC sent · the picture froze once (0.2 s), since it connected', 'a little');
+    eq(await page.evaluate(`[rcLossText(null), rcLossOf({}), rcLossOf({ packetsReceived: 5, packetsLost: -2 }).lost]`), ['', null, 0], 'nothing known; duplicates aren’t losses');
+    await page.evaluate(`(rc.pic.details = true, rcRenderDetails(), true)`);
+    await page.waitFor(`/Lossesnone of [\\d,]+ packets lost/.test(rcUi.details.textContent)`, 8000, 'the row, from the real connection');
+    eq(page.errors, [], 'no page errors');
+  });
+
   test('remote control 1.37 (the 2026-11-21 audit’s RC2): the PC’s still of its screen shows in the picture’s place until the first frame (parts of one JPEG; not another kind; not once frames come)', async ctx => {
     const pc = await fakePc(ctx);
     const page = await viewer(ctx, pc.id);
@@ -1600,6 +1614,7 @@ export default function register(test) {
     await page.evaluate(`window.__opened = []; window.open = (u, t, f) => { __opened.push([u, t, f]); return null; }; true`);
     const action = await page.evaluate(`deviceActions(deviceById('${pc.id}')).map(a => a.label)`);
     assert(action.includes('Control') && action.indexOf('Control') < (action.indexOf('Remote Desktop') + 1 || 99), `Control, next to Remote Desktop: ${action}`);
+    eq(await page.evaluate(`deviceActions(deviceById('${pc.id}')).find(a => a.label === 'Control').sub`), 'Beam’s: its screen as it is, nobody signed out', 'Control’s second line (1.38, RD3)');
     await page.evaluate(`deviceActions(deviceById('${pc.id}')).find(a => a.label === 'Control').action(); true`);
     eq(await page.evaluate('__opened'), [[`${ctx.srv.base}/#remote=${pc.id}`, '_blank', 'noopener']], 'a new tab on #remote=');
     // A session from another device: Settings → Devices shows it, with End.

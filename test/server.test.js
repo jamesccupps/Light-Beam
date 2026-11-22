@@ -2198,6 +2198,15 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     assert.equal(after.status.uacOnScreen, undefined);
     assert.equal((await put({ uacOnScreen: true })).status, 204);
     assert.equal((await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(x => x.id === 'gamingpc001').status.uacOnScreen, true);
+    // (1.38, Windows 1.30, the 2026-11-21 audit's RD2) how Remote Desktop's picture is set up there: what was set, only
+    assert.ok((await s.req('GET', '/api/info', { headers: phone })).json.features.includes('rdp-graphics'));
+    assert.equal((await put({ rdpGraphics: { gpu: true, avc444: false, fps: 60 } })).status, 204);
+    const rdpOf = async () => (await s.req('GET', '/api/devices', { headers: phone })).json.devices.find(x => x.id === 'gamingpc001').status.rdpGraphics;
+    assert.deepEqual(await rdpOf(), { gpu: true, avc444: false, fps: 60 });
+    assert.equal((await put({ rdpGraphics: {} })).status, 204, 'nothing set: an empty report');
+    assert.deepEqual(await rdpOf(), {});
+    assert.equal((await put({ rdpGraphics: null })).status, 204, 'Remote Desktop turned off there');
+    assert.equal(await rdpOf(), undefined);
     // MAC addresses never leave the server, in any form
     const macRe = /0a[:-]?1b[:-]?2c|0A[:-]?1B[:-]?2C/i;
     await sleep(400);
@@ -2216,6 +2225,8 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
       { update: 'failed' }, { update: { version: 'soon', problem: 'x' } }, { update: { version: '1.6.3', problem: ' ' } },
       { update: { version: '1.6.3', problem: 'p'.repeat(301) } }, { update: { version: '1.6.3', problem: 'p', extra: 1 } },
       { uacOnScreen: 'yes' },
+      { rdpGraphics: true }, { rdpGraphics: { gpu: 1 } }, { rdpGraphics: { fps: 0 } }, { rdpGraphics: { fps: 61 } }, { rdpGraphics: { fps: 30.5 } },
+      { rdpGraphics: { gpu: true, extra: true } }, { rdpGraphics: [] },
     ]) {
       assert.equal((await put(bad)).status, 400, JSON.stringify(bad));
     }
@@ -2388,7 +2399,10 @@ test('QW-D: a Remote Desktop file for a Windows PC with a Tailscale address', as
     assert.equal(r.status, 200);
     assert.equal(r.headers['content-type'], 'application/x-rdp');
     assert.match(r.headers['content-disposition'], /attachment; filename="Work PC\.rdp"/);
-    assert.equal(r.body, 'full address:s:work-pc.tail1234.ts.net\r\nprompt for credentials:i:1\r\nscreen mode id:i:2\r\n');
+    // (1.38, the 2026-11-21 audit's RD1) reconnects by itself, follows the window's size, detects the network, the clipboard on
+    assert.equal(r.body, ['full address:s:work-pc.tail1234.ts.net', 'prompt for credentials:i:1', 'screen mode id:i:2',
+      'autoreconnection enabled:i:1', 'dynamic resolution:i:1', 'smart sizing:i:0', 'networkautodetect:i:1', 'bandwidthautodetect:i:1',
+      'connection type:i:7', 'redirectclipboard:i:1', ''].join('\r\n'));
     r = await s.req('GET', '/api/devices/nodnspc0001/remote-desktop.rdp', { headers: app(K, 'phone000001') });
     assert.match(r.body, /^full address:s:100\.64\.80\.3\r\n/, 'falls back to the Tailscale address');
     assert.equal((await s.req('GET', '/api/devices/lanpc000001/remote-desktop.rdp', { headers: app(K, 'phone000001') })).status, 404, 'no address known');

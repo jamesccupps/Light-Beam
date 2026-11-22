@@ -142,10 +142,28 @@ export default function register(test) {
     const downloads = await catchDownloads(ctx, page);
     await page.evaluate(`openConv('${pc.id}')`);
     await openThreadMenu(page);
+    // (1.38, the 2026-11-21 audit's RD3) a line under it says how it differs from Control
+    eq(await page.evaluate(`[...$('#menu').querySelectorAll('.menu-item')].find(b => b.textContent.startsWith('Remote Desktop'))?.querySelector('.menu-sub')?.textContent`),
+      'Windows’ own: signs in to a session of its own, and the PC’s screen locks', 'Remote Desktop’s second line');
     await clickMenu(page, 'Remote Desktop');
     assert(await until(ctx, () => downloads[0]?.done), 'the .rdp file downloaded');
     eq([new URL(downloads[0].url).pathname, downloads[0].name], [`/api/devices/${pc.id}/remote-desktop.rdp`, 'Work PC.rdp'], 'the .rdp download');
     assert(fs.readFileSync(downloads[0].file, 'utf8').includes(`full address:s:${ip}`), 'it connects to the PC’s Tailscale address');
+    // (1.38, Windows 1.30, the 2026-11-21 audit's RD2) Device info: how Remote Desktop's picture is set up there, and where
+    await pc.putStatus({ rdpGraphics: { gpu: true, hwEncode: false, fps: 60 } });
+    await page.waitFor(`deviceById('${pc.id}')?.status?.rdpGraphics?.fps === 60`, 8000, 'the report arrived');
+    await page.evaluate(`openDeviceInfo(deviceById('${pc.id}')); true`);
+    const rdpRow = `[...document.querySelectorAll('#genBody dt')].find(x => x.textContent === 'Remote Desktop')?.nextElementSibling`;
+    await page.waitFor(`!!${rdpRow}`, 3000, 'a Remote Desktop row');
+    const rdpLines = `[...(${rdpRow}?.querySelectorAll('.rdp-lines > span') || [])].map(x => x.textContent).join(' | ')`;
+    eq(await page.evaluate(`[${rdpLines}, ${rdpRow}.querySelector('details.rdp-how summary').textContent, /Remote Session Environment: “Use hardware graphics adapters for all Remote Desktop Services sessions”.*DWMFRAMEINTERVAL = 15/.test(${rdpRow}.querySelector('details.rdp-how p').textContent)]`),
+      ['Graphics card: on | H.264/AVC 444: not set | Hardware encoding: off | Frame rate: up to 60 fps', 'Where these are set', true], 'what is set (a line each), and where');
+    await page.evaluate(`(() => { const row = ${rdpRow}; row.querySelector('details.rdp-how').open = true; refreshDeviceInfo(); return true; })()`);
+    eq(await page.evaluate(`${rdpRow}.querySelector('details.rdp-how').open`), true, 'a refresh keeps it open');
+    await pc.putStatus({ rdpGraphics: {} });
+    await page.waitFor(`${rdpLines} === 'Graphics card: not set | H.264/AVC 444: not set | Hardware encoding: not set | Frame rate: up to 30 fps (Windows’ default)'`, 8000, 'nothing set: Windows decides');
+    eq(await page.evaluate(`[...document.querySelectorAll('#genFoot button')].find(b => b.textContent === 'Remote Desktop')?.title`), 'Windows’ own: signs in to a session of its own, and the PC’s screen locks', 'its button says it too');
+    await page.evaluate(`$('#genDlg').close(); true`);
     // The Windows app: straight to mstsc through the bridge (Beam for Windows 1.3+ only).
     const { page: host } = await hostPage(ctx, { features: ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteDesktop'] });
     await host.waitFor(`paired && hostState.ready && deviceById('${pc.id}')?.can?.remoteDesktop === true`, 10000, 'host ready');

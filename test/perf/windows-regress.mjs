@@ -828,9 +828,45 @@ async function backups(r) {
   r.check(/no restore offer open; checked True/.test((await r.waitLog(/Settings: \(test\) /, from, 10000)) || ''), 'offered once');
 }
 
+// (1.30, Beam 1.38, the 2026-11-21 audit's RD2) The status says how Remote Desktop's picture is set up on this PC, as
+// its registry has it (read with reg.exe here, read only): the three policies when set, the frame-rate limit when set,
+// nothing while Remote Desktop is off.
+function regValue(key, name) {
+  const out = spawnSync('reg', ['query', key, '/v', name], { encoding: 'utf8', windowsHide: true });
+  const m = out.status === 0 && (out.stdout || '').match(new RegExp(`${name}\\s+REG_(DWORD|SZ)\\s+(\\S+)`));
+  return m ? (m[1] === 'DWORD' ? parseInt(m[2], 16) : m[2]) : null;
+}
+
+async function rdp(r) {
+  await r.setup();
+  r.check(!!(await r.waitLog(/Status sent/, 0, 30000)), 'the status went out');
+  const ts = 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services';
+  const edition = regValue('HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion', 'EditionID') || '';
+  const policy = regValue(ts, 'fDenyTSConnections');
+  const on = !/^Core/i.test(edition) && (policy != null ? policy === 0 : regValue('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server', 'fDenyTSConnections') === 0);
+  let want;
+  if (on) {
+    want = {};
+    for (const [k, name] of [['gpu', 'bEnumerateHWBeforeSW'], ['avc444', 'AVC444ModePreferred'], ['hwEncode', 'AVCHardwareEncodePreferred']]) {
+      const v = regValue(ts, name);
+      if (typeof v === 'number') want[k] = v !== 0;
+    }
+    const interval = regValue('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations', 'DWMFRAMEINTERVAL');
+    if (typeof interval === 'number' && interval >= 1) want.fps = Math.min(60, interval * 4);
+  }
+  let got;
+  for (let i = 0; i < 20; i++) {
+    const me = ((await r.api('GET', '/api/devices')).data.devices || []).find(d => d.id === r.appId);
+    got = me?.status?.rdpGraphics;
+    if (JSON.stringify(got) === JSON.stringify(want)) break;
+    await sleep(500);
+  }
+  r.check(JSON.stringify(got) === JSON.stringify(want), `rdpGraphics as the registry has it (Remote Desktop ${on ? 'on' : 'off'} here): ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+}
+
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
   'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups,
-  'outbox-restart': outboxRestart, names, notes, weather };
+  'outbox-restart': outboxRestart, names, notes, weather, rdp };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

@@ -368,6 +368,12 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
   background: transparent; color: var(--text); font: inherit; font-size: 0.875rem; text-align: left; cursor: pointer;
 }
 .menu-item span { flex: 1; }
+.menu-item.has-sub { padding-top: 6px; padding-bottom: 6px; }
+.menu-item .menu-sub { display: block; margin-top: 1px; color: var(--muted); font-size: 0.75rem; line-height: 1.3; white-space: normal; }
+.rdp-lines > span { display: block; }
+.rdp-how { margin-top: 4px; }
+.rdp-how summary { cursor: pointer; color: var(--muted); font-size: 0.8125rem; }
+.rdp-how p { margin: 4px 0 0; color: var(--muted); font-size: 0.8125rem; line-height: 1.4; overflow-wrap: anywhere; }
 .menu-item .i { width: 17px; height: 17px; color: var(--muted); }
 .menu-item kbd { font-size: 0.6875rem; color: var(--muted); }
 .menu-item:hover, .menu-item:focus-visible { background: var(--surface-2); outline: none; }

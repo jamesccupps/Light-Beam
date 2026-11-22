@@ -2346,7 +2346,10 @@ function forgetSitesOf(id) {
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
 // (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
 const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted',
-  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites', 'commands', 'hwBlackbox']);
+  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites', 'commands', 'hwBlackbox', 'rdpGraphics']);
+// (1.38, Windows 1.30, the 2026-11-21 audit's RD2) status `rdpGraphics`: the Group Policy settings that decide Remote
+// Desktop's picture there (true/false when set, absent when not) and its frame-rate limit when set (DWMFRAMEINTERVAL)
+const RDP_GRAPHICS_FLAGS = ['gpu', 'avc444', 'hwEncode'];
 // (1.22) What a Raspberry Pi's firmware says about its power and speed (vcgencmd get_throttled), now and since it started.
 const THROTTLE_FLAGS = new Set(['undervoltage', 'capped', 'throttled', 'softLimit']);
 const HOT_C = 80; // a Pi 4 or 5 slows itself down from 80 °C
@@ -2493,6 +2496,20 @@ function parseStatus(body) {
       out.sites = list;
     } else if (key === 'hwBlackbox') {
       out.hwBlackbox = parseHwBlackbox(value); // (1.35)
+    } else if (key === 'rdpGraphics') {
+      const shape = 'rdpGraphics must be {"gpu", "avc444", "hwEncode": true|false (each only when set), "fps": 1-60 (only when set)}';
+      if (!isPlainObject(value) || Object.keys(value).some(k => k !== 'fps' && !RDP_GRAPHICS_FLAGS.includes(k))) throw bad(shape);
+      const g = {};
+      for (const k of RDP_GRAPHICS_FLAGS) {
+        if (value[k] === undefined) continue;
+        if (typeof value[k] !== 'boolean') throw bad(shape);
+        g[k] = value[k];
+      }
+      if (value.fps !== undefined) {
+        if (!Number.isInteger(value.fps) || value.fps < 1 || value.fps > 60) throw bad(shape);
+        g.fps = value.fps;
+      }
+      out.rdpGraphics = g;
     } else if (key === 'update') {
       // (1.6.2) an app update that didn't install there, in the system's words
       const version = statusText(value?.version), problem = statusText(value?.problem);
@@ -2508,7 +2525,7 @@ function parseStatus(body) {
 
 // What other devices see of a status report (no MAC addresses).
 function publicStatus(status) {
-  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, uacOnScreen, commands, hwBlackbox, at } = status;
+  const { battery, storage, os, remoteControl, locked, update, startsWithWindows, startWanted, model, bootedAt, temperature, throttled, controlProblem, uacOnScreen, commands, hwBlackbox, rdpGraphics, at } = status;
   return {
     ...(battery && { battery }), ...(storage && { storage }), ...(os && { os }),
     ...(remoteControl !== undefined && { remoteControl }), ...(locked !== undefined && { locked }), ...(update && { update }),
@@ -2518,6 +2535,7 @@ function publicStatus(status) {
     ...(uacOnScreen !== undefined && { uacOnScreen }), // (1.30.1) Windows shows its prompts (UAC) on the normal screen there
     ...(commands !== undefined && { commands }), // (1.32) "Allow commands too" there
     ...(hwBlackbox && { hwBlackbox }), // (1.35) HW Blackbox's findings there
+    ...(rdpGraphics && { rdpGraphics }), // (1.38) how Remote Desktop's picture is set up there (the audit's RD2)
     at: at || 0,
   };
 }
@@ -2828,7 +2846,12 @@ function remoteDesktopFile(req, res, [id], url) {
   const host = ts?.dns || ts?.ip;
   if (!host || !/^[A-Za-z0-9.:-]{1,253}$/.test(host)) throw httpError(404, `Beam doesn't know an address for ${target.name}`);
   const address = net.isIPv6(host) ? `[${host}]` : host;
-  const body = [`full address:s:${address}`, 'prompt for credentials:i:1', 'screen mode id:i:2', ''].join('\r\n');
+  // (1.38, the 2026-11-21 audit's RD1) not only the address: reconnect by itself after a blip, the session's size
+  // following the window, the network type detected (not a fixed "modem"/"LAN" profile), the clipboard on. Microsoft's
+  // client doesn't save a window's place back into a file, so there's nothing per PC to remember.
+  const body = [`full address:s:${address}`, 'prompt for credentials:i:1', 'screen mode id:i:2',
+    'autoreconnection enabled:i:1', 'dynamic resolution:i:1', 'smart sizing:i:0',
+    'networkautodetect:i:1', 'bandwidthautodetect:i:1', 'connection type:i:7', 'redirectclipboard:i:1', ''].join('\r\n');
   log.info(`${whoName(deviceIdOf(req, url), 'A browser')} opened Remote Desktop to ${target.name} (${host})`);
   send(res, 200, body, {
     'Content-Type': 'application/x-rdp',
@@ -8133,6 +8156,7 @@ const FEATURES = [
   'hw-blackbox', // (1.35.0: status `hwBlackbox`, HW Blackbox's findings where a PC runs it)
   'apps-found', // (1.35.0: app state `found` (on a PC already, not from Beam; `where`), PUT /api/devices/me/apps items' found/where/also)
   'weather', // (1.36.0: GET /api/weather (LocalCast's weather for the Weather row), the setting `weather`)
+  'rdp-graphics', // (1.38.0: status `rdpGraphics`, how Remote Desktop's picture is set up on a PC; the 2026-11-21 audit's RD2)
   'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];
 

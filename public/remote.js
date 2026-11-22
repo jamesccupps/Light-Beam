@@ -1026,10 +1026,33 @@ async function rcStats() {
     fps, kbps, codec: codec ? String(codec.mimeType || '').replace(/^video\//i, '') : '',
     w: inbound.frameWidth || rcUi.video.videoWidth || 0, h: inbound.frameHeight || rcUi.video.videoHeight || 0,
     jitterMs: Number.isFinite(inbound.jitterBufferDelay) && inbound.jitterBufferEmittedCount > 0 ? Math.round(inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount * 1000) : null,
+    loss: rcLossOf(inbound),
   };
   if (typeof inbound.decoderImplementation === 'string') rc.decoder = rcClean(inbound.decoderImplementation, 80) + (inbound.powerEfficientDecoder === true ? ' (hardware)' : '');
   rcRenderChip();
   rcRenderDetails();
+}
+
+// (1.38, the 2026-11-21 audit's RC5) What this connection lost on the way and how it was made up: the video's own
+// counters (since it connected). FEC packets that were discarded weren't needed (or came too late); the rest repaired.
+function rcLossOf(r) {
+  const n = v => (Number.isFinite(v) && v >= 0 ? Math.round(v) : null);
+  const got = n(r.packetsReceived);
+  if (got == null) return null;
+  return { got, lost: Math.max(0, Math.round(Number(r.packetsLost) || 0)), fec: n(r.fecPacketsReceived), fecUnused: n(r.fecPacketsDiscarded),
+    nacks: n(r.nackCount), resent: n(r.retransmittedPacketsReceived), freezes: n(r.freezeCount),
+    frozeMs: Number.isFinite(r.totalFreezesDuration) ? Math.round(r.totalFreezesDuration * 1000) : null };
+}
+
+function rcLossText(l) {
+  if (!l) return '';
+  const n = v => v.toLocaleString('en-US');
+  const all = l.got + l.lost;
+  const parts = [l.lost > 0 ? `${n(l.lost)} of ${n(all)} packets lost (${(l.lost * 100 / all).toFixed(l.lost * 1000 < all ? 2 : 1)}%)` : `none of ${n(all)} packets lost`];
+  if (l.fec != null) parts.push(l.fec > 0 ? `FEC: ${n(Math.max(0, l.fec - (l.fecUnused || 0)))} of ${n(l.fec)} repair packets used` : 'no FEC sent');
+  if (l.nacks || l.resent) parts.push(`${n(l.nacks || 0)} asked for again, ${n(l.resent || 0)} resent`);
+  if (l.freezes) parts.push(`${l.freezes === 1 ? 'the picture froze once' : `the picture froze ${n(l.freezes)} times`}${l.frozeMs ? ` (${(l.frozeMs / 1000).toFixed(1)} s)` : ''}`);
+  return `${parts.join(' · ')}, since it connected`;
 }
 
 // (1.14.2) Each frame's way from the PC's screen to this one: the browser knows when the PC captured it (from the PC's
@@ -2996,6 +3019,7 @@ function rcRenderDetails() {
     ['Codec', [s.codec || rc.hostCodec, rc.encoder && `encoder ${rc.encoder}${hw(rc.encoder)}`, rc.decoder && `decoder ${rc.decoder}`].filter(Boolean).join(' · ')],
     ['Delay', [s.picMs != null && `about ${rcLag()} ms from a touch to the picture`, s.picMs != null && `${s.picMs} ms from the PC’s screen to this one`,
       rtt != null && `${rtt} ms round trip`, s.jitterMs != null && `${s.jitterMs} ms buffered here`, h?.lost != null && `${h.lost}% lost`].filter(Boolean).join(' · ')],
+    ['Losses', rcLossText(s.loss)],
     ['Measured', rcMeasuredText()],
     ['Start', rcStartText()],
     ['Limited by', rc.qlr && rc.qlr !== 'none' ? (rc.qlr === 'cpu' ? 'the PC’s processor' : rc.qlr === 'bandwidth' ? 'the network' : rc.qlr) : 'nothing'],

@@ -12,6 +12,20 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.38.0 (2026-11-22): Remote Desktop, explained; losses in remote control's details
+
+**Versions:** server 1.38.0, Windows app 1.30.0; the Android app 1.21.1 and Beam for Linux 1.6.0 unchanged.
+
+- **Control or Remote Desktop:** each has a line under it in a device's menu. Control shows the PC's screen as it is
+  and signs nobody out; Remote Desktop is Windows' own: it signs in to a session of its own and the PC's screen locks.
+- **What decides Remote Desktop's speed:** a PC's Device info shows how its Remote Desktop picture is set up there
+  (the graphics card, H.264/AVC 444, hardware encoding, the frame-rate limit) and where each is set. Beam only reads
+  them.
+- **A better Remote Desktop file** from a browser: it reconnects by itself after a blip, follows the window's size,
+  detects the network and shares the clipboard.
+- **Losses in remote control's details:** the packets lost on the way, how many forward error correction repaired,
+  how many were sent again, and whether the picture froze, since the connection started.
+
 ## 1.37.0 (2026-11-22): remote control starts sooner and keeps big changes quick
 
 **Versions:** server 1.37.0 (the viewer), Windows app 1.29.0; the Android app 1.21.1 and Beam for Linux 1.6.0 unchanged.

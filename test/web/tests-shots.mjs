@@ -3,6 +3,30 @@ import path from 'node:path';
 import { hostPage } from './tests-host.mjs';
 
 export default function register(test) {
+  // (1.38, the 2026-11-21 audit's RD2/RD3) a device's menu with the second lines, Device info's Remote Desktop row
+  test('screenshots 1.38: a device’s menu (Control and Remote Desktop told apart), Device info’s Remote Desktop row', async ctx => {
+    const shot = (page, name) => page.screenshot(path.join(ctx.SHOTS, `${name}.png`));
+    const pc = ctx.srv.device(`win${ctx.uid()}${ctx.uid()}`, 'Work PC', 'windows', ctx.nextIp(), '1.3.0');
+    await pc.me();
+    await pc.putStatus({ remoteDesktop: true, remoteControl: true, locked: false, os: 'Windows 11 Pro 24H2', rdpGraphics: { gpu: true, hwEncode: false, fps: 60 } });
+    const stop = pc.online();
+    ctx.defer(stop);
+    for (const [w, h, name, scheme] of [[1280, 800, 'desktop', 'light'], [412, 915, 'phone', 'dark']]) {
+      const page = await ctx.signedIn({ width: w, height: h });
+      await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      await page.waitFor(`deviceById('${pc.id}')?.can?.remoteDesktop === true`, 8000, 'Remote Desktop offered');
+      await page.evaluate(`(openConv('${pc.id}'), threadMenu($('#threadMenuBtn')), true)`);
+      await ctx.sleep(400);
+      await shot(page, `${name}-device-menu-1.38`);
+      await page.evaluate(`(closeMenu(), openDeviceInfo(deviceById('${pc.id}')), true)`);
+      await page.waitFor(`!!document.querySelector('#genBody details.rdp-how')`, 5000, 'the row');
+      await page.evaluate(`(() => { const d = document.querySelector('#genBody details.rdp-how'); d.open = true; d.closest('dd').scrollIntoView({ block: 'center' }); return true; })()`);
+      await ctx.sleep(400);
+      await shot(page, `${name}-device-info-rdp-1.38`);
+      await page.evaluate(`($('#genDlg').close(), true)`);
+    }
+  });
+
   test('screenshots', async ctx => {
     const srv = await ctx.startServer(8825);
     ctx.defer(() => srv.stop());

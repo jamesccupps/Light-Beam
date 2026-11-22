@@ -101,7 +101,8 @@ function deviceActions(d) {
   // Control (1.6, remote.js): a PC whose switch is on; a locked one says to use Remote Desktop instead.
   acts.push(...rcActions(d));
   // In the Windows app it opens directly (Beam for Windows 1.3+); in a browser it's a .rdp file.
-  if (can.remoteDesktop && (!HOST || (hostHas('remoteDesktop') && rdpHost(d)))) acts.push({ label: 'Remote Desktop', icon: 'screen', action: () => remoteDesktop(d) });
+  // (1.38, the 2026-11-21 audit's RD3) a line under each says how it differs from Control (a wrong pick locks the PC)
+  if (can.remoteDesktop && (!HOST || (hostHas('remoteDesktop') && rdpHost(d)))) acts.push({ label: 'Remote Desktop', icon: 'screen', sub: RDP_SUB, action: () => remoteDesktop(d) });
   // (1.20) its Beam log, from anywhere (Beam for Windows 1.14+)
   if (can.log && d.online && d.id !== me.id && serverHas('device-logs')) acts.push({ label: 'Beam log', icon: 'file', action: () => showDeviceLog(d) });
   // (1.26) the folders it shares with this device (Beam for Windows 1.18+; chosen there): files.js
@@ -168,11 +169,24 @@ async function wakeDevice(d) {
   }
 }
 
+// (1.38, the 2026-11-21 audit's RD2) Device info's "Remote Desktop" row: the PC's settings that decide how fast and sharp
+// Remote Desktop's picture is (Group Policy there, read by its Beam app; Beam never changes them), and where they are.
+const RDP_WHERE = 'Group Policy at that PC: Computer Configuration → Administrative Templates → Windows Components → Remote Desktop Services → Remote Desktop Session Host → Remote Session Environment';
+function rdpGraphicsNode(g) {
+  const on = v => (v === true ? 'on' : v === false ? 'off' : 'not set');
+  const lines = [`Graphics card: ${on(g.gpu)}`, `H.264/AVC 444: ${on(g.avc444)}`, `Hardware encoding: ${on(g.hwEncode)}`,
+    `Frame rate: ${Number.isInteger(g.fps) ? `up to ${g.fps} fps` : 'up to 30 fps (Windows’ default)'}`];
+  const open = Boolean($('#genDlg .rdp-how')?.open); // (a refresh keeps it open)
+  return [el('span', { class: 'rdp-lines' }, ...lines.map(l => el('span', {}, l))), el('details', { class: 'rdp-how', open }, el('summary', {}, 'Where these are set'),
+    el('p', {}, `${RDP_WHERE}: “Use hardware graphics adapters for all Remote Desktop Services sessions”, “Prioritize H.264/AVC 444 graphics mode for Remote Desktop Connections” and “Configure H.264/AVC hardware encoding for Remote Desktop Connections”. Up to 60 fps: the value DWMFRAMEINTERVAL = 15 (decimal) under HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations, then a restart. Beam only reads them.`))];
+}
+
 // In the Windows app: Remote Desktop opens directly (the app checks `host` and runs mstsc /v:host).
 // In a browser: a .rdp file for the Remote Desktop app.
 // Either way Windows asks who to sign in as. With a personal or local account a PIN or Windows Hello doesn't work there, and picking it ends in "A
 // certification authority could not be contacted" (1.7.1: say so up front).
 // (1.7.6: between PCs on the same work or school account Windows Hello does work, the user found.)
+const RDP_SUB = 'Windows’ own: signs in to a session of its own, and the PC’s screen locks';
 const RDP_SIGN_IN = 'Sign in with that PC’s Windows account: its email address (or user name) and password. Windows Hello or a PIN works only between PCs on the same work or school account.';
 
 async function remoteDesktop(d) {
@@ -247,14 +261,16 @@ function openDeviceInfo(d, { refresh = false } = {}) {
     s.uacOnScreen === true && ['Windows’ prompts (UAC)', 'On its normal screen: your devices can answer them, and so could any program on that PC', true],
     // (1.32) "Allow commands too" there (turned on only at that PC)
     typeof s.commands === 'boolean' && s.remoteControl === true && ['Commands', s.commands ? 'Allowed, for the devices that may control it' : 'Off (turned on at that PC: “Allow commands too”)'],
+    // (1.38, Windows 1.30, the 2026-11-21 audit's RD2) how Remote Desktop's picture is set up there: words, never a change
+    d.can?.remoteDesktop && s.rdpGraphics && typeof s.rdpGraphics === 'object' && ['Remote Desktop', rdpGraphicsNode(s.rdpGraphics)],
     beamVersionOf(d) && ['Beam', beamVersionOf(d)],
     (d.tailscale?.dns || d.tailscale?.ip) && ['Tailscale', d.tailscale.dns || d.tailscale.ip],
     key && ['Tailscale sign-in', key.text, key.low],
     d.backup?.at && ['Settings backed up', timeAgo(d.backup.at)], // (1.8.1; Settings → Devices' rows said it before the remake)
     s.at && ['Reported', timeAgo(s.at)],
   ].filter(Boolean);
-  const facts = el('dl', { class: 'facts' }, ...rows.flatMap(([k, v, low]) => [el('dt', {}, k), el('dd', { class: low ? 'low' : null }, v)]));
-  const buttons = deviceActions(d).map(a => el('button', { class: 'btn', type: 'button', disabled: Boolean(a.disabled), onclick: () => a.action() }, icon(a.icon), a.label));
+  const facts = el('dl', { class: 'facts' }, ...rows.flatMap(([k, v, low]) => [el('dt', {}, k), el('dd', { class: low ? 'low' : null }, ...[v].flat())]));
+  const buttons = deviceActions(d).map(a => el('button', { class: 'btn', type: 'button', title: a.sub || null, disabled: Boolean(a.disabled), onclick: () => a.action() }, icon(a.icon), a.label));
   // Everything about this device in one place (Settings → Devices opens this): its switches, remote control, history,
   // signing it out.
   const other = d.id !== me.id;
@@ -493,9 +509,11 @@ const rcTurningOff = new Set(); // PCs asked to turn remote control off, until t
 const rcFeature = () => serverHas('remote-control');
 
 // Control (next to Remote Desktop) for a PC this device can control. A locked one says what to use instead.
+// (1.38, the 2026-11-21 audit's RD3) Control's line in the device's menu, beside Remote Desktop's
+const RC_SUB = 'Beam’s: its screen as it is, nobody signed out';
 function rcActions(d) {
   if (!rcFeature() || !d || d.id === me.id) return [];
-  if (d.can?.remoteControl && (!HOST || hostHas('remoteControl'))) return [{ label: 'Control', icon: 'pointer', action: () => openRemote(d) }];
+  if (d.can?.remoteControl && (!HOST || hostHas('remoteControl'))) return [{ label: 'Control', icon: 'pointer', sub: RC_SUB, action: () => openRemote(d) }];
   if (d.status?.remoteControl === true && d.status?.locked === true && !rcTurningOff.has(d.id) && (!HOST || hostHas('remoteControl'))) {
     return [{ label: `${d.name} is locked: use Remote Desktop`, icon: 'lock', disabled: true, action: () => {} }];
   }

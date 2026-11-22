@@ -153,6 +153,7 @@ namespace Beam
             if (!Equals(Val(last, "startsWithWindows"), Val(body, "startsWithWindows")) || !Equals(Val(last, "startWanted"), Val(body, "startWanted"))) return true;
             if (SiteFinder.Signature(Val(last, "sites")) != SiteFinder.Signature(Val(body, "sites"))) return true; // (1.24)
             if (HwBlackbox.Signature(Part(last, "hwBlackbox")) != HwBlackbox.Signature(Part(body, "hwBlackbox"))) return true; // (1.27)
+            if (RdpSignature(Part(last, "rdpGraphics")) != RdpSignature(Part(body, "rdpGraphics"))) return true; // (1.30)
             return string.Join(",", (string[])last["macs"]) != string.Join(",", (string[])body["macs"]);
         }
 
@@ -195,14 +196,24 @@ namespace Beam
                     var h = await Task.Run(() => HwBlackbox.Read(cfg));
                     if (h != null) body["hwBlackbox"] = h;
                 }
+                // (1.30, Beam 1.38, the 2026-11-21 audit's RD2) how Remote Desktop's picture is set up here (read only)
+                bool rdp = app.ServerHas("rdp-graphics");
+                if (rdp)
+                {
+                    var g = RdpGraphics();
+                    if (g != null) body["rdpGraphics"] = g;
+                }
                 if (!force && !Changed(body)) return;
                 bool gone = !body.ContainsKey("battery") && Part(last, "battery") != null;
+                bool rdpGone = rdp && !body.ContainsKey("rdpGraphics") && Part(last, "rdpGraphics") != null;
+                if (rdpGone) body["rdpGraphics"] = null; // (Remote Desktop turned off here)
                 if (gone) body["battery"] = null; // it went away (a UPS unplugged)
                 bool hwbGone = hwb && !body.ContainsKey("hwBlackbox") && Part(last, "hwBlackbox") != null;
                 if (hwbGone) body["hwBlackbox"] = null; // (uninstalled, or its dashboard turned off)
                 await api.Call(HttpMethod.Put, "/api/devices/me/status", body, 20, CancellationToken.None);
                 if (gone) body.Remove("battery");
                 if (hwbGone) body.Remove("hwBlackbox");
+                if (rdpGone) body.Remove("rdpGraphics");
                 bool first = lastSent == DateTime.MinValue;
                 lastSent = DateTime.UtcNow;
                 last = body;
@@ -323,6 +334,36 @@ namespace Beam
             if (policy is int) return (int)policy == 0;
             object deny = Value(@"SYSTEM\CurrentControlSet\Control\Terminal Server", "fDenyTSConnections");
             return deny is int && (int)deny == 0;
+        }
+
+        // (1.30, Beam 1.38, the 2026-11-21 audit's RD2) What decides Remote Desktop's picture on this PC, read only (Beam
+        // never changes these; they're the user's to set): the three Group Policy settings under Remote Desktop Session
+        // Host -> Remote Session Environment (names as in Windows' TerminalServer.admx: bEnumerateHWBeforeSW "Use hardware
+        // graphics adapters...", AVC444ModePreferred, AVCHardwareEncodePreferred; 1 enabled, 0 disabled, absent = not
+        // configured, then left out) and DWMFRAMEINTERVAL, the frame-rate limit (15 = 60 fps, Microsoft's KB 2885213:
+        // fps = value x 4; absent = Windows' 30). Null while Remote Desktop is off here.
+        public static Dictionary<string, object> RdpGraphics()
+        {
+            if (!RemoteDesktopOn()) return null;
+            const string policies = @"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services";
+            var d = new Dictionary<string, object>();
+            Flag(d, "gpu", Value(policies, "bEnumerateHWBeforeSW"));
+            Flag(d, "avc444", Value(policies, "AVC444ModePreferred"));
+            Flag(d, "hwEncode", Value(policies, "AVCHardwareEncodePreferred"));
+            object interval = Value(@"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations", "DWMFRAMEINTERVAL");
+            if (interval is int && (int)interval >= 1) d["fps"] = Math.Min(60, (int)interval * 4);
+            return d;
+        }
+
+        static void Flag(Dictionary<string, object> d, string key, object value)
+        {
+            if (value is int) d[key] = (int)value != 0;
+        }
+
+        static string RdpSignature(Dictionary<string, object> g)
+        {
+            if (g == null) return "";
+            return string.Join(",", g.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Key + "=" + kv.Value));
         }
 
         static readonly string[] VirtualWords = {

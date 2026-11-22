@@ -155,8 +155,9 @@ function openMenu(entries, at, { label = 'Actions', quick = null } = {}) {
   for (const entry of entries) {
     if (!entry) continue;
     if (entry === 'sep') { if (nodes.length && !nodes.at(-1).classList.contains('sep')) nodes.push(el('div', { class: 'sep', role: 'separator' })); continue; }
-    const btn = el('button', { class: `menu-item${entry.danger ? ' danger' : ''}`, type: 'button', role: 'menuitem', disabled: Boolean(entry.disabled) },
-      icon(entry.icon || 'next'), el('span', {}, entry.label), entry.hint && el('kbd', {}, entry.hint));
+    // (1.38, the 2026-11-21 audit's RD3) `sub`: a second, smaller line under the label (what the item does)
+    const btn = el('button', { class: `menu-item${entry.danger ? ' danger' : ''}${entry.sub ? ' has-sub' : ''}`, type: 'button', role: 'menuitem', disabled: Boolean(entry.disabled) },
+      icon(entry.icon || 'next'), el('span', {}, entry.label, entry.sub && el('small', { class: 'menu-sub' }, entry.sub)), entry.hint && el('kbd', {}, entry.hint));
     btn.addEventListener('click', () => { closeMenu(); entry.action(); });
     buttons.push(btn);
     nodes.push(btn);
