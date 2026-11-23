@@ -799,7 +799,9 @@ What can be asked (`what`, and its fields):
   id), `max` (1–1000, default 200) → `{ log, since, level, events: [{ at, level, source, id, message }], more, cut }`,
   newest first (`more`: there were more than `max`; `cut`: it stopped after 25 s). A log that needs administrator
   rights (Security) → `409 denied`.
-- `folders` → `{ folders: [{ name, path }] }`: the log folders chosen at that PC.
+- `folders` → `{ folders: [{ name, path, auto }] }`: the log folders chosen at that PC, then **(Windows 1.34)** the ones
+  found by themselves (`auto: true`: Windows' Logs, Panther and crash reports, and programs' folders named log/logs),
+  unless that's switched off there.
 - `files`: `folder` (a name from `folders`), `path` (a folder inside it) → `{ folder, path, entries: [{ name, dir,
   size, modified }], more }`, newest first, 500 at most. As in shared folders: nothing hidden, starting with `.`, or a
   link, and never outside the folder.

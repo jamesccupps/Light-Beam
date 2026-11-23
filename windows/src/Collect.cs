@@ -29,6 +29,7 @@ namespace Beam
     class LogFolder
     {
         public string Name, Path;
+        public bool Auto; // (1.34) found by itself (Windows' own, or a program's folder named log/logs), not chosen here
 
         public static LogFolder Parse(Dictionary<string, object> d)
         {
@@ -46,6 +47,7 @@ namespace Beam
             var d = new Dictionary<string, object>();
             d["name"] = Name;
             d["path"] = Path;
+            if (Auto) d["auto"] = true;
             return d;
         }
 
@@ -93,7 +95,8 @@ namespace Beam
             if (app.Cfg.CollectAllowed) { SetAllowed(false, from); return; }
             if (app.RcBlocks("turning collecting on")) return;
             var r = MessageBox.Show("Let your approved devices collect logs from this PC?\n\nThey could read Windows' event logs (those " +
-                Environment.UserName + " may read), the files in the log folders you choose here, and which programs and services run. " +
+                Environment.UserName + " may read), Windows' and programs' own log folders (found by themselves; Log folders… can turn " +
+                "that off), the log folders you choose, and which programs and services run. " +
                 "Read only: nothing is run or changed here, and nothing else on this PC is shown. Turn it off in Beam's Settings here.",
                 "Beam", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
             if (r == DialogResult.OK) SetAllowed(true, from);
@@ -251,7 +254,7 @@ namespace Beam
         Dictionary<string, object> Folders()
         {
             var d = new Dictionary<string, object>();
-            d["folders"] = app.Cfg.CollectFolders.Select(f => (object)f.ToJson()).ToArray();
+            d["folders"] = Shares.AllLogFolders(app.Cfg).Select(f => (object)f.ToJson()).ToArray();
             return d;
         }
 
@@ -458,12 +461,6 @@ namespace Beam
         {
             string root = (System.IO.Path.GetPathRoot(full) ?? "").TrimEnd('\\');
             if (full.Equals(root, StringComparison.OrdinalIgnoreCase)) return "a whole drive can't be one: pick the folder the logs are in";
-            if (cfg != null && !string.IsNullOrEmpty(cfg.Dir))
-            {
-                string own = cfg.Dir.TrimEnd('\\'), ownReal = FinalPath(own);
-                foreach (var b in new[] { own, ownReal })
-                    if (b != null && (Within(full, b) || Within(b, full))) return "Beam's own folder (its sign-in is there) can't be one";
-            }
             string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\');
             if (profile.Length > 0 && Within(profile, full)) return "your whole user folder can't be one: pick the folder the logs are in";
             foreach (var sf in new[] { Environment.SpecialFolder.ApplicationData, Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.CommonApplicationData,
@@ -472,15 +469,108 @@ namespace Beam
                 string p = Environment.GetFolderPath(sf).TrimEnd('\\');
                 if (p.Length > 0 && Within(p, full)) return "that's one of Windows' or all apps' own folders: pick the folder the logs are in, inside it";
             }
+            foreach (var b in BeamFolders(cfg)) // (1.34: its data too, not only its settings; after the roots, as for shares)
+                if (Within(full, b) || Within(b, full)) return "Beam's own folder (its sign-in is there) can't be one";
             foreach (var part in full.Substring(root.Length).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries))
                 if (part.StartsWith(".")) return "a folder whose name starts with \".\" can't be one";
             return null;
         }
 
+        // (1.34) Log folders found by themselves (the user: "why when i turn on the log access it doesnt automatically add
+        // logs from windows too?"): Windows' own (Logs, setup's Panther, crash reports), and every folder named log or logs
+        // at most three folders down in ProgramData, Program Files and AppData (not in apps' packages, temp files, caches or
+        // browsers' profiles), each named for where it is ("exacqVision Server logs"). Looked for again after 10 minutes.
+        static readonly object foundLock = new object();
+        static List<LogFolder> found;
+        static DateTime foundAt;
+        static readonly string[] SkipDirs = { "Packages", "Temp", "Cache", "Caches", "INetCache", "User Data", "Profiles", "node_modules", "CrashDumps" };
+
+        public static List<LogFolder> FoundLogFolders(Config cfg)
+        {
+            lock (foundLock)
+            {
+                if (found != null && DateTime.UtcNow - foundAt < TimeSpan.FromMinutes(10)) return found;
+                var list = new List<LogFolder>();
+                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                Action<string, string> add = (name, path) =>
+                {
+                    try
+                    {
+                        string full = System.IO.Path.GetFullPath(path).TrimEnd('\\');
+                        if (!Directory.Exists(full) || list.Any(x => x.Path.Equals(full, StringComparison.OrdinalIgnoreCase))) return;
+                        if (LogFolderRefusal(full, cfg) != null) return;
+                        string unique = name;
+                        for (int i = 2; names.Contains(unique); i++) unique = name + " (" + i + ")";
+                        names.Add(unique);
+                        var f = new LogFolder();
+                        f.Name = unique; f.Path = full; f.Auto = true;
+                        list.Add(f);
+                    }
+                    catch { }
+                };
+                var roots = new List<KeyValuePair<string, string>>();
+                if (cfg.CustomPath && cfg.TestLogRoots.Count > 0)
+                    foreach (var r in cfg.TestLogRoots) roots.Add(new KeyValuePair<string, string>(System.IO.Path.GetFileName(r.TrimEnd('\\')), r));
+                else
+                {
+                    string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                    string data = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                    add("Windows logs", System.IO.Path.Combine(win, "Logs"));
+                    add("Windows setup logs", System.IO.Path.Combine(win, "Panther"));
+                    add("Windows crash reports", System.IO.Path.Combine(data, @"Microsoft\Windows\WER\ReportArchive"));
+                    foreach (var sf in new[] { Environment.SpecialFolder.CommonApplicationData, Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86,
+                        Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.ApplicationData })
+                    {
+                        string r = Environment.GetFolderPath(sf);
+                        if (r.Length > 0 && !roots.Any(x => x.Value.Equals(r, StringComparison.OrdinalIgnoreCase))) roots.Add(new KeyValuePair<string, string>(System.IO.Path.GetFileName(r), r));
+                    }
+                }
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                foreach (var root in roots)
+                {
+                    var hits = new List<string>();
+                    ScanForLogs(root.Value.TrimEnd('\\'), 0, hits, clock);
+                    foreach (var hit in hits.OrderBy(h => h, StringComparer.OrdinalIgnoreCase))
+                    {
+                        var parts = hit.Substring(root.Value.TrimEnd('\\').Length).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+                        string last = parts[parts.Count - 1];
+                        parts.RemoveAt(parts.Count - 1);
+                        add((parts.Count > 0 ? string.Join(" ", parts) : root.Key) + " " + last.ToLowerInvariant(), hit);
+                    }
+                }
+                found = list;
+                foundAt = DateTime.UtcNow;
+                return found;
+            }
+        }
+
+        static void ScanForLogs(string dir, int depth, List<string> hits, System.Diagnostics.Stopwatch clock)
+        {
+            if (depth > 3 || hits.Count >= 150 || clock.ElapsedMilliseconds > 4000) return;
+            foreach (var e in Read(dir))
+            {
+                if (!e.Dir || !Shown(e) || (e.Attributes & ReparsePoint) != 0) continue;
+                if (SkipDirs.Any(s => string.Equals(s, e.Name, StringComparison.OrdinalIgnoreCase))) continue;
+                string full = dir + "\\" + e.Name;
+                if (string.Equals(e.Name, "logs", StringComparison.OrdinalIgnoreCase) || string.Equals(e.Name, "log", StringComparison.OrdinalIgnoreCase)) { hits.Add(full); continue; }
+                if (depth < 3) ScanForLogs(full, depth + 1, hits, clock);
+            }
+        }
+
+        // The chosen ones first, then (when that's on) the ones found by themselves.
+        public static List<LogFolder> AllLogFolders(Config cfg)
+        {
+            var all = cfg.CollectFolders.ToList();
+            if (cfg.CollectAuto)
+                foreach (var f in FoundLogFolders(cfg))
+                    if (!all.Any(x => x.Path.Equals(f.Path, StringComparison.OrdinalIgnoreCase) || string.Equals(x.Name, f.Name, StringComparison.OrdinalIgnoreCase))) all.Add(f);
+            return all;
+        }
+
         // A log folder by its name (as `folders` lists them), still allowed.
         static LogFolder LogFolderNamed(App app, string name)
         {
-            var f = app.Cfg.CollectFolders.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+            var f = AllLogFolders(app.Cfg).FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
             if (f == null) throw new CollectRefusal("there's no log folder named " + (name ?? "?") + " here (folders lists them)", "not-found");
             string why = LogFolderRefusal(f.Path, app.Cfg);
             if (why != null) throw new CollectRefusal(f.Name + " can't be read now: " + why, "not-found");
@@ -578,11 +668,15 @@ namespace Beam
         readonly App app;
         readonly List<LogFolder> folders;
         readonly Panel body, footer;
+        bool auto;
+        List<LogFolder> foundNow = new List<LogFolder>();
 
-        public LogFoldersForm(App app) : base("Log folders", 520)
+        public LogFoldersForm(App app) : base("Log folders", 560)
         {
             this.app = app;
             folders = app.Cfg.CollectFolders.Select(f => f.Copy()).ToList();
+            auto = app.Cfg.CollectAuto;
+            try { foundNow = Shares.FoundLogFolders(app.Cfg); } catch { }
             body = new Panel();
             body.BackColor = Theme.Bg;
             body.AutoScroll = true;
@@ -597,7 +691,7 @@ namespace Beam
             var cancel = new FlatButton("Cancel", null);
             var add = new FlatButton("Add a folder…", null);
             foreach (var b in new[] { save, cancel, add }) { b.BackColor = Theme.Bg; b.Size = new Size(Math.Max(Ui.S(96), b.Preferred().Width), Ui.S(36)); footer.Controls.Add(b); }
-            save.Click += (s, e) => { app.SetLogFolders(folders, "Settings on this PC"); Close(); };
+            save.Click += (s, e) => { app.SetLogFolders(folders, auto, "Settings on this PC"); Close(); };
             cancel.Click += (s, e) => Close();
             add.Click += (s, e) => AddFolder();
             int footerH = Ui.S(36) + Pad;
@@ -614,10 +708,15 @@ namespace Beam
             foreach (Control c in body.Controls.Cast<Control>().ToList()) { body.Controls.Remove(c); c.Dispose(); }
             Y = Pad;
             AddLabel("Log folders", Ui.Title, false, Ui.S(10));
-            AddLabel("Folders whose files your approved devices may read, when \"Let approved devices collect logs\" is on: a " +
-                "program's logs, for example. They see these folders' files and nothing else here (no hidden files, nothing starting " +
-                "with \".\", no shortcuts to other folders), and can't change anything.", Ui.Font, true, Ui.S(14));
-            if (folders.Count == 0) AddLabel("No log folders yet: Add a folder… below.", Ui.Font, false, Ui.S(8));
+            AddLabel("Windows' event logs are always included. Here: the folders whose files your approved devices may read too. " +
+                "They see these folders' files and nothing else here (no hidden files, nothing starting with \".\", no shortcuts " +
+                "to other folders), and can't change anything.", Ui.Font, true, Ui.S(12));
+            var autoCheck = AddCheck("Windows' and programs' own log folders, found by themselves",
+                foundNow.Count == 0 ? "None found on this PC right now" : foundNow.Count + " now: " + string.Join(", ", foundNow.Take(10).Select(f => f.Name)) + (foundNow.Count > 10 ? ", and " + (foundNow.Count - 10) + " more" : ""),
+                auto, 0, Ui.S(14));
+            autoCheck.CheckedChanged += (s, e) => { auto = autoCheck.Checked; };
+            Section("CHOSEN HERE");
+            if (folders.Count == 0) AddLabel("None yet: Add a folder… below (a path like %APPDATA%\\edvrclient can be typed or pasted in its address bar).", Ui.Font, true, Ui.S(8));
             foreach (var f in folders.ToList())
             {
                 Section(f.Name.ToUpperInvariant());
@@ -643,19 +742,19 @@ namespace Beam
 
         void AddFolder()
         {
-            using (var pick = new FolderBrowserDialog())
-            {
-                pick.Description = "A folder with logs your approved devices may read";
-                pick.ShowNewFolderButton = false;
-                if (pick.ShowDialog(this) != DialogResult.OK) return;
-                string why = Add(pick.SelectedPath);
-                if (why != null) MessageBox.Show(this, "That folder can't be a log folder: " + why + ".", "Log folders", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
+            string path = FolderPicker.Pick(this, "A folder with logs your approved devices may read", Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+            if (path == null) return;
+            string why = Add(path);
+            if (why != null) MessageBox.Show(this, "That folder can't be a log folder: " + why + ".", "Log folders", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
+
+        // (tests) the switch, as a click on it would
+        public void SetAuto(bool on) { auto = on; Render(); }
 
         // (also the tests') A folder added, or why not.
         public string Add(string path)
         {
+            path = Environment.ExpandEnvironmentVariables(path ?? "");
             string why = Shares.LogFolderRefusal(path, app.Cfg);
             if (why != null) return why;
             string full = System.IO.Path.GetFullPath(path).TrimEnd('\\');
@@ -671,7 +770,7 @@ namespace Beam
         }
 
         // (tests) What it shows; the window as drawn, into a PNG; Save.
-        public string Describe() { return folders.Count + " folder(s): " + string.Join("; ", folders.Select(f => f.Name + " = " + f.Path)); }
+        public string Describe() { return folders.Count + " folder(s): " + string.Join("; ", folders.Select(f => f.Name + " = " + f.Path)) + "; found by themselves " + (auto ? "on" : "off") + " (" + foundNow.Count + ")"; }
 
         public void Shot(string file)
         {
@@ -684,7 +783,7 @@ namespace Beam
 
         public void SaveForTest()
         {
-            app.SetLogFolders(folders, "the test");
+            app.SetLogFolders(folders, auto, "the test");
             Close();
         }
 

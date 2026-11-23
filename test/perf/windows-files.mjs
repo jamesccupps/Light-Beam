@@ -34,7 +34,8 @@ const failures = [];
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failures.push(what); return ok; };
 const dir = p => path.join(TMP, p);
 // (1.35.2, the audit's finding 12) The folder that must be refused, in AppData by itself (%TEMP% may be elsewhere: G:)
-const OUTSIDE = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), `beam-files-win-outside-${Date.now()}`, 'outside-share');
+const LOCAL = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+const OUTSIDE = path.join(LOCAL, `beam-files-win-outside-${Date.now()}`, 'outside-share');
 for (const d of ['data', 'dist', 'app', 'cfg']) fs.mkdirSync(dir(d), { recursive: true });
 const base = `http://127.0.0.1:${PORT}`;
 const appExe = dir('app/Beam.exe');
@@ -147,6 +148,9 @@ try {
       { id: 'c3c3c3c3', name: 'Outgoing', path: outgoing, devices: [askerId] },
       { id: 'd4d4d4d4', name: 'Temp', path: OUTSIDE, devices: [askerId] },
       { id: 'e5e5e5e5', name: 'Through a link', path: path.join(cfgDir, 'shares', 'ToTemp'), devices: [askerId] },
+      // (1.34) refused: AppData's Local folder itself, and Beam's own data folder in it
+      { id: 'f6f6f6f6', name: 'Local whole', path: LOCAL, devices: [askerId] },
+      { id: 'a7a7a7a7', name: 'Beams data', path: path.join(LOCAL, 'Beam'), devices: [askerId] },
     ] }, null, 2));
   app = spawn(appExe, ['--config', cfgPath, '--background'], { env, windowsHide: true, stdio: 'ignore' });
   app.on('exit', () => { exited = true; });
@@ -157,22 +161,29 @@ try {
   await sleep(3000);
   online = online && await pcOnline();
   check(!!online && online.can?.files2 === true, 'the PC (Beam for Windows 1.20) is online and shares folders (can.files, can.files2)');
-  check(!!(await waitLog(/Shared folders: Temp \(.*outside-share\) isn't shared: Windows' and apps' own folders can't be shared$/, 1000)),
-    'a folder outside its own folder, in %LOCALAPPDATA%, is refused when the config is read');
-  check(!!(await waitLog(/Shared folders: Through a link \(.*ToTemp\) isn't shared: Windows' and apps' own folders can't be shared$/, 1000)),
-    '(1.23) ...and so is a junction to it inside its own folder (where it really is counts)');
+  // (1.34, the user: "adding shared folders doesnt let you pick appdata or folders like that either") a folder inside
+  // AppData is fine now, a junction to it too; AppData's Local folder itself and Beam's own data folder are refused
+  check(!(await waitLog(/Shared folders: (Temp|Through a link) \(/, 1000)), 'a folder in %LOCALAPPDATA% and a junction to it: shared (1.34)');
+  check(!!(await waitLog(/Shared folders: Local whole \(.*\) isn't shared: Windows' and apps' own folders can't be shared as a whole: pick a folder inside one$/, 1000)),
+    '%LOCALAPPDATA% itself: refused');
+  check(!!(await waitLog(/Shared folders: Beams data \(.*\) isn't shared: Beam's own folder \(its sign-in is there\) can't be shared$/, 1000)),
+    'Beam\'s own data folder: refused');
 
   // What each device may see
   const files = (h, body) => call(h, 'POST', `/api/devices/${pcId}/files`, body);
   let r = await files(asker, {});
-  check(r.status === 200 && JSON.stringify(r.json?.shares) === JSON.stringify([{ id: 'a1a1a1a1', name: 'Downloads' }, { id: 'c3c3c3c3', name: 'Outgoing' }]),
+  check(r.status === 200 && JSON.stringify(r.json?.shares) === JSON.stringify([{ id: 'a1a1a1a1', name: 'Downloads' }, { id: 'c3c3c3c3', name: 'Outgoing' }, { id: 'd4d4d4d4', name: 'Temp' }, { id: 'e5e5e5e5', name: 'Through a link' }]),
     `the asker sees the folders shared with it, and only those (${JSON.stringify(r.json)})`);
   r = await files(stranger, {});
   check(r.status === 200 && Array.isArray(r.json?.shares) && r.json.shares.length === 0, `a device ticked nowhere sees none (${JSON.stringify(r.json)})`);
   r = await files(asker, { share: 'b2b2b2b2' });
   check(r.status === 403 && r.json?.reason === 'not-shared', `another device's folder, asked for by its id: refused (${r.status} ${r.json?.reason})`);
   r = await files(asker, { share: 'd4d4d4d4' });
-  check(r.status === 403 && r.json?.reason === 'not-shared', `the refused folder: not there (${r.status} ${r.json?.reason})`);
+  check(r.status === 200 && (r.json?.entries || []).map(e => e.n).join() === 'x.txt', `the folder in %LOCALAPPDATA%: its file (${r.status} ${JSON.stringify(r.json?.entries)})`);
+  r = await files(asker, { share: 'e5e5e5e5' });
+  check(r.status === 200 && (r.json?.entries || []).map(e => e.n).join() === 'x.txt', `...and through the junction to it (${r.status} ${JSON.stringify(r.json?.entries)})`);
+  r = await files(asker, { share: 'f6f6f6f6' });
+  check(r.status === 403 && r.json?.reason === 'not-shared', `a refused folder: not there (${r.status} ${r.json?.reason})`);
 
   // What's in Downloads: never a name starting with ".", hidden or system files, or the junction
   r = await files(asker, { share: 'a1a1a1a1' });
@@ -299,12 +310,12 @@ try {
   check(!!got && got.includes('"sharedFolders":[{"name":"Downloads"') && got.includes('"devices":["Asker Phone"]'), `the page sees the folders and who sees each, by name (${(got || '').match(/"sharedFolders":\[[^\]]*\]/)?.[0]})`);
   forward(['--test-bridge', JSON.stringify({ type: 'setSettings', id: 'test-shares-set', settings: { sharedFolders: [] } })]);
   await waitLog(/Bridge test reply: .*"id":"test-shares-set"/);
-  check(JSON.parse(fs.readFileSync(cfgPath, 'utf8')).sharedFolders?.length === 3, 'the page can\'t change them (setSettings leaves them as they are)');
+  check(JSON.parse(fs.readFileSync(cfgPath, 'utf8')).sharedFolders?.length === 5, 'the page can\'t change them (setSettings leaves them as they are)');
   forward(['--test-bridge', JSON.stringify({ type: 'sharedFolders', id: 'test-shares-open' })]);
   check(!!(await waitLog(/Bridge test reply: .*"id":"test-shares-open"/)), 'the page\'s Shared folders… opens the window (bridge sharedFolders)');
   forward(['--test-shares', 'open']);
   const shown = await waitLog(/Shared folders \(test\): open, /);
-  check(!!shown && /3 folder\(s\): Downloads with 1 device\(s\); Other with 1 device\(s\); Outgoing with 1 device\(s\)$/.test(shown), `...showing each folder and its devices (${shown ? shown.replace(/.*open, /, '') : 'nothing'})`);
+  check(!!shown && /5 folder\(s\): Downloads with 1 device\(s\); Other with 1 device\(s\); Outgoing with 1 device\(s\); Temp with 1 device\(s\); Through a link with 1 device\(s\)$/.test(shown), `...showing each folder and its devices (${shown ? shown.replace(/.*open, /, '') : 'nothing'})`);
   const png = dir('shared-folders-window.png');
   forward(['--test-shares', `shot:${png}`]);
   check(!!(await waitLog(/Shared folders \(test\): shot/)) && fs.existsSync(png) && fs.statSync(png).size > 2000, `...drawn (${png})`);

@@ -620,8 +620,16 @@ async function collect(r) {
   fs.utimesSync(old, new Date(Date.now() - 86400e3), new Date(Date.now() - 86400e3));
   spawnSync('cmd', ['/c', 'mklink', '/J', path.join(logs, 'win'), process.env.SystemRoot || 'C:\\Windows'], { windowsHide: true });
   r.check(fs.existsSync(path.join(logs, 'win', 'win.ini')), 'a junction to Windows in the log folder (made for this test)');
+  // (1.34) where the instance looks for programs' own log folders (instead of this PC's ProgramData, AppData…)
+  const roots = path.join(r.dir, 'roots');
+  const mk = (rel, file = 'run.log', text = 'found kumquat\n') => { fs.mkdirSync(path.join(roots, rel), { recursive: true }); fs.writeFileSync(path.join(roots, rel, file), text); };
+  mk('ProgramData/Acme/App/logs');
+  mk('AppData/Tool/Log');
+  mk('AppData/Packages/Some.App/logs');
+  mk('AppData/Deep/A/B/C/logs');
   await r.setup({ collectAllowed: true, collectFolders: [{ name: 'App logs', path: logs }, { name: 'Whole drive', path: 'C:\\' },
-    { name: 'Own', path: path.join(r.dir, 'cfg') }, { name: 'Roaming', path: process.env.APPDATA }] });
+    { name: 'Own', path: path.join(r.dir, 'cfg') }, { name: 'Roaming', path: process.env.APPDATA }],
+    testLogRoots: [path.join(roots, 'ProgramData'), path.join(roots, 'AppData')] });
   const ask = body => r.api('POST', `/api/devices/${r.appId}/collect`, body);
   r.check(await r.waitFor(async () => ((await r.api('GET', '/api/devices')).data.devices || []).find(d => d.id === r.appId && d.online)?.can?.collect === true, 20000), 'can.collect: on there, and online');
 
@@ -639,7 +647,11 @@ async function collect(r) {
   r.check(x.status === 200 && Array.isArray(x.data.events) && x.data.events.length === 0, 'a source with no events: none');
 
   x = await ask({ what: 'folders' });
-  r.check(JSON.stringify((x.data?.folders || []).map(f => f.name)) === '["App logs"]', `folders: only the one that may be one (${JSON.stringify(x.data)})`);
+  r.check(JSON.stringify((x.data?.folders || []).filter(f => !f.auto).map(f => f.name)) === '["App logs"]', `folders: of the chosen ones, only the one that may be one (${JSON.stringify(x.data)})`);
+  const found = (x.data?.folders || []).filter(f => f.auto).map(f => f.name).sort();
+  r.check(JSON.stringify(found) === JSON.stringify(['Acme App logs', 'Tool log']), `(1.34) found by themselves: a program's logs folder, a log folder; not in apps' packages, not deeper than three (${JSON.stringify(found)})`);
+  x = await ask({ what: 'file', folder: 'acme app logs', path: 'run.log' });
+  r.check(x.data?.text === 'found kumquat\n', `read through a folder found by itself (${x.status} ${x.data?.error || ''})`);
   r.check(r.count(/Log folders: Whole drive .*isn't a log folder: a whole drive/) === 1 && r.count(/Log folders: Own .*isn't a log folder: Beam's own folder/) === 1
     && r.count(/Log folders: Roaming .*isn't a log folder: that's one of Windows'/) === 1, 'the other three left out at the start, and said why');
   x = await ask({ what: 'files', folder: 'app logs' });
@@ -682,6 +694,8 @@ async function collect(r) {
   r.check(r.count(/Collecting: file for Regress Phone/) >= 3 && r.count(/Collecting: events for Regress Phone/) >= 2, 'beam.log says who asked for what kind');
 
   let from = r.logLines().length;
+  r.forward(['--test-log-folders', 'picker-probe']);
+  r.check(!!(await r.waitLog(/Log folders \(test\): picker ok/, from, 15000)), '(1.34) Windows\' own folder picker: made and set up (options, title, start folder), not shown');
   r.forward(['--test-log-folders', 'open']);
   r.check(!!(await r.waitLog(/Log folders \(test\): open, 1 folder\(s\): App logs = /, from, 15000)), 'the Log folders window opens with its one folder');
   r.forward(['--test-log-folders', 'add:C:\\']);
@@ -692,10 +706,14 @@ async function collect(r) {
   r.forward(['--test-log-folders', `shot:${png}`]);
   r.check(!!(await r.waitLog(/Log folders \(test\): shot/, from, 10000)) && fs.existsSync(png) && fs.statSync(png).size > 2000, 'the window drawn: ' + png);
   if (process.env.BEAM_REGRESS_SHOTS && fs.existsSync(png)) fs.copyFileSync(png, path.join(process.env.BEAM_REGRESS_SHOTS, 'log-folders.png'));
+  r.forward(['--test-log-folders', 'auto:off']);
+  r.check(!!(await r.waitLog(/Log folders \(test\): auto:off, .*found by themselves off \(2\)/, from, 10000)), '(1.34) the window: found by themselves (2), switched off');
   r.forward(['--test-log-folders', 'save']);
-  r.check(!!(await r.waitLog(/Log folders \(the test\): App logs \(.*\); files \(/, from, 10000)), 'saved');
+  r.check(!!(await r.waitLog(/Log folders \(the test\): App logs \(.*\); files \(.*\); not Windows' and programs' own/, from, 10000)), 'saved');
   x = await ask({ what: 'folders' });
-  r.check(JSON.stringify((x.data?.folders || []).map(f => f.name)) === '["App logs","files"]', 'both there now');
+  r.check(JSON.stringify((x.data?.folders || []).map(f => f.name)) === '["App logs","files"]', 'both there now, and none found by themselves (off)');
+  x = await ask({ what: 'file', folder: 'Acme App logs', path: 'run.log' });
+  r.check(x.status === 409 && x.data?.reason === 'not-found', 'a found folder, with that off: not there');
   from = r.logLines().length;
   x = await ask({ what: 'file', folder: 'files', path: 'applogs/app.log', tail: 1 });
   r.check(x.data?.text === 'line 30 kumquat-30\n', 'read through the new one');

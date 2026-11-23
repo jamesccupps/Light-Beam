@@ -12,6 +12,23 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.41.2 (2026-11-23): logs found by themselves, folders anywhere in AppData
+
+**Versions:** server 1.41.2 (the web app), the Windows app 1.34.0; the Android app 1.21.2 and Beam for Linux 1.8.0
+unchanged.
+
+- **Log folders found by themselves:** with "Let approved devices collect logs" on, Windows' own log folders (Logs,
+  setup's Panther, crash reports) and every program's folder named "log" or "logs" (up to three folders down in
+  ProgramData, Program Files and AppData; not in apps' packages, temp files, caches or browsers' profiles) can be read
+  too, each named for where it is ("exacqVision Server logs"). Log folders… has the switch (on by default); Windows'
+  event logs were always included.
+- **Picking a folder:** Log folders… and Shared folders… use Windows' own folder picker, with an address bar where a
+  path like `%APPDATA%\edvrclient` can be typed or pasted, and hidden folders such as AppData shown.
+- **Shared folders inside AppData, ProgramData, Program Files or Windows** can be shared now (those folders themselves
+  still can't, nor a whole drive, your whole user folder, or Beam's own folders, where its sign-in is).
+- **The sidebar's header:** with Beam Family's heart and Sites' globe both there, the buttons covered the connection
+  dot; the dot sits on the logo's corner now, and the buttons are a little narrower on wide screens.
+
 ## 1.41.1 (2026-11-23): set it all up in the app
 
 **Versions:** server 1.41.1 (the web app), the Windows app 1.33.0; the Android app 1.21.2 and Beam for Linux 1.8.0

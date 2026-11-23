@@ -147,12 +147,17 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
 
 .side-head { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: calc(12px + env(safe-area-inset-top)) 8px 8px max(16px, env(safe-area-inset-left)); user-select: none; -webkit-user-select: none; }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.125rem; letter-spacing: -.01em; min-width: 0; }
-.brand img { border-radius: 8px; }
+.brand { position: relative; display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.125rem; letter-spacing: -.01em; min-width: 0; }
+.brand img { border-radius: 8px; flex: none; }
+/* (1.41.2) the word gives way first; the connection dot sits on the logo's corner, where nothing can cover it */
+.brand span:not(.status) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); transition: background-color .3s; flex: none; }
+.brand .status { position: absolute; left: 21px; top: calc(50% + 5px); width: 10px; height: 10px; box-shadow: 0 0 0 2px var(--surface); }
 .status.online { background: var(--ok); }
 .status.offline { background: var(--danger); }
-.head-actions { display: flex; gap: 0; }
+.head-actions { display: flex; gap: 0; flex: none; }
+/* (1.41.2) five buttons (Family and Sites shown) and the brand in the 300 px sidebar: narrower buttons on wide screens */
+@media (min-width: 761px) { .head-actions .icon-btn { width: 34px; } }
 
 .side-search { display: flex; align-items: center; gap: 6px; margin: 0 8px 6px; padding: 0 4px 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--muted); }
 .side-search input { flex: 1; min-width: 0; height: 36px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: max(16px, 1rem); }

@@ -832,9 +832,12 @@ function logsCard() {
     after(await hostDo('allowCollect'));
   }, { hint: s.collectAllowed ? 'Your approved devices (and Claude Code on them, through the beam command) can read this PC’s event logs, the log folders below, and which programs and services run. Nothing is run or changed.'
     : 'Your approved devices (and Claude Code on them, through the beam command) could read this PC’s event logs, log folders you choose, and which programs and services run. Read only. Turning it on asks here.' });
+  // (1.41.2, Windows 1.34) what's in by itself, then the folders chosen here
+  const own = s.collectAuto === false ? '' : ', Windows’ and programs’ own log folders (found by themselves)';
+  const chosen = folders.filter(f => !f.auto).map(f => f.name);
   const logs = s.collectAllowed === true && hostHas('logFolders') && inlineRow('Log folders',
     smallBtn('Log folders…', async () => after(await hostDo('logFolders')), { ic: 'folder' }),
-    folders.length ? `${folders.map(f => f.name).join(', ')}: their files can be read` : 'None yet: event logs, programs and services only');
+    `Windows’ event logs${own}${chosen.length ? `, and ${chosen.join(', ')}` : ''} can be read.`);
   const b = s.beamCommand;
   let tool = null;
   let note = null;

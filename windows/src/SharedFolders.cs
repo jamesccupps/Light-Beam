@@ -120,15 +120,36 @@ namespace Beam
             }
             string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\');
             if (profile.Length > 0 && Within(profile, full)) return "your whole user folder can't be shared: pick a folder in it, like Downloads";
+            // (1.34; the user: "adding shared folders doesnt let you pick appdata or folders like that either") Windows' and
+            // apps' own folders themselves never; a folder inside one is fine (it used to be refused too)
             foreach (var sf in new[] { Environment.SpecialFolder.ApplicationData, Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.CommonApplicationData,
                 Environment.SpecialFolder.Windows, Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86 })
             {
                 string p = Environment.GetFolderPath(sf).TrimEnd('\\');
-                if (p.Length > 0 && (Within(full, p) || Within(p, full))) return "Windows' and apps' own folders can't be shared";
+                if (p.Length > 0 && Within(p, full)) return "Windows' and apps' own folders can't be shared as a whole: pick a folder inside one";
             }
+            // (1.34) Beam's own folders never (its sign-in is there), nor a folder holding one (after the roots: AppData
+            // itself holds Beam's, and is refused for what it is)
+            foreach (var b in BeamFolders(cfg)) if (Within(full, b) || Within(b, full)) return "Beam's own folder (its sign-in is there) can't be shared";
             foreach (var part in full.Substring(root.Length).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries))
                 if (part.StartsWith(".")) return "a folder whose name starts with \".\" can't be shared";
             return null;
+        }
+
+        // (1.34) Beam's own folders: its settings (its sign-in is there) and its data (the window's profile), where they really
+        // are too. Never a shared folder or a log folder, nor inside or holding one.
+        static List<string> BeamFolders(Config cfg)
+        {
+            var list = new List<string>();
+            if (cfg != null && !string.IsNullOrEmpty(cfg.Dir)) list.Add(cfg.Dir.TrimEnd('\\'));
+            list.Add(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Beam"));
+            list.Add(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Beam"));
+            foreach (var b in list.ToList())
+            {
+                string real = Directory.Exists(b) ? FinalPath(b) : null;
+                if (real != null && !list.Contains(real, StringComparer.OrdinalIgnoreCase)) list.Add(real);
+            }
+            return list;
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -525,12 +546,10 @@ namespace Beam
 
         void AddFolder()
         {
-            using (var pick = new FolderBrowserDialog())
             {
-                pick.Description = "A folder your other devices may copy files from";
-                pick.ShowNewFolderButton = false;
-                if (pick.ShowDialog(this) != DialogResult.OK) return;
-                string path = pick.SelectedPath;
+                // (1.34) Windows' own picker: an address bar (a path can be typed or pasted), hidden folders like AppData shown
+                string path = FolderPicker.Pick(this, "A folder your other devices may copy files from", null);
+                if (path == null) return;
                 string why = Shares.Refusal(path, app.Cfg);
                 if (why != null) { MessageBox.Show(this, "That folder can't be shared: " + why + ".", "Shared folders", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
                 string full = Path.GetFullPath(path).TrimEnd('\\');
