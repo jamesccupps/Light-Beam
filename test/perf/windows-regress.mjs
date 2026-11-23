@@ -18,6 +18,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -717,6 +718,82 @@ async function collect(r) {
   from = r.logLines().length;
   x = await ask({ what: 'file', folder: 'files', path: 'applogs/app.log', tail: 1 });
   r.check(x.data?.text === 'line 30 kumquat-30\n', 'read through the new one');
+
+  // ---- (1.35, Beam 1.42) the second round
+  r.check(typeof x.data?.tz?.offset === 'number' && x.data.tz.name, `every answer says the PC's time zone (${JSON.stringify(x.data?.tz)})`);
+  // a process to tell apart: flags, a password among them, a word that's its own
+  const probe = spawn(process.execPath, ['--max-old-space-size=64', '-e', 'setTimeout(() => {}, 120000)', '--', '--password=hunter2', 'positional-secret'], { windowsHide: true, stdio: 'ignore' });
+  try {
+    await sleep(800);
+    x = await ask({ what: 'processes', name: 'Beam', sample: 2 });
+    const me = (x.data?.processes || []).find(q => q.path && q.path.toLowerCase() === r.appExe.toLowerCase());
+    r.check(x.data?.sample >= 1.9 && typeof me?.cpuPercent === 'number' && me.parent > 0 && me.threads > 3 && me.workingSet > 0 && me.memory > 0 && me.version === appVersion,
+      `processes --sample: CPU %, parent, threads, working set, private, its version (${JSON.stringify(me && { cpuPercent: me.cpuPercent, parent: me.parent, threads: me.threads, version: me.version, sample: x.data?.sample })})`);
+    x = await ask({ what: 'processes', name: 'node' });
+    const pr = (x.data?.processes || []).find(q => q.pid === probe.pid);
+    const seen = JSON.stringify(pr || {});
+    r.check(!!pr && (pr.flags || []).includes('--max-old-space-size') && (pr.flags || []).includes('--password') && !seen.includes('hunter2') && !seen.includes('positional-secret') && !('commandLine' in pr) && x.data.commandLines === false,
+      `flags without their values, no whole command line (${JSON.stringify(pr?.flags)})`);
+    x = await ask({ what: 'services', name: 'EventLog' });
+    const svc = (x.data?.services || []).find(v => v.name === 'EventLog');
+    r.check(!!svc && /svchost\.exe$/i.test(svc.path || '') && /^\d+\./.test(svc.version || ''), `a service's exe and its version (${JSON.stringify(svc)})`);
+
+    // a file filtered at the PC: --grep, --since, --after (and a file shorter than it), a .gz unpacked
+    const stamp = ms => { const d = new Date(ms), q = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${q(d.getMonth() + 1)}-${q(d.getDate())} ${q(d.getHours())}:${q(d.getMinutes())}:${q(d.getSeconds())}`; };
+    const timed = path.join(logs, 'timed.log');
+    fs.writeFileSync(timed, `${stamp(Date.now() - 5 * 3600e3)} old error kumquat\n${stamp(Date.now() - 10 * 60e3)} recent warning kumquat\n${stamp(Date.now() - 60e3)} recent error kumquat\n    at its stack kumquat\n`);
+    x = await ask({ what: 'file', folder: 'App logs', path: 'timed.log', grep: 'error' });
+    r.check(x.data?.lines === 2 && x.data.matched === 2 && /old error/.test(x.data.text) && /recent error/.test(x.data.text) && !/warning/.test(x.data.text), `--grep (${JSON.stringify(x.data?.text)})`);
+    x = await ask({ what: 'file', folder: 'App logs', path: 'timed.log', since: 30 });
+    r.check(x.data?.lines === 3 && !/old error/.test(x.data.text) && /at its stack/.test(x.data.text), `--since 30 min: the recent lines and the one under them (${JSON.stringify(x.data?.text)})`);
+    x = await ask({ what: 'file', folder: 'App logs', path: 'timed.log', after: 0 });
+    const end = x.data?.end;
+    r.check(end === fs.statSync(timed).size && x.data.lines === 4, `--after 0: all of it, and where to go on from (${end})`);
+    fs.appendFileSync(timed, 'one more line kumquat\n');
+    x = await ask({ what: 'file', folder: 'App logs', path: 'timed.log', after: end });
+    r.check(x.data?.text === 'one more line kumquat\n' && x.data.end === fs.statSync(timed).size, `--after the end: only what came since (${JSON.stringify(x.data?.text)})`);
+    x = await ask({ what: 'file', folder: 'App logs', path: 'timed.log', after: 10_000_000 });
+    r.check(x.data?.rotated === true && x.data.lines === 5, '--after past its end (rotated): from its start again');
+    fs.writeFileSync(path.join(logs, 'old.log.gz'), zlib.gzipSync('gz line one kumquat\ngz error two kumquat\n'));
+    x = await ask({ what: 'file', folder: 'App logs', path: 'old.log.gz', grep: 'error' });
+    r.check(x.data?.gunzipped === true && x.data.text === 'gz error two kumquat\n', `a .gz unpacked at the PC (${JSON.stringify(x.data?.text)})`);
+
+    // a whole file in pieces, with its SHA-256
+    const blob = crypto.randomBytes(3 * MB + 77);
+    fs.writeFileSync(path.join(logs, 'blob.bin'), blob);
+    x = await ask({ what: 'pull', folder: 'App logs', path: 'blob.bin' });
+    const piece1 = Buffer.from(x.data?.data || '', 'base64');
+    const y = await ask({ what: 'pull', folder: 'App logs', path: 'blob.bin', offset: piece1.length });
+    const whole = Buffer.concat([piece1, Buffer.from(y.data?.data || '', 'base64')]);
+    r.check(x.data?.sha256 === sha(blob) && piece1.length === 2 * MB && x.data.size === blob.length && whole.equals(blob) && !('sha256' in (y.data || {})),
+      `pull: 2 MB pieces, the SHA-256 with the first (${piece1.length} + ${whole.length - piece1.length} bytes)`);
+
+    // performance counters, read only (one that isn't there says so)
+    x = await ask({ what: 'counters', paths: ['\\Memory\\Available MBytes', '\\Processor(_Total)\\% Processor Time', '\\No Such Category\\X'], sample: 1 });
+    const cs = x.data?.counters || [];
+    r.check(cs[0]?.values?.[0]?.value > 0 && typeof cs[1]?.values?.[0]?.value === 'number' && /no such counter category/.test(cs[2]?.error || ''),
+      `counters: memory, processor, and one that isn't there (${JSON.stringify(cs).slice(0, 240)})`);
+
+    // at the PC: only *.log and *.gz in App logs; whole command lines on
+    from = r.logLines().length;
+    r.forward(['--test-log-folders', 'open']);
+    await r.waitLog(/Log folders \(test\): open, /, from, 15000);
+    r.forward(['--test-log-folders', 'patterns:App logs=*.log; *.gz; bad/one']);
+    r.check(!!(await r.waitLog(/Log folders \(test\): patterns ok, .*App logs = .* \[\*\.log; \*\.gz\]/, from, 10000)), 'patterns typed at the PC (a bad one dropped)');
+    r.forward(['--test-log-folders', 'cmdlines:on']);
+    r.forward(['--test-log-folders', 'save']);
+    r.check(!!(await r.waitLog(/Log folders \(the test\): App logs \(.*\); .*whole command lines/, from, 10000)), 'saved, with whole command lines');
+    x = await ask({ what: 'files', folder: 'App logs' });
+    const listed = (x.data?.entries || []).map(e => e.name);
+    r.check(listed.includes('timed.log') && listed.includes('old.log.gz') && !listed.includes('blob.bin') && listed.includes('today'), `only the files its patterns allow (folders still shown) (${listed.join(', ')})`);
+    x = await ask({ what: 'pull', folder: 'App logs', path: 'blob.bin' });
+    r.check(x.status === 409 && x.data?.reason === 'not-found', 'a file its patterns don\'t allow: not there');
+    x = await ask({ what: 'processes', name: 'node' });
+    const pr2 = (x.data?.processes || []).find(q => q.pid === probe.pid);
+    r.check(x.data?.commandLines === true && /hunter2/.test(pr2?.commandLine || ''), 'with the switch on at the PC: the whole command line');
+  } finally {
+    try { probe.kill(); } catch {}
+  }
 }
 
 // (1.33, Beam 1.41.1) The beam command set up from the app (the user: "make this all easy to do in the app itself on

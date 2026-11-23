@@ -3637,11 +3637,12 @@ async function postDeviceLog(req, res, _m, url) {
 const COLLECT_APP_MIN = '1.32.0';
 const COLLECT_ANSWER_MS = FAST_TIMEOUTS ? 4000 : 45_000;
 const COLLECT_MAX_BYTES = 4 * MB;
-const COLLECT_KINDS = ['events', 'folders', 'files', 'file', 'processes', 'services', 'system'];
+const COLLECT_KINDS = ['events', 'folders', 'files', 'file', 'processes', 'services', 'system', 'pull', 'counters']; // (1.42: pull, counters)
+const COLLECT_PULL_PIECE = 2 * MB; // (1.42) a pull's piece at most
 const COLLECT_LEVELS = ['critical', 'error', 'warning', 'info', 'all'];
 const COLLECT_REASON = /^[a-z][a-z-]{0,29}$/;
 const collectAsks = new Map(); // request id -> { target, done(answer) }
-const collectLimit = new Limiter(60, 60_000); // per asking device
+const collectLimit = new Limiter(240, 60_000); // per asking device (1.42: 240, a pull comes in pieces)
 
 const collectApp = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, COLLECT_APP_MIN);
 const canCollect = d => collectApp(d) && d.status?.collect === true;
@@ -3675,18 +3676,42 @@ function collectParams(body) {
     const event = int('event', 0, 65_535);
     if (event !== undefined) p.event = event;
     p.max = int('max', 1, 1000) ?? 200;
-  } else if (what === 'files' || what === 'file') {
+  } else if (what === 'files' || what === 'file' || what === 'pull') {
     p.folder = str('folder', 100);
     if (!p.folder) throw httpError(400, 'folder is required (folders lists that PC’s log folders)');
     const rel = str('path', 1000);
     if (rel) p.path = rel;
+    if (what !== 'files' && !p.path) throw httpError(400, 'path is required: the file inside the folder');
     if (what === 'file') {
-      if (!p.path) throw httpError(400, 'path is required: the file inside the folder');
-      p.tail = int('tail', 1, 20_000) ?? 200;
+      // (1.42) filtered at the PC: a regex, a time window, from a byte offset on, a .gz unpacked; `max` the line limit too
+      const grep = str('grep', 300);
+      if (grep) p.grep = grep;
+      const max = int('max', 1, 20_000);
+      p.tail = int('tail', 1, 20_000) ?? max ?? (grep ? 1000 : 200);
+      const since = int('since', 1, 43_200);
+      if (since !== undefined) p.since = since;
+      const after = int('after', 0, Number.MAX_SAFE_INTEGER);
+      if (after !== undefined) p.after = after;
+      if (body.gunzip !== undefined && typeof body.gunzip !== 'boolean') throw httpError(400, 'gunzip must be true or false');
+      if (body.gunzip) p.gunzip = true;
+    } else if (what === 'pull') {
+      p.offset = int('offset', 0, Number.MAX_SAFE_INTEGER) ?? 0;
+      p.length = int('length', 1, COLLECT_PULL_PIECE) ?? COLLECT_PULL_PIECE;
     }
   } else if (what === 'processes' || what === 'services') {
     const name = str('name', 100);
     if (name) p.name = name;
+    if (what === 'processes') {
+      const sample = int('sample', 1, 60); // (1.42) seconds: each process's share of one core over them
+      if (sample !== undefined) p.sample = sample;
+    }
+  } else if (what === 'counters') {
+    // (1.42) performance counters, read only: \Category(instance)\Counter, * in the instance for all of them
+    const paths = body.paths;
+    const ok = s => typeof s === 'string' && s.length <= 200 && /^\\[^\\]+\\[^\\]+$/.test(s) && ![...s].some(c => c.charCodeAt(0) < 32);
+    if (!Array.isArray(paths) || !paths.length || paths.length > 20 || !paths.every(ok)) throw httpError(400, 'paths must be 1 to 20 counter paths like \\Memory\\Available MBytes');
+    p.paths = paths;
+    p.sample = int('sample', 1, 10) ?? 1;
   }
   return { what, params: p };
 }
@@ -3711,7 +3736,7 @@ async function askCollect(req, res, [id], url) {
   const askId = crypto.randomBytes(8).toString('hex');
   const by = { id: me, name: nameOf(me) || deviceNameOf(req, url) || 'A device' };
   const got = await new Promise(resolve => {
-    const timer = setTimeout(() => resolve(null), COLLECT_ANSWER_MS);
+    const timer = setTimeout(() => resolve(null), COLLECT_ANSWER_MS + (params.sample || 0) * 1000); // (1.42: a sample's own seconds too)
     collectAsks.set(askId, { target: target.id, done: a => { clearTimeout(timer); resolve(a); } });
     sendTo(new Set([target.id]), 'collect-request', { id: askId, what, params, by });
   });
@@ -4975,6 +5000,15 @@ function appsOnConnect(c) {
     const s = app.on[d.id]?.state;
     if (s === 'pending' || s === 'asked') writeTo(c, `event: app-install\ndata: ${JSON.stringify({ id: app.id })}\n\n`);
     else if (s === 'removing') writeTo(c, `event: app-uninstall\ndata: ${JSON.stringify({ id: app.id })}\n\n`);
+  }
+}
+
+// (1.42) A device's app that (re)connects while files are on their way to it hears of each, as it would have when it
+// began: a PC whose stream dropped (or that switched to its device token) just as an upload started saves it while it
+// arrives, instead of only once it's whole. (Found by windows-regress: the reconnect came 80 ms after the upload began.)
+function uploadsOnConnect(c) {
+  for (const u of uploads.values()) {
+    if (!u.cancelled && isFor(u, c.deviceId)) writeTo(c, `event: upload\ndata: ${JSON.stringify(uploadEvent(u))}\n\n`);
   }
 }
 
@@ -8327,6 +8361,7 @@ function events(req, res, _m, url) {
     if (kind === 'app') rcOnConnect(client);
     if (kind === 'app') offerUpdateOnConnect(client, req, url);
     if (kind === 'app') appsOnConnect(client); // (1.21) installs or removals asked while it was away
+    if (kind === 'app') uploadsOnConnect(client); // (1.42) files on their way to it that began while it was away
     if (kind === 'app' && devices[deviceId]) renameApp(devices[deviceId], client); // (1.23.2) renamed while it was away
   }
   res.on('close', () => {
@@ -8410,7 +8445,7 @@ const FEATURES = [
   'apps-found', // (1.35.0: app state `found` (on a PC already, not from Beam; `where`), PUT /api/devices/me/apps items' found/where/also)
   'weather', // (1.36.0: GET /api/weather (LocalCast's weather for the Weather row), the setting `weather`)
   'rdp-graphics', // (1.38.0: status `rdpGraphics`, how Remote Desktop's picture is set up on a PC; the 2026-11-21 audit's RD2)
-  'collect', // (1.41.0: POST /api/devices/{id}/collect (events, folders, files, file, processes, services, system: read only), the `collect-request` event, POST /api/devices/me/collect, status `collect`, `can.collect`)
+  'collect', // (1.41.0: POST /api/devices/{id}/collect (events, folders, files, file, processes, services, system: read only), the `collect-request` event, POST /api/devices/me/collect, status `collect`, `can.collect`; 1.42.0: pull, counters, processes' sample, file's grep/since/after/gunzip)
   'sha256', // (1.40.0: file items' sha256 (GET /api/items/{id}; GET /api/file's Repr-Digest); an upload takes the sender's (`sha256` at the start, a PUT's or POST /api/file's ?sha256=) and refuses a damaged one: 422 code checksum, upload-cancelled `damaged`)
   'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];

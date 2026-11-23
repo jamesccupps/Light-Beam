@@ -52,6 +52,7 @@ namespace Beam
         public bool CollectAllowed;            // app 1.32 (Beam 1.41) "Let approved devices collect logs": off until someone at this PC turns it on
         public List<LogFolder> CollectFolders = new List<LogFolder>(); // ...and the folders whose files they may read (chosen here)
         public bool CollectAuto = true;        // app 1.34: also Windows' and programs' own log folders, found by themselves (the switch in Log folders…)
+        public bool CollectCommandLines;       // app 1.35: `processes` gives whole command lines (they can hold passwords): off until chosen here
         public List<string> TestLogRoots = new List<string>(); // (a test instance only) where those are looked for instead of this PC's own folders
         public string TestWinget;              // tests (custom --config only, 1.16): a stand-in for winget (an .exe or .cmd)
         public object[] TestInstalled;         // tests (custom --config only, 1.27): Installed apps' stand-in [{ name, version, location }]
@@ -268,6 +269,7 @@ namespace Beam
                 // (1.32) collecting, read only: a log folder that can't be one (moved, or written in by hand) is left out, and said why
                 c.CollectAllowed = Json.Bool(d, "collectAllowed", false);
                 c.CollectAuto = Json.Bool(d, "collectAuto", true); // (1.34)
+                c.CollectCommandLines = Json.Bool(d, "collectCommandLines", false); // (1.35)
                 c.TestLogRoots = Json.StrList(d, "testLogRoots");
                 var logList = Json.Get(d, "collectFolders") as object[];
                 if (logList != null)
@@ -445,6 +447,7 @@ namespace Beam
                 if (SharedFolders.Count > 0) d["sharedFolders"] = SharedFolders.Select(x => (object)x.ToJson()).ToArray(); else d.Remove("sharedFolders");
                 if (CollectAllowed) d["collectAllowed"] = true; else d.Remove("collectAllowed"); // (1.32)
                 if (!CollectAuto) d["collectAuto"] = false; else d.Remove("collectAuto"); // (1.34)
+                if (CollectCommandLines) d["collectCommandLines"] = true; else d.Remove("collectCommandLines"); // (1.35)
                 if (CollectFolders.Count > 0) d["collectFolders"] = CollectFolders.Select(x => (object)x.ToJson()).ToArray(); else d.Remove("collectFolders");
                 d["autoSave"] = AutoSave;
                 d["maxSaveMB"] = MaxSaveMB;

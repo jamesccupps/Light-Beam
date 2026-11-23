@@ -12,6 +12,29 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.42.0 (2026-11-23): collecting, round two
+
+**Versions:** server 1.42.0, the Windows app 1.35.0, Beam for Linux 1.9.0 (the `beam` command); the Android app 1.21.2
+unchanged. The new kinds and options need the Windows app 1.35 on the PC asked.
+
+- **`processes --sample 30s`:** each process's CPU over that time, as a share of one core (60 s at most), with its
+  parent, threads, private memory and working set, its exe's version and, for Chromium and Electron programs, which
+  kind of process it is (`--type=gpu-process`). Command lines: only their flags, never their values, unless "Whole
+  command lines of running programs" is ticked in Log folders… at that PC (off by default: they can hold passwords).
+- **`pull "<folder>/<path>"`:** a whole file from a log folder, here, in 2 MB pieces, checked against its SHA-256
+  (512 MB at most).
+- **`file` picks lines at the PC:** `--grep <regex>`, `--since 2h` (lines that start with a time, and the ones under
+  them), `--after <byte>` (only what was written since; it says where to go on from, and starts over if the file was
+  rotated), `--max <lines>`, and a `.gz` unpacked.
+- **`counters`:** Windows' performance counters, read twice a few seconds apart: any path like
+  `"\Memory\Available MBytes"`, or `gpu` (GPU memory and engine use per process), `memory`, `cpu`.
+- **`services`** show their exe and its version; **every answer** says the PC's offset from UTC (`--utc` shows the times
+  in UTC); **`beam status`** says the command's own version, apart from the server's.
+- **Log folders… at the PC:** each chosen folder can be limited to some files (`*.log; *.log.1`); the others can't be
+  listed, read or pulled.
+- **Fixed:** a PC (or phone) whose connection to Beam came back just as a big file to it began saved it only once it
+  was whole, not while it arrived: a device that connects now hears of the files already on their way to it.
+
 ## 1.41.2 (2026-11-23): logs found by themselves, folders anywhere in AppData
 
 **Versions:** server 1.41.2 (the web app), the Windows app 1.34.0; the Android app 1.21.2 and Beam for Linux 1.8.0

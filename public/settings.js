@@ -837,7 +837,7 @@ function logsCard() {
   const chosen = folders.filter(f => !f.auto).map(f => f.name);
   const logs = s.collectAllowed === true && hostHas('logFolders') && inlineRow('Log folders',
     smallBtn('Log folders…', async () => after(await hostDo('logFolders')), { ic: 'folder' }),
-    `Windows’ event logs${own}${chosen.length ? `, and ${chosen.join(', ')}` : ''} can be read.`);
+    `Windows’ event logs${own}${chosen.length ? `, and ${chosen.join(', ')}` : ''} can be read.${s.collectCommandLines === true ? ' Whole command lines of running programs too.' : ''}`); // (1.42, Windows 1.35)
   const b = s.beamCommand;
   let tool = null;
   let note = null;

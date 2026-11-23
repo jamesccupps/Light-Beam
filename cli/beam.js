@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -67,12 +67,23 @@ collect logs"; <PC> is a name, the start of one, or an id):
                                                    hour); --level critical|error|warning|info|all
   beam collect <PC> folders                        the log folders chosen at that PC
   beam collect <PC> files "<folder>[/<subfolder>]" what's in one, newest first
-  beam collect <PC> file "<folder>/<path>" [--tail 200]   the last lines of a file (to standard output)
-  beam collect <PC> processes [--name <part>]      what's running (biggest first)
-  beam collect <PC> services [--name <part>]       its Windows services
+  beam collect <PC> file "<folder>/<path>" [--tail 200]   the last lines of a file (to standard output); picked at the
+      [--grep <regex>] [--max <lines>] [--since 2h]       PC: lines matching a regex, from the last 2 hours (lines that
+      [--after <byte>] [--gunzip]                         start with a time), from a byte on (it says where to go on
+                                                   from); a .gz is unpacked
+  beam collect <PC> pull "<folder>/<path>" [folder]   the whole file, here (SHA-256 checked; default: Downloads/Beam)
+  beam collect <PC> processes [--name <part>] [--sample 30s]   what's running: parent, threads, private memory and
+                                                   working set, version, Chromium's --type; --sample: CPU as % of
+                                                   one core over that time (60 s at most)
+  beam collect <PC> services [--name <part>]       its Windows services, with their versions
+  beam collect <PC> counters <path>... | gpu | memory | cpu [--sample 2]   Windows' performance counters, read twice
+                                                   that many seconds apart: paths like "\\Memory\\Available MBytes",
+                                                   or gpu (memory and engine use per process), memory, cpu
   beam collect <PC> system                         Windows, uptime, processor, memory, disks
   beam collect <PC> beam-log [--tail 200]          its own Beam log
       --json                                       the answer as JSON
+      --utc                                        times in UTC (else this computer's own); every answer's first
+                                                   line says the PC's own offset from UTC
 
 Everything else:
   beam devices [--json]                            list your devices (● online)
@@ -349,7 +360,14 @@ async function listDevices(cfg) {
 // Read-only requests a PC's Beam app answers once "Let approved devices collect logs" is on there: for you, and for a
 // Claude Code session on this computer that needs a log from the PC its program runs on. Never code.
 
-const COLLECT_WHAT = ['events', 'folders', 'files', 'file', 'processes', 'services', 'system', 'beam-log'];
+const COLLECT_WHAT = ['events', 'folders', 'files', 'file', 'pull', 'processes', 'services', 'counters', 'system', 'beam-log'];
+
+// (1.9) Counters by a word instead of their paths.
+const COUNTER_SETS = {
+  gpu: ['\\GPU Process Memory(*)\\Dedicated Usage', '\\GPU Process Memory(*)\\Shared Usage', '\\GPU Engine(*)\\Utilization Percentage'],
+  memory: ['\\Memory\\Available MBytes', '\\Memory\\Committed Bytes', '\\Memory\\Commit Limit', '\\Memory\\Pages/sec', '\\Paging File(_Total)\\% Usage'],
+  cpu: ['\\Processor(_Total)\\% Processor Time', '\\System\\Processor Queue Length'],
+};
 
 // A device by its id, its name (any case), or the one name that starts with or holds the word.
 async function deviceNamed(cfg, word) {
@@ -372,6 +390,15 @@ function sinceMinutes(text) {
   return n;
 }
 
+// (1.9) --sample 30s / 30 / 1m: seconds, `max` at most.
+function sampleSeconds(text, max) {
+  const m = /^(\d+)\s*(s|sec|secs|seconds?|m|min|mins|minutes?)?$/i.exec(String(text).trim());
+  if (!m) throw new Error(`--sample takes seconds, like 30s or 1m (not "${text}")`);
+  const n = Number(m[1]) * ((m[2] || 's')[0].toLowerCase() === 'm' ? 60 : 1);
+  if (n < 1 || n > max) throw new Error(`--sample is 1 to ${max} seconds here`);
+  return n;
+}
+
 function wholeNumber(text, flag) {
   if (text === undefined) return undefined;
   const n = Number(text);
@@ -379,11 +406,22 @@ function wholeNumber(text, flag) {
   return n;
 }
 
+let collectUtc = false; // (1.9) --utc
+
 function localTime(ms) {
   if (!ms) return '?';
   const d = new Date(ms);
   const p = n => String(n).padStart(2, '0');
+  if (collectUtc) return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}Z`;
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// (1.9) The PC's own offset from UTC, for an answer's first line: " (UTC-05:00)".
+function zoneOf(got) {
+  const o = got?.tz?.offset;
+  if (typeof o !== 'number') return '';
+  const a = Math.abs(o);
+  return ` (UTC${o < 0 ? '-' : '+'}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}${collectUtc ? '; times below in UTC' : ''})`;
 }
 
 const lastLines = (text, n) => {
@@ -408,6 +446,7 @@ async function collect(cfg, args, opt) {
   const [pcWord, what, ...rest] = args;
   if (!pcWord || !what) throw new Error(`Usage: beam collect <PC> ${COLLECT_WHAT.join('|')} [options]  (beam --help says more)`);
   if (!COLLECT_WHAT.includes(what)) throw new Error(`beam collect takes ${COLLECT_WHAT.join(', ')} (not "${what}")`);
+  collectUtc = Boolean(opt.utc);
   const pc = await deviceNamed(cfg, pcWord);
   const tail = wholeNumber(opt.tail, '--tail');
   if (what === 'beam-log') {
@@ -416,6 +455,7 @@ async function collect(cfg, args, opt) {
     process.stdout.write(lastLines(log.text, tail ?? 200));
     return;
   }
+  if (what === 'pull') return pullFile(cfg, pc, rest, opt);
   const body = { what };
   if (what === 'events') {
     Object.assign(body, { log: opt.log, level: opt.level, source: opt.source, event: wholeNumber(opt.event, '--event'), max: wholeNumber(opt.max, '--max') });
@@ -423,17 +463,74 @@ async function collect(cfg, args, opt) {
   } else if (what === 'files' || what === 'file') {
     const { folder, path: rel } = folderAndPath(rest.join(' '));
     if (!folder) throw new Error(`Which folder?  beam collect "${pc.name}" folders  lists them`);
-    Object.assign(body, { folder, path: rel || undefined, tail: what === 'file' ? tail : undefined });
-  } else if (what === 'processes' || what === 'services') body.name = opt.name;
+    Object.assign(body, { folder, path: rel || undefined });
+    if (what === 'file') {
+      Object.assign(body, { tail, grep: opt.grep, max: wholeNumber(opt.max, '--max'), after: wholeNumber(opt.after, '--after'), gunzip: opt.gunzip || undefined });
+      if (opt.since !== undefined) body.since = sinceMinutes(opt.since);
+    }
+  } else if (what === 'processes' || what === 'services') {
+    body.name = opt.name;
+    if (what === 'processes' && opt.sample !== undefined) body.sample = sampleSeconds(opt.sample, 60);
+  } else if (what === 'counters') {
+    const paths = rest.flatMap(w => COUNTER_SETS[String(w).toLowerCase()] || [w]);
+    if (!paths.length) throw new Error(`Which counters? Paths like "\\Memory\\Available MBytes", or ${Object.keys(COUNTER_SETS).join(', ')}`);
+    body.paths = paths;
+    if (opt.sample !== undefined) body.sample = sampleSeconds(opt.sample, 10);
+  }
   const got = await (await api(cfg, `/api/devices/${encodeURIComponent(pc.id)}/collect`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   })).json();
   if (opt.json) return console.log(JSON.stringify(got, null, 2));
-  printCollected(got);
+  printCollected(got, body);
 }
 
-function printCollected(got) {
-  const name = got.pc?.name || 'The PC';
+// (1.9) A whole file from a log folder, in 2 MB pieces, checked against the SHA-256 the PC gave for it.
+async function pullFile(cfg, pc, rest, opt) {
+  const { folder, path: rel } = folderAndPath(rest[0]);
+  if (!folder || !rel) throw new Error('Usage: beam collect <PC> pull "<folder>/<path>" [local folder]');
+  const dir = path.resolve(rest[1] || DEFAULT_DIR);
+  await fsp.mkdir(dir, { recursive: true });
+  const ask = async offset => (await api(cfg, `/api/devices/${encodeURIComponent(pc.id)}/collect`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ what: 'pull', folder, path: rel, offset }),
+  })).json();
+  let got = await ask(0);
+  if (typeof got.data !== 'string' || typeof got.size !== 'number') throw new Error(`${pc.name}'s Beam can't pull files yet (that needs Beam for Windows 1.35)`);
+  const { size, sha256: want } = got;
+  const dest = await uniquePath(dir, safeName(path.basename(rel)));
+  const part = `${dest}.${process.pid}.beam-part`;
+  const hash = crypto.createHash('sha256');
+  const out = fs.createWriteStream(part);
+  const showProgress = !opt.json && process.stderr.isTTY && size > 4 * 1024 * 1024;
+  try {
+    let offset = 0;
+    for (;;) {
+      const buf = Buffer.from(got.data, 'base64');
+      await new Promise((resolve, reject) => out.write(buf, err => (err ? reject(err) : resolve())));
+      hash.update(buf);
+      offset += buf.length;
+      if (showProgress) process.stderr.write(`\r  ${path.basename(rel)}: ${Math.floor((offset / Math.max(size, 1)) * 100)}%   `);
+      if (offset >= size || !buf.length) break;
+      got = await ask(offset);
+    }
+    await new Promise((resolve, reject) => out.end(err => (err ? reject(err) : resolve())));
+    if (showProgress) process.stderr.write('\r' + ' '.repeat(40) + '\r');
+    if (offset !== size) throw new Error(`${rel} came back short (${offset} of ${size} bytes)`);
+    if (want && hash.digest('hex') !== want) throw new Error(`${rel} changed while it was being pulled (its SHA-256 isn't the one ${pc.name} gave): pull it again`);
+    const final = await uniquePath(dir, path.basename(dest));
+    await fsp.rename(part, final);
+    process.stderr.write(`${pc.name}${zoneOf(got)} · ${folder}/${rel} · ${formatSize(size)}${want ? ', SHA-256 checked' : ''}\n`);
+    console.log(final);
+  } catch (err) {
+    out.destroy();
+    await fsp.rm(part, { force: true });
+    throw err;
+  }
+}
+
+const typeOf = p => (p.flags || []).find(f => f.startsWith('--type='))?.slice(7) || '';
+
+function printCollected(got, asked = {}) {
+  const name = (got.pc?.name || 'The PC') + zoneOf(got);
   const out = s => console.log(s);
   if (got.what === 'events') {
     const list = got.events || [];
@@ -445,23 +542,65 @@ function printCollected(got) {
     }
   } else if (got.what === 'folders') {
     const list = got.folders || [];
-    if (!list.length) out(`${name} has no log folders yet (chosen there: Settings → This PC → Log folders…)`);
-    for (const f of list) out(`${f.name.padEnd(28)} ${f.path}`);
+    if (!list.length) out(`${name} has no log folders yet (chosen there: Settings → Security → Logs and Claude Code → Log folders…)`);
+    for (const f of list) out(`${f.name.padEnd(28)} ${f.path}${f.auto ? '  (found by itself)' : ''}${f.patterns ? `  [only ${f.patterns}]` : ''}`);
   } else if (got.what === 'files') {
     out(`${name} · ${[got.folder, got.path].filter(Boolean).join('/')} · newest first${got.more ? ' (the first ones only)' : ''}`);
     for (const e of got.entries || []) out(`${localTime(e.modified)}  ${(e.dir ? '' : formatSize(e.size)).padStart(9)}  ${e.name}${e.dir ? '/' : ''}`);
   } else if (got.what === 'file') {
-    process.stderr.write(`${name} · ${got.folder}/${got.path} · ${formatSize(got.size)}, changed ${localTime(got.modified)} · ${got.cut ? `its last ${got.lines} lines` : 'all of it'}\n`);
+    const picked = asked.grep || asked.since || asked.after !== undefined || got.gunzipped;
+    const notes = [
+      got.gunzipped && 'unpacked',
+      picked && `${got.matched ?? got.lines} of ${got.read ?? '?'} lines picked`,
+      got.cut ? `its last ${got.lines} lines` : (!picked ? 'all of it' : null),
+      got.rotated && 'it was shorter than --after: read from its start',
+      got.noTimes && 'no line starts with a time: --since left them all out',
+      got.end !== undefined && `next: --after ${got.end}`,
+    ].filter(Boolean);
+    process.stderr.write(`${name} · ${got.folder}/${got.path} · ${formatSize(got.size)}, changed ${localTime(got.modified)} · ${notes.join(' · ')}\n`);
     process.stdout.write(String(got.text ?? ''));
     if (got.text && !got.text.endsWith('\n')) process.stdout.write('\n');
   } else if (got.what === 'processes') {
     const list = got.processes || [];
-    out(`${name} · ${list.length} processes, the most memory first`);
-    for (const p of list) out(`${String(p.name).slice(0, 28).padEnd(28)} ${String(p.pid).padStart(6)} ${formatSize(p.memory || 0).padStart(9)} ${p.cpu != null ? `${p.cpu.toFixed(1)} s`.padStart(10) : ''.padStart(10)}  ${p.started ? localTime(p.started) : ''.padEnd(19)}  ${p.path || ''}${p.title ? `  "${p.title}"` : ''}`);
+    const sampled = typeof got.sample === 'number';
+    out(`${name} · ${list.length} processes, ${sampled ? `CPU over ${got.sample} s as % of one core (${got.threads || '?'} threads: ${(got.threads || 0) * 100}% in all), the busiest first` : 'the most memory first (CPU: seconds since each started)'}`);
+    if (!sampled && asked.sample) out(`  (${got.pc?.name || 'that PC'}'s Beam is older than Windows 1.35: no --sample there)`);
+    out(`${'name'.padEnd(26)} ${'pid'.padStart(6)} ${'parent'.padStart(6)} ${(sampled ? 'cpu %' : 'cpu s').padStart(8)} ${'private'.padStart(9)} ${'working'.padStart(9)} ${'thr'.padStart(4)}  ${'version'.padEnd(16)} ${'type'.padEnd(12)} path`);
+    for (const p of list) {
+      const cpu = sampled ? (p.cpuPercent != null ? `${p.cpuPercent.toFixed(1)}%` : '') : (p.cpu != null ? `${p.cpu.toFixed(1)} s` : '');
+      out(`${String(p.name).slice(0, 26).padEnd(26)} ${String(p.pid).padStart(6)} ${String(p.parent ?? '').padStart(6)} ${cpu.padStart(8)} ${formatSize(p.memory || 0).padStart(9)} ${(p.workingSet ? formatSize(p.workingSet) : '').padStart(9)} ${String(p.threads ?? '').padStart(4)}  ${String(p.version || '').slice(0, 16).padEnd(16)} ${typeOf(p).slice(0, 12).padEnd(12)} ${p.path || ''}${p.title ? `  "${p.title}"` : ''}`);
+      if (p.commandLine) out(`      ${p.commandLine}`);
+    }
   } else if (got.what === 'services') {
     const list = got.services || [];
     out(`${name} · ${list.length} services`);
-    for (const v of list) out(`${String(v.name).slice(0, 36).padEnd(36)} ${String(v.status).padEnd(9)} ${String(v.start || '').padEnd(9)} ${v.display || ''}`);
+    for (const v of list) out(`${String(v.name).slice(0, 36).padEnd(36)} ${String(v.status).padEnd(9)} ${String(v.start || '').padEnd(9)} ${String(v.version || '').slice(0, 16).padEnd(16)} ${v.display || ''}`);
+  } else if (got.what === 'counters') {
+    out(`${name} · counters read ${got.sample || 1} s apart`);
+    for (const c of got.counters || []) {
+      if (c.error) { out(`${c.path}: ${c.error}`); continue; }
+      const values = c.values || [];
+      const bytes = /usage|bytes/i.test(c.path) && !/%/.test(c.path);
+      const show = v => (bytes ? formatSize(v) : `${Math.round(v * 10) / 10}${/percent|%/i.test(c.path) ? '%' : ''}`);
+      if (values.some(v => v.pid)) {
+        // per process: a process's instances (a GPU's engines) added up
+        const per = new Map();
+        for (const v of values) {
+          const k = v.pid ?? v.instance;
+          const e = per.get(k) || { name: v.process || '?', pid: v.pid, value: 0 };
+          e.value += v.value;
+          per.set(k, e);
+        }
+        const top = [...per.values()].filter(e => e.value > 0).sort((a, b) => b.value - a.value).slice(0, 25);
+        out(`${c.path} · per process, the most first${top.length ? '' : ': none above 0'}`);
+        for (const e of top) out(`  ${`${e.name} (${e.pid})`.padEnd(34)} ${show(e.value)}`);
+      } else if (values.length === 1 && !values[0].instance) {
+        out(`${c.path}: ${show(values[0].value)}`);
+      } else {
+        out(`${c.path}`);
+        for (const v of values.slice(0, 50)) out(`  ${String(v.instance).padEnd(34)} ${show(v.value)}`);
+      }
+    }
   } else if (got.what === 'system') {
     const os = got.os || {};
     out(`${name} (${got.computer || '?'}), signed in: ${got.user || '?'}`);
@@ -1268,15 +1407,25 @@ async function approve(cfg, code, opt) {
   return `Approved "${request.name}"`;
 }
 
+// (1.9) a > b, versions like 1.9.0
+function newerVersion(a, b) {
+  const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+}
+
 async function status(cfg, opt = {}) {
   const me = await whoAmI(cfg);
-  const [info, { devices }] = await Promise.all([(await api(cfg, '/api/info')).json(), listDevices(cfg)]);
+  const [info, { devices }, ups] = await Promise.all([(await api(cfg, '/api/info')).json(), listDevices(cfg),
+    api(cfg, '/api/updates').then(r => r.json()).catch(() => ({}))]);
   const self = devices.find(d => d.id === me.you);
+  const latest = ups?.linux?.version || null; // (1.9) the beam command the server offers (Beam for Linux's build)
   if (opt.json) {
     return console.log(JSON.stringify({
       server: cfg.url, version: info.version, api: info.api, device: { id: me.you || cfg.deviceId, name: self?.name || cfg.device },
       signedInWith: me.auth?.via === 'token' ? 'token' : 'master key', devices: { online: devices.filter(d => d.online).length, total: devices.length },
       storage: info.storage || null, retentionDays: info.retentionDays || null, maxItems: info.maxItems || null, address: info.publicUrl || null,
+      command: { version: VERSION, latest },
     }, null, 2));
   }
   const lines = [
@@ -1288,6 +1437,9 @@ async function status(cfg, opt = {}) {
   lines.push(`Keeps items: ${info.retentionDays ? `${info.retentionDays} days` : 'until deleted'}, at most ${info.maxItems || 'unlimited'}`);
   if (info.publicUrl) lines.push(`Address:     ${info.publicUrl}`);
   if (info.tailscaleSignIn !== undefined) lines.push(`Tailscale sign-in: ${info.tailscaleSignIn ? `on (${(info.tailscaleOwners || []).join(', ') || 'no owners yet'})` : 'off'}`);
+  // (1.9) Beam's parts have their own versions: this command's isn't the server's
+  const update = linuxApp(cfg) ? 'it updates itself' : 'Beam for Windows updates it (Settings → Security → Logs and Claude Code), or Set up there again';
+  lines.push(`This command: beam ${VERSION}${latest ? (newerVersion(latest, VERSION) ? `, and ${latest} is newer on the server: ${update}` : ', the newest') : ''} (its version is its own, apart from the server's)`);
   console.log(lines.join('\n'));
 }
 
@@ -2381,6 +2533,12 @@ async function main() {
         event: { type: 'string' },
         max: { type: 'string' },
         tail: { type: 'string' },
+        // (1.9) collect's second round
+        sample: { type: 'string' },
+        grep: { type: 'string' },
+        after: { type: 'string' },
+        gunzip: { type: 'boolean' },
+        utc: { type: 'boolean' },
       },
     });
   } catch (err) {
@@ -2399,7 +2557,7 @@ async function main() {
     // stauts" used to say "No such file: stauts").
     if (/^[a-z][a-z-]*$/i.test(cmd) && !fs.existsSync(cmd)) {
       const near = nearestCommand(cmd);
-      console.error(`beam: "${cmd}" isn't a command, or a file here.${near ? ` Did you mean  beam ${near}?` : ''}\nRun  beam --help  for the list of commands.`);
+      console.error(`beam: "${cmd}" isn't a command, or a file here.${near ? ` Did you mean  beam ${near}?` : ''}\nRun  beam --help  for the list of commands (this is beam ${VERSION}:  beam status  says whether a newer one exists).`);
       process.exitCode = 2;
       return;
     }

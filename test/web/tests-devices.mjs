@@ -772,6 +772,9 @@ export default function register(test) {
     assert(!(await page.evaluate(`__host.log.some(m => m.type === 'setSettings' && m.settings.collectAllowed === true)`)), 'never turned on by the page itself');
     await page.evaluate(`__host.emit({ type: 'settings', settings: { ...hostState.settings, collectAllowed: true, collectFolders: [{ name: 'App logs', path: 'C:\\Shop\\logs' }] } }); true`);
     await page.waitFor(`${sw('Let approved devices collect logs')}?.checked === true && /Log folders…/.test($('#set-security').textContent) && /Windows’ event logs, Windows’ and programs’ own log folders \\(found by themselves\\), and App logs can be read/.test($('#set-security').textContent)`, 3000, 'on, with its folders row');
+    assert(!(await page.evaluate(`/Whole command lines/.test($('#set-security').textContent)`)), 'command lines: not said while off');
+    await page.evaluate(`__host.emit({ type: 'settings', settings: { ...hostState.settings, collectCommandLines: true } }); true`);
+    await page.waitFor(`/can be read\\. Whole command lines of running programs too\\./.test($('#set-security').textContent)`, 3000, '(1.42, Windows 1.35) the row says whole command lines are on');
     await page.evaluate(`[...$('#set-security').querySelectorAll('button')].find(b => /Log folders…/.test(b.textContent)).click(); true`);
     await page.waitFor(`__host.log.some(m => m.type === 'logFolders')`, 3000, 'Log folders… opens the app’s window');
     await page.evaluate(`${sw('Let approved devices collect logs')}.click(); true`);

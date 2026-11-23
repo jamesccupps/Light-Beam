@@ -785,11 +785,13 @@ collect logs" is turned on at that PC (status `collect`, `can.collect`); the log
 ask: a trusted, lasting sign-in, the `beam` command included (`beam collect`); `403` for a session-only one or
 `403 reason "trusted"`. The server passes the request on (`collect-request { id, what, params, by: { id, name } }`, to
 that PC's streams only) and the answer back, and keeps nothing; its log says who collected what kind from which PC.
-60 requests a minute per asking device (`429`).
+240 requests a minute per asking device (`429`; **1.42**: 60 before, a pull comes in pieces). **(1.42, Windows 1.35)**
+Every answer has `tz: { name, offset }` (the PC's time zone; `offset` in minutes east of UTC); `pull`, `counters` and
+the new fields need Windows 1.35 (an older app answers `409 unknown` or leaves them out).
 
 | Method & path | Result |
 |---|---|
-| `POST /api/devices/{id}/collect` | `{ "what", … }` (below) → the PC's answer `{ …, "what", "pc": { "id", "name" }, "at" }` (`Cache-Control: no-store`), within 45 s. `400` for fields that aren't valid; `409 { reason }`: `not-windows`, `old-app`, `off`, `offline`, `no-answer`, or the PC's own (`not-found`, `denied`, `bad`, `failed`, `unknown`) with its words after its name |
+| `POST /api/devices/{id}/collect` | `{ "what", … }` (below) → the PC's answer `{ …, "what", "pc": { "id", "name" }, "at" }` (`Cache-Control: no-store`), within 45 s (plus `sample`'s seconds). `400` for fields that aren't valid; `409 { reason }`: `not-windows`, `old-app`, `off`, `offline`, `no-answer`, or the PC's own (`not-found`, `denied`, `bad`, `failed`, `unknown`) with its words after its name |
 | `POST /api/devices/me/collect` | the PC's answer: `{ "id", "data": { … } }` or `{ "id", "error", "reason" }` (4 MB at most) → `204`; `404` for a request that isn't for this device or timed out |
 
 What can be asked (`what`, and its fields):
@@ -807,10 +809,28 @@ What can be asked (`what`, and its fields):
   link, and never outside the folder.
 - `file`: `folder`, `path`, `tail` (lines, 1–20000, default 200) → `{ folder, path, size, modified, text, lines, cut }`:
   the last lines from the file's last 1 MB at most (UTF-16 when it starts with that mark, else UTF-8); `cut`: there's
-  more before it.
+  more before it. **(1.42, Windows 1.35)** Picked at the PC: `grep` (a .NET regex, ≤300 characters, case matters: `(?i)` for not),
+  `since` (minutes: lines that start with a time in that window, and the lines under them), `after` (a byte offset:
+  only what comes after it; `end` in the answer is where to go on from, `rotated: true` when the file is now shorter and
+  was read from its start), `max` (lines, as `tail`; default 1000 with `grep`), `gunzip` (a `.gz` is unpacked anyway:
+  `gunzipped: true`). With any of them it looks through 512 MB at most (a .gz: 256 MB unpacked), and says `matched`
+  (lines that matched), `read` (lines looked at), `noTimes` (no line said its time).
+- `pull` **(1.42, Windows 1.35)**: `folder`, `path`, `offset` (default 0), `length` (≤ 2 MB, the default) → `{ folder,
+  path, size, modified, offset, data, length, sha256 }`: `data` base64; `sha256` (of the whole file) only with offset
+  0. Files up to 512 MB (`409 too-big`). `beam collect … pull` asks piece by piece and checks the SHA-256.
 - `processes`: `name` (a part of it) → `{ processes: [{ name, pid, memory, cpu, started, path, title, session }] }`, the
-  most memory first (`memory`: private bytes; `cpu`: seconds; no command lines: they can hold passwords).
+  most memory first (`memory`: private bytes; `cpu`: seconds; no command lines: they can hold passwords). **(1.42,
+  Windows 1.35)** `sample` (seconds, 1–60): `cpuPercent` (of one core over that time; the most first) and `sample`,
+  `threads` (the PC's) in the answer; each process also has `parent`, `threads`, `workingSet`, `version` (its exe's) and
+  `flags` (its command line's `--flags`, never their values; `--type`'s kept); `commandLine` (≤ 4000 characters) only
+  when "Whole command lines of running programs" is ticked at that PC (`commandLines: true` in the answer).
 - `services`: `name` (a part of its name or display name) → `{ services: [{ name, display, status, start }] }`.
+  **(1.42, Windows 1.35)** with `path` (its exe) and `version`.
+- `counters` **(1.42, Windows 1.35)**: `paths` (1–20, like `\Memory\Available MBytes` or `\GPU Engine(*)\Utilization
+  Percentage`; `*` or an instance in brackets), `sample` (seconds, 1–10, default 1) → `{ sample, counters: [{ path,
+  values: [{ instance, value, pid?, process? }] } | { path, error }] }`: read twice `sample` seconds apart (rates as
+  Windows calculates them); instances as Windows gives them (lower case); `pid`/`process` for `pid_N_…` instances (GPU
+  counters); 3000 values at most.
 - `system` → `{ computer, user, os: { name, version, build }, bootedAt, cpu: { name, threads }, memory: { total, free },
   disks: [{ name, label, format, total, free }], timeZone, beam }`.
 

@@ -2675,6 +2675,7 @@ namespace Beam
             s["collectAllowed"] = ServerHas("collect") ? (object)Cfg.CollectAllowed : null;
             s["collectFolders"] = ServerHas("collect") ? (object)Cfg.CollectFolders.Select(f => (object)f.ToJson()).ToArray() : null;
             s["collectAuto"] = ServerHas("collect") ? (object)Cfg.CollectAuto : null; // (1.34) Windows' and programs' own log folders too
+            s["collectCommandLines"] = ServerHas("collect") ? (object)Cfg.CollectCommandLines : null; // (1.35) whole command lines in `processes`
             // (1.33) the beam command on this PC for Claude Code (set up, removed and its note in Settings here: bridge beamCommand)
             s["beamCommand"] = ServerHas("collect") && BeamCmd != null ? BeamCmd.StatusObject() : null;
             // (1.18, Beam 1.26; null: the server has none) The folders shared from here and who sees each: read-only (the
@@ -2904,14 +2905,16 @@ namespace Beam
             if (!Ui.TestOffscreen) { logFoldersForm.Activate(); Native.SetForegroundWindow(logFoldersForm.Handle); }
         }
 
-        public void SetLogFolders(List<LogFolder> list, bool auto, string from)
+        public void SetLogFolders(List<LogFolder> list, bool auto, bool commandLines, string from)
         {
             if (RcBlocks("changing log folders")) return;
             Cfg.CollectFolders = list.Where(f => !f.Auto && Shares.LogFolderRefusal(f.Path, Cfg) == null).ToList();
             Cfg.CollectAuto = auto;
+            Cfg.CollectCommandLines = commandLines; // (1.35)
             Cfg.Save();
             Log.Write("Log folders (" + from + "): " + (Cfg.CollectFolders.Count == 0 ? "none chosen" : string.Join("; ", Cfg.CollectFolders.Select(f => f.Name + " (" + f.Path + ")")))
-                + (auto ? "; Windows' and programs' own too" : "; not Windows' and programs' own"));
+                + (auto ? "; Windows' and programs' own too" : "; not Windows' and programs' own")
+                + (commandLines ? "; whole command lines" : ""));
             if (SettingsChanged != null) SettingsChanged();
             MarkChanged();
         }
@@ -2924,6 +2927,8 @@ namespace Beam
             if (logFoldersForm == null || logFoldersForm.IsDisposed) { Log.Write("Log folders (test): no window"); return; }
             if (cmd.StartsWith("add:")) { string why = logFoldersForm.Add(cmd.Substring(4)); Log.Write("Log folders (test): add " + (why ?? "ok") + ", " + logFoldersForm.Describe()); }
             else if (cmd == "auto:on" || cmd == "auto:off") { logFoldersForm.SetAuto(cmd == "auto:on"); Log.Write("Log folders (test): " + cmd + ", " + logFoldersForm.Describe()); }
+            else if (cmd == "cmdlines:on" || cmd == "cmdlines:off") { logFoldersForm.SetCommandLines(cmd == "cmdlines:on"); Log.Write("Log folders (test): " + cmd + ", " + logFoldersForm.Describe()); }
+            else if (cmd.StartsWith("patterns:")) { int eq = cmd.IndexOf('='); string why = eq > 9 ? logFoldersForm.SetPatterns(cmd.Substring(9, eq - 9), cmd.Substring(eq + 1)) : "patterns:<folder>=<patterns>"; Log.Write("Log folders (test): patterns " + (why ?? "ok") + ", " + logFoldersForm.Describe()); }
             else if (cmd.StartsWith("shot:")) { logFoldersForm.Shot(cmd.Substring(5)); Log.Write("Log folders (test): shot"); }
             else if (cmd == "save") logFoldersForm.SaveForTest();
             else if (cmd == "close") logFoldersForm.Close();

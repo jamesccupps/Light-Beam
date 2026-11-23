@@ -30,6 +30,27 @@ namespace Beam
     {
         public string Name, Path;
         public bool Auto; // (1.34) found by itself (Windows' own, or a program's folder named log/logs), not chosen here
+        public string Patterns; // (1.35) only these files ("*.log; *.log.1"; * and ? on the name), chosen here; empty: all
+
+        // (1.35) The patterns as the user typed them, tidied: names, * and ?, separated by ";" (anything else dropped).
+        public static string Tidy(string patterns)
+        {
+            var list = (patterns ?? "").Split(new[] { ';', ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(x => Regex.IsMatch(x, @"^[\w.*?\-\[\]()]{1,60}$")).Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToList();
+            return list.Count == 0 ? null : string.Join("; ", list);
+        }
+
+        // Whether a file (by its name) may be read here.
+        public bool Allows(string name)
+        {
+            if (string.IsNullOrEmpty(Patterns)) return true;
+            foreach (var x in Patterns.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string re = "^" + Regex.Escape(x.Trim()).Replace(@"\*", ".*").Replace(@"\?", ".") + "$";
+                if (Regex.IsMatch(name ?? "", re, RegexOptions.IgnoreCase)) return true;
+            }
+            return false;
+        }
 
         public static LogFolder Parse(Dictionary<string, object> d)
         {
@@ -39,6 +60,7 @@ namespace Beam
             f.Name = Json.Str(d, "name");
             if (string.IsNullOrWhiteSpace(f.Path)) return null;
             if (string.IsNullOrWhiteSpace(f.Name)) f.Name = Shares.DefaultName(f.Path);
+            f.Patterns = Tidy(Json.Str(d, "patterns")); // (1.35)
             return f;
         }
 
@@ -48,13 +70,14 @@ namespace Beam
             d["name"] = Name;
             d["path"] = Path;
             if (Auto) d["auto"] = true;
+            if (!string.IsNullOrEmpty(Patterns)) d["patterns"] = Patterns; // (1.35)
             return d;
         }
 
         public LogFolder Copy()
         {
             var f = new LogFolder();
-            f.Name = Name; f.Path = Path;
+            f.Name = Name; f.Path = Path; f.Patterns = Patterns;
             return f;
         }
     }
@@ -66,7 +89,7 @@ namespace Beam
         public CollectRefusal(string message, string reason) : base(message) { Reason = reason; }
     }
 
-    class LogCollector
+    partial class LogCollector // (1.35: the second round in CollectMore.cs)
     {
         readonly App app;
         public const string OnlyHere = "Collecting is turned on only at this PC: Beam's Settings on this PC (Let approved devices collect logs)";
@@ -126,7 +149,9 @@ namespace Beam
                 try
                 {
                     var clock = Stopwatch.StartNew();
-                    body["data"] = await Task.Run(() => Gather(what, p));
+                    var data = await Task.Run(() => Gather(what, p));
+                    data["tz"] = TimeZoneObject(); // (1.35) every answer: its times line up with UTC ones
+                    body["data"] = data;
                     Log.Write("Collecting: " + what + " for " + byName + " (" + clock.ElapsedMilliseconds + " ms)");
                 }
                 catch (CollectRefusal ex)
@@ -155,8 +180,16 @@ namespace Beam
                 case "events": return Events(p);
                 case "folders": return Folders();
                 case "files": return Shares.LogFiles(app, Json.Str(p, "folder"), Json.Str(p, "path"));
-                case "file": return Shares.LogTail(app, Json.Str(p, "folder"), Json.Str(p, "path"), (int)Clamp(Json.Long(p, "tail", 200), 1, 20000));
-                case "processes": return Processes(Json.Str(p, "name"));
+                case "file": // (1.35: --grep, --since, --after, .gz; `max` is its line limit too)
+                {
+                    string grep = Json.Str(p, "grep");
+                    long limit = Json.Long(p, "tail", Json.Long(p, "max", grep != null ? 1000 : 200));
+                    return Shares.LogRead(app, Json.Str(p, "folder"), Json.Str(p, "path"), (int)Clamp(limit, 1, 20000), string.IsNullOrEmpty(grep) ? null : grep,
+                        (int)Clamp(Json.Long(p, "since", 0), 0, 43200), Json.Long(p, "after", -1), Json.Bool(p, "gunzip", false));
+                }
+                case "pull": return Shares.LogPull(app, Json.Str(p, "folder"), Json.Str(p, "path"), Math.Max(0, Json.Long(p, "offset", 0)), (int)Clamp(Json.Long(p, "length", 2 << 20), 1, 2 << 20)); // (1.35)
+                case "counters": return Counters(Json.StrList(p, "paths").Take(20).ToList(), (int)Clamp(Json.Long(p, "sample", 1), 1, 10)); // (1.35)
+                case "processes": return ProcessList(Json.Str(p, "name"), (int)Clamp(Json.Long(p, "sample", 0), 0, 60)); // (1.35: sampled, told apart)
                 case "services": return Services(Json.Str(p, "name"));
                 case "system": return SystemInfo();
             }
@@ -280,41 +313,6 @@ namespace Beam
             finally { CloseHandle(h); }
         }
 
-        // What runs, the most memory first. No command lines: they can hold passwords.
-        static Dictionary<string, object> Processes(string filter)
-        {
-            var list = new List<Dictionary<string, object>>();
-            foreach (var p in Process.GetProcesses())
-            {
-                using (p)
-                {
-                    try
-                    {
-                        string name = p.ProcessName;
-                        if (!string.IsNullOrEmpty(filter) && name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                        var d = new Dictionary<string, object>();
-                        d["name"] = name;
-                        d["pid"] = p.Id;
-                        long mem = 0;
-                        try { mem = p.PrivateMemorySize64; } catch { }
-                        d["memory"] = mem;
-                        try { d["cpu"] = Math.Round(p.TotalProcessorTime.TotalSeconds, 1); } catch { d["cpu"] = null; }
-                        try { d["started"] = Ms(p.StartTime); } catch { d["started"] = null; }
-                        d["path"] = ImagePath(p.Id);
-                        string title = null;
-                        try { title = p.MainWindowTitle; } catch { }
-                        if (!string.IsNullOrEmpty(title)) d["title"] = title.Length > 200 ? title.Substring(0, 200) : title;
-                        try { d["session"] = p.SessionId; } catch { }
-                        list.Add(d);
-                    }
-                    catch { } // (it ended meanwhile)
-                }
-            }
-            var o = new Dictionary<string, object>();
-            o["processes"] = list.OrderByDescending(x => (long)x["memory"]).Cast<object>().ToArray();
-            return o;
-        }
-
         static string StatusName(ServiceControllerStatus s)
         {
             switch (s)
@@ -346,6 +344,8 @@ namespace Beam
                         d["display"] = s.DisplayName;
                         d["status"] = StatusName(s.Status);
                         try { d["start"] = s.StartType.ToString().ToLowerInvariant(); } catch { d["start"] = null; }
+                        string exe = ServiceExe(s.ServiceName); // (1.35)
+                        if (exe != null) { d["path"] = exe; string v = VersionOf(exe); if (v != null) d["version"] = v; }
                         list.Add(d);
                     }
                     catch { }
@@ -586,7 +586,7 @@ namespace Beam
             string norm;
             string dir = Resolve(sf, rel, out norm);
             if (dir == null) throw new CollectRefusal("there's no folder " + rel + " in " + f.Name, "not-found");
-            var all = Read(dir).Where(Shown).OrderByDescending(e => e.Mtime).ToList();
+            var all = Read(dir).Where(Shown).Where(e => e.Dir || f.Allows(e.Name)).OrderByDescending(e => e.Mtime).ToList(); // (1.35: its patterns)
             var d = new Dictionary<string, object>();
             d["folder"] = f.Name;
             d["path"] = norm;
@@ -609,7 +609,7 @@ namespace Beam
             var f = LogFolderNamed(app, folder);
             Entry e;
             string full = Inside(System.IO.Path.GetFullPath(f.Path).TrimEnd('\\'), rel, out e);
-            if (full == null || e == null || e.Dir) throw new CollectRefusal("there's no file " + (rel ?? "?") + " in " + f.Name, "not-found");
+            if (full == null || e == null || e.Dir || !f.Allows(e.Name)) throw new CollectRefusal("there's no file " + (rel ?? "?") + " in " + f.Name, "not-found");
             byte[] head = new byte[3], bytes;
             long size, start;
             int headN = 0;
@@ -668,14 +668,16 @@ namespace Beam
         readonly App app;
         readonly List<LogFolder> folders;
         readonly Panel body, footer;
-        bool auto;
+        bool auto, commandLines;
         List<LogFolder> foundNow = new List<LogFolder>();
+        readonly Dictionary<LogFolder, TextField> patternFields = new Dictionary<LogFolder, TextField>();
 
         public LogFoldersForm(App app) : base("Log folders", 560)
         {
             this.app = app;
             folders = app.Cfg.CollectFolders.Select(f => f.Copy()).ToList();
             auto = app.Cfg.CollectAuto;
+            commandLines = app.Cfg.CollectCommandLines;
             try { foundNow = Shares.FoundLogFolders(app.Cfg); } catch { }
             body = new Panel();
             body.BackColor = Theme.Bg;
@@ -691,7 +693,7 @@ namespace Beam
             var cancel = new FlatButton("Cancel", null);
             var add = new FlatButton("Add a folder…", null);
             foreach (var b in new[] { save, cancel, add }) { b.BackColor = Theme.Bg; b.Size = new Size(Math.Max(Ui.S(96), b.Preferred().Width), Ui.S(36)); footer.Controls.Add(b); }
-            save.Click += (s, e) => { app.SetLogFolders(folders, auto, "Settings on this PC"); Close(); };
+            save.Click += (s, e) => { TakePatterns(); app.SetLogFolders(folders, auto, commandLines, "Settings on this PC"); Close(); };
             cancel.Click += (s, e) => Close();
             add.Click += (s, e) => AddFolder();
             int footerH = Ui.S(36) + Pad;
@@ -715,19 +717,28 @@ namespace Beam
                 foundNow.Count == 0 ? "None found on this PC right now" : foundNow.Count + " now: " + string.Join(", ", foundNow.Take(10).Select(f => f.Name)) + (foundNow.Count > 10 ? ", and " + (foundNow.Count - 10) + " more" : ""),
                 auto, 0, Ui.S(14));
             autoCheck.CheckedChanged += (s, e) => { auto = autoCheck.Checked; };
+            var cmdCheck = AddCheck("Whole command lines of running programs",
+                "They can hold passwords. Without this, a program's flags are shown with their values left out.", commandLines, 0, Ui.S(14));
+            cmdCheck.CheckedChanged += (s, e) => { commandLines = cmdCheck.Checked; };
+            TakePatterns();
+            patternFields.Clear();
             Section("CHOSEN HERE");
             if (folders.Count == 0) AddLabel("None yet: Add a folder… below (a path like %APPDATA%\\edvrclient can be typed or pasted in its address bar).", Ui.Font, true, Ui.S(8));
             foreach (var f in folders.ToList())
             {
                 Section(f.Name.ToUpperInvariant());
                 AddLabel(f.Path, Ui.Small, true, Ui.S(6));
+                AddLabel("Only these files (blank: all of them), like *.log; *.log.1", Ui.Small, true, Ui.S(4));
+                var field = AddField(f.Patterns ?? "", 0, Ui.S(4));
+                field.Label = "Only these files in " + f.Name;
+                patternFields[f] = field;
                 var remove = new FlatButton("Remove " + f.Name, null);
                 remove.DangerStyle = true;
                 remove.BackColor = Theme.Bg;
                 remove.Size = new Size(Math.Max(Ui.S(96), remove.Preferred().Width), Ui.S(32));
                 remove.SetBounds(X0, Y + Ui.S(4), remove.Width, remove.Height);
                 var gone = f;
-                remove.Click += (s, e) => { folders.Remove(gone); Render(); };
+                remove.Click += (s, e) => { TakePatterns(); folders.Remove(gone); Render(); };
                 body.Controls.Add(remove);
                 Y += remove.Height + Ui.S(12);
             }
@@ -751,6 +762,27 @@ namespace Beam
         // (tests) the switch, as a click on it would
         public void SetAuto(bool on) { auto = on; Render(); }
 
+        // (1.35) What's typed in each folder's field, into the folders (before drawing again, and on Save).
+        void TakePatterns()
+        {
+            foreach (var kv in patternFields) if (!kv.Value.IsDisposed) kv.Key.Patterns = LogFolder.Tidy(kv.Value.Text);
+        }
+
+        // (tests) the whole command lines switch; a chosen folder's patterns, as typed
+        public void SetCommandLines(bool on) { commandLines = on; Render(); }
+
+        public string SetPatterns(string folder, string patterns)
+        {
+            var f = folders.FirstOrDefault(x => string.Equals(x.Name, folder, StringComparison.OrdinalIgnoreCase));
+            if (f == null) return "no chosen folder named " + folder;
+            TakePatterns();
+            f.Patterns = LogFolder.Tidy(patterns);
+            TextField field; // typed into its field, as a person would (Render reads the fields back)
+            if (patternFields.TryGetValue(f, out field) && !field.IsDisposed) field.Text = f.Patterns ?? "";
+            Render();
+            return null;
+        }
+
         // (also the tests') A folder added, or why not.
         public string Add(string path)
         {
@@ -770,7 +802,7 @@ namespace Beam
         }
 
         // (tests) What it shows; the window as drawn, into a PNG; Save.
-        public string Describe() { return folders.Count + " folder(s): " + string.Join("; ", folders.Select(f => f.Name + " = " + f.Path)) + "; found by themselves " + (auto ? "on" : "off") + " (" + foundNow.Count + ")"; }
+        public string Describe() { return folders.Count + " folder(s): " + string.Join("; ", folders.Select(f => f.Name + " = " + f.Path + (string.IsNullOrEmpty(f.Patterns) ? "" : " [" + f.Patterns + "]"))) + "; found by themselves " + (auto ? "on" : "off") + " (" + foundNow.Count + "); command lines " + (commandLines ? "on" : "off"); }
 
         public void Shot(string file)
         {
@@ -783,7 +815,8 @@ namespace Beam
 
         public void SaveForTest()
         {
-            app.SetLogFolders(folders, auto, "the test");
+            TakePatterns();
+            app.SetLogFolders(folders, auto, commandLines, "the test");
             Close();
         }
 

@@ -55,6 +55,23 @@ beam collect shop system --json                      # any of them as JSON
 
 The PC is a name, the start of one, or an id (`beam devices`).
 
+**(1.9, needs Beam for Windows 1.35 on that PC)**
+
+```bash
+beam collect shop processes --name ProtectPanes --sample 30s   # CPU as % of one core over 30 s, parent, threads,
+                                                               # private/working set, version, Chromium's --type
+beam collect shop file "App logs/app.log" --grep "error|timeout" --since 2h   # lines picked at the PC
+beam collect shop file "App logs/app.log" --after 48213        # only what was written since (it says the next --after)
+beam collect shop file "App logs/old.log.gz" --tail 100        # a .gz is unpacked there
+beam collect shop pull "App logs/trace.etl" ./here             # the whole file, SHA-256 checked (512 MB at most)
+beam collect shop counters gpu                                 # GPU memory and engine use per process
+beam collect shop counters "\Memory\Available MBytes" --sample 2
+beam collect shop events --utc                                 # times in UTC (every answer says the PC's offset)
+```
+
+Command lines show only their flags (never their values) unless "Whole command lines of running programs" is ticked in
+Log folders… at that PC. A chosen log folder can be limited to some files there (`*.log; *.log.1`).
+
 **(1.41.1) Without typing any of the setup:** on a Windows PC, Beam's Settings → Security → "Logs and Claude Code" →
 **The beam command: Set up…** installs it (from your Beam, checked), signs it in as its own approved device, puts it on
 your PATH and, if you like, tells Claude Code on that PC how to use it (a short note in Claude Code's CLAUDE.md). It

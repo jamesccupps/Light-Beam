@@ -8668,7 +8668,184 @@ test('1.41 CLI (Beam for Linux 1.8): beam collect <PC> events|files|file|process
     r = await cli(['collect', 'shop pc', 'events', '--since', 'yesterday'], { home, env });
     assert.match(r.out, /--since takes minutes, or a time like 30m, 2h or 3d/);
     r = await cli(['collect', 'shop pc', 'shell'], { home, env });
-    assert.match(r.out, /beam collect takes events, folders, files, file, processes, services, system, beam-log/);
+    assert.match(r.out, /beam collect takes events, folders, files, file, pull, processes, services, counters, system, beam-log/);
+    pc.close();
+  } finally {
+    stop = true;
+    await s.stop();
+  }
+});
+
+test('1.42 collect’s second round: processes’ sample, file’s grep/max/since/after/gunzip, pull’s offset and length, counters’ paths and sample: checked and passed on; a sample’s seconds added to the wait', async () => {
+  const s = await startServer('collect142', 8799);
+  let stop = false;
+  let answering = null;
+  try {
+    const K = s.key;
+    const pcH = app(K, 'col2pc00142', 'Shop PC', 'windows', { 'X-Beam-App-Version': '1.35.0', ...from('100.64.42.2') });
+    const asker = app(K, 'col2ask0142', 'Robin Phone', 'android', from('100.64.42.1'));
+    for (const h of [pcH, asker]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    assert.equal((await s.req('PUT', '/api/devices/me/status', { headers: json(pcH), body: '{"collect":true}' })).status, 204);
+    const pc = await openEvents(s.port, pcH);
+    await waitFor(async () => (await s.req('GET', '/api/devices', { headers: asker })).json.devices.find(d => d.id === 'col2pc00142')?.online, 5000);
+    const seen = [];
+    let delay = 0;
+    answering = (async () => {
+      const done = new Set();
+      while (!stop) {
+        const e = pc.events.find(x => x.event === 'collect-request' && !done.has(x.data.id));
+        if (!e) { await sleep(25); continue; }
+        done.add(e.data.id);
+        seen.push(e.data);
+        if (delay) await sleep(delay);
+        await s.req('POST', '/api/devices/me/collect', { headers: json(pcH), body: JSON.stringify({ id: e.data.id, data: { ok: true, tz: { name: 'Eastern Standard Time', offset: -300 } } }) });
+      }
+    })().catch(() => {});
+    const ask = body => s.req('POST', '/api/devices/col2pc00142/collect', { headers: json(asker), body: JSON.stringify(body) });
+    let r = await ask({ what: 'processes', name: 'node', sample: 3 });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(seen.at(-1).params, { name: 'node', sample: 3 });
+    assert.deepEqual(r.json.tz, { name: 'Eastern Standard Time', offset: -300 }, 'the PC’s time zone passed on');
+    r = await ask({ what: 'file', folder: 'App logs', path: 'a.log', grep: 'error|warn', max: 50, since: 120, after: 1024, gunzip: true });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(seen.at(-1).params, { folder: 'App logs', path: 'a.log', grep: 'error|warn', tail: 50, since: 120, after: 1024, gunzip: true });
+    r = await ask({ what: 'file', folder: 'App logs', path: 'a.log', grep: 'x' });
+    assert.equal(seen.at(-1).params.tail, 1000, 'a grep keeps up to 1000 lines unless told');
+    r = await ask({ what: 'pull', folder: 'App logs', path: 'big.csv' });
+    assert.deepEqual(seen.at(-1).params, { folder: 'App logs', path: 'big.csv', offset: 0, length: 2 * 1024 * 1024 });
+    r = await ask({ what: 'pull', folder: 'App logs', path: 'big.csv', offset: 2097152, length: 1000 });
+    assert.deepEqual(seen.at(-1).params, { folder: 'App logs', path: 'big.csv', offset: 2097152, length: 1000 });
+    r = await ask({ what: 'counters', paths: ['\\Memory\\Available MBytes', '\\GPU Engine(*)\\Utilization Percentage'], sample: 2 });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(seen.at(-1).params, { paths: ['\\Memory\\Available MBytes', '\\GPU Engine(*)\\Utilization Percentage'], sample: 2 });
+    for (const bad of [{ what: 'processes', sample: 0 }, { what: 'processes', sample: 61 }, { what: 'file', folder: 'A', path: 'a', grep: 'x'.repeat(301) },
+      { what: 'file', folder: 'A', path: 'a', since: 0 }, { what: 'file', folder: 'A', path: 'a', after: -1 }, { what: 'file', folder: 'A', path: 'a', gunzip: 'yes' },
+      { what: 'pull', folder: 'A' }, { what: 'pull', folder: 'A', path: 'a', length: 3 * 1024 * 1024 }, { what: 'counters' }, { what: 'counters', paths: [] },
+      { what: 'counters', paths: ['Memory\\Available MBytes'] }, { what: 'counters', paths: Array(21).fill('\\Memory\\Available MBytes') }, { what: 'counters', paths: ['\\Memory\\A'], sample: 11 }]) {
+      assert.equal((r = await ask(bad)).status, 400, JSON.stringify(bad).slice(0, 120) + ' ' + r.body);
+    }
+    // A sample's seconds are waited for on top of the usual (4 s in tests): a 3 s sample answered after 5 s is fine
+    delay = 5000;
+    const t0 = Date.now();
+    r = await ask({ what: 'processes', sample: 3 });
+    assert.equal(r.status, 200, `a sampled request waits longer (${r.status} after ${Date.now() - t0} ms)`);
+    r = await ask({ what: 'processes' });
+    assert.deepEqual([r.status, r.json.reason], [409, 'no-answer'], 'without a sample, the usual wait');
+    delay = 0;
+    pc.close();
+  } finally {
+    stop = true;
+    await answering; // its late answer (the one not waited for) reaches a server still running
+    await s.stop();
+  }
+});
+
+test('1.42 an app that connects while a file is on its way to it hears of it (a PC that reconnected just as it began saves it while it arrives); not a file for another device, nor one cancelled', async () => {
+  const s = await startServer('uploadsconnect142', 8797);
+  try {
+    const K = s.key;
+    const phone = app(K, 'upc142phone', 'Robin Phone', 'android', from('100.64.42.21'));
+    const pcH = app(K, 'upc142pc001', 'Shop PC', 'windows', from('100.64.42.22'));
+    const otherH = app(K, 'upc142pc002', 'Den PC', 'windows', from('100.64.42.23'));
+    for (const h of [phone, pcH, otherH]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    const mine = await post(s, '/api/uploads', { name: 'big.bin', size: 50_000_000, to: ['upc142pc001'] }, phone);
+    const theirs = await post(s, '/api/uploads', { name: 'den.bin', size: 50_000_000, to: ['upc142pc002'] }, phone);
+    const gone = await post(s, '/api/uploads', { name: 'gone.bin', size: 50_000_000, to: ['upc142pc001'] }, phone);
+    assert.equal((await s.req('DELETE', `/api/uploads/${gone.json.id}`, { headers: phone })).status, 204);
+    const part = await s.req('PUT', `/api/uploads/${mine.json.id}?offset=0`, { headers: { ...phone, 'Content-Type': 'application/octet-stream' }, body: Buffer.alloc(1000, 7) });
+    assert.ok(part.status < 300, `the first 1000 bytes (${part.status} ${part.body})`);
+    const pc = await openEvents(s.port, pcH);
+    const got = await pc.wait('upload', d => d.id === mine.json.id);
+    assert.ok(got, 'the upload that began before it connected');
+    assert.equal(got.data.name, 'big.bin');
+    assert.equal(got.data.size, 50_000_000);
+    assert.equal(got.data.offset, 1000, 'as far as it has come');
+    await sleep(200);
+    assert.ok(!pc.events.some(e => e.event === 'upload' && (e.data.id === theirs.json.id || e.data.id === gone.json.id)), 'not one for another device, nor one cancelled');
+    pc.close();
+  } finally { await s.stop(); }
+});
+
+test('1.42 CLI (Beam for Linux 1.9): processes --sample (CPU %, parent, threads, version, --type), pull (in pieces, its SHA-256 checked; a file that changed refused), counters gpu (per process), file --grep/--after (where to go on from), --utc and the PC’s offset, status’s own version', async () => {
+  const s = await startServer('collect142cli', 8798);
+  let stop = false;
+  try {
+    const K = s.key;
+    const pcH = app(K, 'cli2pc00142', 'Shop PC', 'windows', { 'X-Beam-App-Version': '1.35.0', ...from('100.64.42.12') });
+    assert.equal((await s.req('GET', '/api/me', { headers: pcH })).status, 200);
+    assert.equal((await s.req('PUT', '/api/devices/me/status', { headers: json(pcH), body: '{"collect":true}' })).status, 204);
+    const pc = await openEvents(s.port, pcH);
+    const asked = [];
+    const blob = crypto.randomBytes(5 * 1024 * 1024 + 123);
+    const sha = b => crypto.createHash('sha256').update(b).digest('hex');
+    let shaGiven = sha(blob);
+    const tz = { name: 'Eastern Standard Time', offset: -300 };
+    const answer = d => {
+      asked.push({ what: d.what, params: d.params });
+      if (d.what === 'processes') return { sample: 30, threads: 8, processes: [
+        { name: 'ProtectPanes', pid: 14228, parent: 9000, threads: 41, memory: 315e6, workingSet: 400e6, cpu: 9000, cpuPercent: 138.3, path: 'C:\\Apps\\ProtectPanes.exe', version: '1.4.14', flags: ['--type=gpu-process', '--enable-features'] },
+        { name: 'ProtectPanes', pid: 9000, parent: 1, threads: 60, memory: 120e6, workingSet: 150e6, cpu: 100, cpuPercent: 2.5, path: 'C:\\Apps\\ProtectPanes.exe', version: '1.4.14' }] };
+      if (d.what === 'pull') {
+        const off = d.params.offset, piece = blob.subarray(off, off + d.params.length);
+        return { size: blob.length, modified: Date.now(), offset: off, data: piece.toString('base64'), length: piece.length, ...(off === 0 && { sha256: shaGiven }) };
+      }
+      if (d.what === 'counters') return { sample: 1, counters: [
+        { path: d.params.paths[0], values: [{ instance: 'pid_14228_luid_0x1_phys_0', pid: 14228, process: 'ProtectPanes', value: 600e6 }, { instance: 'pid_3436_luid_0x1_phys_0', pid: 3436, process: 'edvrclient', value: 200e6 }] },
+        { path: d.params.paths[1], values: [] },
+        { path: d.params.paths[2], values: [{ instance: 'pid_14228_luid_0x1_phys_0_eng_0_engtype_3D', pid: 14228, process: 'ProtectPanes', value: 30 }, { instance: 'pid_14228_luid_0x1_phys_0_eng_1_engtype_VideoDecode', pid: 14228, process: 'ProtectPanes', value: 25 }] }] };
+      if (d.what === 'file') return { folder: d.params.folder, path: d.params.path, size: 4000, modified: Date.UTC(2026, 10, 23, 18, 0, 0), text: 'error one\nerror two\n', lines: 2, matched: 2, read: 80, cut: false, end: 4000 };
+      if (d.what === 'events') return { log: 'System', since: 60, level: 'warning', events: [{ at: Date.UTC(2026, 10, 23, 18, 15, 1), level: 'error', source: 'disk', id: 7, message: 'bad block' }] };
+      return {};
+    };
+    (async () => {
+      const done = new Set();
+      while (!stop) {
+        const e = pc.events.find(x => x.event === 'collect-request' && !done.has(x.data.id));
+        if (!e) { await sleep(20); continue; }
+        done.add(e.data.id);
+        await s.req('POST', '/api/devices/me/collect', { headers: json(pcH), body: JSON.stringify({ id: e.data.id, data: { ...answer(e.data), tz } }) });
+      }
+    })().catch(() => {}); // (stopped with the server)
+    const home = homeDir('collect142cli');
+    const env = { BEAM_URL: `http://127.0.0.1:${s.port}`, BEAM_KEY: K };
+    let r = await cli(['collect', 'shop pc', 'processes', '--sample', '30s'], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(asked.at(-1).params, { sample: 30 });
+    assert.match(r.out, /Shop PC \(UTC-05:00\) · 2 processes, CPU over 30 s as % of one core \(8 threads: 800% in all\)/);
+    assert.match(r.out, /ProtectPanes\s+14228\s+9000\s+138\.3%\s+\S+ MB\s+\S+ MB\s+41\s+1\.4\.14\s+gpu-process\s+C:\\Apps\\ProtectPanes\.exe/);
+    // pull: three pieces, the SHA-256 checked, written whole
+    const into = path.join(TMP, 'collect142-pull');
+    r = await cli(['collect', 'shop pc', 'pull', 'HW Blackbox/programs_2026-11-23.csv', into], { home, env, timeout: 120000 });
+    assert.equal(r.code, 0, r.out);
+    const pulls = asked.filter(a => a.what === 'pull');
+    assert.deepEqual(pulls.map(a => a.params.offset), [0, 2097152, 4194304]);
+    const saved = path.join(into, 'programs_2026-11-23.csv');
+    assert.equal(sha(fs.readFileSync(saved)), sha(blob), 'every byte as on the PC');
+    assert.match(r.out, /Shop PC \(UTC-05:00\) · HW Blackbox\/programs_2026-11-23\.csv · 5\.0 MB, SHA-256 checked/);
+    shaGiven = '0'.repeat(64); // the file changed between its SHA-256 and its pieces
+    r = await cli(['collect', 'shop pc', 'pull', 'HW Blackbox/programs_2026-11-23.csv', into], { home, env, timeout: 120000 });
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /changed while it was being pulled/);
+    assert.deepEqual(fs.readdirSync(into), ['programs_2026-11-23.csv'], 'no second copy, no part file left');
+    // counters: the gpu set, per process
+    r = await cli(['collect', 'shop pc', 'counters', 'gpu', '--sample', '2'], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(asked.at(-1).params, { paths: ['\\GPU Process Memory(*)\\Dedicated Usage', '\\GPU Process Memory(*)\\Shared Usage', '\\GPU Engine(*)\\Utilization Percentage'], sample: 2 });
+    assert.match(r.out, /\\GPU Process Memory\(\*\)\\Dedicated Usage · per process, the most first\n {2}ProtectPanes \(14228\)\s+572 MB\n {2}edvrclient \(3436\)\s+191 MB/);
+    assert.match(r.out, /\\GPU Engine\(\*\)\\Utilization Percentage · per process, the most first\n {2}ProtectPanes \(14228\)\s+55%/);
+    // file --grep --after: where to go on from
+    r = await cli(['collect', 'shop pc', 'file', 'App logs/app.log', '--grep', 'error', '--after', '1000', '--since', '2h'], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(asked.at(-1).params, { folder: 'App logs', path: 'app.log', grep: 'error', after: 1000, since: 120, tail: 1000 });
+    assert.match(r.out, /2 of 80 lines picked · next: --after 4000/);
+    assert.match(r.out, /error one\nerror two\n/);
+    // --utc: the times in UTC
+    r = await cli(['collect', 'shop pc', 'events', '--utc'], { home, env });
+    assert.match(r.out, /Shop PC \(UTC-05:00; times below in UTC\) · System/);
+    assert.match(r.out, /2026-11-23 18:15:01Z {2}error/);
+    // status: this command's own version, apart from the server's
+    r = await cli(['status'], { home, env });
+    assert.match(r.out, /This command: beam \d+\.\d+\.\d+ \(its version is its own, apart from the server's\)/);
     pc.close();
   } finally {
     stop = true;
