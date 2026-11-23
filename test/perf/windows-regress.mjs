@@ -5,7 +5,7 @@
 // any check fails.
 //
 //   node test/perf/windows-regress.mjs [all|reconnect|restart|revoke|ack|doublepoke|nonbeam401|cancel-after-restart|cancel-live|lane
-//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open|outbox-restart|names|checksums] [--exe <Beam.exe>]
+//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open|outbox-restart|names|checksums|collect] [--exe <Beam.exe>]
 //
 // Isolated like the other windows-* checks: a scratch server (this checkout's server.js) on 127.0.0.1:8805, the app
 // reaching it through a small TCP proxy on 8855 (so its connections can be dropped), a fake peer, and a copy of Beam.exe
@@ -602,6 +602,104 @@ async function checksums(r) {
   r.check(!!(await r.waitLog(new RegExp(`Saved down:${id} .*SHA-256 checked`), from, 5000)), 'checked against its item\'s SHA-256 once it was one');
 }
 
+// (1.32, Beam 1.41) Collecting, read only: the app with collecting on and log folders in its config (one that may be,
+// three that may not: a whole drive, its own folder, AppData itself), asked through the server as an approved device
+// asks: event logs (System; one it may not read; one that isn't there), the log folder's files newest first (nothing
+// hidden, dot-named or a junction), a file's end (UTF-8, UTF-16, the last 1 MB of a big one), nothing outside it,
+// processes (its own Beam.exe, with its path), services, system; the Log folders window; beam.log never holds what went.
+async function collect(r) {
+  const logs = path.join(r.dir, 'files', 'applogs');
+  fs.mkdirSync(path.join(logs, 'today'), { recursive: true });
+  const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1} kumquat-${i + 1}`).join('\n') + '\n';
+  fs.writeFileSync(path.join(logs, 'app.log'), lines);
+  fs.writeFileSync(path.join(logs, '.secret.log'), 'hidden kumquat\n');
+  fs.writeFileSync(path.join(logs, 'today', 'wide.log'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('wide one\r\nwide two\r\n', 'utf16le')]));
+  fs.writeFileSync(path.join(logs, 'big.log'), Array.from({ length: 60000 }, (_, i) => `big ${String(i).padStart(6, '0')} ${'x'.repeat(40)}`).join('\n') + '\n');
+  const old = path.join(logs, 'old.log');
+  fs.writeFileSync(old, 'old line\n');
+  fs.utimesSync(old, new Date(Date.now() - 86400e3), new Date(Date.now() - 86400e3));
+  spawnSync('cmd', ['/c', 'mklink', '/J', path.join(logs, 'win'), process.env.SystemRoot || 'C:\\Windows'], { windowsHide: true });
+  r.check(fs.existsSync(path.join(logs, 'win', 'win.ini')), 'a junction to Windows in the log folder (made for this test)');
+  await r.setup({ collectAllowed: true, collectFolders: [{ name: 'App logs', path: logs }, { name: 'Whole drive', path: 'C:\\' },
+    { name: 'Own', path: path.join(r.dir, 'cfg') }, { name: 'Roaming', path: process.env.APPDATA }] });
+  const ask = body => r.api('POST', `/api/devices/${r.appId}/collect`, body);
+  r.check(await r.waitFor(async () => ((await r.api('GET', '/api/devices')).data.devices || []).find(d => d.id === r.appId && d.online)?.can?.collect === true, 20000), 'can.collect: on there, and online');
+
+  let x = await ask({ what: 'events', log: 'System', since: 7 * 1440, level: 'all', max: 5 });
+  const ev = x.data?.events || [];
+  r.check(x.status === 200 && ev.length === 5 && x.data.more === true && ev.every(e => e.at > 0 && e.source && typeof e.id === 'number' && typeof e.message === 'string' && e.message.length > 0),
+    `events: System's last 5, more there (${x.status} ${JSON.stringify(ev[0] || x.data).slice(0, 160)})`);
+  r.check(ev.every((e, i) => i === 0 || e.at <= ev[i - 1].at), 'newest first');
+  const elevated = spawnSync('net', ['session'], { windowsHide: true }).status === 0;
+  x = await ask({ what: 'events', log: 'Security' });
+  r.check(elevated ? x.status === 200 : x.status === 409 && x.data.reason === 'denied', `the Security log: ${elevated ? 'read (this run is elevated)' : 'needs administrator rights'} (${x.status} ${x.data?.error})`);
+  x = await ask({ what: 'events', log: 'No Such Log' });
+  r.check(x.status === 409 && x.data.reason === 'not-found', `a log that isn't there (${x.status} ${x.data?.error})`);
+  x = await ask({ what: 'events', log: 'Application', source: 'Beam regress nobody', since: 60 });
+  r.check(x.status === 200 && Array.isArray(x.data.events) && x.data.events.length === 0, 'a source with no events: none');
+
+  x = await ask({ what: 'folders' });
+  r.check(JSON.stringify((x.data?.folders || []).map(f => f.name)) === '["App logs"]', `folders: only the one that may be one (${JSON.stringify(x.data)})`);
+  r.check(r.count(/Log folders: Whole drive .*isn't a log folder: a whole drive/) === 1 && r.count(/Log folders: Own .*isn't a log folder: Beam's own folder/) === 1
+    && r.count(/Log folders: Roaming .*isn't a log folder: that's one of Windows'/) === 1, 'the other three left out at the start, and said why');
+  x = await ask({ what: 'files', folder: 'app logs' });
+  const names = (x.data?.entries || []).map(e => e.name);
+  r.check(x.status === 200 && names.includes('app.log') && names.includes('today') && names.includes('big.log') && names.at(-1) === 'old.log'
+    && !names.includes('.secret.log') && !names.includes('win'), `files: newest first, nothing hidden, dot-named or a junction (${names.join(', ')})`);
+  x = await ask({ what: 'files', folder: 'App logs', path: 'today' });
+  r.check(JSON.stringify((x.data?.entries || []).map(e => e.name)) === '["wide.log"]' && x.data.path === 'today', 'a folder inside it');
+  x = await ask({ what: 'file', folder: 'App logs', path: 'app.log', tail: 3 });
+  r.check(x.data?.text === 'line 28 kumquat-28\nline 29 kumquat-29\nline 30 kumquat-30\n' && x.data.lines === 3 && x.data.cut === true && x.data.size === lines.length,
+    `a file's last 3 lines (${JSON.stringify(x.data).slice(0, 200)})`);
+  x = await ask({ what: 'file', folder: 'App logs', path: 'today\\wide.log' });
+  r.check(x.data?.text === 'wide one\r\nwide two\r\n' && x.data.cut === false && x.data.path === 'today/wide.log', `UTF-16, all of it (${JSON.stringify(x.data?.text)})`);
+  x = await ask({ what: 'file', folder: 'App logs', path: 'big.log', tail: 20000 });
+  const bigText = x.data?.text || '';
+  r.check(x.status === 200 && Buffer.byteLength(bigText) <= 1024 * 1024 && bigText.endsWith(`big 059999 ${'x'.repeat(40)}\n`) && /^big \d{6} x{40}\n/.test(bigText) && x.data.cut === true,
+    `a 3 MB file: whole lines from its last 1 MB (${Buffer.byteLength(bigText)} bytes, ${x.data?.lines} lines)`);
+  for (const bad of ['../app.log', '.secret.log', 'win/win.ini', 'today', 'C:\\Windows\\win.ini', 'nope.log', '/../../Windows/win.ini']) {
+    x = await ask({ what: 'file', folder: 'App logs', path: bad });
+    r.check(x.status === 409 && x.data.reason === 'not-found', `nothing outside it: ${bad} (${x.status} ${x.data?.error})`);
+  }
+  x = await ask({ what: 'files', folder: 'App logs', path: 'win' });
+  r.check(x.status === 409 && x.data.reason === 'not-found', 'not through the junction');
+  x = await ask({ what: 'file', folder: 'Nope', path: 'a.log' });
+  r.check(x.status === 409 && x.data.reason === 'not-found' && /no log folder named Nope/.test(x.data.error), 'a folder that isn\'t one');
+
+  x = await ask({ what: 'processes', name: 'Beam' });
+  const mine = (x.data?.processes || []).find(q => q.path && q.path.toLowerCase() === r.appExe.toLowerCase());
+  r.check(!!mine && mine.memory > 0 && mine.started > 0 && mine.pid > 0, `processes: its own Beam.exe with its path (${JSON.stringify(mine || x.data).slice(0, 200)})`);
+  x = await ask({ what: 'services', name: 'eventlog' });
+  r.check((x.data?.services || []).some(v => v.name === 'EventLog' && v.status === 'running' && v.start === 'automatic'), `services: EventLog running (${JSON.stringify(x.data).slice(0, 200)})`);
+  x = await ask({ what: 'system' });
+  const sys = x.data || {};
+  r.check(String(sys.computer).toLowerCase() === os.hostname().toLowerCase().slice(0, 15) && sys.beam === '1.32.0' && sys.memory?.total > 0 && sys.bootedAt > 0
+    && (sys.disks || []).some(d => d.name === 'C:' && d.total > 0) && /^Windows/.test(sys.os?.name) && /^\d+\.\d+$/.test(sys.os?.build), `system (${JSON.stringify(sys).slice(0, 240)})`);
+
+  const logText = r.logLines().join('\n');
+  r.check(!logText.includes('kumquat') && !logText.includes('wide one') && !logText.includes(ev[0]?.message?.slice(0, 40) || '\u0000'), 'beam.log never holds what went back');
+  r.check(r.count(/Collecting: file for Regress Phone/) >= 3 && r.count(/Collecting: events for Regress Phone/) >= 2, 'beam.log says who asked for what kind');
+
+  let from = r.logLines().length;
+  r.forward(['--test-log-folders', 'open']);
+  r.check(!!(await r.waitLog(/Log folders \(test\): open, 1 folder\(s\): App logs = /, from, 15000)), 'the Log folders window opens with its one folder');
+  r.forward(['--test-log-folders', 'add:C:\\']);
+  r.check(!!(await r.waitLog(/Log folders \(test\): add a whole drive can't be one/, from, 10000)), 'a whole drive: no');
+  r.forward(['--test-log-folders', `add:${path.join(r.dir, 'files')}`]);
+  r.check(!!(await r.waitLog(/Log folders \(test\): add ok, 2 folder\(s\): App logs = .*; files = /, from, 10000)), 'a folder inside the temp folder (AppData): yes');
+  const png = path.join(r.dir, 'log-folders.png');
+  r.forward(['--test-log-folders', `shot:${png}`]);
+  r.check(!!(await r.waitLog(/Log folders \(test\): shot/, from, 10000)) && fs.existsSync(png) && fs.statSync(png).size > 2000, 'the window drawn: ' + png);
+  if (process.env.BEAM_REGRESS_SHOTS && fs.existsSync(png)) fs.copyFileSync(png, path.join(process.env.BEAM_REGRESS_SHOTS, 'log-folders.png'));
+  r.forward(['--test-log-folders', 'save']);
+  r.check(!!(await r.waitLog(/Log folders \(the test\): App logs \(.*\); files \(/, from, 10000)), 'saved');
+  x = await ask({ what: 'folders' });
+  r.check(JSON.stringify((x.data?.folders || []).map(f => f.name)) === '["App logs","files"]', 'both there now');
+  from = r.logLines().length;
+  x = await ask({ what: 'file', folder: 'files', path: 'applogs/app.log', tail: 1 });
+  r.check(x.data?.text === 'line 30 kumquat-30\n', 'read through the new one');
+}
+
 // (1.28, Beam 1.36) The Weather row's page: the bridge's openWeather opens LocalCast's page (here a made-up one) in a
 // window of its own (its own profile, no bridge); asked again, the same window; an address that isn't a web page's is
 // refused.
@@ -945,7 +1043,7 @@ async function rdp(r) {
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
   'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups,
-  'outbox-restart': outboxRestart, names, notes, weather, rdp, checksums };
+  'outbox-restart': outboxRestart, names, notes, weather, rdp, checksums, collect };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

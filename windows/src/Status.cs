@@ -150,6 +150,7 @@ namespace Beam
             if (!Equals(Val(last, "os"), Val(body, "os")) || !Equals(Val(last, "remoteDesktop"), Val(body, "remoteDesktop"))) return true;
             if (!Equals(Val(last, "remoteControl"), Val(body, "remoteControl")) || !Equals(Val(last, "locked"), Val(body, "locked"))) return true;
             if (!Equals(Val(last, "commands"), Val(body, "commands"))) return true; // (1.25)
+            if (!Equals(Val(last, "collect"), Val(body, "collect"))) return true; // (1.32)
             if (!Equals(Val(last, "startsWithWindows"), Val(body, "startsWithWindows")) || !Equals(Val(last, "startWanted"), Val(body, "startWanted"))) return true;
             if (SiteFinder.Signature(Val(last, "sites")) != SiteFinder.Signature(Val(body, "sites"))) return true; // (1.24)
             if (HwBlackbox.Signature(Part(last, "hwBlackbox")) != HwBlackbox.Signature(Part(body, "hwBlackbox"))) return true; // (1.27)
@@ -176,6 +177,8 @@ namespace Beam
                 }
                 // (1.25, Beam 1.32) "Allow commands too": the devices that may control this PC may run commands on it
                 if (app.ServerHas("commands") && app.Commands != null) body["commands"] = app.Commands.Allowed;
+                // (1.32, Beam 1.41) "Let approved devices collect logs" (read only)
+                if (app.ServerHas("collect") && app.Collector != null) body["collect"] = app.Collector.Allowed;
                 // Beam 1.20 (app 1.14): for the setup check, whether Windows' own startup list has this app (and whether
                 // its user wants it there). Only to a server that knows them: others answer 400.
                 if (app.ServerHas("setup-check"))

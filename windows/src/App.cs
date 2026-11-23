@@ -83,6 +83,7 @@ namespace Beam
         public PcHistory History;         // Beam 1.18 (app 1.13): Windows' record of restarts, power losses and crashes, sent
         public AppInstaller Apps;         // Beam 1.21 (app 1.16): the user's apps, installed here when asked (once allowed here)
         public CommandRunner Commands;    // Beam 1.32 (app 1.25): commands from the devices that may control this PC (once allowed here)
+        public LogCollector Collector;    // Beam 1.41 (app 1.32): read-only requests (logs, processes…) from approved devices (once allowed here)
         bool appsReported;                // ...what's installed told to the server on this stream
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
         FamilyWindow family;                     // (1.10) Beam Family in a window of its own
@@ -176,6 +177,7 @@ namespace Beam
             History = new PcHistory(this);
             Apps = new AppInstaller(this);
             Commands = new CommandRunner(this);
+            Collector = new LogCollector(this);
 
             up = new Uploader(() => Api, j => { var s = j.State; Post(() => OnUploadChanged(j, s)); }, j => { });
             down = new Downloader(() => Api, j => { var s = j.State; Post(() => OnDownloadChanged(j, s)); }, OnDownloadProgress);
@@ -763,6 +765,9 @@ namespace Beam
                 case "command-run": // Beam 1.32: a command from a device that may control this PC (once allowed here)
                 case "command-stop":
                     Commands.OnEvent(name, d);
+                    break;
+                case "collect-request": // Beam 1.41: an approved device collects a log, the processes… (read only; once allowed here)
+                    Collector.OnRequest(d);
                     break;
                 case "files-request": // Beam 1.26: another device looks in this PC's shared folders (chosen here)
                     Shares.OnRequest(this, d);
@@ -2662,6 +2667,10 @@ namespace Beam
             // Beam 1.32 (app 1.25; null: the server has no commands). As for remote control: the page can turn it off, never on.
             s["commandsAllowed"] = ServerHas("commands") ? (object)Cfg.CommandsAllowed : null;
             s["commandsRunning"] = Commands != null ? Commands.Running : 0;
+            // Beam 1.41 (app 1.32; null: the server can't collect). As for commands: the page can turn it off, never on; the
+            // log folders are chosen only in the native window (bridge `logFolders`).
+            s["collectAllowed"] = ServerHas("collect") ? (object)Cfg.CollectAllowed : null;
+            s["collectFolders"] = ServerHas("collect") ? (object)Cfg.CollectFolders.Select(f => (object)f.ToJson()).ToArray() : null;
             // (1.18, Beam 1.26; null: the server has none) The folders shared from here and who sees each: read-only (the
             // page opens SharedFoldersForm, bridge `sharedFolders`).
             s["sharedFolders"] = ServerHas("shared-folders") ? (object)Cfg.SharedFolders.Select(f =>
@@ -2749,6 +2758,14 @@ namespace Beam
                 if (!(v is bool) || (bool)v) return AppInstaller.OnlyHere;
                 appsOff = true;
             }
+            bool collectOff = false;
+            if (s.ContainsKey("collectAllowed"))
+            {
+                // (1.32) Only off from here: on at this PC (Settings' question).
+                var v = Json.Get(s, "collectAllowed");
+                if (!(v is bool) || (bool)v) return LogCollector.OnlyHere;
+                collectOff = true;
+            }
             bool commandsOff = false;
             if (s.ContainsKey("commandsAllowed"))
             {
@@ -2813,6 +2830,7 @@ namespace Beam
             if (rcOff && Cfg.AllowRemoteControl) Rc.SetOff("settings");
             if (appsOff) Apps.SetAllowed(false, "settings");
             if (commandsOff) Commands.SetAllowed(false, "settings");
+            if (collectOff) Collector.SetAllowed(false, "settings");
             if (SettingsChanged != null) SettingsChanged();
             if (Backups != null) Backups.Changed();
             MarkChanged();
@@ -2838,6 +2856,49 @@ namespace Beam
             if (what != null) status.Now("commands " + what);
             if (SettingsChanged != null) SettingsChanged();
             MarkChanged();
+        }
+
+        // (1.32) "Let approved devices collect logs" changed: the server (the switch), the page.
+        public void CollectChanged(string what)
+        {
+            if (what != null) status.Now("collecting " + what);
+            if (SettingsChanged != null) SettingsChanged();
+            MarkChanged();
+        }
+
+        // (1.32) Settings → This PC → Log folders…: the native window (the folders are chosen only there).
+        LogFoldersForm logFoldersForm;
+
+        public void ShowLogFolders(Form owner)
+        {
+            if (!ServerHas("collect") || RcBlocks("changing log folders")) return;
+            if (logFoldersForm != null && !logFoldersForm.IsDisposed) { logFoldersForm.Activate(); return; }
+            logFoldersForm = new LogFoldersForm(this);
+            Ui.PlaceForTest(logFoldersForm);
+            logFoldersForm.FormClosed += (s2, e2) => logFoldersForm = null;
+            if (owner != null) logFoldersForm.Show(owner); else logFoldersForm.Show();
+            if (!Ui.TestOffscreen) { logFoldersForm.Activate(); Native.SetForegroundWindow(logFoldersForm.Handle); }
+        }
+
+        public void SetLogFolders(List<LogFolder> list, string from)
+        {
+            if (RcBlocks("changing log folders")) return;
+            Cfg.CollectFolders = list.Where(f => Shares.LogFolderRefusal(f.Path, Cfg) == null).ToList();
+            Cfg.Save();
+            Log.Write("Log folders (" + from + "): " + (Cfg.CollectFolders.Count == 0 ? "none" : string.Join("; ", Cfg.CollectFolders.Select(f => f.Name + " (" + f.Path + ")"))));
+            if (SettingsChanged != null) SettingsChanged();
+            MarkChanged();
+        }
+
+        // (tests, a custom --config only) The Log folders window: open, add:<folder>, shot:<png>, save, close.
+        void LogFoldersTest(string cmd)
+        {
+            if (cmd == "open") { ShowLogFolders(null); Log.Write("Log folders (test): " + (logFoldersForm != null ? "open, " + logFoldersForm.Describe() : "not opened")); return; }
+            if (logFoldersForm == null || logFoldersForm.IsDisposed) { Log.Write("Log folders (test): no window"); return; }
+            if (cmd.StartsWith("add:")) { string why = logFoldersForm.Add(cmd.Substring(4)); Log.Write("Log folders (test): add " + (why ?? "ok") + ", " + logFoldersForm.Describe()); }
+            else if (cmd.StartsWith("shot:")) { logFoldersForm.Shot(cmd.Substring(5)); Log.Write("Log folders (test): shot"); }
+            else if (cmd == "save") logFoldersForm.SaveForTest();
+            else if (cmd == "close") logFoldersForm.Close();
         }
 
         // "Allow remote control" in the tray menu or Settings → This PC: on only through the native confirmation, which
@@ -3186,6 +3247,7 @@ namespace Beam
             if (o.TestFamily != null && Cfg.CustomPath) FamilyTest(o.TestFamily);
             if (o.TestApps != null && Cfg.CustomPath) Apps.TestCommand(o.TestApps);
             if (o.TestShares != null && Cfg.CustomPath) SharesTest(o.TestShares);
+            if (o.TestLogFolders != null && Cfg.CustomPath) LogFoldersTest(o.TestLogFolders);
             if (o.TestToasts != null && Cfg.CustomPath) ToastsTest(o.TestToasts);
             if (o.RemoveApp != null) Apps.RemoveFromWindows(o.RemoveApp); // (1.16: Windows' Installed apps → Uninstall)
         }

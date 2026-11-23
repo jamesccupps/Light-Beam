@@ -49,6 +49,8 @@ namespace Beam
         public bool CommandsAllowed;           // Beam 1.32 (app 1.25) "Allow commands too": off until someone at this PC allows it
         public List<InstalledApp> InstalledApps = new List<InstalledApp>(); // ...and what Beam installed here
         public List<SharedFolder> SharedFolders = new List<SharedFolder>(); // app 1.18 (Beam 1.26): folders other devices may copy from (chosen here)
+        public bool CollectAllowed;            // app 1.32 (Beam 1.41) "Let approved devices collect logs": off until someone at this PC turns it on
+        public List<LogFolder> CollectFolders = new List<LogFolder>(); // ...and the folders whose files they may read (chosen here)
         public string TestWinget;              // tests (custom --config only, 1.16): a stand-in for winget (an .exe or .cmd)
         public object[] TestInstalled;         // tests (custom --config only, 1.27): Installed apps' stand-in [{ name, version, location }]
         public string TestHwbUrl;              // tests (custom --config only, 1.27): HW Blackbox's dashboard's stand-in (http://127.0.0.1:port)
@@ -261,6 +263,18 @@ namespace Beam
                         if (why != null) { Log.Write("Shared folders: " + f.Name + " (" + f.Path + ") isn't shared: " + why); continue; }
                         c.SharedFolders.Add(f);
                     }
+                // (1.32) collecting, read only: a log folder that can't be one (moved, or written in by hand) is left out, and said why
+                c.CollectAllowed = Json.Bool(d, "collectAllowed", false);
+                var logList = Json.Get(d, "collectFolders") as object[];
+                if (logList != null)
+                    foreach (var o in logList)
+                    {
+                        var f = LogFolder.Parse(Json.Obj(o));
+                        if (f == null || c.CollectFolders.Any(x => string.Equals(x.Name, f.Name, StringComparison.OrdinalIgnoreCase))) continue;
+                        string why = Shares.LogFolderRefusal(f.Path, c);
+                        if (why != null) { Log.Write("Log folders: " + f.Name + " (" + f.Path + ") isn't a log folder: " + why); continue; }
+                        c.CollectFolders.Add(f);
+                    }
                 var appList = Json.Get(d, "installedApps") as object[];
                 if (appList != null)
                     foreach (var o in appList)
@@ -425,6 +439,8 @@ namespace Beam
                 if (CommandsAllowed) d["commandsAllowed"] = true; else d.Remove("commandsAllowed");
                 if (InstalledApps.Count > 0) d["installedApps"] = InstalledApps.Select(x => (object)x.ToJson()).ToArray(); else d.Remove("installedApps");
                 if (SharedFolders.Count > 0) d["sharedFolders"] = SharedFolders.Select(x => (object)x.ToJson()).ToArray(); else d.Remove("sharedFolders");
+                if (CollectAllowed) d["collectAllowed"] = true; else d.Remove("collectAllowed"); // (1.32)
+                if (CollectFolders.Count > 0) d["collectFolders"] = CollectFolders.Select(x => (object)x.ToJson()).ToArray(); else d.Remove("collectFolders");
                 d["autoSave"] = AutoSave;
                 d["maxSaveMB"] = MaxSaveMB;
                 d["saveFolder"] = SaveFolder;

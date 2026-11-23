@@ -2185,8 +2185,8 @@ test('QW-A: device status is stored, shown without MAC addresses, and validated'
     assert.equal(d.status.macs, undefined);
     // (1.17: + Tailscale's own view of the machine: the fake says nothing about Online or a key expiry)
     assert.deepEqual(d.tailscale, { name: 'gaming-pc', dns: 'gaming-pc.tail1234.ts.net', ip: '100.64.50.1', online: false, keyExpiry: null });
-    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false, files: false, files2: false, commands: false });
-    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false, files: false, files2: false, commands: false });
+    assert.deepEqual(d.can, { ring: true, wake: true, remoteDesktop: true, remoteControl: false, log: false, apps: false, files: false, files2: false, commands: false, collect: false });
+    assert.deepEqual(devs.find(x => x.id === 'phone000001').can, { ring: true, wake: false, remoteDesktop: false, remoteControl: false, log: false, apps: false, files: false, files2: false, commands: false, collect: false });
     // a partial report keeps the rest; null clears a field
     r = await put({ battery: null });
     assert.equal(r.status, 204);
@@ -8502,6 +8502,176 @@ test('1.40 CLI (Beam for Linux 1.7): its SHA-256 with an upload (damaged on the 
     fs.rmSync(file, { force: true });
   } finally {
     proxy.close();
+    await s.stop();
+  }
+});
+
+test('1.41 collecting from a PC (read only): only once allowed there (status collect, can.collect), from an approved lasting sign-in (the CLI too), its request and answer, the PC’s refusals and silence, checked fields; the log says who collected what kind, never what came back', async () => {
+  const s = await startServer('collect141', 8799);
+  try {
+    const K = s.key;
+    const admin = app(K, 'coladmin141', 'Robin Phone', 'android', from('100.64.41.1'));
+    const pcH = app(K, 'colpc000141', 'Shop PC', 'windows', { 'X-Beam-App-Version': '1.32.0', ...from('100.64.41.2') });
+    const oldH = app(K, 'colold00141', 'Old PC', 'windows', { 'X-Beam-App-Version': '1.31.0', ...from('100.64.41.3') });
+    for (const h of [admin, pcH, oldH]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    const cliKey = (await s.req('GET', '/api/pair', { headers: admin })).json.key;
+    const cli = { Authorization: `Bearer ${cliKey}`, 'X-Beam-Device-Id': 'colcli00141', 'X-Beam-Device': 'beam-cli', 'X-Beam-Platform': 'cli', ...from('100.64.41.4') };
+    assert.equal((await s.req('GET', '/api/me', { headers: cli })).status, 200);
+    const ask = (h, pc, body) => s.req('POST', `/api/devices/${pc}/collect`, { headers: json(h), body: JSON.stringify(body) });
+    const status = (h, body) => s.req('PUT', '/api/devices/me/status', { headers: json(h), body: JSON.stringify(body) }).then(r => r.status);
+    const logged = re => waitFor(() => re.test(s.out), 5000).then(() => true, () => false);
+
+    // Off until turned on at the PC; then can.collect; an app too old; offline (no stream); not a PC.
+    let r = await ask(cli, 'colpc000141', { what: 'system' });
+    assert.deepEqual([r.status, r.json.reason], [409, 'off'], r.body);
+    assert.match(r.json.error, /Collecting is off on Shop PC/);
+    assert.equal(await status(pcH, { collect: true }), 204);
+    assert.equal(await status(oldH, { collect: true }), 204);
+    assert.ok(await logged(/Shop PC lets approved devices collect its logs now/));
+    const can = async id => (await s.req('GET', '/api/devices', { headers: admin })).json.devices.find(d => d.id === id)?.can?.collect;
+    assert.equal(await can('colpc000141'), true);
+    assert.equal(await can('colold00141'), false, 'its app is too old');
+    assert.deepEqual([(r = await ask(cli, 'colold00141', { what: 'system' })).status, r.json.reason], [409, 'old-app']);
+    assert.deepEqual([(r = await ask(cli, 'colpc000141', { what: 'system' })).status, r.json.reason], [409, 'offline']);
+    assert.deepEqual([(r = await ask(cli, 'coladmin141', { what: 'system' })).status, r.json.reason], [409, 'not-windows']);
+
+    // The PC online: a request arrives as collect-request with its fields (defaults filled in) and who asked; the
+    // answer goes to the asker, with what, pc and at.
+    const pc = await openEvents(s.port, pcH);
+    await waitFor(async () => (await s.req('GET', '/api/devices', { headers: admin })).json.devices.find(d => d.id === 'colpc000141')?.online, 5000);
+    const answerNext = async (fn, n = 1) => {
+      const e = await pc.wait('collect-request', d => !answered.has(d.id), 8000);
+      answered.add(e.data.id);
+      const out = await fn(e.data);
+      if (out) assert.equal((await s.req('POST', '/api/devices/me/collect', { headers: json(pcH), body: JSON.stringify({ id: e.data.id, ...out }) })).status, 204);
+      return e.data;
+    };
+    const answered = new Set();
+    const SECRET = 'disk 4 is failing: zebra-quartz';
+    let asked = ask(cli, 'colpc000141', { what: 'events' });
+    let req = await answerNext(() => ({ data: { log: 'System', events: [{ at: 1, level: 'error', source: 'disk', id: 7, message: SECRET }] } }));
+    r = await asked;
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(req.params, { log: 'System', since: 60, level: 'warning', max: 200 }, 'the defaults');
+    assert.deepEqual(pick(req.by, ['id', 'name']), { id: 'colcli00141', name: 'beam-cli' });
+    assert.equal(r.json.what, 'events');
+    assert.deepEqual(r.json.pc, { id: 'colpc000141', name: 'Shop PC' });
+    assert.equal(r.json.events[0].message, SECRET);
+    assert.ok(r.json.at > 0);
+    assert.ok(await logged(/beam-cli collected events from Shop PC/));
+    assert.ok(!s.out.includes('zebra-quartz'), 'never what came back');
+    asked = ask(cli, 'colpc000141', { what: 'file', folder: 'App logs', path: 'today/app.log', tail: 50 });
+    req = await answerNext(() => ({ data: { text: 'a\nb\n', size: 4 } }));
+    assert.deepEqual(req.params, { folder: 'App logs', path: 'today/app.log', tail: 50 });
+    assert.equal((await asked).json.text, 'a\nb\n');
+    asked = ask(cli, 'colpc000141', { what: 'events', log: 'Microsoft-Windows-Windows Defender/Operational', since: 1440, level: 'all', source: 'Service Control Manager', event: 7036, max: 1000 });
+    req = await answerNext(() => ({ data: { events: [] } }));
+    assert.deepEqual(req.params, { log: 'Microsoft-Windows-Windows Defender/Operational', since: 1440, level: 'all', source: 'Service Control Manager', event: 7036, max: 1000 });
+    assert.equal((await asked).status, 200);
+
+    // The PC's own refusal (its reason kept, its words with its name); silence; an answer to someone else's request.
+    asked = ask(cli, 'colpc000141', { what: 'file', folder: 'Nope', path: 'x.log' });
+    await answerNext(() => ({ error: 'there’s no log folder named Nope', reason: 'not-found' }));
+    r = await asked;
+    assert.deepEqual([r.status, r.json.reason, r.json.error], [409, 'not-found', 'Shop PC: there’s no log folder named Nope']);
+    asked = ask(cli, 'colpc000141', { what: 'processes', name: 'node' });
+    req = await answerNext(() => null);
+    assert.deepEqual(req.params, { name: 'node' });
+    r = await asked;
+    assert.deepEqual([r.status, r.json.reason], [409, 'no-answer']);
+    assert.equal((await s.req('POST', '/api/devices/me/collect', { headers: json(pcH), body: JSON.stringify({ id: req.id, data: {} }) })).status, 404, 'too late');
+    asked = ask(cli, 'colpc000141', { what: 'services' });
+    req = await answerNext(() => null);
+    assert.equal((await s.req('POST', '/api/devices/me/collect', { headers: json(oldH), body: JSON.stringify({ id: req.id, data: { services: [] } }) })).status, 404, 'only the PC asked');
+    assert.equal((await s.req('POST', '/api/devices/me/collect', { headers: json(pcH), body: JSON.stringify({ id: req.id, data: { services: [] } }) })).status, 204);
+    assert.equal((await asked).status, 200);
+
+    // Fields checked before anything goes to the PC.
+    for (const bad of [{ what: 'shell' }, { what: 'events', level: 'loud' }, { what: 'events', since: 0 }, { what: 'events', max: 5000 },
+      { what: 'events', source: "x' or '1'='1" }, { what: 'events', log: 'System<x>' }, { what: 'files' }, { what: 'file', folder: 'App logs' },
+      { what: 'file', folder: 'App logs', path: 'a\u0000b' }, { what: 'file', folder: 'App logs', path: 'a.log', tail: 0 }]) {
+      assert.equal((r = await ask(cli, 'colpc000141', bad)).status, 400, JSON.stringify(bad) + ' ' + r.body);
+    }
+
+    // Not from a sign-in that isn't approved.
+    assert.equal((await s.req('PUT', '/api/devices/colcli00141/trust', { headers: json(admin), body: '{"trusted":false}' })).status, 200);
+    r = await ask(cli, 'colpc000141', { what: 'system' });
+    assert.deepEqual([r.status, r.json.reason], [403, 'trusted']);
+    assert.equal(pc.events.filter(e => e.event === 'collect-request').length, answered.size, 'nothing more went to the PC');
+
+    // Turned off at the PC.
+    assert.equal(await status(pcH, { collect: false }), 204);
+    assert.ok(await logged(/Shop PC no longer lets devices collect its logs/));
+    assert.deepEqual([(r = await ask(admin, 'colpc000141', { what: 'system' })).status, r.json.reason], [409, 'off']);
+    pc.close();
+  } finally { await s.stop(); }
+});
+
+test('1.41 CLI (Beam for Linux 1.8): beam collect <PC> events|files|file|processes|system|beam-log: the PC by name or its start, the fields from the options, the answer printed (the file to standard output), --json, an ambiguous name, a PC where it is off', async () => {
+  const s = await startServer('collect141cli', 8798);
+  let stop = false;
+  try {
+    const K = s.key;
+    const pcH = app(K, 'clipc000141', 'Shop PC', 'windows', { 'X-Beam-App-Version': '1.32.0', ...from('100.64.41.12') });
+    const lapH = app(K, 'clilap00141', 'Shop Laptop', 'windows', { 'X-Beam-App-Version': '1.32.0', ...from('100.64.41.13') });
+    for (const h of [pcH, lapH]) assert.equal((await s.req('GET', '/api/me', { headers: h })).status, 200);
+    assert.equal((await s.req('PUT', '/api/devices/me/status', { headers: json(pcH), body: '{"collect":true}' })).status, 204);
+    const pc = await openEvents(s.port, pcH);
+    const asked = [];
+    const answer = async e => {
+      if (e.event === 'log-request') return s.req('POST', '/api/devices/me/log', { headers: json(pcH), body: JSON.stringify({ id: e.data.id, name: 'beam.log', text: 'one\ntwo\nthree\n' }) });
+      const d = e.data;
+      asked.push({ what: d.what, params: d.params });
+      const data = {
+        events: { log: d.params.log, since: d.params.since, level: d.params.level, events: [{ at: Date.UTC(2026, 10, 23, 12, 0, 5), level: 'error', source: 'disk', id: 7, message: 'The device has a bad block.\r\nSecond line.' }] },
+        file: { folder: d.params.folder, path: d.params.path, size: 2_000_000, modified: Date.now(), text: 'last line 1\nlast line 2\n', lines: 2, cut: true },
+        processes: { processes: [{ name: 'node', pid: 4242, memory: 50_000_000, cpu: 12.5, started: Date.now(), path: 'C:\\Program Files\\nodejs\\node.exe' }] },
+        system: { computer: 'SHOP-PC', user: 'robin', os: { name: 'Windows 11 Pro', version: '24H2', build: '26100.1' }, bootedAt: Date.now() - 3600e3, memory: { total: 16e9, free: 8e9 }, disks: [{ name: 'C:', total: 500e9, free: 100e9 }], beam: '1.32.0' },
+      }[d.what];
+      return s.req('POST', '/api/devices/me/collect', { headers: json(pcH), body: JSON.stringify({ id: d.id, data }) });
+    };
+    (async () => {
+      const done = new Set();
+      while (!stop) {
+        const e = pc.events.find(x => (x.event === 'collect-request' || x.event === 'log-request') && !done.has(x.data.id));
+        if (e) { done.add(e.data.id); await answer(e); } else await sleep(25);
+      }
+    })();
+    const home = homeDir('collect141cli');
+    const env = { BEAM_URL: `http://127.0.0.1:${s.port}`, BEAM_KEY: K };
+    let r = await cli(['collect', 'shop pc', 'events', '--since', '2h', '--level', 'error'], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(asked.at(-1), { what: 'events', params: { log: 'System', since: 120, level: 'error', max: 200 } });
+    assert.match(r.out, /Shop PC · System · error and worse · the last 120 min · 1 event, newest first/);
+    assert.match(r.out, /\d{4}-\d\d-\d\d \d\d:\d\d:05 {2}error {4}disk \(7\) {2}The device has a bad block\.\n {6}Second line\./);
+    r = await cli(['collect', 'Shop P', 'file', 'App logs/today/app.log', '--tail', '50'], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(asked.at(-1), { what: 'file', params: { folder: 'App logs', path: 'today/app.log', tail: 50 } });
+    assert.match(r.out, /Shop PC · App logs\/today\/app\.log · 1\.9 MB, changed .+ · its last 2 lines/);
+    assert.match(r.out, /last line 1\nlast line 2\n/);
+    r = await cli(['collect', 'clipc000141', 'processes', '--name', 'node', '--json'], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(asked.at(-1), { what: 'processes', params: { name: 'node' } });
+    const parsed = JSON.parse(r.out);
+    assert.deepEqual([parsed.what, parsed.pc.name, parsed.processes[0].pid], ['processes', 'Shop PC', 4242]);
+    r = await cli(['collect', 'shop pc', 'system'], { home, env });
+    assert.match(r.out, /Shop PC \(SHOP-PC\), signed in: robin\nWindows: Windows 11 Pro, 24H2, build 26100\.1/);
+    r = await cli(['collect', 'shop pc', 'beam-log', '--tail', '2'], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(r.out, 'two\nthree\n');
+    r = await cli(['collect', 'shop', 'system'], { home, env });
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /"shop" could be Shop PC, Shop Laptop: say which/);
+    r = await cli(['collect', 'shop laptop', 'system'], { home, env });
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /Collecting is off on Shop Laptop/);
+    r = await cli(['collect', 'shop pc', 'events', '--since', 'yesterday'], { home, env });
+    assert.match(r.out, /--since takes minutes, or a time like 30m, 2h or 3d/);
+    r = await cli(['collect', 'shop pc', 'shell'], { home, env });
+    assert.match(r.out, /beam collect takes events, folders, files, file, processes, services, system, beam-log/);
+    pc.close();
+  } finally {
+    stop = true;
     await s.stop();
   }
 });

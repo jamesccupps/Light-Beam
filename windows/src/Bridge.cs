@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper", "saveText", "allowCommands", "weather" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper", "saveText", "allowCommands", "weather", "allowCollect", "logFolders" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -238,6 +238,14 @@ namespace Beam
                 }
                 case "allowCommands": // (1.25) "Allow commands too": on through the native confirmation, at this PC
                     if (!app.Cfg.CommandsAllowed) app.Commands.Toggle("Settings on this PC");
+                    Reply(id, Obj("settings", app.SettingsObject()));
+                    break;
+                case "allowCollect": // (1.32) "Let approved devices collect logs": on through the native question, at this PC
+                    if (!app.Cfg.CollectAllowed) app.Collector.Toggle("Settings on this PC");
+                    Reply(id, Obj("settings", app.SettingsObject()));
+                    break;
+                case "logFolders": // (1.32) Log folders…: the native window (the folders are chosen only there)
+                    app.ShowLogFolders(win);
                     Reply(id, Obj("settings", app.SettingsObject()));
                     break;
                 case "allowApps": // (1.16) "Let Beam install apps on this PC": on through the native confirmation, at this PC

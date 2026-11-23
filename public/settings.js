@@ -797,8 +797,19 @@ function thisDeviceCard() {
       if (!hostHas('allowApps')) { renderSettings(); return; }
       after(await hostDo('allowApps'));
     }, { hint: 'Apps you install from Beam’s Apps page go onto this PC without asking each time.' });
+    // (1.41, Windows 1.32) read-only collecting by approved devices (the beam command too): on through Beam's question here
+    const folders = Array.isArray(s.collectFolders) ? s.collectFolders : [];
+    const collect = typeof s.collectAllowed === 'boolean' && switchRow('Let approved devices collect logs', s.collectAllowed, async on => {
+      if (!on) return after(await hostDo('setSettings', { settings: { collectAllowed: false } }));
+      if (!hostHas('allowCollect')) { renderSettings(); return; }
+      after(await hostDo('allowCollect'));
+    }, { hint: s.collectAllowed ? 'Your approved devices (and the beam command on them) can read this PC’s event logs, the log folders below, and which programs and services run. Nothing is run or changed.'
+      : 'Your approved devices (and the beam command on them) could read this PC’s event logs, log folders you choose, and which programs and services run. Read only. Turning it on asks here.' });
+    const logs = s.collectAllowed === true && hostHas('logFolders') && inlineRow('Log folders',
+      smallBtn('Log folders…', async () => after(await hostDo('logFolders')), { ic: 'folder' }),
+      folders.length ? `${folders.map(f => f.name).join(', ')}: their files can be read` : 'None yet: event logs, programs and services only');
     const admin = s.adminHelper?.available && hostHas('adminHelper') ? adminHelperRows(s.adminHelper) : null;
-    return rc || apps || admin ? card('This PC', rc, cmds, apps, admin) : null;
+    return rc || apps || collect || admin ? card('This PC', rc, cmds, apps, collect, logs, admin) : null;
   }
   // Beam for Linux's window (its page is that computer's sign-in): the agent does it, as `beam control on` would.
   const d = deviceById(me.id);

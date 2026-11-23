@@ -778,6 +778,40 @@ streams only) and the answer back, and keeps nothing.
 | `POST /api/devices/{id}/log` | `{ "name", "text", "size", "at" }` (`Cache-Control: no-store`), within 30 s. `409` when it can't (too old, offline, no answer in time); `403` for a session-only sign-in, and **(1.25.4)** `403 reason "trusted"` for one that isn't trusted |
 | `POST /api/devices/me/log` | the PC's answer: `{ "id", "name", "text" }` (1 MB at most is passed on, the end of it) → `204`; `404` for a request that isn't for this device or timed out |
 
+### Collecting from a PC, read only (1.41)
+Feature `collect`. Fixed read-only requests a PC's Beam app answers (Windows 1.32 or later), never code: Windows' event
+logs, the files in the log folders chosen at that PC, its processes, services and system. Off until "Let approved devices
+collect logs" is turned on at that PC (status `collect`, `can.collect`); the log folders are chosen there too. Who may
+ask: a trusted, lasting sign-in, the `beam` command included (`beam collect`); `403` for a session-only one or
+`403 reason "trusted"`. The server passes the request on (`collect-request { id, what, params, by: { id, name } }`, to
+that PC's streams only) and the answer back, and keeps nothing; its log says who collected what kind from which PC.
+60 requests a minute per asking device (`429`).
+
+| Method & path | Result |
+|---|---|
+| `POST /api/devices/{id}/collect` | `{ "what", … }` (below) → the PC's answer `{ …, "what", "pc": { "id", "name" }, "at" }` (`Cache-Control: no-store`), within 45 s. `400` for fields that aren't valid; `409 { reason }`: `not-windows`, `old-app`, `off`, `offline`, `no-answer`, or the PC's own (`not-found`, `denied`, `bad`, `failed`, `unknown`) with its words after its name |
+| `POST /api/devices/me/collect` | the PC's answer: `{ "id", "data": { … } }` or `{ "id", "error", "reason" }` (4 MB at most) → `204`; `404` for a request that isn't for this device or timed out |
+
+What can be asked (`what`, and its fields):
+- `events`: `log` (default `System`; letters, digits, spaces and `.-/_`, e.g. `Application`,
+  `Microsoft-Windows-Windows Defender/Operational`), `since` (minutes, 1–43200, default 60), `level` (`critical`,
+  `error`, `warning` (default: warnings and worse), `info`, `all`), `source` (a provider's name), `event` (an event
+  id), `max` (1–1000, default 200) → `{ log, since, level, events: [{ at, level, source, id, message }], more, cut }`,
+  newest first (`more`: there were more than `max`; `cut`: it stopped after 25 s). A log that needs administrator
+  rights (Security) → `409 denied`.
+- `folders` → `{ folders: [{ name, path }] }`: the log folders chosen at that PC.
+- `files`: `folder` (a name from `folders`), `path` (a folder inside it) → `{ folder, path, entries: [{ name, dir,
+  size, modified }], more }`, newest first, 500 at most. As in shared folders: nothing hidden, starting with `.`, or a
+  link, and never outside the folder.
+- `file`: `folder`, `path`, `tail` (lines, 1–20000, default 200) → `{ folder, path, size, modified, text, lines, cut }`:
+  the last lines from the file's last 1 MB at most (UTF-16 when it starts with that mark, else UTF-8); `cut`: there's
+  more before it.
+- `processes`: `name` (a part of it) → `{ processes: [{ name, pid, memory, cpu, started, path, title, session }] }`, the
+  most memory first (`memory`: private bytes; `cpu`: seconds; no command lines: they can hold passwords).
+- `services`: `name` (a part of its name or display name) → `{ services: [{ name, display, status, start }] }`.
+- `system` → `{ computer, user, os: { name, version, build }, bootedAt, cpu: { name, threads }, memory: { total, free },
+  disks: [{ name, label, format, total, free }], timeZone, beam }`.
+
 ### Shared folders (1.26)
 Feature `shared-folders`. A PC's folders that some of the owner's devices may look in and copy files from, chosen only at
 that PC (Beam for Windows 1.18: Settings → Control & sharing → Shared folders…, the folders and for each the devices that see it);

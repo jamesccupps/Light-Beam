@@ -2346,7 +2346,7 @@ function forgetSitesOf(id) {
 // (1.20) startsWithWindows: the PC's Beam app is in Windows' own startup list; startWanted: its user wants it there
 // (1.22) model, bootedAt, temperature, throttled: Beam for Linux (a Raspberry Pi first)
 const STATUS_FIELDS = new Set(['battery', 'storage', 'os', 'macs', 'remoteDesktop', 'remoteControl', 'locked', 'update', 'startsWithWindows', 'startWanted',
-  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites', 'commands', 'hwBlackbox', 'rdpGraphics']);
+  'model', 'bootedAt', 'temperature', 'throttled', 'controlProblem', 'uacOnScreen', 'sites', 'commands', 'hwBlackbox', 'rdpGraphics', 'collect']);
 // (1.38, Windows 1.30, the 2026-11-21 audit's RD2) status `rdpGraphics`: the Group Policy settings that decide Remote
 // Desktop's picture there (true/false when set, absent when not) and its frame-rate limit when set (DWMFRAMEINTERVAL)
 const RDP_GRAPHICS_FLAGS = ['gpu', 'avc444', 'hwEncode'];
@@ -2478,7 +2478,7 @@ function parseStatus(body) {
       const macs = Array.isArray(value) && value.length <= 8 ? value.map(normalizeMac) : [null];
       if (macs.some(m => !m)) throw bad('macs must be a list of up to 8 addresses like aa:bb:cc:dd:ee:ff');
       out.macs = [...new Set(macs)];
-    } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked' || key === 'startsWithWindows' || key === 'startWanted' || key === 'uacOnScreen' || key === 'commands') {
+    } else if (key === 'remoteDesktop' || key === 'remoteControl' || key === 'locked' || key === 'startsWithWindows' || key === 'startWanted' || key === 'uacOnScreen' || key === 'commands' || key === 'collect') {
       if (typeof value !== 'boolean') throw bad(`${key} must be true or false`);
       out[key] = value;
     } else if (key === 'sites') {
@@ -2607,6 +2607,7 @@ function capabilitiesOf(device, ts = tailscaleOf(device)) {
     files: canShareFiles(device), // (1.26) its Beam app shares folders chosen there (shared folders)
     files2: canShareMore(device), // (1.28) ...with icons, thumbnails, previews, search and whole folders
     commands: canRunCommands(device), // (1.32) its Beam app runs commands from the devices that may control it (on there)
+    collect: canCollect(device), // (1.41) its Beam app answers read-only requests (logs, processes…), once allowed there
   };
 }
 
@@ -2637,6 +2638,7 @@ async function putStatus(req, res, _m, url) {
   const hwbBefore = Boolean(device.status?.hwBlackbox); // (1.39) its findings were on its page already
   const allowed = device.status?.remoteControl === true;
   const commandsWere = device.status?.commands === true; // (1.32)
+  const collectWas = device.status?.collect === true; // (1.41)
   const { update } = changes;
   if (update && (update.version !== device.status?.update?.version || update.problem !== device.status?.update?.problem)) {
     log.warn(`${device.name} couldn't install Beam ${update.version}: ${update.problem}`);
@@ -2656,6 +2658,9 @@ async function putStatus(req, res, _m, url) {
   if (changes.commands !== undefined && (changes.commands === true) !== commandsWere) { // (1.32)
     log.info(`${device.name} ${changes.commands === true ? 'runs commands from the devices that may control it now' : 'no longer runs commands'}`);
     if (changes.commands !== true) cmdStopOf(r => r.pc === device.id, `Commands were turned off on ${device.name}`, 'off');
+  }
+  if (changes.collect !== undefined && (changes.collect === true) !== collectWas) { // (1.41)
+    log.info(`${device.name} ${changes.collect === true ? 'lets approved devices collect its logs now' : 'no longer lets devices collect its logs'}`);
   }
   checkStatusAlerts(device);
   if (changes.hwBlackbox) hwbReported(device); // (1.35.1) a power loss's alert may be waiting for it
@@ -3617,6 +3622,125 @@ async function postDeviceLog(req, res, _m, url) {
   if (typeof body.text !== 'string') throw httpError(400, 'Expected {"id", "name", "text"}');
   const text = body.text.length > LOG_MAX_BYTES ? body.text.slice(-LOG_MAX_BYTES) : body.text;
   ask.done({ name: statusText(body.name).slice(0, 80) || 'beam.log', text, size: Buffer.byteLength(text), at: now() });
+  send(res, 204);
+}
+
+// ---------------------------------------------------------------- collecting from a PC, read only (1.41)
+// The user, 2026-11-23: "there should be a way to gather logs and other things from other devices … the claude code
+// chat on this computer … can utlize beam for some things it may need from that computer" (their picks: "Read-only
+// first", "The beam command"). Fixed read-only requests, never code, answered by a PC's Beam app (Windows 1.32+) once
+// "Let approved devices collect logs" is on there (status `collect`, turned on only at that PC): Windows' event logs,
+// the files in the log folders chosen there, its processes, services and system. Who may ask: a trusted, lasting
+// sign-in, the beam command included (how a Claude Code session reaches it). Nothing is kept here; the log says who
+// collected what kind from which PC, never what came back. (Beam-dev\plan\collect.md)
+
+const COLLECT_APP_MIN = '1.32.0';
+const COLLECT_ANSWER_MS = FAST_TIMEOUTS ? 4000 : 45_000;
+const COLLECT_MAX_BYTES = 4 * MB;
+const COLLECT_KINDS = ['events', 'folders', 'files', 'file', 'processes', 'services', 'system'];
+const COLLECT_LEVELS = ['critical', 'error', 'warning', 'info', 'all'];
+const COLLECT_REASON = /^[a-z][a-z-]{0,29}$/;
+const collectAsks = new Map(); // request id -> { target, done(answer) }
+const collectLimit = new Limiter(60, 60_000); // per asking device
+
+const collectApp = d => d?.platform === 'windows' && versionAtLeast(d.appVersion, COLLECT_APP_MIN);
+const canCollect = d => collectApp(d) && d.status?.collect === true;
+
+// The request's own fields, checked (the PC checks them again): { what, params }.
+function collectParams(body) {
+  const what = body.what;
+  if (!COLLECT_KINDS.includes(what)) throw httpError(400, `what must be one of ${COLLECT_KINDS.join(', ')}`);
+  const str = (key, max, re) => {
+    const v = body[key];
+    if (v === undefined || v === null || v === '') return undefined;
+    let control = false;
+    if (typeof v === 'string') for (let i = 0; i < v.length && !control; i++) control = v.charCodeAt(i) < 32;
+    if (typeof v !== 'string' || v.length > max || control || (re && !re.test(v))) throw httpError(400, `${key} isn't valid here`);
+    return v;
+  };
+  const int = (key, min, max) => {
+    const v = body[key];
+    if (v === undefined || v === null) return undefined;
+    if (!Number.isInteger(v) || v < min || v > max) throw httpError(400, `${key} must be a whole number from ${min} to ${max}`);
+    return v;
+  };
+  const p = {};
+  if (what === 'events') {
+    p.log = str('log', 200, /^[\w .\-/]+$/) ?? 'System';
+    p.since = int('since', 1, 43_200) ?? 60; // minutes, 30 days at most
+    p.level = body.level ?? 'warning';
+    if (!COLLECT_LEVELS.includes(p.level)) throw httpError(400, `level must be one of ${COLLECT_LEVELS.join(', ')}`);
+    const source = str('source', 200, /^[^'"<>&]+$/);
+    if (source) p.source = source;
+    const event = int('event', 0, 65_535);
+    if (event !== undefined) p.event = event;
+    p.max = int('max', 1, 1000) ?? 200;
+  } else if (what === 'files' || what === 'file') {
+    p.folder = str('folder', 100);
+    if (!p.folder) throw httpError(400, 'folder is required (folders lists that PC’s log folders)');
+    const rel = str('path', 1000);
+    if (rel) p.path = rel;
+    if (what === 'file') {
+      if (!p.path) throw httpError(400, 'path is required: the file inside the folder');
+      p.tail = int('tail', 1, 20_000) ?? 200;
+    }
+  } else if (what === 'processes' || what === 'services') {
+    const name = str('name', 100);
+    if (name) p.name = name;
+  }
+  return { what, params: p };
+}
+
+// POST /api/devices/{id}/collect { what, … } → { …what the PC sent, what, pc: { id, name }, at }; 409 { reason } when it
+// can't (not-windows, old-app, off, offline, no-answer, or the PC's own: not-found, denied, …).
+async function askCollect(req, res, [id], url) {
+  const target = targetDevice(id);
+  const body = await readJson(req);
+  const auth = authOf(req);
+  if (auth.session) throw httpError(403, 'A sign-in for this browser session only can’t collect from a PC', { reason: 'temporary' });
+  if (!isTrusted(auth)) throw notTrusted('collect logs from a PC');
+  const { what, params } = collectParams(body);
+  const why = target.platform !== 'windows' ? ['not-windows', `${target.name} can’t be collected from (only PCs with the Beam app for Windows can)`]
+    : !collectApp(target) ? ['old-app', `${target.name} needs the Beam app ${COLLECT_APP_MIN} or later`]
+    : target.status?.collect !== true ? ['off', `Collecting is off on ${target.name}: turn on “Let approved devices collect logs” in Beam’s Settings → This PC there`]
+    : !isOnline(target.id) ? ['offline', `${target.name} is offline`] : null;
+  if (why) throw httpError(409, why[1], { reason: why[0] });
+  const me = resolveAlias(deviceIdOf(req, url) || '') || 'unknown';
+  if (collectLimit.blocked(me)) throw Object.assign(httpError(429, 'Too many requests; try again in a minute'), { headers: { 'Retry-After': String(collectLimit.retryAfter(me)) } });
+  collectLimit.hit(me);
+  const askId = crypto.randomBytes(8).toString('hex');
+  const by = { id: me, name: nameOf(me) || deviceNameOf(req, url) || 'A device' };
+  const got = await new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), COLLECT_ANSWER_MS);
+    collectAsks.set(askId, { target: target.id, done: a => { clearTimeout(timer); resolve(a); } });
+    sendTo(new Set([target.id]), 'collect-request', { id: askId, what, params, by });
+  });
+  collectAsks.delete(askId);
+  const who = whoName(me, 'A browser');
+  if (!got) {
+    log.info(`${who} asked ${target.name} for ${what}: no answer in time`);
+    throw httpError(409, `${target.name} didn’t answer in time`, { reason: 'no-answer' });
+  }
+  if (got.error) {
+    log.info(`${who} asked ${target.name} for ${what}: not given (${got.reason})`);
+    throw httpError(409, `${target.name}: ${got.error}`, { reason: got.reason });
+  }
+  log.info(`${who} collected ${what} from ${target.name} (${formatSize(got.size)})`);
+  send(res, 200, { ...got.data, what, pc: { id: target.id, name: target.name }, at: now() }, { 'Cache-Control': 'no-store' });
+}
+
+// POST /api/devices/me/collect { id, data } or { id, error, reason }: a PC's answer to a collect request.
+async function postCollect(req, res, _m, url) {
+  const d = devices[deviceIdOf(req, url)];
+  if (!d) throw httpError(400, 'X-Beam-Device-Id is required');
+  const body = await readJson(req, { limit: COLLECT_MAX_BYTES + 4096 });
+  const ask = typeof body.id === 'string' ? collectAsks.get(body.id) : null;
+  if (!ask || ask.target !== d.id) throw httpError(404, 'No such request (it may have timed out)');
+  if (typeof body.error === 'string') {
+    ask.done({ error: statusText(body.error).slice(0, 300) || 'it couldn’t', reason: COLLECT_REASON.test(body.reason || '') ? body.reason : 'refused' });
+  } else if (isPlainObject(body.data)) {
+    ask.done({ data: body.data, size: Number(req.headers['content-length']) || 0 });
+  } else throw httpError(400, 'Expected {"id", "data"} or {"id", "error", "reason"}');
   send(res, 204);
 }
 
@@ -8286,6 +8410,7 @@ const FEATURES = [
   'apps-found', // (1.35.0: app state `found` (on a PC already, not from Beam; `where`), PUT /api/devices/me/apps items' found/where/also)
   'weather', // (1.36.0: GET /api/weather (LocalCast's weather for the Weather row), the setting `weather`)
   'rdp-graphics', // (1.38.0: status `rdpGraphics`, how Remote Desktop's picture is set up on a PC; the 2026-11-21 audit's RD2)
+  'collect', // (1.41.0: POST /api/devices/{id}/collect (events, folders, files, file, processes, services, system: read only), the `collect-request` event, POST /api/devices/me/collect, status `collect`, `can.collect`)
   'sha256', // (1.40.0: file items' sha256 (GET /api/items/{id}; GET /api/file's Repr-Digest); an upload takes the sender's (`sha256` at the start, a PUT's or POST /api/file's ?sha256=) and refuses a damaged one: 422 code checksum, upload-cancelled `damaged`)
   'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];
@@ -9697,6 +9822,8 @@ const routes = [
   ['GET', `/api/devices/${DEV}/history`, getHistory],
   ['POST', '/api/devices/me/log', postDeviceLog],
   ['POST', `/api/devices/${DEV}/log`, askDeviceLog],
+  ['POST', '/api/devices/me/collect', postCollect], // (1.41) collecting from a PC, read only
+  ['POST', `/api/devices/${DEV}/collect`, askCollect],
   ['GET', '/api/inbox', getInbox], // (1.33) the alerts inbox
   ['PUT', '/api/inbox/read', putInboxRead],
   ['POST', '/api/inbox/senders', addInboxSender],

@@ -36,6 +36,25 @@ beam logout                            # sign this computer out (beam login sign
 Leave out `--to` to send to all devices. When Beam moves, the `beam` command follows it by itself, once the new
 server has proved it holds your key.
 
+### Collecting from a PC (read only, 1.41)
+
+Reads from another of your PCs (Beam for Windows 1.32 or later), once "Let approved devices collect logs" is on at
+that PC (its Beam: Settings → This PC; Log folders… there chooses the folders whose files may be read). This
+computer's sign-in must be an approved one. Nothing is run or changed there.
+
+```bash
+beam collect "Shop PC" events                        # System's warnings and errors, the last hour
+beam collect shop events --log Application --since 2h --level error --source "MyApp"
+beam collect shop folders                            # the log folders chosen at that PC
+beam collect shop files "App logs"                   # what's in one, newest first
+beam collect shop file "App logs/today/app.log" --tail 300   # the last lines (to standard output)
+beam collect shop processes --name node              # what runs (biggest first), services, system
+beam collect shop beam-log --tail 100                # its own Beam log
+beam collect shop system --json                      # any of them as JSON
+```
+
+The PC is a name, the start of one, or an id (`beam devices`).
+
 ## iPhone Shortcuts
 
 Until there's an iPhone app, Shortcuts can send to Beam from the share sheet. Replace `BEAM` with

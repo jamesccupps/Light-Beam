@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -59,6 +59,20 @@ Receiving:
       --no-notify      no desktop notifications
       --dir <folder>   where to save files (default: Downloads/Beam)
       --max-save <MB>  only auto-save files up to this size (default: 1024)
+
+Collecting from a PC (read only; turned on at that PC: Beam's Settings → This PC → "Let approved devices
+collect logs"; <PC> is a name, the start of one, or an id):
+  beam collect <PC> events [--log System] [--since 2h] [--level warning] [--source <name>] [--event <id>] [--max 200]
+                                                   Windows' event log (default: System, warnings and worse, the last
+                                                   hour); --level critical|error|warning|info|all
+  beam collect <PC> folders                        the log folders chosen at that PC
+  beam collect <PC> files "<folder>[/<subfolder>]" what's in one, newest first
+  beam collect <PC> file "<folder>/<path>" [--tail 200]   the last lines of a file (to standard output)
+  beam collect <PC> processes [--name <part>]      what's running (biggest first)
+  beam collect <PC> services [--name <part>]       its Windows services
+  beam collect <PC> system                         Windows, uptime, processor, memory, disks
+  beam collect <PC> beam-log [--tail 200]          its own Beam log
+      --json                                       the answer as JSON
 
 Everything else:
   beam devices [--json]                            list your devices (● online)
@@ -329,6 +343,136 @@ async function sendFile(cfg, file, { name, quiet, to = [], again = false } = {})
 
 async function listDevices(cfg) {
   return (await api(cfg, '/api/devices')).json();
+}
+
+// ---------------------------------------------------------------- collecting from a PC (1.8, server 1.41)
+// Read-only requests a PC's Beam app answers once "Let approved devices collect logs" is on there: for you, and for a
+// Claude Code session on this computer that needs a log from the PC its program runs on. Never code.
+
+const COLLECT_WHAT = ['events', 'folders', 'files', 'file', 'processes', 'services', 'system', 'beam-log'];
+
+// A device by its id, its name (any case), or the one name that starts with or holds the word.
+async function deviceNamed(cfg, word) {
+  const { devices } = await listDevices(cfg);
+  const w = String(word || '').trim().toLowerCase();
+  if (!w) throw new Error('Which PC?  beam devices  lists them');
+  let list = devices.filter(d => d.id === word || d.name.toLowerCase() === w);
+  if (!list.length) list = devices.filter(d => d.name.toLowerCase().startsWith(w));
+  if (!list.length) list = devices.filter(d => d.name.toLowerCase().includes(w));
+  if (list.length === 1) return list[0];
+  if (!list.length) throw new Error(`No device is named "${word}" (beam devices lists them)`);
+  throw new Error(`"${word}" could be ${list.map(d => d.name).join(', ')}: say which`);
+}
+
+function sinceMinutes(text) {
+  const m = /^(\d+)\s*(m|min|mins|minutes?|h|hours?|d|days?)?$/i.exec(String(text).trim());
+  if (!m) throw new Error(`--since takes minutes, or a time like 30m, 2h or 3d (not "${text}")`);
+  const n = Number(m[1]) * ({ h: 60, d: 1440 }[(m[2] || 'm')[0].toLowerCase()] || 1);
+  if (n < 1 || n > 43_200) throw new Error('--since goes back 30 days at most');
+  return n;
+}
+
+function wholeNumber(text, flag) {
+  if (text === undefined) return undefined;
+  const n = Number(text);
+  if (!Number.isInteger(n)) throw new Error(`${flag} takes a whole number`);
+  return n;
+}
+
+function localTime(ms) {
+  if (!ms) return '?';
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+const lastLines = (text, n) => {
+  if (!n) return text;
+  const lines = String(text).split('\n');
+  const trailing = lines.length && lines[lines.length - 1] === '' ? 1 : 0;
+  return lines.slice(Math.max(0, lines.length - trailing - n)).join('\n');
+};
+
+// "<folder>/<path>": the folder's name (as the PC lists it), then the path inside it.
+function folderAndPath(word) {
+  const s = String(word || '').replace(/\\/g, '/');
+  const i = s.indexOf('/');
+  if (i < 0) return { folder: s, path: '' };
+  let a = i + 1, b = s.length;
+  while (a < b && s[a] === '/') a++;
+  while (b > a && s[b - 1] === '/') b--;
+  return { folder: s.slice(0, i), path: s.slice(a, b) };
+}
+
+async function collect(cfg, args, opt) {
+  const [pcWord, what, ...rest] = args;
+  if (!pcWord || !what) throw new Error(`Usage: beam collect <PC> ${COLLECT_WHAT.join('|')} [options]  (beam --help says more)`);
+  if (!COLLECT_WHAT.includes(what)) throw new Error(`beam collect takes ${COLLECT_WHAT.join(', ')} (not "${what}")`);
+  const pc = await deviceNamed(cfg, pcWord);
+  const tail = wholeNumber(opt.tail, '--tail');
+  if (what === 'beam-log') {
+    const log = await (await api(cfg, `/api/devices/${encodeURIComponent(pc.id)}/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+    if (opt.json) return console.log(JSON.stringify({ ...log, text: lastLines(log.text, tail) }, null, 2));
+    process.stdout.write(lastLines(log.text, tail ?? 200));
+    return;
+  }
+  const body = { what };
+  if (what === 'events') {
+    Object.assign(body, { log: opt.log, level: opt.level, source: opt.source, event: wholeNumber(opt.event, '--event'), max: wholeNumber(opt.max, '--max') });
+    if (opt.since !== undefined) body.since = sinceMinutes(opt.since);
+  } else if (what === 'files' || what === 'file') {
+    const { folder, path: rel } = folderAndPath(rest.join(' '));
+    if (!folder) throw new Error(`Which folder?  beam collect "${pc.name}" folders  lists them`);
+    Object.assign(body, { folder, path: rel || undefined, tail: what === 'file' ? tail : undefined });
+  } else if (what === 'processes' || what === 'services') body.name = opt.name;
+  const got = await (await api(cfg, `/api/devices/${encodeURIComponent(pc.id)}/collect`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })).json();
+  if (opt.json) return console.log(JSON.stringify(got, null, 2));
+  printCollected(got);
+}
+
+function printCollected(got) {
+  const name = got.pc?.name || 'The PC';
+  const out = s => console.log(s);
+  if (got.what === 'events') {
+    const list = got.events || [];
+    out(`${name} · ${got.log} · ${got.level === 'all' ? 'every level' : `${got.level} and worse`} · the last ${got.since} min · ${list.length} event${list.length === 1 ? '' : 's'}, newest first${got.more ? ' (more: --max raises it)' : ''}${got.cut ? ' (stopped early: it took too long)' : ''}`);
+    for (const e of list) {
+      const [first, ...more] = String(e.message || '').replace(/\r/g, '').split('\n').filter(l => l.trim());
+      out(`${localTime(e.at)}  ${String(e.level || '').padEnd(8)} ${e.source} (${e.id})  ${first || ''}`);
+      for (const l of more) out(`      ${l}`);
+    }
+  } else if (got.what === 'folders') {
+    const list = got.folders || [];
+    if (!list.length) out(`${name} has no log folders yet (chosen there: Settings → This PC → Log folders…)`);
+    for (const f of list) out(`${f.name.padEnd(28)} ${f.path}`);
+  } else if (got.what === 'files') {
+    out(`${name} · ${[got.folder, got.path].filter(Boolean).join('/')} · newest first${got.more ? ' (the first ones only)' : ''}`);
+    for (const e of got.entries || []) out(`${localTime(e.modified)}  ${(e.dir ? '' : formatSize(e.size)).padStart(9)}  ${e.name}${e.dir ? '/' : ''}`);
+  } else if (got.what === 'file') {
+    process.stderr.write(`${name} · ${got.folder}/${got.path} · ${formatSize(got.size)}, changed ${localTime(got.modified)} · ${got.cut ? `its last ${got.lines} lines` : 'all of it'}\n`);
+    process.stdout.write(String(got.text ?? ''));
+    if (got.text && !got.text.endsWith('\n')) process.stdout.write('\n');
+  } else if (got.what === 'processes') {
+    const list = got.processes || [];
+    out(`${name} · ${list.length} processes, the most memory first`);
+    for (const p of list) out(`${String(p.name).slice(0, 28).padEnd(28)} ${String(p.pid).padStart(6)} ${formatSize(p.memory || 0).padStart(9)} ${p.cpu != null ? `${p.cpu.toFixed(1)} s`.padStart(10) : ''.padStart(10)}  ${p.started ? localTime(p.started) : ''.padEnd(19)}  ${p.path || ''}${p.title ? `  "${p.title}"` : ''}`);
+  } else if (got.what === 'services') {
+    const list = got.services || [];
+    out(`${name} · ${list.length} services`);
+    for (const v of list) out(`${String(v.name).slice(0, 36).padEnd(36)} ${String(v.status).padEnd(9)} ${String(v.start || '').padEnd(9)} ${v.display || ''}`);
+  } else if (got.what === 'system') {
+    const os = got.os || {};
+    out(`${name} (${got.computer || '?'}), signed in: ${got.user || '?'}`);
+    out(`Windows: ${[os.name, os.version, os.build && `build ${os.build}`].filter(Boolean).join(', ')}`);
+    out(`Up since: ${localTime(got.bootedAt)}`);
+    if (got.cpu) out(`Processor: ${got.cpu.name || '?'} (${got.cpu.cores ? `${got.cpu.cores} cores, ` : ''}${got.cpu.threads} threads)`);
+    if (got.memory) out(`Memory: ${formatSize(got.memory.free)} free of ${formatSize(got.memory.total)}`);
+    for (const d of got.disks || []) out(`Disk ${d.name} ${d.label ? `(${d.label}) ` : ''}${formatSize(d.free)} free of ${formatSize(d.total)}`);
+    if (got.timeZone) out(`Time zone: ${got.timeZone}`);
+    if (got.beam) out(`Beam: ${got.beam}`);
+  } else out(JSON.stringify(got, null, 2));
 }
 
 async function listItems(cfg) {
@@ -2177,7 +2321,7 @@ async function agent(cfg, opt) {
 
 // ---------------------------------------------------------------- main
 
-const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version', 'window', 'control', 'logout']);
+const COMMANDS = new Set(['login', 'setup', 'status', 'devices', 'send', 'text', 'clip', 'get', 'pull', 'ls', 'list', 'rm', 'approve', 'listen', 'open', 'pair', 'help', 'agent', 'version', 'window', 'control', 'logout', 'collect']);
 
 // (1.4.1, audit 2026-10-11) The command a typo was probably meant to be: at most two letters off.
 function nearestCommand(word) {
@@ -2229,6 +2373,14 @@ async function main() {
         yes: { type: 'boolean', short: 'y' },
         json: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
+        // (1.8) beam collect
+        log: { type: 'string' },
+        since: { type: 'string' },
+        level: { type: 'string' },
+        source: { type: 'string' },
+        event: { type: 'string' },
+        max: { type: 'string' },
+        tail: { type: 'string' },
       },
     });
   } catch (err) {
@@ -2293,6 +2445,7 @@ async function main() {
         case 'control': result = await control(cfg, args); break;
         case 'pair': await pair(cfg); break;
         case 'logout': result = await logout(cfg); break;
+        case 'collect': await collect(cfg, args, opt); break; // (1.8)
       }
     }
   } catch (err) {

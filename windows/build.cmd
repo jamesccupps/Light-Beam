@@ -88,7 +88,7 @@ if errorlevel 1 (
   /resource:"%HERE%bin\BeamInput.exe",Beam.helper.BeamInput.exe ^
   /resource:"%HERE%obj\helper-signer.cer",Beam.helper.signer.cer ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
-  /r:System.Net.Http.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Security.dll ^
+  /r:System.Net.Http.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Security.dll /r:System.ServiceProcess.dll ^
   /r:"%WINMD%\Windows.Data.winmd" /r:"%WINMD%\Windows.UI.winmd" /r:"%WINMD%\Windows.Foundation.winmd" ^
   /r:"%NETFX%\System.Runtime.dll" /r:"%NETFX%\System.Runtime.WindowsRuntime.dll" /r:"%NETFX%\System.Runtime.InteropServices.WindowsRuntime.dll" ^
   /r:"%WV%\Microsoft.Web.WebView2.Core.dll" /r:"%WV%\Microsoft.Web.WebView2.WinForms.dll" ^

@@ -12,6 +12,21 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.41.0 (2026-11-23): collect logs from a PC (read only)
+
+**Versions:** server 1.41.0, the Windows app 1.32.0, Beam for Linux 1.8.0 (the `beam` command); the Android app 1.21.2
+unchanged.
+
+- **`beam collect <PC> …`** reads from another of your PCs, read only: Windows' event logs (`events --log System
+  --since 2h --level error`), the files in log folders chosen at that PC (`folders`, `files`, `file "<folder>/<path>"
+  --tail 200`), what runs (`processes`, `services`), `system`, and its Beam log (`beam-log`). For you, or a script or
+  an AI assistant on your computer that needs a program's log from the PC it runs on. Never code, nothing changed.
+- **Off on every PC until turned on there:** Settings → This PC → "Let approved devices collect logs" (Beam asks at
+  that PC), and Log folders… for the folders whose files may be read (never a whole drive, your whole user folder,
+  Windows' or all apps' own folders, or Beam's own; inside one: no hidden files, nothing starting with ".", no links
+  followed). Only approved, lasting sign-ins may ask; the server keeps nothing and logs only who collected what kind.
+  Device info says whether a PC allows it.
+
 ## 1.40.0 (2026-11-23): a SHA-256 for every file
 
 **Versions:** server 1.40.0, the Windows app 1.31.0, Beam for Linux 1.7.0; the Android app 1.21.2 unchanged.

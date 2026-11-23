@@ -746,8 +746,8 @@ export default function register(test) {
 
   test('Settings → Security: this device’s own switches (the Windows app’s remote control and app installs, Beam for Linux’s remote control) (2026-10-21)', async ctx => {
     // (the user: "it can be a per device setting in the app gui settings on that device, it should just be easy")
-    const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowApps', 'allowRemoteControl'];
-    const { page } = await hostPage(ctx, { features, settings: { allowRemoteControl: false, appsAllowed: false } });
+    const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowApps', 'allowRemoteControl', 'allowCollect', 'logFolders'];
+    const { page } = await hostPage(ctx, { features, settings: { allowRemoteControl: false, appsAllowed: false, collectAllowed: false, collectFolders: [] } });
     await page.waitFor(`paired && hostState.ready`);
     await page.evaluate(`openSettings('security'); true`);
     const sw = label => `[...$('#set-security').querySelectorAll('label.switch')].find(l => l.textContent.startsWith(${JSON.stringify(label)}))?.querySelector('input')`;
@@ -763,6 +763,18 @@ export default function register(test) {
     await page.waitFor(`${sw('Allow remote control')}?.checked === true`, 3000, 'on');
     await page.evaluate(`${sw('Allow remote control')}.click(); true`);
     await page.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings.allowRemoteControl === false)`, 3000, 'off');
+    // (1.41, Windows 1.32) "Let approved devices collect logs": on through the app's own question, its Log folders… row
+    // only while it's on (the folders chosen in the app's own window), off straight through
+    await page.waitFor(`Boolean(${sw('Let approved devices collect logs')}) && !/Log folders…/.test($('#set-security').textContent)`, 3000, 'the collect switch, no folders row while off');
+    await page.evaluate(`${sw('Let approved devices collect logs')}.click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'allowCollect')`, 3000, 'asked the app (collect)');
+    assert(!(await page.evaluate(`__host.log.some(m => m.type === 'setSettings' && m.settings.collectAllowed === true)`)), 'never turned on by the page itself');
+    await page.evaluate(`__host.emit({ type: 'settings', settings: { ...hostState.settings, collectAllowed: true, collectFolders: [{ name: 'App logs', path: 'C:\\Shop\\logs' }] } }); true`);
+    await page.waitFor(`${sw('Let approved devices collect logs')}?.checked === true && /Log folders…/.test($('#set-security').textContent) && /App logs: their files can be read/.test($('#set-security').textContent)`, 3000, 'on, with its folders row');
+    await page.evaluate(`[...$('#set-security').querySelectorAll('button')].find(b => /Log folders…/.test(b.textContent)).click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'logFolders')`, 3000, 'Log folders… opens the app’s window');
+    await page.evaluate(`${sw('Let approved devices collect logs')}.click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings.collectAllowed === false)`, 3000, 'collect off');
     eq(page.errors, [], 'no page errors');
     // Beam for Linux's window (a page that is that computer's sign-in), played by this page's own device: why it can't
     // be on shows under a switch that waits; with nothing in the way, the switch asks the server (which refuses here: the

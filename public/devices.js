@@ -261,6 +261,8 @@ function openDeviceInfo(d, { refresh = false } = {}) {
     s.uacOnScreen === true && ['Windows’ prompts (UAC)', 'On its normal screen: your devices can answer them, and so could any program on that PC', true],
     // (1.32) "Allow commands too" there (turned on only at that PC)
     typeof s.commands === 'boolean' && s.remoteControl === true && ['Commands', s.commands ? 'Allowed, for the devices that may control it' : 'Off (turned on at that PC: “Allow commands too”)'],
+    // (1.41) "Let approved devices collect logs" there (read only; turned on only at that PC)
+    typeof s.collect === 'boolean' && ['Collecting logs', s.collect ? 'Allowed, for approved devices (read only: beam collect)' : 'Off (turned on at that PC: Settings → This PC)'],
     // (1.38, Windows 1.30, the 2026-11-21 audit's RD2) how Remote Desktop's picture is set up there: words, never a change
     d.can?.remoteDesktop && s.rdpGraphics && typeof s.rdpGraphics === 'object' && ['Remote Desktop', rdpGraphicsNode(s.rdpGraphics)],
     beamVersionOf(d) && ['Beam', beamVersionOf(d)],
