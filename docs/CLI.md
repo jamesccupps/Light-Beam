@@ -55,6 +55,11 @@ beam collect shop system --json                      # any of them as JSON
 
 The PC is a name, the start of one, or an id (`beam devices`).
 
+**(1.41.1) Without typing any of the setup:** on a Windows PC, Beam's Settings → Security → "Logs and Claude Code" →
+**The beam command: Set up…** installs it (from your Beam, checked), signs it in as its own approved device, puts it on
+your PATH and, if you like, tells Claude Code on that PC how to use it (a short note in Claude Code's CLAUDE.md). It
+needs Node.js 20 or later. Remove there takes it all away again.
+
 ## iPhone Shortcuts
 
 Until there's an iPhone app, Shortcuts can send to Beam from the share sheet. Replace `BEAM` with

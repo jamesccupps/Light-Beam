@@ -1172,7 +1172,9 @@ namespace Beam
         // (1.31, server 1.40; the 2026-11-21 audit's F1) The whole part file's SHA-256 against the server's. A live
         // download's answer had none: the item has it once the upload has become one (still finishing: wait a moment;
         // neither: the server refused the sender's copy, or it was cancelled → Gone, nothing saved). Not the same: the
-        // part goes and it starts over once, then fails. True: save it.
+        // part goes and it starts over once, then fails. True: save it. (1.33) The upload is asked first, then the item:
+        // the server removes the one and adds the other in one step, so a gone upload without an item is really gone
+        // (asked the other way round, a file that became its item between the two questions was thrown away).
         async Task<bool> Verified(DownloadJob job, CancellationToken ct)
         {
             try { HashFrom(job, job.Item.Size, ct); }
@@ -1183,27 +1185,32 @@ namespace Beam
             string want = job.ExpectSha;
             if (want == null && (job.Early || !job.Answered))
             {
-                for (int i = 0; i < 40 && want == null; i++)
+                for (int i = 0; i < 40; i++)
                 {
+                    if (job.Early)
+                    {
+                        bool arriving = false;
+                        try { await api().Call(HttpMethod.Get, "/api/uploads/" + job.Item.Id, null, 20, ct).ConfigureAwait(false); arriving = true; }
+                        catch (ApiException ex) { if (ex.Status != 404) break; }
+                        if (arriving) { await Task.Delay(500, ct).ConfigureAwait(false); continue; } // (still finishing there)
+                    }
                     try
                     {
                         var it = await api().GetItem(job.Item.Id).ConfigureAwait(false);
-                        if (it == null || it.Sha256 == null) break; // (a server before 1.40, an older item: nothing to check)
-                        want = it.Sha256;
-                        break;
+                        want = it != null ? it.Sha256 : null; // (null: a server before 1.40, an older item: nothing to check)
                     }
-                    catch (ApiException ex) { if (ex.Status != 404) break; }
-                    if (!job.Early) break; // (deleted meanwhile: the bytes here are what it was)
-                    try { await api().Call(HttpMethod.Get, "/api/uploads/" + job.Item.Id, null, 20, ct).ConfigureAwait(false); }
                     catch (ApiException ex)
                     {
-                        if (ex.Status != 404) break;
-                        job.State = JobState.Gone;
-                        job.Error = "It wasn't kept at the server (the sender cancelled it, or it arrived damaged there)";
-                        Log.Write("Download " + job.TransferId + ": done, but the server kept no item of it (cancelled, or refused as damaged): not saved");
-                        return false;
+                        if (ex.Status == 404 && job.Early)
+                        {
+                            job.State = JobState.Gone;
+                            job.Error = "It wasn't kept at the server (the sender cancelled it, or it arrived damaged there)";
+                            Log.Write("Download " + job.TransferId + ": done, but the server kept no item of it (cancelled, or refused as damaged): not saved");
+                            return false;
+                        }
+                        // (not early and deleted meanwhile: the bytes here are what it was)
                     }
-                    await Task.Delay(500, ct).ConfigureAwait(false);
+                    break;
                 }
             }
             job.Checked = want != null && want == got;

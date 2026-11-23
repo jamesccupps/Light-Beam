@@ -797,19 +797,8 @@ function thisDeviceCard() {
       if (!hostHas('allowApps')) { renderSettings(); return; }
       after(await hostDo('allowApps'));
     }, { hint: 'Apps you install from Beam’s Apps page go onto this PC without asking each time.' });
-    // (1.41, Windows 1.32) read-only collecting by approved devices (the beam command too): on through Beam's question here
-    const folders = Array.isArray(s.collectFolders) ? s.collectFolders : [];
-    const collect = typeof s.collectAllowed === 'boolean' && switchRow('Let approved devices collect logs', s.collectAllowed, async on => {
-      if (!on) return after(await hostDo('setSettings', { settings: { collectAllowed: false } }));
-      if (!hostHas('allowCollect')) { renderSettings(); return; }
-      after(await hostDo('allowCollect'));
-    }, { hint: s.collectAllowed ? 'Your approved devices (and the beam command on them) can read this PC’s event logs, the log folders below, and which programs and services run. Nothing is run or changed.'
-      : 'Your approved devices (and the beam command on them) could read this PC’s event logs, log folders you choose, and which programs and services run. Read only. Turning it on asks here.' });
-    const logs = s.collectAllowed === true && hostHas('logFolders') && inlineRow('Log folders',
-      smallBtn('Log folders…', async () => after(await hostDo('logFolders')), { ic: 'folder' }),
-      folders.length ? `${folders.map(f => f.name).join(', ')}: their files can be read` : 'None yet: event logs, programs and services only');
     const admin = s.adminHelper?.available && hostHas('adminHelper') ? adminHelperRows(s.adminHelper) : null;
-    return rc || apps || collect || admin ? card('This PC', rc, cmds, apps, collect, logs, admin) : null;
+    return rc || apps || admin ? card('This PC', rc, cmds, apps, admin) : null;
   }
   // Beam for Linux's window (its page is that computer's sign-in): the agent does it, as `beam control on` would.
   const d = deviceById(me.id);
@@ -826,6 +815,64 @@ function thisDeviceCard() {
   }, { hint: problem ? `Can’t be on yet: ${problem}` : 'Your devices could see and control this computer’s screen.', disabled: Boolean(problem) && !on }));
 }
 
+// (1.41.1, Windows 1.33; the user: "make this all easy to do in the app itself on each device") In the Windows app's own
+// window: whether approved devices may collect this PC's logs (read only) and from which folders, and the beam command
+// here for Claude Code: set up (installed from this Beam, checked, signed in as its own approved device, on the PATH, and
+// a note in Claude Code's CLAUDE.md), kept up to date, removed. All of it only here, at the PC.
+let beamCommandBusy = false;
+function logsCard() {
+  if (!HOST) return null;
+  const s = hostState.settings || {};
+  if (typeof s.collectAllowed !== 'boolean') return null;
+  const after = r => { if (r?.settings) hostState.settings = r.settings; renderSettings(); };
+  const folders = Array.isArray(s.collectFolders) ? s.collectFolders : [];
+  const collect = switchRow('Let approved devices collect logs', s.collectAllowed, async on => {
+    if (!on) return after(await hostDo('setSettings', { settings: { collectAllowed: false } }));
+    if (!hostHas('allowCollect')) { renderSettings(); return; }
+    after(await hostDo('allowCollect'));
+  }, { hint: s.collectAllowed ? 'Your approved devices (and Claude Code on them, through the beam command) can read this PC’s event logs, the log folders below, and which programs and services run. Nothing is run or changed.'
+    : 'Your approved devices (and Claude Code on them, through the beam command) could read this PC’s event logs, log folders you choose, and which programs and services run. Read only. Turning it on asks here.' });
+  const logs = s.collectAllowed === true && hostHas('logFolders') && inlineRow('Log folders',
+    smallBtn('Log folders…', async () => after(await hostDo('logFolders')), { ic: 'folder' }),
+    folders.length ? `${folders.map(f => f.name).join(', ')}: their files can be read` : 'None yet: event logs, programs and services only');
+  const b = s.beamCommand;
+  let tool = null;
+  let note = null;
+  if (b && hostHas('beamCommand')) {
+    const run = async (action, fields, done) => {
+      beamCommandBusy = true;
+      renderSettings();
+      const r = await hostDo('beamCommand', { action, ...fields });
+      beamCommandBusy = false;
+      if (r?.settings) { hostState.settings = r.settings; if (done) toast(done); }
+      renderSettings();
+    };
+    const busy = beamCommandBusy || b.busy;
+    const setUp = async () => {
+      const box = el('input', { type: 'checkbox', checked: Boolean(b.claude) });
+      if (!b.claude) box.disabled = true;
+      const extra = el('div', {},
+        el('p', { class: 'muted small' }, 'Beam installs the beam command on this PC (from your Beam, checked against its signature), signs it in as its own approved device, and adds it to your PATH. Claude Code here can then ask your other PCs for their logs, read only.'),
+        el('label', { class: 'check' }, box, el('span', {}, 'Tell Claude Code on this PC how to use it',
+          el('small', { class: 'muted block' }, b.claude ? 'A short note in Claude Code’s own CLAUDE.md, in your user folder' : 'Claude Code isn’t set up on this PC'))));
+      if (await confirmDialog({ title: 'Set up the beam command for Claude Code?', confirm: 'Set up', extra })) run('setup', { note: box.checked }, 'The beam command is set up');
+    };
+    const remove = async () => {
+      if (await confirmDialog({ title: 'Remove the beam command?', text: 'It’s signed out and removed from Beam’s devices, from this PC and from your PATH, and Claude Code’s note goes.', confirm: 'Remove', danger: true })) run('remove', {}, 'The beam command is removed');
+    };
+    const hint = !b.nodeOk ? (b.node ? `Needs Node.js 20 or later (this PC has ${b.node}): nodejs.org` : 'Needs Node.js (version 20 or later) on this PC: nodejs.org, then Set up')
+      : b.installed ? `Set up: beam ${b.version || ''}${b.signedIn ? `, signed in as ${b.device || 'its own device'}` : ', not signed in: Set up again'}. In a new terminal: beam collect "<PC>" …`
+      : 'For Claude Code on this PC: it can then ask your other PCs for their logs (where they allow it), read only.';
+    const button = b.installed
+      ? (b.signedIn ? smallBtn('Remove', remove, { disabled: busy }) : smallBtn('Set up again', setUp, { kind: 'primary', disabled: busy }))
+      : smallBtn(busy ? 'Setting up…' : 'Set up…', setUp, { kind: 'primary', disabled: busy || !b.nodeOk });
+    tool = [inlineRow('The beam command', button, hint), b.error && !b.installed && cardInfo(`Not set up: ${b.error}`)];
+    note = b.installed && b.claude && switchRow('Tell Claude Code how to use it', Boolean(b.note), on => run('note', { on }),
+      { hint: 'A short note in Claude Code’s CLAUDE.md in your user folder: how a session here asks your PCs for logs.', disabled: busy });
+  }
+  return card('Logs and Claude Code', collect, logs, ...(tool || []), note);
+}
+
 function sectionSecurity() {
   const info = server.info || {};
   const pw = el('input', { type: 'password', placeholder: 'New password (8+ characters)', autocomplete: 'new-password', 'aria-label': 'New sign-in password' });
@@ -840,6 +887,7 @@ function sectionSecurity() {
   pw.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } });
   const parts = [
     thisDeviceCard(),
+    logsCard(),
     card('Sign-in password',
       cardInfo(info.passwordSet ? 'A password is set: type it on any sign-in page to sign in there.' : 'Not set yet. With a password you can sign in on any browser by typing it.'),
       el('div', { class: 'set-row set-stack' }, current, row(pw, save)),

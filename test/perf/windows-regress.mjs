@@ -5,7 +5,7 @@
 // any check fails.
 //
 //   node test/perf/windows-regress.mjs [all|reconnect|restart|revoke|ack|doublepoke|nonbeam401|cancel-after-restart|cancel-live|lane
-//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open|outbox-restart|names|checksums|collect] [--exe <Beam.exe>]
+//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open|outbox-restart|names|checksums|collect|beamcmd] [--exe <Beam.exe>]
 //
 // Isolated like the other windows-* checks: a scratch server (this checkout's server.js) on 127.0.0.1:8805, the app
 // reaching it through a small TCP proxy on 8855 (so its connections can be dropped), a fake peer, and a copy of Beam.exe
@@ -673,7 +673,8 @@ async function collect(r) {
   r.check((x.data?.services || []).some(v => v.name === 'EventLog' && v.status === 'running' && v.start === 'automatic'), `services: EventLog running (${JSON.stringify(x.data).slice(0, 200)})`);
   x = await ask({ what: 'system' });
   const sys = x.data || {};
-  r.check(String(sys.computer).toLowerCase() === os.hostname().toLowerCase().slice(0, 15) && sys.beam === '1.32.0' && sys.memory?.total > 0 && sys.bootedAt > 0
+  const appVersion = /const string Text = "([^"]+)"/.exec(fs.readFileSync(path.join(ROOT, 'windows', 'src', 'Version.cs'), 'utf8'))?.[1];
+  r.check(String(sys.computer).toLowerCase() === os.hostname().toLowerCase().slice(0, 15) && sys.beam === appVersion && sys.memory?.total > 0 && sys.bootedAt > 0
     && (sys.disks || []).some(d => d.name === 'C:' && d.total > 0) && /^Windows/.test(sys.os?.name) && /^\d+\.\d+$/.test(sys.os?.build), `system (${JSON.stringify(sys).slice(0, 240)})`);
 
   const logText = r.logLines().join('\n');
@@ -698,6 +699,66 @@ async function collect(r) {
   from = r.logLines().length;
   x = await ask({ what: 'file', folder: 'files', path: 'applogs/app.log', tail: 1 });
   r.check(x.data?.text === 'line 30 kumquat-30\n', 'read through the new one');
+}
+
+// (1.33, Beam 1.41.1) The beam command set up from the app (the user: "make this all easy to do in the app itself on
+// each device"): Set up (this Beam's build, checked; signed in as its own approved device; Claude Code's note after what
+// was there), the command collecting from this very PC, the app still a Windows PC, the note out and in, Remove (all of
+// it gone, the device too), and a build that isn't signed with this Beam's key refused. All inside the test's folder.
+async function beamcmd(r) {
+  const built = spawnSync(process.execPath, [path.join(ROOT, 'linux', 'build.mjs'), '--out', path.join(r.dir, 'dist')], { windowsHide: true, encoding: 'utf8' });
+  r.check(built.status === 0 && fs.existsSync(path.join(r.dir, 'dist', 'beam-linux.js')), 'Beam for Linux (the beam command) built into the test server\'s dist ' + (built.stderr || '').slice(0, 200));
+  const home = path.join(r.dir, 'cfg', 'home');
+  const notes = path.join(home, '.claude', 'CLAUDE.md');
+  fs.mkdirSync(path.dirname(notes), { recursive: true });
+  fs.writeFileSync(notes, '# Mine\n\nKeep this.\n');
+  await r.setup({ collectAllowed: true });
+  const step = async (cmd, ms = 60000) => {
+    const from = r.logLines().length;
+    r.forward(['--test-beam-command', cmd]);
+    return (await r.waitLog(new RegExp(`beam command \\(test\\): ${cmd} `), from, ms)) || '';
+  };
+  let line = await step('setup');
+  r.check(/ setup ok, /.test(line), 'Set up: ' + line.slice(0, 300));
+  const cli = path.join(r.dir, 'cfg', 'cli');
+  let cfgJson = {};
+  try { cfgJson = JSON.parse(fs.readFileSync(path.join(home, '.beam.json'), 'utf8')); } catch {}
+  r.check(fs.existsSync(path.join(cli, 'beam.js')) && fs.existsSync(path.join(cli, 'beam.cmd')), 'beam.js and beam.cmd in its folder');
+  r.check(cfgJson.url === r.appUrl && /^b[pt]_/.test(cfgJson.key || '') && cfgJson.device === 'Regress PC (beam command)' && /^[0-9a-f]{24}$/.test(cfgJson.deviceId || ''),
+    `signed in as its own device (${JSON.stringify({ ...cfgJson, key: (cfgJson.key || '').slice(0, 3) })})`);
+  let text = fs.readFileSync(notes, 'utf8');
+  r.check(text.startsWith('# Mine\n\nKeep this.\n\n<!-- Beam: the beam command') && text.includes('beam collect "<PC>" events') && text.trim().endsWith('<!-- /Beam -->'), 'Claude Code\'s note after what was there');
+  // (not spawnSync: this process is the app's proxy, and the command's requests go through it)
+  const run = args => new Promise(resolve => {
+    const p = spawn('cmd', ['/c', path.join(cli, 'beam.cmd'), ...args], { windowsHide: true });
+    let stdout = '', stderr = '';
+    p.stdout.on('data', d => { stdout += d; });
+    p.stderr.on('data', d => { stderr += d; });
+    const timer = setTimeout(() => p.kill(), 60000);
+    p.on('exit', status => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
+  });
+  const x = await run(['collect', r.appId, 'system', '--json']);
+  let got = null;
+  try { got = JSON.parse(x.stdout); } catch {}
+  const appVersion = /const string Text = "([^"]+)"/.exec(fs.readFileSync(path.join(ROOT, 'windows', 'src', 'Version.cs'), 'utf8'))?.[1];
+  r.check(x.status === 0 && got?.beam === appVersion && got?.pc?.id === r.appId, `the command collects from this very PC: ${x.status} ${(x.stdout || x.stderr || '').slice(0, 200)}`);
+  const devs = (await r.api('GET', '/api/devices')).data.devices || [];
+  const own = devs.find(d => d.id === cfgJson.deviceId);
+  r.check(own?.platform === 'cli' && own?.trusted === true && own?.name === 'Regress PC (beam command)', `its own device, approved (${JSON.stringify(own && { name: own.name, platform: own.platform, trusted: own.trusted })})`);
+  r.check(devs.find(d => d.id === r.appId)?.platform === 'windows', 'the app stays a Windows PC');
+  line = await step('note:off');
+  r.check(fs.readFileSync(notes, 'utf8') === '# Mine\n\nKeep this.\n', 'the note out, the rest as it was');
+  line = await step('note:on');
+  r.check(fs.readFileSync(notes, 'utf8').includes('<!-- /Beam -->') && /"note":true/.test(line), 'the note back');
+  line = await step('remove');
+  r.check(/ remove ok, /.test(line) && !fs.existsSync(cli) && !fs.existsSync(path.join(home, '.beam.json')), 'Remove: its folder and its sign-in gone');
+  r.check(fs.readFileSync(notes, 'utf8') === '# Mine\n\nKeep this.\n', 'Remove: the note gone, the rest as it was');
+  r.check(await r.waitFor(async () => !((await r.api('GET', '/api/devices')).data.devices || []).some(d => d.id === cfgJson.deviceId), 10000), 'Remove: its device gone from Beam');
+  const meta = path.join(r.dir, 'dist', 'beam-linux.js.json');
+  const m = JSON.parse(fs.readFileSync(meta, 'utf8'));
+  fs.writeFileSync(meta, JSON.stringify({ ...m, sig: Buffer.alloc(64, 7).toString('base64') }));
+  line = await step('setup');
+  r.check(/isn't signed with this Beam's key/.test(line) && !fs.existsSync(path.join(cli, 'beam.js')), 'a build not signed with this Beam\'s key: refused, nothing installed (' + line.slice(0, 200) + ')');
 }
 
 // (1.28, Beam 1.36) The Weather row's page: the bridge's openWeather opens LocalCast's page (here a made-up one) in a
@@ -1043,7 +1104,7 @@ async function rdp(r) {
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
   'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups,
-  'outbox-restart': outboxRestart, names, notes, weather, rdp, checksums, collect };
+  'outbox-restart': outboxRestart, names, notes, weather, rdp, checksums, collect, beamcmd };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

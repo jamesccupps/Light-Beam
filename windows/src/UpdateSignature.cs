@@ -23,7 +23,18 @@ namespace Beam
             return Check(UpdateKey.PublicKey, version, sha256Hex, size, signature);
         }
 
+        // (1.33) Another of Beam's signed builds: "linux" (the beam command, BeamCommand.cs) signs "beam-linux-update\n…".
+        public static string Check(string version, string sha256Hex, long size, string signature, string app)
+        {
+            return Check(UpdateKey.PublicKey, version, sha256Hex, size, signature, app);
+        }
+
         public static string Check(string publicKey, string version, string sha256Hex, long size, string signature)
+        {
+            return Check(publicKey, version, sha256Hex, size, signature, "windows");
+        }
+
+        public static string Check(string publicKey, string version, string sha256Hex, long size, string signature, string app)
         {
             if (string.IsNullOrEmpty(publicKey)) return null;
             if (string.IsNullOrEmpty(signature)) return "the update isn't signed";
@@ -39,7 +50,7 @@ namespace Beam
             var blob = new byte[8 + 64];
             blob[0] = 0x45; blob[1] = 0x43; blob[2] = 0x53; blob[3] = 0x31; blob[4] = 32;
             Buffer.BlockCopy(xy, 0, blob, 8, 64);
-            byte[] message = Encoding.UTF8.GetBytes("beam-windows-update\n" + version + "\n" + (sha256Hex ?? "").Trim().ToLowerInvariant() + "\n" + size.ToString(CultureInfo.InvariantCulture));
+            byte[] message = Encoding.UTF8.GetBytes("beam-" + app + "-update\n" + version + "\n" + (sha256Hex ?? "").Trim().ToLowerInvariant() + "\n" + size.ToString(CultureInfo.InvariantCulture));
             try
             {
                 using (var key = CngKey.Import(blob, CngKeyBlobFormat.EccPublicBlob))

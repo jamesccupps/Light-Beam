@@ -84,6 +84,7 @@ namespace Beam
         public AppInstaller Apps;         // Beam 1.21 (app 1.16): the user's apps, installed here when asked (once allowed here)
         public CommandRunner Commands;    // Beam 1.32 (app 1.25): commands from the devices that may control this PC (once allowed here)
         public LogCollector Collector;    // Beam 1.41 (app 1.32): read-only requests (logs, processes…) from approved devices (once allowed here)
+        public BeamCommand BeamCmd;       // Beam 1.41.1 (app 1.33): the beam command on this PC, for Claude Code (set up from Settings here)
         bool appsReported;                // ...what's installed told to the server on this stream
         readonly Dictionary<string, RemoteViewWindow> remoteViews = new Dictionary<string, RemoteViewWindow>(); // ...and controlling others
         FamilyWindow family;                     // (1.10) Beam Family in a window of its own
@@ -178,6 +179,7 @@ namespace Beam
             Apps = new AppInstaller(this);
             Commands = new CommandRunner(this);
             Collector = new LogCollector(this);
+            BeamCmd = new BeamCommand(this);
 
             up = new Uploader(() => Api, j => { var s = j.State; Post(() => OnUploadChanged(j, s)); }, j => { });
             down = new Downloader(() => Api, j => { var s = j.State; Post(() => OnDownloadChanged(j, s)); }, OnDownloadProgress);
@@ -1552,6 +1554,7 @@ namespace Beam
 
         void OnUpdateInfo(Dictionary<string, object> d, bool manual, Action<string> report)
         {
+            if (BeamCmd != null) BeamCmd.UpdateIfOld(d); // (1.33) the beam command, when it's set up here
             var u = Updater.FromUpdates(d);
             if (!Updater.IsNewer(u))
             {
@@ -2671,6 +2674,8 @@ namespace Beam
             // log folders are chosen only in the native window (bridge `logFolders`).
             s["collectAllowed"] = ServerHas("collect") ? (object)Cfg.CollectAllowed : null;
             s["collectFolders"] = ServerHas("collect") ? (object)Cfg.CollectFolders.Select(f => (object)f.ToJson()).ToArray() : null;
+            // (1.33) the beam command on this PC for Claude Code (set up, removed and its note in Settings here: bridge beamCommand)
+            s["beamCommand"] = ServerHas("collect") && BeamCmd != null ? BeamCmd.StatusObject() : null;
             // (1.18, Beam 1.26; null: the server has none) The folders shared from here and who sees each: read-only (the
             // page opens SharedFoldersForm, bridge `sharedFolders`).
             s["sharedFolders"] = ServerHas("shared-folders") ? (object)Cfg.SharedFolders.Select(f =>
@@ -2864,6 +2869,24 @@ namespace Beam
             if (what != null) status.Now("collecting " + what);
             if (SettingsChanged != null) SettingsChanged();
             MarkChanged();
+        }
+
+        // (1.33) The beam command's state changed (set up, updated, removed, its note): the page.
+        public void CommandToolChanged()
+        {
+            if (marshal.InvokeRequired) { Post(CommandToolChanged); return; }
+            if (SettingsChanged != null) SettingsChanged();
+            MarkChanged();
+        }
+
+        // (tests, a custom --config only) The beam command: setup, setup-nonote, note:on, note:off, remove, status.
+        async void BeamCommandTest(string cmd)
+        {
+            string why = null;
+            if (cmd == "setup" || cmd == "setup-nonote") why = await BeamCmd.SetUp(cmd == "setup");
+            else if (cmd == "remove") why = await BeamCmd.Remove();
+            else if (cmd == "note:on" || cmd == "note:off") why = BeamCmd.SetNote(cmd == "note:on");
+            Log.Write("beam command (test): " + cmd + " " + (why ?? "ok") + ", " + Json.Stringify(BeamCmd.StatusObject()));
         }
 
         // (1.32) Settings → This PC → Log folders…: the native window (the folders are chosen only there).
@@ -3248,6 +3271,7 @@ namespace Beam
             if (o.TestApps != null && Cfg.CustomPath) Apps.TestCommand(o.TestApps);
             if (o.TestShares != null && Cfg.CustomPath) SharesTest(o.TestShares);
             if (o.TestLogFolders != null && Cfg.CustomPath) LogFoldersTest(o.TestLogFolders);
+            if (o.TestBeamCommand != null && Cfg.CustomPath) BeamCommandTest(o.TestBeamCommand);
             if (o.TestToasts != null && Cfg.CustomPath) ToastsTest(o.TestToasts);
             if (o.RemoveApp != null) Apps.RemoveFromWindows(o.RemoveApp); // (1.16: Windows' Installed apps → Uninstall)
         }

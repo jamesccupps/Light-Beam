@@ -50,6 +50,7 @@ namespace Beam
         public string TestBridge;    // tests: a host bridge message as if the chat page sent it (the reply goes to beam.log)
         public string TestShares;    // tests (1.18): the Shared folders window ("open", "shot:<png>", "save", "close")
         public string TestLogFolders; // tests (1.32): the Log folders window ("open", "add:<folder>", "shot:<png>", "save", "close")
+        public string TestBeamCommand; // tests (1.33): the beam command ("setup", "setup-nonote", "note:on", "note:off", "remove", "status")
         public string TestToasts;    // tests (1.21): "on" (notifications described in beam.log), "click:<arguments>|<reply text>"
         public bool ToastActivated;  // (1.21) started by Windows for a click on a notification (--toast-activated -Embedding)
         public string TestOpenRemote; // tests: the viewer window for that device, as the page's "Control" opens it
@@ -106,6 +107,7 @@ namespace Beam
                 else if (lower == "--test-bridge" && more) o.TestBridge = args[++i];
                 else if (lower == "--test-shares" && more) o.TestShares = args[++i];
                 else if (lower == "--test-log-folders" && more) o.TestLogFolders = args[++i];
+                else if (lower == "--test-beam-command" && more) o.TestBeamCommand = args[++i];
                 else if (lower == "--test-toasts" && more) o.TestToasts = args[++i];
                 else if (lower == "--toast-activated" || lower == "-embedding") { o.ToastActivated = true; o.Background = true; } // (never a file to send)
                 else if (lower == "--test-open-remote" && more) o.TestOpenRemote = args[++i];
@@ -172,6 +174,7 @@ namespace Beam
             if (TestBridge != null) { list.Add("--test-bridge"); list.Add(TestBridge); }
             if (TestShares != null) { list.Add("--test-shares"); list.Add(TestShares); }
             if (TestLogFolders != null) { list.Add("--test-log-folders"); list.Add(TestLogFolders); }
+            if (TestBeamCommand != null) { list.Add("--test-beam-command"); list.Add(TestBeamCommand); }
             if (TestToasts != null) { list.Add("--test-toasts"); list.Add(TestToasts); }
             if (TestOpenRemote != null) { list.Add("--test-open-remote"); list.Add(TestOpenRemote); }
             if (TestFamily != null) { list.Add("--test-family"); list.Add(TestFamily); }

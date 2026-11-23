@@ -12,6 +12,21 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.41.1 (2026-11-23): set it all up in the app
+
+**Versions:** server 1.41.1 (the web app), the Windows app 1.33.0; the Android app 1.21.2 and Beam for Linux 1.8.0
+unchanged.
+
+- **Settings → Security → "Logs and Claude Code"** in the Windows app's window, on each PC: "Let approved devices
+  collect logs" and Log folders… (moved here), and **the beam command for Claude Code: Set up**. One click installs it
+  from your Beam (checked against its SHA-256 and your update key), signs it in as its own approved device ("<PC>
+  (beam command)": no password or code), puts it on your PATH, and, if you like, adds a short note to
+  Claude Code's own CLAUDE.md saying how a session uses it. Needs Node.js 20 or later. Beam keeps it up to date with its builds; Remove
+  takes all of it away again (its device too).
+- **Fixed (Windows 1.31–1.32):** a big file saved while it was still arriving could be thrown away at the very end, as
+  if the server had refused it, when it became its item in the moment between two of the app's checks (the app now
+  asks in the order that can't miss it).
+
 ## 1.41.0 (2026-11-23): collect logs from a PC (read only)
 
 **Versions:** server 1.41.0, the Windows app 1.32.0, Beam for Linux 1.8.0 (the `beam` command); the Android app 1.21.2

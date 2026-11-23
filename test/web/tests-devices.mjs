@@ -746,8 +746,9 @@ export default function register(test) {
 
   test('Settings → Security: this device’s own switches (the Windows app’s remote control and app installs, Beam for Linux’s remote control) (2026-10-21)', async ctx => {
     // (the user: "it can be a per device setting in the app gui settings on that device, it should just be easy")
-    const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowApps', 'allowRemoteControl', 'allowCollect', 'logFolders'];
-    const { page } = await hostPage(ctx, { features, settings: { allowRemoteControl: false, appsAllowed: false, collectAllowed: false, collectFolders: [] } });
+    const features = ['transfers', 'localFiles', 'settings', 'openPanel', 'remoteControl', 'allowApps', 'allowRemoteControl', 'allowCollect', 'logFolders', 'beamCommand'];
+    const tool = { node: '22.1.0', nodeOk: true, installed: false, claude: true, note: false, signedIn: false };
+    const { page } = await hostPage(ctx, { features, settings: { allowRemoteControl: false, appsAllowed: false, collectAllowed: false, collectFolders: [], beamCommand: tool } });
     await page.waitFor(`paired && hostState.ready`);
     await page.evaluate(`openSettings('security'); true`);
     const sw = label => `[...$('#set-security').querySelectorAll('label.switch')].find(l => l.textContent.startsWith(${JSON.stringify(label)}))?.querySelector('input')`;
@@ -775,6 +776,24 @@ export default function register(test) {
     await page.waitFor(`__host.log.some(m => m.type === 'logFolders')`, 3000, 'Log folders… opens the app’s window');
     await page.evaluate(`${sw('Let approved devices collect logs')}.click(); true`);
     await page.waitFor(`__host.log.some(m => m.type === 'setSettings' && m.settings.collectAllowed === false)`, 3000, 'collect off');
+    // (1.41.1, Windows 1.33) the beam command for Claude Code: Set up… asks first (the note ticked), then the app does it
+    const cardText = `[...$('#set-security').querySelectorAll('.set-card')].find(c => /Logs and Claude Code/.test(c.textContent))?.textContent || ''`;
+    const btn = label => `[...$('#set-security').querySelectorAll('button')].find(b => b.textContent.includes(${JSON.stringify(label)}))`;
+    await page.waitFor(`/The beam command/.test(${cardText}) && /Let approved devices collect logs/.test(${cardText}) && Boolean(${btn('Set up…')})`, 3000, 'its card: the collect switch and the beam command');
+    await page.evaluate(`${btn('Set up…')}.click(); true`);
+    await page.waitFor(`/Set up the beam command for Claude Code/.test(document.querySelector('#genDlg[open]')?.textContent || '') && document.querySelector('#genDlg[open] input[type=checkbox]')?.checked === true`, 3000, 'asks first, the note ticked');
+    await page.evaluate(`__host.reply('beamCommand', () => ({ ok: true, result: { settings: { ...hostState.settings, beamCommand: { ...hostState.settings.beamCommand, installed: true, signedIn: true, version: '1.8.0', device: 'Shop PC (beam command)', note: true } } } })); [...document.querySelectorAll('#genDlg[open] button')].find(b => b.textContent === 'Set up').click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'beamCommand' && m.action === 'setup' && m.note === true)`, 3000, 'asked the app: setup with the note');
+    await page.waitFor(`/beam 1\\.8\\.0, signed in as Shop PC \\(beam command\\)/.test(${cardText}) && ${sw('Tell Claude Code how to use it')}?.checked === true && Boolean(${btn('Remove')})`, 3000, 'set up: its state, the note switch, Remove');
+    await page.evaluate(`${sw('Tell Claude Code how to use it')}.click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'beamCommand' && m.action === 'note' && m.on === false)`, 3000, 'the note switch asks the app');
+    await page.evaluate(`${btn('Remove')}.click(); true`);
+    await page.waitFor(`/Remove the beam command/.test(document.querySelector('#genDlg[open]')?.textContent || '')`, 3000, 'Remove asks');
+    await page.evaluate(`[...document.querySelectorAll('#genDlg[open] button')].find(b => b.textContent === 'Remove').click(); true`);
+    await page.waitFor(`__host.log.some(m => m.type === 'beamCommand' && m.action === 'remove')`, 3000, 'asked the app: remove');
+    // No Node.js: Set up waits, and says what's needed
+    await page.evaluate(`__host.emit({ type: 'settings', settings: { ...hostState.settings, beamCommand: { node: null, nodeOk: false, installed: false, claude: true } } }); true`);
+    await page.waitFor(`/Needs Node\\.js \\(version 20 or later\\)/.test(${cardText}) && ${btn('Set up…')}?.disabled === true`, 3000, 'no Node.js: says so, Set up waits');
     eq(page.errors, [], 'no page errors');
     // Beam for Linux's window (a page that is that computer's sign-in), played by this page's own device: why it can't
     // be on shows under a switch that waits; with nothing in the way, the switch asks the server (which refuses here: the

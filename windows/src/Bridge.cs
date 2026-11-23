@@ -13,7 +13,7 @@ namespace Beam
     class Bridge
     {
         public const int Version = 1;
-        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper", "saveText", "allowCommands", "weather", "allowCollect", "logFolders" };
+        public static readonly string[] Features = { "transfers", "localFiles", "settings", "clipboard", "pickFiles", "pickFolder", "dragOut", "dragOutDone", "openPanel", "remoteDesktop", "phoneNotifications", "remoteControl", "restoreSettings", "copyFiles", "dragOutMany", "family", "allowApps", "appAsk", "sharedFolders", "look", "allowRemoteControl", "adminHelper", "saveText", "allowCommands", "weather", "allowCollect", "logFolders", "beamCommand" };
 
         // Several files at once (copyFiles, dragOut with itemIds; Beam 1.12): more than this is a mistake, not a selection.
         const int MaxFilesAtOnce = 1000;
@@ -244,6 +244,9 @@ namespace Beam
                     if (!app.Cfg.CollectAllowed) app.Collector.Toggle("Settings on this PC");
                     Reply(id, Obj("settings", app.SettingsObject()));
                     break;
+                case "beamCommand": // (1.33) the beam command for Claude Code: { action: setup (note) | remove | note (on) }
+                    BeamCommandDo(id, Json.Str(m, "action"), Json.Bool(m, "note", true), Json.Bool(m, "on", false));
+                    break;
                 case "logFolders": // (1.32) Log folders…: the native window (the folders are chosen only there)
                     app.ShowLogFolders(win);
                     Reply(id, Obj("settings", app.SettingsObject()));
@@ -406,6 +409,17 @@ namespace Beam
                 }
             }
             catch (Exception ex) { Fail(id, "failed", "Couldn't save it: " + ex.Message); }
+        }
+
+        async void BeamCommandDo(object id, string action, bool note, bool on)
+        {
+            string why;
+            if (action == "setup") why = await app.BeamCmd.SetUp(note);
+            else if (action == "remove") why = await app.BeamCmd.Remove();
+            else if (action == "note") why = app.BeamCmd.SetNote(on);
+            else { Fail(id, "bad", "Unknown action"); return; }
+            if (why != null) Fail(id, "failed", why);
+            else Reply(id, Obj("settings", app.SettingsObject()));
         }
 
         async void CopyText(object id, string itemId, string text)

@@ -150,6 +150,13 @@ namespace Beam
             return u.Version == null || string.IsNullOrEmpty(u.Sha256) ? null : u;
         }
 
+        // (1.33) a > b, both versions like 1.8.0
+        public static bool IsNewerVersion(string a, string b)
+        {
+            Version va, vb;
+            return TryParse(a, out va) && TryParse(b, out vb) && va > vb;
+        }
+
         public static bool IsNewer(UpdateInfo u)
         {
             Version v;
