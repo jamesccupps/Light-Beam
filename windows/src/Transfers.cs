@@ -8,6 +8,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -87,6 +88,90 @@ namespace Beam
         {
             length = count;
             return true;
+        }
+    }
+
+    // (1.31, server 1.40; the 2026-11-21 audit's F1) SHA-256s: an upload's own (read beside it, usually from the cache),
+    // a download's as it's written, the server's in Repr-Digest (RFC 9530). Windows' own (CNG) SHA-256 uses the CPU's
+    // SHA instructions where it has them; the managed one would be several times slower.
+    static class Transfers
+    {
+        public static string Hex(byte[] b)
+        {
+            var sb = new System.Text.StringBuilder(b.Length * 2);
+            foreach (var x in b) sb.Append(x.ToString("x2"));
+            return sb.ToString();
+        }
+
+        // A SHA-256 in hex as the server writes it, or null.
+        public static string ShaHex(string s)
+        {
+            if (s == null || s.Length != 64) return null;
+            foreach (char c in s) if (!(c >= '0' && c <= '9' || c >= 'a' && c <= 'f')) return null;
+            return s;
+        }
+
+        // The first `count` bytes of a file into a hash (all of it when count is -1).
+        public static void HashFile(HashAlgorithm hash, string path, long count, CancellationToken ct)
+        {
+            using (var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.SequentialScan))
+            {
+                var buf = new byte[1 << 20];
+                long left = count < 0 ? long.MaxValue : count;
+                while (left > 0)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    int n = f.Read(buf, 0, (int)Math.Min(buf.Length, left));
+                    if (n <= 0)
+                    {
+                        if (count < 0) break;
+                        throw new IOException("it's shorter than it was");
+                    }
+                    hash.TransformBlock(buf, 0, n, null, 0);
+                    left -= n;
+                }
+            }
+        }
+
+        // A whole file's SHA-256 (hex), on a thread of its own at below-normal priority.
+        public static Task<string> Sha256Of(string path, CancellationToken ct)
+        {
+            return Task.Run(() =>
+            {
+                var thread = Thread.CurrentThread;
+                var before = thread.Priority;
+                thread.Priority = ThreadPriority.BelowNormal;
+                try
+                {
+                    using (var sha = new SHA256Cng())
+                    {
+                        HashFile(sha, path, -1, ct);
+                        sha.TransformFinalBlock(new byte[0], 0, 0);
+                        return Hex(sha.Hash);
+                    }
+                }
+                finally { thread.Priority = before; }
+            }, ct);
+        }
+
+        // The SHA-256 in an answer's Repr-Digest (`sha-256=:<base64>:`), as hex; null without one.
+        public static string ReprSha256(HttpResponseMessage resp)
+        {
+            IEnumerable<string> values;
+            if (!resp.Headers.TryGetValues("Repr-Digest", out values)) return null;
+            foreach (var value in values)
+                foreach (var part in value.Split(','))
+                {
+                    var p = part.Trim();
+                    if (!p.StartsWith("sha-256=:", StringComparison.OrdinalIgnoreCase) || !p.EndsWith(":") || p.Length < 11) continue;
+                    try
+                    {
+                        var b = Convert.FromBase64String(p.Substring(9, p.Length - 10));
+                        if (b.Length == 32) return Hex(b);
+                    }
+                    catch (FormatException) { }
+                }
+            return null;
         }
     }
 
@@ -196,6 +281,8 @@ namespace Beam
         public Action<UploadJob> Finished;
         public int RestartCount;
         public DateTime BusySince = DateTime.MinValue; // the server has said "still busy with this chunk" since then
+        public Task<string> Hashing;      // (1.31) the file's SHA-256, read beside the upload; the last PUT carries it
+        public int Damaged;               // (1.31) times the server found other bytes than these (422 checksum)
 
         public override string TransferId { get { return "up:" + LocalId; } }
     }
@@ -218,6 +305,12 @@ namespace Beam
         public int QuickRetries;          // early: retries without a pause in a row (the file just became an item)
         public long Gap;                  // early: how far the sender was ahead at the last look, if no bytes came since
         public volatile bool Parked;      // early: waiting for its sender between two looks
+        public HashAlgorithm Hasher;      // (1.31) the SHA-256 of the part file's first Hashed bytes, kept as they're written
+        public long Hashed = -1;
+        public string ExpectSha;          // (1.31) the server's (Repr-Digest), when an answer had it
+        public bool Answered;             // (1.31) a whole-file answer came (its Repr-Digest, or none, is the server's word)
+        public int Damaged;               // (1.31) times what arrived wasn't the server's file
+        public bool Checked;              // (1.31) its SHA-256 matched the server's (the Saved line says so)
         readonly SemaphoreSlim wake = new SemaphoreSlim(0);
 
         // An early download with nothing to do until its sender goes on: parked, or on a connection that has had no
@@ -474,6 +567,7 @@ namespace Beam
             using (fs)
             {
                 if (job.UploadId == null) job.Size = fs.Length;
+                if (job.Hashing == null || job.Hashing.IsFaulted || job.Hashing.IsCanceled) job.Hashing = Transfers.Sha256Of(job.Path, ct);
                 while (true)
                 {
                     Exception transient = null;
@@ -566,12 +660,23 @@ namespace Beam
                 if (fs.Length != job.Size) throw new LocalFileException("The file changed while it was being sent", null);
             }
             catch (IOException ex) { throw new LocalFileException("Can't read the file: " + ex.Message, ex); }
+            // (1.31) The last PUT carries the file's SHA-256 (a server 1.40+ keeps it only if its bytes match).
+            string sha = null;
+            if (baseOffset + got >= job.Size && job.Hashing != null)
+            {
+                try { sha = await job.Hashing.ConfigureAwait(false); }
+                catch (Exception ex)
+                {
+                    if (ct.IsCancellationRequested) throw;
+                    Log.Write("Upload " + job.TransferId + ": goes without its SHA-256 (" + ex.Message + ")");
+                }
+            }
 
             var reqCts = job.BeginRequest(ct);
             var took = Stopwatch.StartNew();
             try
             {
-                var req = api().Request(HttpMethod.Put, "/api/uploads/" + job.UploadId + "?offset=" + baseOffset);
+                var req = api().Request(HttpMethod.Put, "/api/uploads/" + job.UploadId + "?offset=" + baseOffset + (sha != null ? "&sha256=" + sha : ""));
                 req.Content = new FileChunkContent(fs, baseOffset, got, n =>
                 {
                     job.Done = baseOffset + n;
@@ -628,6 +733,19 @@ namespace Beam
                     {
                         await Resync(job, ct).ConfigureAwait(false);
                         return job.State == JobState.Done;
+                    }
+                    if (status == 422 && Json.Str(d, "code") == "checksum")
+                    {
+                        // (1.31) Other bytes reached the server than this file's: it dropped them. Once more from the start
+                        // (the file read again: it may have changed), then no more.
+                        if (++job.Damaged > 1) throw new ApiException(400, "It arrived damaged twice (the server's SHA-256 of it isn't this file's): is the file changing while it's sent?", d);
+                        Log.Write("Upload " + job.TransferId + ": arrived damaged at the server (its SHA-256 isn't this file's), sending it again");
+                        job.UploadId = null;
+                        job.Offset = 0;
+                        job.Done = 0;
+                        job.Hashing = Transfers.Sha256Of(job.Path, ct);
+                        changed(job);
+                        return false;
                     }
                     string msg = Json.Str(d, "error") ?? ("HTTP " + status);
                     Api.NoticeMoved(status, d);
@@ -903,7 +1021,7 @@ namespace Beam
             }
             catch (IOException ex) { throw new LocalFileException("Can't write the file: " + ex.Message, ex); }
             job.Done = have;
-            if (have == item.Size && (have > 0 || File.Exists(job.PartPath))) return Finish(job);
+            if (have == item.Size && (have > 0 || File.Exists(job.PartPath))) return !await Verified(job, ct).ConfigureAwait(false) || Finish(job);
 
             var reqCts = job.BeginRequest(ct);
             try
@@ -946,6 +1064,13 @@ namespace Beam
                     if (have > 0) Log.Write("Download " + job.TransferId + ": " + (append ? "resuming at byte " + have : "the server ignored the range, starting over"));
                     if (!append) have = 0;
                     job.Done = have;
+                    // (1.31) The server's SHA-256 of the whole file (none while it's still arriving, or from servers before
+                    // 1.40), and this file's own kept from what the part file has.
+                    var digest = Transfers.ReprSha256(resp);
+                    if (digest != null) job.ExpectSha = digest;
+                    if (!(resp.Headers.CacheControl != null && resp.Headers.CacheControl.NoStore)) job.Answered = true;
+                    try { HashFrom(job, have, ct); }
+                    catch (IOException ex) { throw new LocalFileException("Can't read the file: " + ex.Message, ex); }
 
                     FileStream file;
                     try
@@ -982,6 +1107,8 @@ namespace Beam
                                     job.QuickRetries = 0;
                                     job.Gap = 0;
                                     writing = file.WriteAsync(buf, 0, n, ct);
+                                    job.Hasher.TransformBlock(buf, 0, n, null, 0); // (1.31; the write only reads buf too)
+                                    job.Hashed += n;
                                     job.Done += n;
                                     job.Failures = 0;
                                     progress(job);
@@ -1011,7 +1138,7 @@ namespace Beam
                         throw new HttpRequestException("The download stalled");
                     }
                     if (job.Done < item.Size) throw new HttpRequestException("The connection closed early");
-                    return Finish(job);
+                    return !await Verified(job, ct).ConfigureAwait(false) || Finish(job);
                 }
             }
             catch (OperationCanceledException)
@@ -1020,6 +1147,73 @@ namespace Beam
                 throw new TimeoutException("The connection stalled");
             }
             finally { job.EndRequest(reqCts); }
+        }
+
+        // (1.31) The hash for the part file's first `have` bytes: kept from the writes, else read again from the file (after
+        // a restart, a write that failed, a fresh start).
+        static void HashFrom(DownloadJob job, long have, CancellationToken ct)
+        {
+            if (job.Hasher != null && job.Hashed == have) return;
+            DropHasher(job);
+            var h = new SHA256Cng();
+            try { if (have > 0) Transfers.HashFile(h, job.PartPath, have, ct); }
+            catch { h.Dispose(); throw; }
+            job.Hasher = h;
+            job.Hashed = have;
+        }
+
+        static void DropHasher(DownloadJob job)
+        {
+            if (job.Hasher != null) job.Hasher.Dispose();
+            job.Hasher = null;
+            job.Hashed = -1;
+        }
+
+        // (1.31, server 1.40; the 2026-11-21 audit's F1) The whole part file's SHA-256 against the server's. A live
+        // download's answer had none: the item has it once the upload has become one (still finishing: wait a moment;
+        // neither: the server refused the sender's copy, or it was cancelled → Gone, nothing saved). Not the same: the
+        // part goes and it starts over once, then fails. True: save it.
+        async Task<bool> Verified(DownloadJob job, CancellationToken ct)
+        {
+            try { HashFrom(job, job.Item.Size, ct); }
+            catch (IOException ex) { throw new LocalFileException("Can't read the file: " + ex.Message, ex); }
+            job.Hasher.TransformFinalBlock(new byte[0], 0, 0);
+            string got = Transfers.Hex(job.Hasher.Hash);
+            DropHasher(job);
+            string want = job.ExpectSha;
+            if (want == null && (job.Early || !job.Answered))
+            {
+                for (int i = 0; i < 40 && want == null; i++)
+                {
+                    try
+                    {
+                        var it = await api().GetItem(job.Item.Id).ConfigureAwait(false);
+                        if (it == null || it.Sha256 == null) break; // (a server before 1.40, an older item: nothing to check)
+                        want = it.Sha256;
+                        break;
+                    }
+                    catch (ApiException ex) { if (ex.Status != 404) break; }
+                    if (!job.Early) break; // (deleted meanwhile: the bytes here are what it was)
+                    try { await api().Call(HttpMethod.Get, "/api/uploads/" + job.Item.Id, null, 20, ct).ConfigureAwait(false); }
+                    catch (ApiException ex)
+                    {
+                        if (ex.Status != 404) break;
+                        job.State = JobState.Gone;
+                        job.Error = "It wasn't kept at the server (the sender cancelled it, or it arrived damaged there)";
+                        Log.Write("Download " + job.TransferId + ": done, but the server kept no item of it (cancelled, or refused as damaged): not saved");
+                        return false;
+                    }
+                    await Task.Delay(500, ct).ConfigureAwait(false);
+                }
+            }
+            job.Checked = want != null && want == got;
+            if (want == null || want == got) return true;
+            FileUtil.TryDelete(job.PartPath);
+            job.ExpectSha = null;
+            job.Answered = false;
+            if (++job.Damaged > 1) throw new ApiException(400, "It arrived damaged twice (its SHA-256 isn't the server's)", null);
+            Log.Write("Download " + job.TransferId + ": arrived damaged (its SHA-256 isn't the server's), starting over");
+            throw new HttpRequestException("It arrived damaged, starting over");
         }
 
         bool Finish(DownloadJob job)
@@ -1057,7 +1251,7 @@ namespace Beam
                 FileUtil.MarkFromInternet(final, job.Referrer);
                 job.FinalPath = final;
                 job.State = JobState.Done;
-                Log.Write("Saved " + job.TransferId + " to " + final + Speed(job));
+                Log.Write("Saved " + job.TransferId + " to " + final + Speed(job) + (job.Checked ? ", SHA-256 checked" : ""));
                 return true;
             }
             catch (Exception ex) { throw new LocalFileException("Can't save the file: " + ex.Message, ex); }

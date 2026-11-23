@@ -1025,7 +1025,7 @@ on every device, opening LocalCast's own page as it is. Beam doesn't change Loca
 |---|---|
 | `GET /api/items` | `{ "items": [Item...], "cursor" }`, newest first (`cursor` is 1.4) |
 | `GET /api/items?since=<cursor>` | **(1.4)** only what changed since that cursor: `{ "items", "deleted", "cursor", "delta": true }`, or the full list with `"delta": false` (see Delta sync) |
-| `GET /api/items/{id}` | the full Item |
+| `GET /api/items/{id}` | the full Item; **(1.40, feature `sha256`)** a file's has `sha256` (its SHA-256 in hex; lists and events leave it out) |
 | `GET /api/items/{id}/text` | full text as `text/plain`. Sends `ETag`/`Last-Modified` (`304` with `If-None-Match`) (v3) |
 | `POST /api/items/{id}/ack` | Mark as delivered to the calling device → `{ "id", "delivered" }` |
 | `PATCH /api/items/{id}` | **(v3)** `{ "pinned": true|false }` and **(1.14, feature `edit`)** `{ "text": "…" }` (a text's new words: its sender's device, or **(1.30.1)** an approved sign-in, else `403 {reason: "trusted"}`; `edited` is set; a long one goes to data/texts as when it was sent; `400` for a file or nothing left); **(1.34, feature `notes`)** `{ "done": true|false }` (a note ticked off: notes only,
@@ -1079,7 +1079,8 @@ server:
 
 ### Sending files: simple (small files, curl, Shortcuts)
 `PUT /api/file?name=<url-encoded name>&to=<ids or names, comma-separated>` (v3: optional `&w=&h=`). The body is the
-raw file bytes (not multipart) → `201` + Item.
+raw file bytes (not multipart) → `201` + Item. **(1.40)** Optional `&sha256=<hex>`: the file's SHA-256; other bytes
+arriving → `422 { "code": "checksum" }` and no item.
 
 ### Sending files: resumable (use this in apps, required for large files)
 1. `POST /api/uploads` with JSON `{ "name": "video.mp4", "size": 123456789, "mime": "video/mp4", "to": [...], "w", "h" }`
@@ -1109,6 +1110,15 @@ raw file bytes (not multipart) → `201` + Item.
    `409 { "error": "It had finished already", "id" }` (the item stays; before, an `upload-cancelled` went out for it).
 5. The finished item has the same id as the upload. If the final response was lost, `GET /api/items/{id}` returns it.
 
+**A SHA-256 for every upload (1.40, feature `sha256`).** The server keeps each upload's SHA-256 while its bytes are
+written (no second read; after a restart it reads the partial file once, at the next `PUT`), and the finished item has
+it (`sha256`: `GET /api/items/{id}`, the finishing `201`; `GET /api/file`'s `Repr-Digest`, below).
+- Send the file's own SHA-256 (hex): `"sha256"` in `POST /api/uploads`, or `&sha256=<hex>` on any `PUT` (the
+  Windows app and `beam` put it on the last one, read from the file beside the upload). Not 64 hex digits → `400`.
+- If the bytes the server has aren't those, the last `PUT` gets `422 { "error", "code": "checksum" }`: the upload is
+  dropped (`upload-cancelled` with `"damaged": true`) and never becomes an item. Send it again from the start (the
+  apps do, once). Without one from the sender, the item's `sha256` is that of what reached the server.
+
 **Big chunks (1.4, feature `big-chunks`).** Each chunk waits a full round trip for its reply before the next one
 starts: with 8 MB chunks at 25 ms and 50 MB/s that leaves the link idle about 20 % of the time.
 - `maxChunkSize` (in `POST /api/uploads`, `GET /api/uploads/{id}` and `GET /api/info`) is the largest body one `PUT`
@@ -1129,6 +1139,10 @@ so interrupted downloads can resume with `Range: bytes=N-`.
 - An invalid range such as `bytes=5-2` is ignored (`200`).
 - A zero-byte file always answers `200`.
 - Add `?inline` to view images, video or audio in a browser (never SVG or HTML).
+- **(1.40, feature `sha256`)** `Repr-Digest: sha-256=:<base64>:` (RFC 9530): the whole file's SHA-256, on a `206`
+  too. Check what you saved against it; not the same → delete it and download again. A file still arriving (below)
+  has none until it is an item: then `GET /api/items/{id}` has `sha256` (no item and no upload any more: the server
+  refused the sender's copy, or it was cancelled). Items from before 1.40 have none.
 
 **Downloads while the upload is still running (1.4, feature `live-download`).** `GET /api/file/{id}` also works with
 the id of an upload that is still arriving (from the `upload` event), with the same sign-in rules as a finished file:
@@ -1161,7 +1175,7 @@ the id of an upload that is still arriving (from the `upload` event), with the s
 | `read` | **(v3)** `{ "device", "conversation", "ts" }`: a read marker moved (see Conversations) |
 | `upload` | **(v3)** `{ "id", "name", "size", "offset", "mime", "from", "device", "to" }`: an upload started or progressed (at most once a second per upload), for "incoming 35%" |
 | `upload-done` | **(v3)** `{ "id" }`, followed by the `item` event |
-| `upload-cancelled` | **(v3)** `{ "id" }` (cancelled or expired) |
+| `upload-cancelled` | **(v3)** `{ "id" }` (cancelled or expired); **(1.40)** `"damaged": true` when the server refused it (its SHA-256 isn't the sender's) |
 | `settings` | **(v3)** the settings object, after a change |
 | `moved` | **(v3)** `{ "movedTo" }`: Beam moved (see above); the stream closes |
 | `ring` | **(1.3)** `{ "device", "by", "from", "stop", "at" }`: ring (or stop ringing) the device `device`; everyone else ignores it |

@@ -12,6 +12,20 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.40.0 (2026-11-23): a SHA-256 for every file
+
+**Versions:** server 1.40.0, the Windows app 1.31.0, Beam for Linux 1.7.0; the Android app 1.21.2 unchanged.
+
+- **The server keeps every upload's SHA-256** as its bytes arrive (no second read of the file), and the file's item has
+  it. A sender can give its own (`sha256` when the upload starts, or on a `PUT`): if the bytes that reached the server
+  aren't those, the upload is refused (`422`, code `checksum`) and never becomes an item. The Windows app and the
+  `beam` command send theirs (read from the file beside the upload) and send the file again once if it's refused.
+- **Downloads are checked:** `GET /api/file` says the file's SHA-256 (`Repr-Digest`). The Windows app and `beam` check
+  what they saved against it, and download again once if it isn't the same; a file saved while it still arrives is
+  checked against its item once it is one. The Windows app's log says "SHA-256 checked" for each saved file.
+- Not yet: the Android app (its next build), and browsers (their downloads go to the browser's own folder; the server
+  still keeps the SHA-256 of what a browser sends).
+
 ## 1.39.0 (2026-11-22): Control wakes a sleeping PC; alerts for HW Blackbox's problems
 
 **Versions:** server 1.39.0; the Windows app 1.30.0, the Android app 1.21.2 and Beam for Linux 1.6.0 unchanged.

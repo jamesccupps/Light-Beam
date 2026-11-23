@@ -87,6 +87,7 @@ namespace Beam
         public Dictionary<string, long> Delivered = new Dictionary<string, long>();
         public long Ts;
         public long Edited; // (1.14 edit) when its words last changed, 0 if never
+        public string Sha256; // (1.31, server 1.40) a file's SHA-256 (hex), from GET /api/items/{id}; lists leave it out
 
         public bool IsFile { get { return Kind == "file"; } }
         public bool IsText { get { return Kind == "text"; } }
@@ -109,6 +110,7 @@ namespace Beam
             it.Delivered = Json.LongMap(d, "delivered");
             it.Ts = Json.Long(d, "ts", 0);
             it.Edited = Json.Long(d, "edited", 0);
+            it.Sha256 = Transfers.ShaHex(Json.Str(d, "sha256"));
             return Config.ValidId(it.Id) ? it : null; // (1.26.2, the 2026-11-14 audit: ids go into file names)
         }
     }

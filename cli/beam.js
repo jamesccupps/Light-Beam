@@ -6,7 +6,7 @@
 'use strict';
 
 // Beam for Linux's version (linux/build.mjs signs the build with it; Beam sees it when this is the Linux app).
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 // The public half of the key Beam for Linux's updates are signed with: linux/build.mjs fills it in (empty here).
 const UPDATE_KEY = '';
 
@@ -242,12 +242,28 @@ async function sendText(cfg, text, to = []) {
 const BIG_CHUNK_MIN = 64 * 1024 * 1024;
 const CHUNK_SECONDS = 4;
 
-// Resumable, chunked upload (see docs/API.md), so big files survive dropped connections.
-async function sendFile(cfg, file, { name, quiet, to = [] } = {}) {
+// (1.7, the server's 1.40) A file's SHA-256 (hex), read on its own beside the upload (usually from the cache).
+async function fileSha256(file) {
+  const hash = crypto.createHash('sha256');
+  for await (const piece of fs.createReadStream(file, { highWaterMark: 1024 * 1024 })) hash.update(piece);
+  return hash.digest('hex');
+}
+
+// (1.7) The SHA-256 in a Repr-Digest header (RFC 9530: `sha-256=:<base64>:`), as hex; null without one.
+function reprSha256(header) {
+  const m = /(?:^|,)\s*sha-256=:([A-Za-z0-9+/]+=*):/i.exec(header || '');
+  const bytes = m ? Buffer.from(m[1], 'base64') : null;
+  return bytes?.length === 32 ? bytes.toString('hex') : null;
+}
+
+// Resumable, chunked upload (see docs/API.md), so big files survive dropped connections. (1.7) The last PUT carries
+// the file's SHA-256: a server that finds other bytes refuses it (422, code checksum), and it goes once more.
+async function sendFile(cfg, file, { name, quiet, to = [], again = false } = {}) {
   const stat = await fsp.stat(file).catch(() => null);
   if (!stat) throw new Error(`No such file: ${file}`);
   if (stat.isDirectory()) return sendFolder(cfg, file, { quiet, to }); // (1.5.0: as a .zip)
   name ||= path.basename(file);
+  const hashing = fileSha256(file).catch(() => null);
   const showProgress = !quiet && process.stderr.isTTY && stat.size > 2 * 1024 * 1024;
   const upload = await (await api(cfg, '/api/uploads', {
     method: 'POST',
@@ -274,7 +290,8 @@ async function sendFile(cfg, file, { name, quiet, to = [] } = {}) {
           }
         }
       }
-      const res = await (await api(cfg, `/api/uploads/${upload.id}?offset=${offset}`, {
+      const sha = end === stat.size ? await hashing : null;
+      const res = await (await api(cfg, `/api/uploads/${upload.id}?offset=${offset}${sha ? `&sha256=${sha}` : ''}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(end - offset) },
         body: chunk(),
@@ -295,6 +312,11 @@ async function sendFile(cfg, file, { name, quiet, to = [] } = {}) {
         if (err.body.offset === offset) await new Promise(r => setTimeout(r, 2000)); // another chunk is still finishing
         offset = err.body.offset;
         continue;
+      }
+      if (err.status === 422 && err.body?.code === 'checksum') {
+        if (again) throw new Error(`${name} arrived damaged twice (its SHA-256 at the server isn't this file's): is it changing while it's sent?`);
+        if (!quiet) process.stderr.write(`\r  ${name}: arrived damaged at the server, sending it again…\n`);
+        return sendFile(cfg, file, { name, quiet, to, again: true });
       }
       if (!err.network && !(err.status >= 500 && err.status !== 507)) throw err;
       if (++failures > 8) throw err;
@@ -363,8 +385,17 @@ async function download(cfg, item, dir) {
   const dest = await uniquePath(dir, safeName(item.name));
   // (1.6) A part file of this process's own: `beam pull` beside the agent wrote into the same one.
   const part = `${dest}.${process.pid}.beam-part`;
+  const hash = crypto.createHash('sha256');
   try {
-    await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(part));
+    await pipeline(Readable.fromWeb(res.body), async function* (source) {
+      for await (const piece of source) {
+        hash.update(piece);
+        yield piece;
+      }
+    }, fs.createWriteStream(part));
+    // (1.7, the server's 1.40) what was saved, checked against the server's SHA-256
+    const want = reprSha256(res.headers.get('repr-digest'));
+    if (want && hash.digest('hex') !== want) throw new Error(`${item.name} arrived damaged (its SHA-256 isn't the server's), so it wasn't saved`);
     if (process.env.BEAM_TEST_SAVE_PAUSE) await new Promise(r => setTimeout(r, Number(process.env.BEAM_TEST_SAVE_PAUSE)));
     const final = await uniquePath(dir, path.basename(dest)); // (taken meanwhile: the next free name)
     await fsp.rename(part, final);

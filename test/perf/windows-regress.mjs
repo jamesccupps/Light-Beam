@@ -5,7 +5,7 @@
 // any check fails.
 //
 //   node test/perf/windows-regress.mjs [all|reconnect|restart|revoke|ack|doublepoke|nonbeam401|cancel-after-restart|cancel-live|lane
-//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open|outbox-restart|names] [--exe <Beam.exe>]
+//        |pause-full|blip-mid-chunk|retry-early|lost-finish|copy-image|copy-files|notify-open|outbox-restart|names|checksums] [--exe <Beam.exe>]
 //
 // Isolated like the other windows-* checks: a scratch server (this checkout's server.js) on 127.0.0.1:8805, the app
 // reaching it through a small TCP proxy on 8855 (so its connections can be dropped), a fake peer, and a copy of Beam.exe
@@ -89,11 +89,39 @@ class Run {
       });
       src.on('end', () => { if (!dst.destroyed) dst.end(); });
     };
+    // (1.31) While this[flag] is set: one byte of the first body after a header that has `marker` is flipped (then the
+    // flag goes and this[done] is set). `flipUp`: a PUT to /api/uploads; `flipDown`: a file's answer (Repr-Digest).
+    const flipOnce = (src, dst, marker, flag, done) => {
+      let state = 0;
+      src.on('data', chunk => {
+        if (this[flag]) {
+          let at = -1;
+          if (state === 0) {
+            const m = chunk.indexOf(marker);
+            if (m >= 0) { state = 1; const e = chunk.indexOf('\r\n\r\n', m); if (e >= 0) { state = 2; at = e + 4; } }
+          } else if (state === 1) {
+            const e = chunk.indexOf('\r\n\r\n');
+            if (e >= 0) { state = 2; at = e + 4; }
+          } else at = 0;
+          if (state === 2 && at >= 0 && at < chunk.length) {
+            chunk = Buffer.from(chunk);
+            chunk[at] ^= 0xff;
+            this[flag] = false;
+            this[done] = true;
+            state = 0;
+          }
+        }
+        if (!dst.destroyed) dst.write(chunk);
+      });
+      src.on('end', () => { if (!dst.destroyed) dst.end(); });
+    };
     this.proxy = net.createServer(c => {
       const s = net.connect(PORT, '127.0.0.1');
       this.sockets.add(c); this.sockets.add(s);
-      if (this.upRate !== undefined && !latency) paced(c, s); else pipe(c, s);
-      if (this.dropFinish) {
+      if (this.flipUp !== undefined) flipOnce(c, s, 'PUT /api/uploads/', 'flipUp', 'flippedUp');
+      else if (this.upRate !== undefined && !latency) paced(c, s); else pipe(c, s);
+      if (this.flipDown !== undefined) flipOnce(s, c, 'Repr-Digest:', 'flipDown', 'flippedDown');
+      else if (this.dropFinish) {
         // The server's answer that finishes an upload never arrives: the connection drops instead (once).
         s.on('data', chunk => {
           if (this.dropFinish && chunk.includes('"done":true')) { this.dropFinish = false; this.dropped = true; c.destroy(); s.destroy(); return; }
@@ -523,6 +551,57 @@ async function notes(r) {
   r.check(!fs.readdirSync(path.join(r.dir, 'down')).some(f => f.startsWith('for-later')), 'its own notes are not saved as downloads');
 }
 
+// (1.31, Beam 1.40; the 2026-11-21 audit's F1) SHA-256s. Sending: the last PUT carries the file's own; a byte damaged
+// on the way (the proxy flips one) → the server refuses it (422) → sent once more → one item with the file's SHA-256.
+// Saving: damaged on the way once → the part goes, once more, saved "SHA-256 checked"; the server's own copy damaged
+// (its disk) → twice, then failed, nothing left; a big file saved while it arrives → checked against its item.
+async function checksums(r) {
+  r.flipUp = false;
+  r.flipDown = false;
+  await r.setup();
+  const file = path.join(r.dir, 'files', 'sum.bin');
+  const data = crypto.randomBytes(3 * MB);
+  fs.writeFileSync(file, data);
+  r.flipUp = true;
+  let from = r.logLines().length;
+  r.forward(['--send', '--to', r.peerId, file]);
+  const done = await r.waitLog(/Upload up:\S+ finished as item \S+/, from, 30000);
+  r.check(r.flippedUp === true, 'a byte of the PUT was damaged on the way');
+  r.check(r.count(/arrived damaged at the server \(its SHA-256 isn't this file's\), sending it again/, from) === 1, 'the server refused it, and the app sent it again');
+  const sent = ((await r.api('GET', '/api/items')).data.items || []).filter(i => i.name === 'sum.bin');
+  const full = sent.length === 1 ? (await r.api('GET', `/api/items/${sent[0].id}`)).data : null;
+  r.check(!!done && full?.sha256 === sha(data), `one item, with the file's SHA-256 (${sent.length})`);
+
+  const small = crypto.randomBytes(2 * MB);
+  r.flipDown = true;
+  from = r.logLines().length;
+  const c1 = await r.api('POST', '/api/uploads', { name: 'down1.bin', size: small.length, mime: 'application/octet-stream', to: [r.appId] });
+  await r.upload(c1.data.id, small, 0, small.length);
+  r.check(await r.waitFor(() => r.saved(small, 'down1.bin'), 30000), 'saved whole after one try damaged on the way');
+  r.check(r.flippedDown === true && r.count(/arrived damaged \(its SHA-256 isn't the server's\), starting over/, from) === 1, 'the damaged try was caught and started over');
+  r.check(!!(await r.waitLog(new RegExp(`Saved down:${c1.data.id} .*SHA-256 checked`), from, 5000)), 'its Saved line says "SHA-256 checked"');
+
+  const bad = crypto.randomBytes(MB);
+  const c2 = await r.api('POST', '/api/uploads', { name: 'down2.bin', size: bad.length, mime: 'application/octet-stream', to: [r.peerId] });
+  await r.upload(c2.data.id, bad, 0, bad.length);
+  const stored = path.join(r.dir, 'data', 'files', c2.data.id);
+  const b = fs.readFileSync(stored);
+  b[1000] ^= 0xff;
+  fs.writeFileSync(stored, b);
+  from = r.logLines().length;
+  const fw = await r.api('POST', `/api/items/${c2.data.id}/forward`, { to: [r.appId] });
+  r.check(fw.status === 201, 'forwarded to the app (the same, damaged, file)');
+  r.check(!!(await r.waitLog(new RegExp(`Download down:${fw.data.id} failed: It arrived damaged twice`), from, 30000)), 'the server\'s damaged copy: twice, then failed');
+  r.check(!r.downFiles().some(f => f.startsWith('down2')), 'nothing of it saved, no part file left');
+
+  from = r.logLines().length;
+  const { id, data: big } = await r.startBig(40 * MB, 16 * MB);
+  r.check(!!(await r.waitLog(new RegExp(`Saving ${id} while`), from, 15000)), 'a big file: saving starts while it arrives');
+  await r.finishRest(id, big);
+  r.check(await r.waitFor(() => r.saved(big), 30000), 'saved complete');
+  r.check(!!(await r.waitLog(new RegExp(`Saved down:${id} .*SHA-256 checked`), from, 5000)), 'checked against its item\'s SHA-256 once it was one');
+}
+
 // (1.28, Beam 1.36) The Weather row's page: the bridge's openWeather opens LocalCast's page (here a made-up one) in a
 // window of its own (its own profile, no bridge); asked again, the same window; an address that isn't a web page's is
 // refused.
@@ -866,7 +945,7 @@ async function rdp(r) {
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
   'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups,
-  'outbox-restart': outboxRestart, names, notes, weather, rdp };
+  'outbox-restart': outboxRestart, names, notes, weather, rdp, checksums };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);

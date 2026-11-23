@@ -8355,6 +8355,157 @@ test('1.39 health alerts (the 2026-11-21 audit’s F9): a new “Problem” amon
   } finally { await s.stop(); }
 });
 
+test('1.40 a SHA-256 for every upload (the 2026-11-21 audit’s F1): kept while it arrives (a chunk that breaks off, a restart), the sender’s checked before it becomes an item (422 checksum, upload-cancelled damaged), the one-shot upload too, a forward keeps it, Repr-Digest on GET /api/file (a 206 too), lists and events leave it out; the partial file cut under the server is caught', async () => {
+  let s = await startServer('sha140', 8797);
+  try {
+    const K = s.key;
+    const h = app(K, 'shadev00140', 'Sha Desk', 'windows');
+    const phone = app(K, 'shaphone140', 'Sha Phone', 'android');
+    const oct = { ...h, 'Content-Type': 'application/octet-stream' };
+    const sha = b => crypto.createHash('sha256').update(b).digest('hex');
+    const digestOf = b => `sha-256=:${crypto.createHash('sha256').update(b).digest('base64')}:`;
+    const look = async id => (await s.req('GET', `/api/uploads/${id}`, { headers: h })).json;
+    let ev = await openEvents(s.port, phone);
+
+    // The sender's at the start (any case); the item has it; the list and the item event don't; GET /api/file says it.
+    const a = crypto.randomBytes(700_000);
+    let init = await post(s, '/api/uploads', { name: 'a.bin', size: a.length, sha256: sha(a).toUpperCase() }, h);
+    assert.equal(init.status, 201, init.body);
+    const idA = init.json.id;
+    let r = await s.req('PUT', `/api/uploads/${idA}?offset=0`, { headers: oct, body: a });
+    assert.equal(r.status, 201, r.body);
+    assert.equal(r.json.item.sha256, sha(a), 'the finishing answer has it');
+    assert.equal((await s.req('GET', `/api/items/${idA}`, { headers: h })).json.sha256, sha(a));
+    assert.ok(!('sha256' in (await s.req('GET', '/api/items', { headers: h })).json.items.find(i => i.id === idA)), 'lists leave it out');
+    assert.ok(!('sha256' in (await ev.wait('item', d => d.id === idA)).data), 'the item event leaves it out');
+    r = await s.req('GET', `/api/file/${idA}`, { headers: h, raw: true });
+    assert.equal(r.headers['repr-digest'], digestOf(a));
+    assert.equal(Buffer.compare(r.body, a), 0);
+    r = await s.req('GET', `/api/file/${idA}`, { headers: { ...h, Range: 'bytes=100-' }, raw: true });
+    assert.equal(r.status, 206);
+    assert.equal(r.headers['repr-digest'], digestOf(a), 'the whole file’s, on a 206 too');
+    const fwd = await post(s, `/api/items/${idA}/forward`, { to: [] }, h);
+    assert.equal(fwd.status, 201, fwd.body);
+    assert.equal((await s.req('GET', `/api/items/${fwd.json.id}`, { headers: h })).json.sha256, sha(a), 'a forward has the same bytes');
+    assert.equal((await post(s, '/api/uploads', { name: 'x.bin', size: 3, sha256: 'abc' }, h)).status, 400, 'not a SHA-256');
+
+    // A chunk that breaks off mid-way, then the rest with the sender's on the last PUT.
+    const b = crypto.randomBytes(1_200_000);
+    const idB = (await post(s, '/api/uploads', { name: 'b.bin', size: b.length }, h)).json.id;
+    const stall = stalledPut(s.port, `/api/uploads/${idB}?offset=0`, h, b.length, b.subarray(0, 600_000));
+    await waitFor(async () => (await look(idB)).received >= 600_000, 5000);
+    stall.r.destroy();
+    await stall.done;
+    const kept = await waitFor(async () => { const u = await look(idB); return !u.busy && u.offset > 0 && u.offset; }, 5000);
+    r = await s.req('PUT', `/api/uploads/${idB}?offset=${kept}&sha256=${sha(b)}`, { headers: oct, body: b.subarray(kept) });
+    assert.equal(r.status, 201, r.body);
+    assert.equal(r.json.item.sha256, sha(b));
+
+    // The one-shot upload: its own, and the sender's checked.
+    r = await s.req('PUT', `/api/file?name=one.txt&sha256=${sha('0123456789')}`, { headers: h, body: '0123456789' });
+    assert.equal(r.status, 201, r.body);
+    assert.equal(r.json.sha256, sha('0123456789'));
+    r = await s.req('PUT', `/api/file?name=two.txt&sha256=${sha('something else')}`, { headers: h, body: '0123456789' });
+    assert.equal(r.status, 422, r.body);
+    assert.equal(r.json.code, 'checksum');
+    assert.equal((await s.req('GET', '/api/items', { headers: h })).json.items.filter(i => i.name === 'two.txt').length, 0, 'never an item');
+
+    // A restart in the middle (no hash survives it): rebuilt from the partial file; the sender's from the start kept.
+    const c = crypto.randomBytes(900_000);
+    const idC = (await post(s, '/api/uploads', { name: 'c.bin', size: c.length, sha256: sha(c) }, h)).json.id;
+    assert.equal((await s.req('PUT', `/api/uploads/${idC}?offset=0`, { headers: oct, body: c.subarray(0, 400_000) })).json.offset, 400_000);
+    ev.close();
+    await s.req('POST', '/api/admin/shutdown', { headers: { Authorization: `Bearer ${K}` } });
+    await s.exited;
+    s = await startServer('sha140', 8797, { keep: true });
+    r = await s.req('PUT', `/api/uploads/${idC}?offset=400000`, { headers: oct, body: c.subarray(400_000) });
+    assert.equal(r.status, 201, r.body);
+    assert.equal(r.json.item.sha256, sha(c));
+
+    // The audit's finding 2: the partial file cut back under the running server (a second one on the same data used
+    // to); the next bytes land after the cut and the size comes out right. The sender's SHA-256 says it isn't what
+    // was sent: dropped, never an item, the devices told (damaged), the log says so.
+    ev = await openEvents(s.port, phone);
+    const d = crypto.randomBytes(1_000_000);
+    const idD = (await post(s, '/api/uploads', { name: 'd.bin', size: d.length }, h)).json.id;
+    assert.equal((await s.req('PUT', `/api/uploads/${idD}?offset=0`, { headers: oct, body: d.subarray(0, 500_000) })).json.offset, 500_000);
+    fs.truncateSync(path.join(s.data, 'uploads', `${idD}.part`), 300_000);
+    r = await s.req('PUT', `/api/uploads/${idD}?offset=500000`, { headers: oct, body: d.subarray(500_000, 700_000) });
+    assert.equal(r.json.offset, 500_000, 'the server goes by its file: 300 KB, then 200 KB more');
+    r = await s.req('PUT', `/api/uploads/${idD}?offset=500000&sha256=${sha(d)}`, { headers: oct, body: d.subarray(500_000) });
+    assert.equal(r.status, 422, r.body);
+    assert.equal(r.json.code, 'checksum');
+    assert.match(r.json.error, /arrived damaged/);
+    assert.equal((await s.req('GET', `/api/uploads/${idD}`, { headers: h })).status, 404, 'dropped');
+    assert.equal((await s.req('GET', `/api/items/${idD}`, { headers: h })).status, 404, 'never an item');
+    assert.ok(!fs.existsSync(path.join(s.data, 'uploads', `${idD}.part`)), 'its partial file gone');
+    assert.ok(await ev.wait('upload-cancelled', x => x.id === idD && x.damaged === true));
+    assert.match(s.out, /Upload of "d\.bin" \[\w+\] from Sha Desk arrived damaged: its SHA-256 isn't the one the sender gave, so it wasn't kept/);
+    // Without one from the sender it becomes an item, with the SHA-256 of what the server has (a receiver's check
+    // against Repr-Digest then passes or fails by what it got from here).
+    const e = crypto.randomBytes(300_000);
+    const idE = (await post(s, '/api/uploads', { name: 'e.bin', size: e.length }, h)).json.id;
+    r = await s.req('PUT', `/api/uploads/${idE}?offset=0`, { headers: oct, body: e });
+    assert.equal(r.json.item.sha256, sha(e));
+    ev.close();
+  } finally { await s.stop(); }
+});
+
+// (1.40) A proxy in front of a test server that flips the first byte of the next PUT to /api/uploads (`st.put`) or of
+// the next GET /api/file answer (`st.get`): damage on the way, as nothing else in a test can make it.
+function damagingProxy(target) {
+  const st = { put: false, get: false };
+  const flip = c => { const b = Buffer.from(c); b[0] ^= 0xff; return b; };
+  const server = http.createServer((req, res) => {
+    let up = req.method === 'PUT' && req.url.startsWith('/api/uploads/') && st.put && !(st.put = false);
+    let down = req.method === 'GET' && req.url.startsWith('/api/file/') && st.get && !(st.get = false);
+    const fwd = http.request({ host: '127.0.0.1', port: target, method: req.method, path: req.url, headers: req.headers, agent: false }, r2 => {
+      res.writeHead(r2.statusCode, r2.headers);
+      r2.on('data', c => { res.write(down && c.length ? flip(c) : c); if (c.length) down = false; });
+      r2.on('end', () => res.end());
+    });
+    fwd.on('error', () => res.destroy());
+    req.on('data', c => { fwd.write(up && c.length ? flip(c) : c); if (c.length) up = false; });
+    req.on('end', () => fwd.end());
+  });
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ port: server.address().port, st, close: () => { server.closeAllConnections(); server.close(); } })));
+}
+
+test('1.40 CLI (Beam for Linux 1.7): its SHA-256 with an upload (damaged on the way: refused, sent once more), a saved file checked against Repr-Digest (damaged: not saved)', async () => {
+  const s = await startServer('sha140cli', 8798);
+  const proxy = await damagingProxy(s.port);
+  try {
+    const home = homeDir('sha140cli');
+    const env = { BEAM_URL: `http://127.0.0.1:${proxy.port}`, BEAM_KEY: s.key };
+    const h = app(s.key, 'shacli00140', 'Check', 'windows');
+    const sha = b => crypto.createHash('sha256').update(b).digest('hex');
+    const data = crypto.randomBytes(3 * 1024 * 1024);
+    const file = path.join(TMP, 'sha140-z.bin');
+    fs.writeFileSync(file, data);
+    proxy.st.put = true;
+    let r = await cli(['send', file], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /sha140-z\.bin: arrived damaged at the server, sending it again/);
+    assert.match(s.out, /Upload of "sha140-z\.bin" \[\w+\] from .+ arrived damaged/);
+    const items = (await s.req('GET', '/api/items', { headers: h })).json.items.filter(i => i.name === 'sha140-z.bin');
+    assert.equal(items.length, 1, 'one item, the good one');
+    assert.equal((await s.req('GET', `/api/items/${items[0].id}`, { headers: h })).json.sha256, sha(data));
+    const into = path.join(TMP, 'sha140-pull');
+    proxy.st.get = true;
+    r = await cli(['pull', items[0].id.slice(0, 8), into], { home, env });
+    assert.notEqual(r.code, 0, r.out);
+    assert.match(r.out, /sha140-z\.bin arrived damaged \(its SHA-256 isn't the server's\), so it wasn't saved/);
+    assert.deepEqual(fs.existsSync(into) ? fs.readdirSync(into) : [], [], 'nothing saved, no part file left');
+    r = await cli(['pull', items[0].id.slice(0, 8), into], { home, env });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(sha(fs.readFileSync(path.join(into, 'sha140-z.bin'))), sha(data), 'saved whole the second time');
+    fs.rmSync(file, { force: true });
+  } finally {
+    proxy.close();
+    await s.stop();
+  }
+});
+
 // ---------------------------------------------------------------- runner
 
 (async () => {

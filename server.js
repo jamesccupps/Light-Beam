@@ -6575,9 +6575,10 @@ function publicItem(item) {
   return { from: null, to: [], delivered: {}, ...rest, ...(isNote(item) ? { note: true, done: Boolean(item.done) } : {}), pinned: Boolean(item.pinned), thumb: Boolean(thumb) };
 }
 
-// Lists and live events cut texts to 16 KB; the full text is at /api/items/{id}/text.
+// Lists and live events cut texts to 16 KB; the full text is at /api/items/{id}/text. (1.40) A file's sha256 is left
+// out of them (64 bytes a file that no list needs): GET /api/items/{id} and GET /api/file's Repr-Digest have it.
 function summary(item) {
-  const out = publicItem(item);
+  const { sha256, ...out } = publicItem(item);
   if (item.kind !== 'text') return out;
   const length = item.textFile ? item.textLength : item.text.length;
   if (length <= LIST_TEXT_LIMIT) return out;
@@ -6691,13 +6692,14 @@ const diskFull = offset => httpError(507, "The Beam server's disk is full.", off
 // (a phone that walked out of Wi-Fi mid-upload leaves a connection that would otherwise hang forever); what arrived
 // until then is still written. Network reads come in 64 KB pieces; they are written about 1 MB at a time (one
 // write per piece cost a sixth of an upload's CPU), one write in flight while the next batch fills.
-// onData(bytes received), onWritten(bytes written).
+// onData(bytes received), onWritten(bytes written), onStored(buffers, bytes) (1.40: each batch once written, before
+// its fsync: a running SHA-256 of what is on disk).
 // durable: { want(written, end, failed), done(written) }: after each write, and once at the end (end is true, and
 // failed when the body broke off), want() decides whether to fsync now; done() then learns how many bytes are
 // surely on disk.
 const WRITE_BATCH = MB;
 
-async function receiveBody(req, dest, limit, { flags = 'w', onData, onWritten, durable } = {}) {
+async function receiveBody(req, dest, limit, { flags = 'w', onData, onWritten, onStored, durable } = {}) {
   let size = 0;
   let stored = 0;
   let synced = 0;
@@ -6720,6 +6722,7 @@ async function receiveBody(req, dest, limit, { flags = 'w', onData, onWritten, d
     batch = [];
     batched = 0;
     await writeAll(fh, bufs);
+    onStored?.(bufs, bytes);
     stored += bytes;
     onWritten?.(stored);
     await sync(false);
@@ -6989,6 +6992,7 @@ async function forwardItem(req, res, [id], url) {
     shares(await linkOrCopy(filePath(source.id), filePath(copy.id), source.size));
     Object.assign(copy, { name: source.name, size: source.size, mime: source.mime });
     if (source.w) Object.assign(copy, { w: source.w, h: source.h });
+    if (source.sha256) copy.sha256 = source.sha256; // (1.40)
   }
   if (source.thumb) {
     try {
@@ -7197,11 +7201,16 @@ async function postFile(req, res, _m, url) {
   // (1.30.2, the review's Low) one of unknown length (chunked) stops at the room there is
   const limit = known ? MAX_UPLOAD : await roomLeft();
   const name = fileNameFrom(req, url);
+  const expect = senderSha(url.searchParams.get('sha256')); // (1.40)
   const id = newId();
   const dest = filePath(id);
+  const hash = crypto.createHash('sha256');
   let size;
   try {
-    size = await receiveBody(req, dest, limit, { durable: { want: (_n, end) => end, done: () => syncDir(DIR.files) } });
+    size = await receiveBody(req, dest, limit, {
+      onStored: bufs => { for (const b of bufs) hash.update(b); },
+      durable: { want: (_n, end) => end, done: () => syncDir(DIR.files) },
+    });
   } catch (err) {
     await rmQuiet(dest);
     if (err.status === 413 && limit < MAX_UPLOAD) throw httpError(507, `Not enough space on the Beam server for ${name} (${formatSize(limit)} available)`);
@@ -7210,7 +7219,12 @@ async function postFile(req, res, _m, url) {
     if (!res.headersSent && !res.socket?.destroyed) throw httpError(400, 'Upload interrupted');
     return;
   }
-  const item = newItem(req, url, { id, kind: 'file', name, size, mime: mimeFor(name, req.headers['content-type']), ...imageSize(url.searchParams.get('w'), url.searchParams.get('h')) }, to);
+  const sha256 = hash.digest('hex');
+  if (expect && sha256 !== expect) {
+    await rmQuiet(dest);
+    throw damaged(name, id, deviceIdOf(req, url), deviceNameOf(req, url));
+  }
+  const item = newItem(req, url, { id, kind: 'file', name, size, mime: mimeFor(name, req.headers['content-type']), ...imageSize(url.searchParams.get('w'), url.searchParams.get('h')), sha256 }, to);
   addItem(item);
   await saved();
   send(res, 201, publicItem(item));
@@ -7234,7 +7248,7 @@ function uploadPaths(id) {
 }
 
 function saveUploadMeta(upload) {
-  const { busy, activeReq, settled, cancelled, lastByte, lastEvent, watchers, syncedAt, metaSaving, ...meta } = upload;
+  const { busy, activeReq, settled, cancelled, lastByte, lastEvent, watchers, syncedAt, metaSaving, hash, hashed, ...meta } = upload;
   const json = JSON.stringify(meta);
   const write = () => writeFileDurable(uploadPaths(upload.id).meta, json);
   // One save at a time per upload: two at once would trip over the same temporary file.
@@ -7336,12 +7350,56 @@ function uploadInfo(u) {
 
 const uploadEvent = (u, offset = u.offset) => ({ id: u.id, name: u.name, size: u.size, offset, mime: u.mime, from: u.from, device: u.device, to: u.to });
 
+// (1.40, the 2026-11-21 audit's F1) Every upload's SHA-256, kept while its bytes are written (no second read of the
+// file): `hash` holds its first `hashed` bytes (a chunk that breaks off still writes, and hashes, all it got). When
+// that isn't the partial file's size (a restart keeps no hash; a write that failed; the file cut under the server), it
+// is rebuilt by reading the partial file from the start: never from a copy of an earlier state, whose bytes may no
+// longer be the file's. A sender may give its own (`sha256` at the start, or on a PUT's `?sha256=`, usually the
+// last): a file whose bytes here don't match it never becomes an item (422, code checksum).
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+
+function senderSha(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const sha = String(value).toLowerCase();
+  if (!SHA256_HEX.test(sha)) throw httpError(400, 'sha256 must be the file’s SHA-256 in hex (64 characters)');
+  return sha;
+}
+
+async function uploadHash(upload) {
+  if (upload.hash && upload.hashed === upload.offset) return;
+  const hash = crypto.createHash('sha256');
+  let at = 0;
+  upload.hash = null;
+  try {
+    if (upload.offset > 0) {
+      for await (const piece of fs.createReadStream(uploadPaths(upload.id).part, { start: 0, end: upload.offset - 1, highWaterMark: MB })) {
+        hash.update(piece);
+        at += piece.length;
+        upload.lastByte = now(); // (busy reading: not a stalled chunk for a takeover)
+      }
+    }
+    if (at !== upload.offset) throw new Error(`it has ${formatSize(at)}, not ${formatSize(upload.offset)}`);
+  } catch (err) {
+    log.warn(`Upload of "${cutText(upload.name, 80)}" [${shortId(upload.id)}]: couldn't read what it has so far for its SHA-256 (${err.message}); it goes on without one`);
+    return;
+  }
+  if (at >= BIG_TRANSFER) log.info(`Upload of "${cutText(upload.name, 80)}" [${shortId(upload.id)}]: read its ${formatSize(at)} again for its SHA-256 (it goes on at ${percentOf(at, upload.size)})`);
+  upload.hash = hash;
+  upload.hashed = at;
+}
+
+function damaged(name, id, from, device) {
+  log.warn(`Upload of "${cutText(name, 80)}" [${shortId(id)}] from ${whoName(from, device)} arrived damaged: its SHA-256 isn't the one the sender gave, so it wasn't kept`);
+  return httpError(422, 'It arrived damaged (its SHA-256 isn’t the one that was sent): send it again', { code: 'checksum' });
+}
+
 async function createUpload(req, res, _m, url) {
   const body = await readJson(req);
   const size = Number(body.size);
   if (!Number.isSafeInteger(size) || size < 0) throw httpError(400, 'size must be a whole number of bytes');
   if (size > MAX_UPLOAD) throw httpError(413, `File is larger than the ${formatSize(MAX_UPLOAD)} limit`);
   const to = targetsFromRequest(req, url, body.to);
+  const expect = senderSha(body.sha256); // (1.40)
   await ensureSpace(size);
   const name = sanitizeName(body.name);
   const upload = {
@@ -7350,6 +7408,7 @@ async function createUpload(req, res, _m, url) {
     size,
     mime: mimeFor(name, body.mime),
     ...imageSize(body.w, body.h),
+    ...(expect && { expect }),
     to,
     from: deviceIdOf(req, url),
     device: deviceNameOf(req, url) || nameOf(deviceIdOf(req, url)) || 'Unknown device',
@@ -7413,6 +7472,8 @@ async function putChunk(req, res, [id], url) {
   const rawOffset = url.searchParams.get('offset');
   const offset = rawOffset === null || rawOffset === '' ? 0 : Number(rawOffset);
   if (offset !== upload.offset) throw httpError(409, 'Wrong offset', { offset: upload.offset });
+  const expect = senderSha(url.searchParams.get('sha256')); // (1.40)
+  if (expect) upload.expect = expect;
 
   if (offset > 0 && now() - upload.touched > 60_000) {
     log.info(`Upload of "${upload.name}" [${shortId(id)}] resumed at ${percentOf(offset, upload.size)} after ${durationText(now() - upload.touched)}`);
@@ -7432,11 +7493,17 @@ async function putChunk(req, res, [id], url) {
       return upload.cancelled ? undefined : saveUploadMeta(upload);
     },
   };
+  await uploadHash(upload).catch(() => {}); // (1.40)
   try {
     await receiveBody(req, uploadPaths(id).part, upload.size - upload.offset, {
       flags: 'a',
       durable,
       onWritten: () => notifyUpload(upload),
+      onStored: (bufs, bytes) => {
+        if (!upload.hash) return;
+        for (const b of bufs) upload.hash.update(b);
+        upload.hashed += bytes;
+      },
       onData: received => {
         upload.received = start + received;
         upload.lastByte = upload.touched = now();
@@ -7469,12 +7536,24 @@ async function putChunk(req, res, [id], url) {
       return;
     }
     if (upload.offset < upload.size) return send(res, 200, { offset: upload.offset, done: false });
+    // (1.40) Its SHA-256, and the sender's checked against it before it becomes an item: a damaged file is dropped
+    // (the sender starts over; a download that followed it learns it from upload-cancelled, `damaged`).
+    const sha256 = upload.hash && upload.hashed === upload.size ? upload.hash.digest('hex') : null;
+    upload.hash = null;
+    if (sha256 && upload.expect && sha256 !== upload.expect) {
+      uploads.delete(id);
+      upload.cancelled = true;
+      notifyUpload(upload);
+      await removeUploadFiles(id);
+      broadcast('upload-cancelled', { id, damaged: true });
+      throw damaged(upload.name, id, upload.from, upload.device);
+    }
     // The item appears in the same turn as the rename completes, so a download never finds neither the partial
     // file nor the item; the folder is fsynced before the answer.
     await fsp.rename(uploadPaths(id).part, filePath(id));
     uploads.delete(id);
     const { name, size, mime, w, h, from, device, to } = upload;
-    const item = { id, kind: 'file', name, size, mime, ...(w && { w, h }), from, device, to, delivered: {}, ts: now() };
+    const item = { id, kind: 'file', name, size, mime, ...(w && { w, h }), ...(sha256 && { sha256 }), from, device, to, delivered: {}, ts: now() };
     if (size >= BIG_TRANSFER && upload.started) {
       log.info(`Upload finished: "${cutText(name, 80)}" [${shortId(id)}] in ${durationText(now() - upload.started)} (average ${speedText(size, now() - upload.started)})`);
     }
@@ -7504,7 +7583,7 @@ async function getFile(req, res, [id], url) {
   const inline = url.searchParams.has('inline');
   const logged = !inline && req.method !== 'HEAD' && noteDownload(req, url, item);
   await serveFile(req, res, filePath(id), item.name, item.mime, inline, {
-    etag: `"f-${item.id}-${item.size}"`, lastModified: item.ts,
+    etag: `"f-${item.id}-${item.size}"`, lastModified: item.ts, sha256: item.sha256,
     onFinish: ({ bytes, ms }) => {
       if (logged && bytes >= BIG_TRANSFER) log.info(`Download finished: [${shortId(id)}] to ${whoName(deviceIdOf(req, url), 'a browser')}, ${formatSize(bytes)} in ${durationText(ms)} (${speedText(bytes, ms)})`);
     },
@@ -7646,7 +7725,7 @@ function rangeOf(req, size, { etag, lastModified }) {
   return start >= size ? 'unsatisfiable' : { start, end };
 }
 
-async function serveFile(req, res, file, name, mime, inline, { cache = 'private, max-age=31536000, immutable', etag, lastModified, onFinish } = {}) {
+async function serveFile(req, res, file, name, mime, inline, { cache = 'private, max-age=31536000, immutable', etag, lastModified, onFinish, sha256 } = {}) {
   let stat;
   try { stat = await fsp.stat(file); } catch { return send(res, 404, { error: 'File is missing' }); }
   inline = inline && /^(image|video|audio)\//.test(mime) && mime !== 'image/svg+xml';
@@ -7661,6 +7740,8 @@ async function serveFile(req, res, file, name, mime, inline, { cache = 'private,
     'Accept-Ranges': 'bytes',
     ETag: etag,
     'Last-Modified': new Date(lastModified).toUTCString(),
+    // (1.40) the whole file's SHA-256 (RFC 9530), also on a 206: a receiver checks what it saved against it
+    ...(sha256 && { 'Repr-Digest': `sha-256=:${Buffer.from(sha256, 'hex').toString('base64')}:` }),
   };
   if (req.headers['if-none-match'] === etag) return send(res, 304, '', headers);
   const range = rangeOf(req, stat.size, { etag, lastModified });
@@ -8205,6 +8286,7 @@ const FEATURES = [
   'apps-found', // (1.35.0: app state `found` (on a PC already, not from Beam; `where`), PUT /api/devices/me/apps items' found/where/also)
   'weather', // (1.36.0: GET /api/weather (LocalCast's weather for the Weather row), the setting `weather`)
   'rdp-graphics', // (1.38.0: status `rdpGraphics`, how Remote Desktop's picture is set up on a PC; the 2026-11-21 audit's RD2)
+  'sha256', // (1.40.0: file items' sha256 (GET /api/items/{id}; GET /api/file's Repr-Digest); an upload takes the sender's (`sha256` at the start, a PUT's or POST /api/file's ?sha256=) and refuses a damaged one: 422 code checksum, upload-cancelled `damaged`)
   'commands', // (1.32.0: POST /api/devices/{id}/commands (answered with an event stream), GET /api/commands/{run}, POST /api/commands/{run}/stop, POST /api/devices/me/commands, `command-run`/`command-stop`, status `commands`, `can.commands`)
 ];
 
