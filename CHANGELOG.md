@@ -12,6 +12,17 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## Windows 1.35.1 (2026-11-25): log folders found on a busy PC
+
+**Versions:** Windows app 1.35.1; server 1.42.0, Android app 1.21.2, Beam for Linux 1.9.0 (all unchanged).
+
+- **Programs' log folders found by themselves on a busy PC:** the search had 4 seconds for ProgramData, Program Files
+  and AppData together and kept what it had found by then, so on a PC working hard it could stop partway (one stopped at
+  "ESET" in ProgramData and missed HW Blackbox's logs) and say nothing. It now runs in the background at low priority
+  (two minutes at most), the first request waits for it, and a folder found before stays while it's still there.
+  beam.log says what it found; `folders` says `searching` while a new search runs, and a folder not found yet says
+  Beam is still looking.
+
 ## 1.42.0 (2026-11-23): collecting, round two
 
 **Versions:** server 1.42.0, the Windows app 1.35.0, Beam for Linux 1.9.0 (the `beam` command); the Android app 1.21.2

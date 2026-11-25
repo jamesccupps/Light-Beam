@@ -54,6 +54,7 @@ namespace Beam
         public bool CollectAuto = true;        // app 1.34: also Windows' and programs' own log folders, found by themselves (the switch in Log folders…)
         public bool CollectCommandLines;       // app 1.35: `processes` gives whole command lines (they can hold passwords): off until chosen here
         public List<string> TestLogRoots = new List<string>(); // (a test instance only) where those are looked for instead of this PC's own folders
+        public int TestLogSearchDelayMs;       // (a test instance only, 1.35.1) a pause before each folder the search reads: a slow, busy PC
         public string TestWinget;              // tests (custom --config only, 1.16): a stand-in for winget (an .exe or .cmd)
         public object[] TestInstalled;         // tests (custom --config only, 1.27): Installed apps' stand-in [{ name, version, location }]
         public string TestHwbUrl;              // tests (custom --config only, 1.27): HW Blackbox's dashboard's stand-in (http://127.0.0.1:port)
@@ -271,6 +272,7 @@ namespace Beam
                 c.CollectAuto = Json.Bool(d, "collectAuto", true); // (1.34)
                 c.CollectCommandLines = Json.Bool(d, "collectCommandLines", false); // (1.35)
                 c.TestLogRoots = Json.StrList(d, "testLogRoots");
+                c.TestLogSearchDelayMs = (int)Math.Max(0, Math.Min(5000, Json.Long(d, "testLogSearchDelayMs", 0)));
                 var logList = Json.Get(d, "collectFolders") as object[];
                 if (logList != null)
                     foreach (var o in logList)

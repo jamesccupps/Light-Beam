@@ -803,7 +803,9 @@ What can be asked (`what`, and its fields):
   rights (Security) → `409 denied`.
 - `folders` → `{ folders: [{ name, path, auto }] }`: the log folders chosen at that PC, then **(Windows 1.34)** the ones
   found by themselves (`auto: true`: Windows' Logs, Panther and crash reports, and programs' folders named log/logs),
-  unless that's switched off there.
+  unless that's switched off there. **(Windows 1.35.1)** That search runs in the background (again after 10 minutes);
+  the first request waits for it (20 s at most); `searching: true` while a new one runs (the last list is answered
+  meanwhile; folders found before stay while they're still there).
 - `files`: `folder` (a name from `folders`), `path` (a folder inside it) → `{ folder, path, entries: [{ name, dir,
   size, modified }], more }`, newest first, 500 at most. As in shared folders: nothing hidden, starting with `.`, or a
   link, and never outside the folder.

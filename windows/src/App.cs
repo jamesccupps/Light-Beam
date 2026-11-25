@@ -2912,6 +2912,7 @@ namespace Beam
             Cfg.CollectAuto = auto;
             Cfg.CollectCommandLines = commandLines; // (1.35)
             Cfg.Save();
+            if (auto && Cfg.CollectAllowed) { try { Shares.FoundLogFolders(Cfg, 0); } catch { } } // (1.35.1) looked for in the background
             Log.Write("Log folders (" + from + "): " + (Cfg.CollectFolders.Count == 0 ? "none chosen" : string.Join("; ", Cfg.CollectFolders.Select(f => f.Name + " (" + f.Path + ")")))
                 + (auto ? "; Windows' and programs' own too" : "; not Windows' and programs' own")
                 + (commandLines ? "; whole command lines" : ""));
@@ -2924,6 +2925,7 @@ namespace Beam
         {
             if (cmd == "open") { ShowLogFolders(null); Log.Write("Log folders (test): " + (logFoldersForm != null ? "open, " + logFoldersForm.Describe() : "not opened")); return; }
             if (cmd == "picker-probe") { Log.Write("Log folders (test): picker " + (FolderPicker.Probe(Cfg.Dir) ?? "ok")); return; } // (1.34)
+            if (cmd == "rescan" || cmd.StartsWith("rescan:")) { int ms; Shares.SearchAgain(Cfg, cmd.Length > 7 && int.TryParse(cmd.Substring(7), out ms) ? ms : 0); Log.Write("Log folders (test): searching again"); return; } // (1.35.1)
             if (logFoldersForm == null || logFoldersForm.IsDisposed) { Log.Write("Log folders (test): no window"); return; }
             if (cmd.StartsWith("add:")) { string why = logFoldersForm.Add(cmd.Substring(4)); Log.Write("Log folders (test): add " + (why ?? "ok") + ", " + logFoldersForm.Describe()); }
             else if (cmd == "auto:on" || cmd == "auto:off") { logFoldersForm.SetAuto(cmd == "auto:on"); Log.Write("Log folders (test): " + cmd + ", " + logFoldersForm.Describe()); }

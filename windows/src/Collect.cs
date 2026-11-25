@@ -96,7 +96,13 @@ namespace Beam
         const int BudgetMs = 25000; // an answer's time at most (the server waits 45 s)
         static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        public LogCollector(App app) { this.app = app; }
+        public LogCollector(App app)
+        {
+            this.app = app;
+            // (1.35.1) the found log folders looked for in the background a while after starting, ready when asked
+            if (app.Cfg.CollectAllowed && app.Cfg.CollectAuto && !app.Cfg.CustomPath)
+                Task.Delay(30000).ContinueWith(_ => { try { Shares.FoundLogFolders(app.Cfg, 0); } catch { } });
+        }
 
         public bool Allowed { get { return app.Cfg.CollectAllowed; } }
 
@@ -108,6 +114,7 @@ namespace Beam
             if (on && app.RcBlocks("turning collecting on")) return;
             app.Cfg.CollectAllowed = on;
             app.Cfg.Save();
+            if (on && app.Cfg.CollectAuto) { try { Shares.FoundLogFolders(app.Cfg, 0); } catch { } } // (1.35.1) looked for now, in the background
             Log.Write("Collecting: " + (on ? "approved devices may collect this PC's logs, processes and services (read only)" : "turned off on this PC") + " (" + from + ")");
             app.CollectChanged(on ? "turned on" : "turned off");
         }
@@ -288,6 +295,7 @@ namespace Beam
         {
             var d = new Dictionary<string, object>();
             d["folders"] = Shares.AllLogFolders(app.Cfg).Select(f => (object)f.ToJson()).ToArray();
+            if (app.Cfg.CollectAuto && Shares.SearchingForLogs) d["searching"] = true; // (1.35.1) still looking: more may come
             return d;
         }
 
@@ -480,80 +488,152 @@ namespace Beam
         // logs from windows too?"): Windows' own (Logs, setup's Panther, crash reports), and every folder named log or logs
         // at most three folders down in ProgramData, Program Files and AppData (not in apps' packages, temp files, caches or
         // browsers' profiles), each named for where it is ("exacqVision Server logs"). Looked for again after 10 minutes.
+        // (1.35.1, the user: "why would hqblackbox not be sharing logs anymore through beam after this update?") The search
+        // had 4 s for everything and kept what it had by then as if it were all: on Office Desktop, busy with ProtectPanes,
+        // it stopped at "ESET" in ProgramData, before HWBlackbox. Now it runs in the background at below normal priority
+        // (2 minutes at most), one runs at a time, a request waits only for the very first one (20 s at most), and folders
+        // found before stay while they're still there (a search cut short, or a folder it couldn't read that time).
         static readonly object foundLock = new object();
-        static List<LogFolder> found;
+        static List<LogFolder> found;       // the last finished search's, with earlier finds that are still there
+        static List<LogFolder> partial;     // the first search's so far (before any has finished)
         static DateTime foundAt;
+        static Task searching;              // the search under way, if any
+        static int nextMaxMs;               // (tests) the next search's time at most
+        const int SearchMaxMs = 120000;
         static readonly string[] SkipDirs = { "Packages", "Temp", "Cache", "Caches", "INetCache", "User Data", "Profiles", "node_modules", "CrashDumps" };
 
-        public static List<LogFolder> FoundLogFolders(Config cfg)
+        // waitMs: how long to wait for the very first search (0: never; the Log folders window, warming up).
+        public static List<LogFolder> FoundLogFolders(Config cfg, int waitMs = 20000)
         {
+            Task t;
             lock (foundLock)
             {
                 if (found != null && DateTime.UtcNow - foundAt < TimeSpan.FromMinutes(10)) return found;
-                var list = new List<LogFolder>();
-                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                Action<string, string> add = (name, path) =>
-                {
-                    try
-                    {
-                        string full = System.IO.Path.GetFullPath(path).TrimEnd('\\');
-                        if (!Directory.Exists(full) || list.Any(x => x.Path.Equals(full, StringComparison.OrdinalIgnoreCase))) return;
-                        if (LogFolderRefusal(full, cfg) != null) return;
-                        string unique = name;
-                        for (int i = 2; names.Contains(unique); i++) unique = name + " (" + i + ")";
-                        names.Add(unique);
-                        var f = new LogFolder();
-                        f.Name = unique; f.Path = full; f.Auto = true;
-                        list.Add(f);
-                    }
-                    catch { }
-                };
-                var roots = new List<KeyValuePair<string, string>>();
-                if (cfg.CustomPath && cfg.TestLogRoots.Count > 0)
-                    foreach (var r in cfg.TestLogRoots) roots.Add(new KeyValuePair<string, string>(System.IO.Path.GetFileName(r.TrimEnd('\\')), r));
-                else
-                {
-                    string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-                    string data = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                    add("Windows logs", System.IO.Path.Combine(win, "Logs"));
-                    add("Windows setup logs", System.IO.Path.Combine(win, "Panther"));
-                    add("Windows crash reports", System.IO.Path.Combine(data, @"Microsoft\Windows\WER\ReportArchive"));
-                    foreach (var sf in new[] { Environment.SpecialFolder.CommonApplicationData, Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86,
-                        Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.ApplicationData })
-                    {
-                        string r = Environment.GetFolderPath(sf);
-                        if (r.Length > 0 && !roots.Any(x => x.Value.Equals(r, StringComparison.OrdinalIgnoreCase))) roots.Add(new KeyValuePair<string, string>(System.IO.Path.GetFileName(r), r));
-                    }
-                }
-                var clock = System.Diagnostics.Stopwatch.StartNew();
-                foreach (var root in roots)
-                {
-                    var hits = new List<string>();
-                    ScanForLogs(root.Value.TrimEnd('\\'), 0, hits, clock);
-                    foreach (var hit in hits.OrderBy(h => h, StringComparer.OrdinalIgnoreCase))
-                    {
-                        var parts = hit.Substring(root.Value.TrimEnd('\\').Length).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries).ToList();
-                        string last = parts[parts.Count - 1];
-                        parts.RemoveAt(parts.Count - 1);
-                        add((parts.Count > 0 ? string.Join(" ", parts) : root.Key) + " " + last.ToLowerInvariant(), hit);
-                    }
-                }
-                found = list;
-                foundAt = DateTime.UtcNow;
-                return found;
+                if (searching == null) searching = StartSearch(cfg);
+                if (found != null || waitMs <= 0) return found ?? partial ?? new List<LogFolder>();
+                t = searching;
             }
+            try { t.Wait(waitMs); } catch { }
+            lock (foundLock) return found ?? partial ?? new List<LogFolder>();
         }
 
-        static void ScanForLogs(string dir, int depth, List<string> hits, System.Diagnostics.Stopwatch clock)
+        public static bool SearchingForLogs { get { lock (foundLock) return searching != null; } }
+
+        // (tests: --test-log-folders rescan[:<ms>]) A new search now, whatever the last one's age.
+        public static void SearchAgain(Config cfg, int maxMs)
         {
-            if (depth > 3 || hits.Count >= 150 || clock.ElapsedMilliseconds > 4000) return;
+            lock (foundLock) { foundAt = DateTime.MinValue; nextMaxMs = maxMs; }
+            FoundLogFolders(cfg, 0);
+        }
+
+        static Task StartSearch(Config cfg) // (under foundLock)
+        {
+            int maxMs = nextMaxMs > 0 ? nextMaxMs : SearchMaxMs;
+            nextMaxMs = 0;
+            int delayMs = cfg.CustomPath ? cfg.TestLogSearchDelayMs : 0;
+            bool first = found == null;
+            return Task.Factory.StartNew(() =>
+            {
+                var me = Thread.CurrentThread;
+                var priority = me.Priority;
+                me.Priority = ThreadPriority.BelowNormal;
+                var clock = Stopwatch.StartNew();
+                var list = new List<LogFolder>();
+                bool cut = false;
+                int kept = 0;
+                try
+                {
+                    var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    Action<string, string> add = (name, path) =>
+                    {
+                        try
+                        {
+                            string full = System.IO.Path.GetFullPath(path).TrimEnd('\\');
+                            if (!Directory.Exists(full) || list.Any(x => x.Path.Equals(full, StringComparison.OrdinalIgnoreCase))) return;
+                            if (LogFolderRefusal(full, cfg) != null) return;
+                            string unique = name;
+                            for (int i = 2; names.Contains(unique); i++) unique = name + " (" + i + ")";
+                            names.Add(unique);
+                            var f = new LogFolder();
+                            f.Name = unique; f.Path = full; f.Auto = true;
+                            list.Add(f);
+                        }
+                        catch { }
+                    };
+                    var roots = new List<KeyValuePair<string, string>>();
+                    if (cfg.CustomPath && cfg.TestLogRoots.Count > 0)
+                        foreach (var r in cfg.TestLogRoots) roots.Add(new KeyValuePair<string, string>(System.IO.Path.GetFileName(r.TrimEnd('\\')), r));
+                    else
+                    {
+                        string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                        string data = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                        add("Windows logs", System.IO.Path.Combine(win, "Logs"));
+                        add("Windows setup logs", System.IO.Path.Combine(win, "Panther"));
+                        add("Windows crash reports", System.IO.Path.Combine(data, @"Microsoft\Windows\WER\ReportArchive"));
+                        foreach (var sf in new[] { Environment.SpecialFolder.CommonApplicationData, Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86,
+                            Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.ApplicationData })
+                        {
+                            string r = Environment.GetFolderPath(sf);
+                            if (r.Length > 0 && !roots.Any(x => x.Value.Equals(r, StringComparison.OrdinalIgnoreCase))) roots.Add(new KeyValuePair<string, string>(System.IO.Path.GetFileName(r), r));
+                        }
+                    }
+                    foreach (var root in roots)
+                    {
+                        var hits = new List<string>();
+                        ScanForLogs(root.Value.TrimEnd('\\'), 0, hits, clock, maxMs, delayMs, ref cut);
+                        foreach (var hit in hits.OrderBy(h => h, StringComparer.OrdinalIgnoreCase))
+                        {
+                            var parts = hit.Substring(root.Value.TrimEnd('\\').Length).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+                            string last = parts[parts.Count - 1];
+                            parts.RemoveAt(parts.Count - 1);
+                            add((parts.Count > 0 ? string.Join(" ", parts) : root.Key) + " " + last.ToLowerInvariant(), hit);
+                        }
+                        lock (foundLock) if (found == null) partial = list.ToList();
+                    }
+                    // What the last search found and this one didn't: kept while it's still there (and still allowed).
+                    List<LogFolder> before;
+                    lock (foundLock) before = found != null ? found.ToList() : new List<LogFolder>();
+                    foreach (var f in before)
+                    {
+                        if (list.Any(x => x.Path.Equals(f.Path, StringComparison.OrdinalIgnoreCase))) continue;
+                        int had = list.Count;
+                        add(f.Name, f.Path);
+                        if (list.Count > had) kept++;
+                    }
+                    bool changed;
+                    lock (foundLock)
+                    {
+                        changed = first || found == null || found.Count != list.Count || found.Any(f => !list.Any(x => x.Path.Equals(f.Path, StringComparison.OrdinalIgnoreCase)));
+                        found = list;
+                        partial = null;
+                        foundAt = DateTime.UtcNow;
+                    }
+                    if (changed || cut)
+                        Log.Write("Log folders: found " + list.Count + " by themselves in " + (clock.ElapsedMilliseconds / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + " s"
+                            + (cut ? " (stopped at " + (maxMs / 1000) + " s)" : "") + (kept > 0 ? "; " + kept + " found before kept (still there)" : ""));
+                }
+                catch (Exception ex) { Log.Write("Log folders: looking for them failed (" + ex.Message + ")"); }
+                finally
+                {
+                    lock (foundLock) { searching = null; if (found == null) { found = list; partial = null; foundAt = DateTime.UtcNow; } }
+                    try { me.Priority = priority; } catch { }
+                }
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        }
+
+        static void ScanForLogs(string dir, int depth, List<string> hits, Stopwatch clock, int maxMs, int delayMs, ref bool cut)
+        {
+            if (depth > 3 || hits.Count >= 150) return;
+            if (clock.ElapsedMilliseconds > maxMs) { cut = true; return; }
+            if (delayMs > 0) Thread.Sleep(delayMs); // (tests: a slow PC)
             foreach (var e in Read(dir))
             {
                 if (!e.Dir || !Shown(e) || (e.Attributes & ReparsePoint) != 0) continue;
                 if (SkipDirs.Any(s => string.Equals(s, e.Name, StringComparison.OrdinalIgnoreCase))) continue;
                 string full = dir + "\\" + e.Name;
                 if (string.Equals(e.Name, "logs", StringComparison.OrdinalIgnoreCase) || string.Equals(e.Name, "log", StringComparison.OrdinalIgnoreCase)) { hits.Add(full); continue; }
-                if (depth < 3) ScanForLogs(full, depth + 1, hits, clock);
+                if (depth < 3) ScanForLogs(full, depth + 1, hits, clock, maxMs, delayMs, ref cut);
+                if (cut) return;
             }
         }
 
@@ -571,7 +651,8 @@ namespace Beam
         static LogFolder LogFolderNamed(App app, string name)
         {
             var f = AllLogFolders(app.Cfg).FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
-            if (f == null) throw new CollectRefusal("there's no log folder named " + (name ?? "?") + " here (folders lists them)", "not-found");
+            if (f == null) throw new CollectRefusal("there's no log folder named " + (name ?? "?") + " here (folders lists them)"
+                + (app.Cfg.CollectAuto && SearchingForLogs ? "; Beam here is still looking for programs' log folders: ask again in a minute" : ""), "not-found");
             string why = LogFolderRefusal(f.Path, app.Cfg);
             if (why != null) throw new CollectRefusal(f.Name + " can't be read now: " + why, "not-found");
             return f;
@@ -678,7 +759,7 @@ namespace Beam
             folders = app.Cfg.CollectFolders.Select(f => f.Copy()).ToList();
             auto = app.Cfg.CollectAuto;
             commandLines = app.Cfg.CollectCommandLines;
-            try { foundNow = Shares.FoundLogFolders(app.Cfg); } catch { }
+            try { foundNow = Shares.FoundLogFolders(app.Cfg, 0); } catch { } // (1.35.1) never waits here (the window's thread)
             body = new Panel();
             body.BackColor = Theme.Bg;
             body.AutoScroll = true;

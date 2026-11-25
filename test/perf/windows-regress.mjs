@@ -796,6 +796,59 @@ async function collect(r) {
   }
 }
 
+// (1.35.1) The found log folders on a slow, busy PC (Office Desktop: the old 4 s search stopped at "ESET" in ProgramData,
+// before HWBlackbox): 0.7 s before each folder it reads makes this search take ~6 s. The first request waits for it and
+// gets all four (the old one lost what came after 4 s); a new search runs in the background (the old list answered
+// meanwhile, `searching`, a not-found that says it's still looking); a folder that's gone goes, a new one comes; a search
+// cut short keeps what was found before and is still there, and says so in beam.log.
+async function collectSlow(r) {
+  const roots = path.join(r.dir, 'roots');
+  const mk = rel => { fs.mkdirSync(path.join(roots, rel), { recursive: true }); fs.writeFileSync(path.join(roots, rel, 'run.log'), 'found kumquat\n'); };
+  mk('ProgramData/Acme/App/logs');
+  mk('ProgramData/Beta/logs');
+  mk('ProgramData/Zeta/Tool/log');
+  mk('AppData/Late/logs');
+  await r.setup({ collectAllowed: true, collectFolders: [], testLogRoots: [path.join(roots, 'ProgramData'), path.join(roots, 'AppData')], testLogSearchDelayMs: 700 });
+  const ask = body => r.api('POST', `/api/devices/${r.appId}/collect`, body);
+  const found = x => (x.data?.folders || []).filter(f => f.auto).map(f => f.name).sort().join(', ');
+  r.check(await r.waitFor(async () => ((await r.api('GET', '/api/devices')).data.devices || []).find(d => d.id === r.appId && d.online)?.can?.collect === true, 20000), 'can.collect');
+
+  const t0 = Date.now();
+  let x = await ask({ what: 'folders' });
+  const took = Date.now() - t0;
+  r.check(found(x) === 'Acme App logs, Beta logs, Late logs, Zeta Tool log' && took > 4000 && !x.data.searching,
+    `the first request waits for the whole search (${(took / 1000).toFixed(1)} s, over the old 4 s): ${found(x)}`);
+  const line = r.logLines().find(l => /Log folders: found 4 by themselves in [\d.]+ s/.test(l));
+  r.check(!!line && Number(/in ([\d.]+) s/.exec(line)[1]) >= 4, `beam.log says what it found, and how long it took (${line?.slice(24)})`);
+
+  // a new search in the background: the last list answers meanwhile
+  fs.rmSync(path.join(roots, 'ProgramData', 'Beta', 'logs'), { recursive: true, force: true });
+  mk('ProgramData/Gamma/logs');
+  let from = r.logLines().length;
+  r.forward(['--test-log-folders', 'rescan']);
+  await r.waitLog(/Log folders \(test\): searching again/, from, 10000);
+  const t1 = Date.now();
+  x = await ask({ what: 'folders' });
+  r.check(x.data?.searching === true && found(x) === 'Acme App logs, Beta logs, Late logs, Zeta Tool log' && Date.now() - t1 < 3000,
+    `while it looks again: the last list at once, searching: true (${Date.now() - t1} ms)`);
+  x = await ask({ what: 'file', folder: 'Gamma logs', path: 'run.log' });
+  r.check(x.status === 409 && x.data?.reason === 'not-found' && /still looking for programs' log folders: ask again in a minute/.test(x.data.error || ''),
+    `a folder it hasn't found yet: not-found, and it says it's still looking (${x.data?.error})`);
+  r.check(!!(await r.waitLog(/Log folders: found 4 by themselves in/, from, 30000)), 'the new search finished (beam.log: what changed)');
+  x = await ask({ what: 'folders' });
+  r.check(found(x) === 'Acme App logs, Gamma logs, Late logs, Zeta Tool log' && !x.data.searching, `a folder that's gone goes, a new one comes: ${found(x)}`);
+  x = await ask({ what: 'file', folder: 'Gamma logs', path: 'run.log' });
+  r.check(x.data?.text === 'found kumquat\n', 'read through the new one');
+
+  // a search cut short (1.5 s here, 2 minutes for real): what was found before and is still there stays
+  from = r.logLines().length;
+  r.forward(['--test-log-folders', 'rescan:1500']);
+  r.check(!!(await r.waitLog(/Log folders: found 4 by themselves in [\d.]+ s \(stopped at 1 s\); 3 found before kept \(still there\)/, from, 30000)),
+    'cut short: beam.log says so, and that the ones found before were kept');
+  x = await ask({ what: 'folders' });
+  r.check(found(x) === 'Acme App logs, Gamma logs, Late logs, Zeta Tool log', `none lost: ${found(x)}`);
+}
+
 // (1.33, Beam 1.41.1) The beam command set up from the app (the user: "make this all easy to do in the app itself on
 // each device"): Set up (this Beam's build, checked; signed in as its own approved device; Claude Code's note after what
 // was there), the command collecting from this very PC, the app still a Windows PC, the note out and in, Remove (all of
@@ -1199,7 +1252,7 @@ async function rdp(r) {
 
 const scenarios = { reconnect, restart, revoke, ack, doublepoke, nonbeam401, 'cancel-after-restart': cancelAfterRestart, 'cancel-live': cancelLive, lane,
   'pause-full': pauseFull, 'blip-mid-chunk': blipMidChunk, 'retry-early': retryEarly, 'lost-finish': lostFinish, 'copy-image': copyImage, 'copy-files': copyFiles, 'notify-open': notifyOpen, backups,
-  'outbox-restart': outboxRestart, names, notes, weather, rdp, checksums, collect, beamcmd };
+  'outbox-restart': outboxRestart, names, notes, weather, rdp, checksums, collect, 'collect-slow': collectSlow, beamcmd };
 const run = wanted.length === 0 || wanted.includes('all') ? Object.keys(scenarios) : wanted;
 if (!EXE) { console.error('No Beam.exe: build with windows\\build.cmd or pass --exe'); process.exit(2); }
 console.log(`Beam: ${EXE}\ntemp: ${TMP}`);
