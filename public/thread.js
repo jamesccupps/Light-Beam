@@ -91,6 +91,9 @@ function showNewPill(count) {
 
 // ---------------------------------------------------------------- avatars
 
+// (1.42.1) The PC is on while its Beam app isn't (devices.js offlineWhy): an amber dot.
+const pcOnly = d => Boolean(d && !d.online && offlineWhy(d)?.on);
+
 function avatar(conv, { big = false } = {}) {
   if (conv === 'all') return el('span', { class: `avatar all${big ? ' big' : ''}` }, icon('all'));
   if (conv === 'notes') return el('span', { class: `avatar notes${big ? ' big' : ''}` }, icon('note')); // (1.34.0)
@@ -98,7 +101,7 @@ function avatar(conv, { big = false } = {}) {
   const removed = !d;
   return el('span', { class: `avatar${removed ? ' removed' : ''}${big ? ' big' : ''}` },
     icon(removed ? 'ghost' : PLATFORM_ICON[d.platform] || 'globe'),
-    !removed && el('span', { class: `dot${d.online ? ' on' : ''}`, title: d.online ? 'Online' : 'Offline' }));
+    !removed && el('span', { class: `dot${d.online ? ' on' : pcOnly(d) ? ' up' : ''}`, title: d.online ? 'Online' : pcOnly(d) ? offlineWhy(d).short : 'Offline' }));
 }
 
 // ---------------------------------------------------------------- sidebar (keyed rows, patched in place)
@@ -130,13 +133,13 @@ function patchRow(row, conv, { active }) {
   const last = list.at(-1);
   const d = deviceById(conv);
   const count = unread(conv);
-  const avKey = conv === 'all' ? 'all' : conv === 'notes' ? 'notes' : d ? `${d.platform}:${d.online}` : 'removed';
+  const avKey = conv === 'all' ? 'all' : conv === 'notes' ? 'notes' : d ? `${d.platform}:${d.online}:${pcOnly(d)}` : 'removed';
   if (row.avKey !== avKey) { row.av.replaceChildren(avatar(conv)); row.avKey = avKey; }
   const name = convName(conv);
   if (row.name.textContent !== name) row.name.textContent = name;
   const time = last ? shortWhen(last.ts) : '';
   if (row.time.textContent !== time) row.time.textContent = time;
-  const sub = last ? preview(last) : conv === 'all' ? 'Send to every device' : conv === 'notes' ? 'Things to keep for later' : !d ? 'Removed device' : d.online ? 'Online' : `Last seen ${timeAgo(d.lastSeen)}`;
+  const sub = last ? preview(last) : conv === 'all' ? 'Send to every device' : conv === 'notes' ? 'Things to keep for later' : !d ? 'Removed device' : d.online ? 'Online' : pcOnly(d) ? offlineWhy(d).short : `Last seen ${timeAgo(d.lastSeen)}`;
   if (row.preview.textContent !== sub) row.preview.textContent = sub;
   row.badge.hidden = count === 0;
   if (count) {

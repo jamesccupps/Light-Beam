@@ -455,6 +455,11 @@ can't pass for it.
     there; `false` means it's off, asleep or without internet; `expired`, its Tailscale sign-in ran out. Tailscale
     notices a machine that lost power or network only after a few minutes, so the web app says "still on" only once
     Beam has missed the device for 4 minutes.
+- **(1.42.1)** `host: true`: the PC the server runs on (its Beam app connects from this machine). While its Beam app is
+  away, `pcOn: { since?, signedIn }`: it's on all the same; `since` when Windows last started (ms), `signedIn` whether
+  anyone has signed in since (Windows' records on this PC, read at start and every 2 minutes while the app is away;
+  `null` when they can't be read here). The web app says "On, nobody signed in" (at once) or "On, Beam not running"
+  (after a minute), with Remote Desktop first.
 - `can` (1.3): what the device can do:
   - `ring`: an Android or Windows app at version 1.3.0 or later, as reported with `X-Beam-App-Version` (an unknown
     version counts as older);

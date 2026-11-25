@@ -1747,11 +1747,13 @@ function deviceList() {
     if (tokenPlatform(t) === devices[id]?.platform) signIns.set(id, (signIns.get(id) || 0) + 1);
   }
   const trusted = trustedDevices(); // (1.25)
+  const host = ownPc()?.id; // (1.42.1)
   return Object.values(devices)
     .map(d => {
       const ts = tailscaleOf(d);
       return {
         id: d.id, name: d.name, platform: d.platform, online: isOnline(d.id), lastSeen: d.lastSeen, user: d.user || 'owner',
+        ...(d.id === host && { host: true, ...(!isOnline(d.id) && { pcOn: ownPcOn(d) }) }), // (1.42.1) Beam's server runs on it
         ...(d.appVersion && { appVersion: d.appVersion }),
         signedIn: signedIn.has(d.id), ...(d.temporary && { temporary: true }), trusted: trusted.has(`${d.id}|${d.platform}`),
         ...(signIns.get(d.id) > 1 && { signIns: signIns.get(d.id) }),
@@ -3442,11 +3444,22 @@ function ownPc() {
 
 async function readOwnHistory() {
   const pc = ownPc();
-  if (!pc) return;
+  if (!pc) return 0;
   const since = pcHistory.sinceOf(history[pc.id]?.events).System;
   const from = since ? Date.parse(since) - 60e3 : now() - 30 * 86400e3;
   const added = ingestHistory(pc, await winevents.readOwnEvents({ since: new Date(from).toISOString(), env }));
   if (added) log.info(`${pc.name} (this server's PC): ${added} new record${added === 1 ? '' : 's'} for its history, from Windows`);
+  return added;
+}
+
+// (1.42.1, the user, after a power blip at 10:09: "tailscale showed it online, beam didn't though") This server's own PC
+// while its Beam app is away is on all the same (the server runs there): since when, and whether anyone has signed in
+// since then (its Windows records; null when they can't be read here). The web says "On, nobody signed in" instead of
+// "Last seen", and offers Remote Desktop first.
+function ownPcOn(d) {
+  if (!OWN_HISTORY) return { signedIn: null };
+  const up = pcHistory.explain(history[d.id]?.events || [], [], { at: now(), days: 1 }).up;
+  return { ...(up?.since && { since: up.since }), signedIn: up ? Boolean(up.signedIn) : null };
 }
 
 // ---------------------------------------------------------------- the setup check (1.20)
@@ -10466,6 +10479,13 @@ async function serve() {
     scheduleBackups().catch(err => log.warn(`Backups couldn't be planned: ${err.message}`));
     // (1.18) This server's own PC's history from Windows: a power loss here is known before anyone signs in.
     if (OWN_HISTORY) setTimeout(() => readOwnHistory().catch(err => log.warn(`This server's PC's history couldn't be read from Windows: ${err.message}`)), FAST_TIMEOUTS ? 300 : 15_000).unref();
+    // (1.42.1) ...and again every 2 minutes while its Beam app is away: a sign-in there shows (devices list `pcOn`)
+    if (OWN_HISTORY) {
+      setInterval(() => {
+        const pc = ownPc();
+        if (pc && !isOnline(pc.id)) readOwnHistory().then(added => { if (added) broadcastDevices(); }).catch(() => {});
+      }, FAST_TIMEOUTS ? 1000 : 120_000).unref();
+    }
     // (1.20) The setup check: 2 minutes in (devices have come back), then every 6 hours.
     if (SETUP_AUTO) {
       setTimeout(() => runSetupCheck(), FAST_TIMEOUTS ? 500 : 120_000).unref();

@@ -201,6 +201,7 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; }
 .avatar.removed { opacity: .7; }
 .avatar .dot { position: absolute; right: 0; bottom: 0; width: 12px; height: 12px; border-radius: 50%; background: #8a919c; border: 2px solid var(--surface); }
 .avatar .dot.on { background: var(--ok); }
+.avatar .dot.up { background: var(--warn); } /* (1.42.1) on, its Beam app not */
 
 /* ---------- banners ---------- */
 .banner { padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface); font-size: 0.8438rem; }
@@ -647,7 +648,7 @@ html.files-mode .shared-stage img { max-height: 70vh; }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 /* ---------- device status and alerts ---------- */
 .i.tiny { width: 13px; height: 13px; vertical-align: -2px; margin-right: 3px; }
-.fact.low, dd.low, .conn-key.low, .conn-server.low { color: var(--warn); font-weight: 650; }
+.fact.low, .fact.pc-on, dd.low, .conn-key.low, .conn-server.low { color: var(--warn); font-weight: 650; } /* (1.42.1: pc-on) */
 .fact.ringing { color: var(--accent); font-weight: 650; }
 .fact.ringing .i { animation: ring-wiggle 1s ease-in-out infinite; transform-origin: 50% 20%; }
 @keyframes ring-wiggle { 0%, 60%, 100% { transform: rotate(0); } 15% { transform: rotate(14deg); } 30% { transform: rotate(-12deg); } 45% { transform: rotate(8deg); } }

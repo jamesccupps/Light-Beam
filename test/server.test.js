@@ -610,7 +610,9 @@ test('A7: behind a proxy that hides addresses nothing is linked and autopair ref
   const s = await startServer('proxy', 8791);
   try {
     const K = s.key;
-    const P = from('172.17.0.1'); // Docker bridge gateway / NAS proxy: every client looks the same
+    // A NAS proxy: every client looks the same. (1.42.1: a documentation address, never this PC's own: Hyper-V's Default
+    // Switch took 172.17.0.1 here after a restart, and the server rightly took that for its own machine.)
+    const P = from('198.51.100.7');
     await s.req('GET', '/api/me', { headers: app(K, 'workpc00001', 'Work PC', 'windows', P) });
     const phone = await openEvents(s.port, app(K, 'phone000001', 'Pixel', 'android', P));
     await phone.wait('hello');
@@ -621,7 +623,7 @@ test('A7: behind a proxy that hides addresses nothing is linked and autopair ref
     await s.req('GET', '/api/me', { headers: app(K, 'desktop0001', 'Desktop', 'windows', P) });
     r = await s.req('GET', '/api/me', { headers: app(K, 'workpc00001', 'Work PC', 'windows', P) });
     assert.equal(r.json.you, 'workpc00001', 'a sleeping PC is not merged into another');
-    await waitFor(() => /connect from the same address 172\.17\.0\.1.*BEAM_TRUSTED_PROXIES/.test(s.out));
+    await waitFor(() => /connect from the same address 198\.51\.100\.7.*BEAM_TRUSTED_PROXIES/.test(s.out));
     // An appending proxy: the left part of X-Forwarded-For is the client's own claim and is ignored
     const phone2 = await openEvents(s.port, app(K, 'phone000002', 'Pixel2', 'android', from('100.80.0.8')));
     await phone2.wait('hello');
@@ -8738,6 +8740,39 @@ test('1.42 collect’s second round: processes’ sample, file’s grep/max/sinc
     await answering; // its late answer (the one not waited for) reaches a server still running
     await s.stop();
   }
+});
+
+test('1.42.1 this server’s own PC while its Beam app is away: on (host, pcOn: since it started, nobody signed in); a sign-in there read again; gone once its app connects; not for another PC', async () => {
+  let s = await startServer('ownpc1421', 8796);
+  const K = s.key;
+  const own = app(K, 'hostpc01421', 'Office PC', 'windows'); // (from this machine: the server's own PC)
+  const other = app(K, 'shoppc01421', 'Shop Desktop', 'windows', from('100.64.42.31'));
+  for (const hd of [own, other]) assert.equal((await s.req('GET', '/api/me', { headers: hd })).status, 200);
+  await waitFor(() => { try { return Object.keys(JSON.parse(fs.readFileSync(path.join(s.data, 'devices.json'), 'utf8'))).length === 2; } catch { return false; } });
+  await s.stop();
+  const lost = Date.now() - 10 * 60e3;
+  const ownFile = path.join(TMP, 'ownpc1421-own.json');
+  fs.writeFileSync(ownFile, JSON.stringify([started(lost), unclean(lost + 3000), lastAlive(lost + 9000, lost - 15e3)]));
+  s = await startServer('ownpc1421', 8796, { keep: true, env: { BEAM_TEST_OWN_EVENTS: ownFile } });
+  try {
+    const list = async () => (await s.req('GET', '/api/devices', { headers: other })).json.devices;
+    let d = await waitFor(async () => { const x = (await list()).find(v => v.id === 'hostpc01421'); return x?.pcOn?.since && x; });
+    assert.equal(d.host, true);
+    assert.equal(d.online, false);
+    assert.deepEqual(d.pcOn, { since: lost, signedIn: false }, 'on since it started, nobody signed in');
+    const shop = (await list()).find(v => v.id === 'shoppc01421');
+    assert.ok(!('host' in shop) && !('pcOn' in shop), 'not for another PC');
+    // someone signs in there (its Beam app doesn't start): read again while the app is away
+    fs.writeFileSync(ownFile, JSON.stringify([started(lost), unclean(lost + 3000), lastAlive(lost + 9000, lost - 15e3), signedIn(lost + 5 * 60e3)]));
+    d = await waitFor(async () => { const x = (await list()).find(v => v.id === 'hostpc01421'); return x?.pcOn?.signedIn === true && x; }, 8000);
+    assert.equal(d.pcOn.since, lost);
+    // its Beam app connects: online, still the server's PC, no pcOn
+    const pc = await openEvents(s.port, own);
+    d = await waitFor(async () => { const x = (await list()).find(v => v.id === 'hostpc01421'); return x?.online && x; });
+    assert.equal(d.host, true);
+    assert.ok(!('pcOn' in d));
+    pc.close();
+  } finally { await s.stop(); }
 });
 
 test('1.42 an app that connects while a file is on its way to it hears of it (a PC that reconnected just as it began saves it while it arrives); not a file for another device, nor one cancelled', async () => {

@@ -29,17 +29,29 @@ const beamVersionOf = d => d.appVersion || ''; // the Beam apps report it; brows
 const rdpHost = d => d.tailscale?.dns || d.tailscale?.ip || '';
 
 // (1.17) Why an app is offline, as Tailscale sees its machine (the server's `tailscale.online`, `expired`): { short, long,
-// low } or null. Not for browsers or the command line, which are often away. And "still on Tailscale" only once Beam has
-// missed it for 4 minutes: Tailscale notices a machine that lost power or network only after a few.
+// low, on } or null. Not for browsers or the command line, which are often away. And "still on Tailscale" only once Beam
+// has missed it for 4 minutes: Tailscale notices a machine that lost power or network only after a few.
+// (1.42.1, the user: "tailscale showed it online, beam didn't though") `on`: the PC is on while its Beam app isn't (an
+// amber dot, this in place of "Last seen", Remote Desktop first). This server's own PC (`host`) the server knows itself:
+// at once when nobody has signed in since it started (`pcOn.signedIn` false), else after a minute (an app restarting).
 const WHY_PLATFORMS = new Set(['windows', 'android', 'ios', 'mac', 'linux']);
+const SIGN_IN_HINT = 'Its Beam app starts when someone signs in there: Remote Desktop can sign in.';
 function offlineWhy(d) {
+  if (!d.online && d.host && d.pcOn && WHY_PLATFORMS.has(d.platform)) {
+    const p = d.pcOn;
+    const since = Number.isFinite(p.since) ? `, started ${historyWhen(p.since)}` : '';
+    if (p.signedIn === false) return { short: 'On, nobody signed in', long: `It’s on (Beam’s server runs on it${since}), but nobody has signed in since. ${SIGN_IN_HINT}`, on: true };
+    if (Date.now() - (d.lastSeen || 0) >= 60e3) {
+      return { short: 'On, Beam not running', long: `It’s on (Beam’s server runs on it${since}), but its Beam app isn’t running${p.signedIn ? ' (someone has signed in)' : `. ${SIGN_IN_HINT}`}`, on: true };
+    }
+  }
   const t = d.tailscale;
   if (d.online || !t || typeof t.online !== 'boolean' || !WHY_PLATFORMS.has(d.platform)) return null;
   if (t.expired) return { short: 'Tailscale sign-in ran out', long: 'Its Tailscale sign-in ran out: sign in to Tailscale on it again', low: true };
   if (t.online) {
     if (Date.now() - (d.lastSeen || 0) < 4 * 60e3) return null;
     return d.platform === 'windows'
-      ? { short: 'PC on, Beam not running', long: 'The PC is on (Tailscale still sees it), but Beam isn’t running there' }
+      ? { short: 'PC on, Beam not running', long: `The PC is on (Tailscale still sees it), but Beam isn’t running there: nobody may have signed in yet, or Beam was closed. ${SIGN_IN_HINT}`, on: true }
       : { short: 'On Tailscale, Beam not connected', long: 'It’s on Tailscale, but Beam isn’t connected (the app may be closed)' };
   }
   return { short: 'Off or asleep', long: `Tailscale can’t reach it either: it’s off, asleep or without internet${t.lastSeen ? ` (Tailscale last saw it ${timeAgo(t.lastSeen)})` : ''}` };
@@ -60,9 +72,14 @@ function deviceFacts(d, { long = false } = {}) {
   const facts = [];
   const s = d.status || {};
   const reported = s.at ? `Reported ${timeAgo(s.at)}` : '';
-  facts.push({ text: d.online ? 'Online' : long ? `Offline, last seen ${timeAgo(d.lastSeen)}` : `Last seen ${timeAgo(d.lastSeen)}` });
   const why = offlineWhy(d);
-  if (why) facts.push({ text: why.short, cls: why.low ? 'low' : '', title: why.long });
+  if (why?.on) { // (1.42.1) on, its Beam app not: that first, then when Beam last saw it
+    facts.push({ text: why.short, cls: 'pc-on', title: why.long });
+    facts.push({ text: `Beam last saw it ${timeAgo(d.lastSeen)}` });
+  } else {
+    facts.push({ text: d.online ? 'Online' : long ? `Offline, last seen ${timeAgo(d.lastSeen)}` : `Last seen ${timeAgo(d.lastSeen)}` });
+    if (why) facts.push({ text: why.short, cls: why.low ? 'low' : '', title: why.long });
+  }
   if (isRinging(d.id)) facts.push({ text: 'Ringing…', cls: 'ringing', icon: 'bell' });
   if (s.battery && Number.isFinite(s.battery.level)) {
     facts.push({ label: 'Battery', text: `${Math.round(s.battery.level)}%${s.battery.charging ? ' charging' : ''}`, icon: s.battery.charging ? 'bolt' : 'battery',
@@ -97,12 +114,15 @@ function deviceActions(d) {
       ? { label: 'Stop ringing', icon: 'bell-off', action: () => ringDevice(d, true) }
       : { label: 'Ring', icon: 'bell', action: () => ringDevice(d) });
   }
-  if (can.wake && !d.online) acts.push({ label: 'Wake', icon: 'power', action: () => wakeDevice(d) });
+  const on = !d.online && offlineWhy(d)?.on; // (1.42.1) on, its Beam app not: Remote Desktop (to sign in) first, no Wake
+  const rdpOk = can.remoteDesktop && (!HOST || (hostHas('remoteDesktop') && rdpHost(d)));
+  if (on && rdpOk) acts.push({ label: 'Remote Desktop', icon: 'screen', sub: RDP_SIGN_IN_SUB, action: () => remoteDesktop(d) });
+  if (can.wake && !d.online && !on) acts.push({ label: 'Wake', icon: 'power', action: () => wakeDevice(d) });
   // Control (1.6, remote.js): a PC whose switch is on; a locked one says to use Remote Desktop instead.
   acts.push(...rcActions(d));
   // In the Windows app it opens directly (Beam for Windows 1.3+); in a browser it's a .rdp file.
   // (1.38, the 2026-11-21 audit's RD3) a line under each says how it differs from Control (a wrong pick locks the PC)
-  if (can.remoteDesktop && (!HOST || (hostHas('remoteDesktop') && rdpHost(d)))) acts.push({ label: 'Remote Desktop', icon: 'screen', sub: RDP_SUB, action: () => remoteDesktop(d) });
+  if (rdpOk && !on) acts.push({ label: 'Remote Desktop', icon: 'screen', sub: RDP_SUB, action: () => remoteDesktop(d) });
   // (1.20) its Beam log, from anywhere (Beam for Windows 1.14+)
   if (can.log && d.online && d.id !== me.id && serverHas('device-logs')) acts.push({ label: 'Beam log', icon: 'file', action: () => showDeviceLog(d) });
   // (1.26) the folders it shares with this device (Beam for Windows 1.18+; chosen there): files.js
@@ -187,6 +207,7 @@ function rdpGraphicsNode(g) {
 // certification authority could not be contacted" (1.7.1: say so up front).
 // (1.7.6: between PCs on the same work or school account Windows Hello does work, the user found.)
 const RDP_SUB = 'Windows’ own: signs in to a session of its own, and the PC’s screen locks';
+const RDP_SIGN_IN_SUB = 'Windows’ own: signs in from its sign-in screen (then Beam starts there); the PC’s own screen stays locked'; // (1.42.1)
 const RDP_SIGN_IN = 'Sign in with that PC’s Windows account: its email address (or user name) and password. Windows Hello or a PIN works only between PCs on the same work or school account.';
 
 async function remoteDesktop(d) {
@@ -243,7 +264,7 @@ function openDeviceInfo(d, { refresh = false } = {}) {
   const power = piPowerLine(s.throttled); // (1.22)
   const speed = piSpeedLine(s.throttled);
   const rows = [
-    ['Status', d.online ? 'Online' : `Offline, last seen ${timeAgo(d.lastSeen)}`],
+    ['Status', d.online ? 'Online' : why?.on ? `${why.short} (Beam last saw it ${timeAgo(d.lastSeen)})` : `Offline, last seen ${timeAgo(d.lastSeen)}`],
     why && ['Why', why.long, why.low],
     up && ['Up since', `${historyWhen(up.since)}${UP_AFTER[up.kind] ? `, ${UP_AFTER[up.kind]}` : ''}`, INCIDENTS.has(up.kind) && Date.now() - up.since < 86400e3],
     !up && d.online && Number.isFinite(s.bootedAt) && ['Up since', historyWhen(s.bootedAt)], // (1.22) Beam for Linux says when it started

@@ -282,6 +282,21 @@ export default function register(test) {
     eq((await why({ online: false, platform: 'android', lastSeen: 0, tailscale: { online: true, expired: true } }))?.low, true, 'a key that ran out stands out');
     eq(await why({ online: false, platform: 'web', lastSeen: 0, tailscale: { online: false } }), null, 'not for a browser');
     eq(await why({ online: true, platform: 'windows', tailscale: { online: true } }), null, 'online');
+    // (1.42.1) on while its Beam app isn't: this server's own PC (at once when nobody signed in; after a minute when
+    // someone did: an app restarting), or as Tailscale sees it
+    eq((await why({ online: false, platform: 'windows', host: true, lastSeen: Date.now() - 5e3, pcOn: { since: Date.now() - 120e3, signedIn: false } }))?.short, 'On, nobody signed in');
+    eq(await why({ online: false, platform: 'windows', host: true, lastSeen: Date.now() - 5e3, pcOn: { signedIn: true } }), null, 'signed in, just gone: its app restarting');
+    eq((await why({ online: false, platform: 'windows', host: true, lastSeen: Date.now() - 90e3, pcOn: { signedIn: true } }))?.short, 'On, Beam not running');
+    eq((await why({ online: false, platform: 'windows', lastSeen: now - 10 * 60e3, tailscale: { online: true } }))?.on, true, 'Tailscale sees it: on');
+    const hostPc = { id: 'hostpc00142', name: 'Desktop', platform: 'windows', online: false, host: true, lastSeen: Date.now() - 5e3, pcOn: { signedIn: false },
+      tailscale: { ip: '100.64.1.1', dns: 'desktop.example.ts.net', online: true }, can: { wake: true, remoteDesktop: true } };
+    const hostFacts = await page.evaluate(`deviceFacts(${JSON.stringify(hostPc)}).map(f => f.text + '|' + (f.cls || ''))`);
+    eq(hostFacts[0], 'On, nobody signed in|pc-on', JSON.stringify(hostFacts));
+    assert(/^Beam last saw it /.test(hostFacts[1]), JSON.stringify(hostFacts));
+    const hostActs = await page.evaluate(`deviceActions(${JSON.stringify(hostPc)}).map(a => a.label + ' | ' + (a.sub || ''))`);
+    eq(hostActs[0], 'Remote Desktop | Windows’ own: signs in from its sign-in screen (then Beam starts there); the PC’s own screen stays locked', JSON.stringify(hostActs));
+    assert(!hostActs.some(a => a.startsWith('Wake')), `no Wake: it’s on (${JSON.stringify(hostActs)})`);
+    eq(await page.evaluate(`pcOnly(${JSON.stringify(hostPc)})`), true, 'its row: the amber dot');
     await page.evaluate(`$('#settingsDlg').close()`);
     await page.evaluate(`openDeviceInfo({ id: 'someid00001', name: 'Garage PC', platform: 'windows', online: false, lastSeen: Date.now() - 600e3, tailscale: { ip: '100.64.17.9', online: false, keyExpiry: Date.now() + 5 * ${DAY} } })`);
     const facts = await page.evaluate(`[...$('#genBody').querySelectorAll('dt')].map(dt => [dt.textContent, dt.nextElementSibling.textContent, dt.nextElementSibling.classList.contains('low')])`);

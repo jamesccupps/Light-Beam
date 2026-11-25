@@ -12,6 +12,18 @@ What changed in each release, newest first. Beam's parts are versioned separatel
 Each release is tagged with the server's version (`v1.29.5`), or, when one app moved alone, with that app's
 (`android-v1.16.0`). An entry says which other parts moved.
 
+## 1.42.1 (2026-11-25): a PC that's on while Beam isn't
+
+**Versions:** server 1.42.1 (the web app); the Windows app 1.35.1, the Android app 1.21.2 and Beam for Linux 1.9.0
+unchanged.
+
+- **"On, nobody signed in" instead of "Last seen":** a PC that's on while its Beam app isn't running (after a restart,
+  before anyone signs in: the app starts at sign-in) gets an amber dot and says so. For the PC Beam's server runs on,
+  the server knows it from Windows' own records (since when it's been up, and whether anyone has signed in since,
+  looked at again every 2 minutes); for the others, when Tailscale still sees them (after 4 minutes, as before).
+- **Its menu offers Remote Desktop first** (Windows' own: it signs in from the sign-in screen, then Beam starts there),
+  and no Wake (it's on). The Android app shows it with its next build.
+
 ## Windows 1.35.1 (2026-11-25): log folders found on a busy PC
 
 **Versions:** Windows app 1.35.1; server 1.42.0, Android app 1.21.2, Beam for Linux 1.9.0 (all unchanged).
